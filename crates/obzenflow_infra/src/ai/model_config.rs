@@ -772,7 +772,9 @@ fn resolve_named_value(name: Option<&str>, default: &str) -> (String, String) {
 mod tests {
     use super::*;
     use crate::test_support::{env_lock, EnvGuard};
-    use obzenflow_core::config::{ConfigScope, ConfigSource, ConfigValueMeta, SecretRef};
+    use obzenflow_core::config::{
+        ConfigScope, ConfigSource, ConfigSubject, ConfigValueMeta, SecretRef,
+    };
     use obzenflow_runtime::runtime_config::{AiModelsConfig, Resolved};
 
     fn resolved<T>(value: T) -> Resolved<T> {
@@ -782,6 +784,7 @@ mod tests {
                 key_path: "ai.models.test".to_string(),
                 source: ConfigSource::Default,
                 scope: ConfigScope::Global,
+                subject: ConfigSubject::Unqualified,
             },
         }
     }

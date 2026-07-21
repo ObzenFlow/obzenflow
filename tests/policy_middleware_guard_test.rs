@@ -11,7 +11,7 @@
 //! FLOWIP-128g.
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::circuit_breaker;
+use obzenflow_adapters::middleware::CircuitBreaker;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::TypedPayload;
 use obzenflow_core::WriterId;
@@ -24,6 +24,13 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+fn breaker(failures: u32) -> CircuitBreaker {
+    CircuitBreaker::builder()
+        .consecutive_failures(failures)
+        .build()
+        .expect("test breaker configuration")
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GuardEvent {
@@ -109,7 +116,7 @@ async fn flow_level_policy_middleware_is_rejected_at_build() {
             "target/policy-guard-logs/flow-scope",
         )),
         middleware: [
-            circuit_breaker(3)
+            breaker(3)
         ],
 
         stages: {
@@ -154,7 +161,7 @@ async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
                 writer_id: WriterId::from(obzenflow_core::StageId::new()),
             });
             guarded = transform!(GuardEvent -> GuardEvent => SyncPassthrough, [
-                circuit_breaker(3)
+                breaker(3)
             ]);
             guard_sink = sink!(GuardEvent => NullSink);
         },
@@ -192,7 +199,7 @@ async fn policy_middleware_on_async_non_effect_stage_is_rejected_at_build() {
                 writer_id: WriterId::from(obzenflow_core::StageId::new()),
             });
             guarded = async_transform!(GuardEvent -> GuardEvent => AsyncPassthrough, [
-                circuit_breaker(3)
+                breaker(3)
             ]);
             guard_sink = sink!(GuardEvent => NullSink);
         },

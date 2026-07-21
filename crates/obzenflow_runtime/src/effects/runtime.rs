@@ -294,7 +294,6 @@ impl EffectsCore {
         E: Effect,
     {
         let declaration = self.ctx.effect_declaration(E::EFFECT_TYPE)?;
-        self.validate_typed_outcome_coordination::<E>()?;
         // FLOWIP-120c G10: the missing-key check is a deterministic
         // validation error, so it sits above the effect-history lookup and
         // the boundary consult. Live and replay recompute the same error,
@@ -435,7 +434,7 @@ impl EffectsCore {
             };
         };
 
-        // Guarded path (FLOWIP-115h): hand the boundary a policy-neutral
+        // Policy path: hand the boundary a policy-neutral
         // callable for one physical call. Each call clones the effect and a
         // pristine context, while the terminal successful outcome rides the
         // slot so only `perform` can record it after the boundary returns.
@@ -532,30 +531,6 @@ impl EffectsCore {
                 .await?;
                 Err(err)
             }
-            EffectBoundaryOutcome::Skipped { results, source } => {
-                let result = self
-                    .record_boundary_skip::<E>(cursor, descriptor_hash, descriptor, results, source)
-                    .await;
-                match &result {
-                    Ok(_) => {
-                        self.observe_effect_outcome(
-                            E::EFFECT_TYPE,
-                            crate::stages::observer::EffectObserverOutcome::Succeeded,
-                        )
-                        .await?;
-                    }
-                    Err(err) => {
-                        self.observe_effect_outcome(
-                            E::EFFECT_TYPE,
-                            crate::stages::observer::EffectObserverOutcome::Failed {
-                                message: err.error_message(),
-                            },
-                        )
-                        .await?;
-                    }
-                }
-                result
-            }
             EffectBoundaryOutcome::Aborted(reason) => {
                 let result = self
                     .record_boundary_abort(cursor, descriptor_hash, descriptor, reason)
@@ -618,51 +593,6 @@ impl EffectsCore {
         .await
     }
 
-    async fn record_boundary_skip<E>(
-        &mut self,
-        cursor: EffectCursor,
-        descriptor_hash: EffectDescriptorHash,
-        descriptor: EffectDescriptor,
-        results: Vec<ChainEvent>,
-        source: Option<String>,
-    ) -> Result<E::Outcome, EffectError>
-    where
-        E: Effect,
-    {
-        if results.is_empty() {
-            // An empty skip must still record an outcome under the
-            // effect cursor; otherwise strict replay of this input
-            // fails with MissingRecordedEffect, a false corruption
-            // signal for a rejection the live run made deliberately.
-            let err = EffectError::BoundaryRejected {
-                rejected_by: EffectFailureSource::new("effect_boundary"),
-                code: EffectFailureCode::new("skip_without_facts"),
-                message: "effect boundary skipped without fallback output facts".to_string(),
-                retry: RetryDisposition::NotRetryable,
-            };
-            self.append_failed_record(cursor, descriptor_hash, descriptor, &err)
-                .await?;
-            return Err(err);
-        }
-        let facts = results
-            .iter()
-            .map(|event| {
-                TypedFact::from_event(event).ok_or_else(|| {
-                    EffectError::Execution(
-                        "effect boundary fallback output must be Data facts".to_string(),
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let output = E::Outcome::try_from_facts(&facts).map_err(effect_fact_set_error)?;
-        let origin = Some(EffectFactOrigin::MiddlewareSynthesized {
-            label: source.unwrap_or_else(|| "effect_boundary".to_string()),
-        });
-        self.append_success_facts(cursor, descriptor_hash, descriptor, facts, origin)
-            .await?;
-        Ok(output)
-    }
-
     async fn record_boundary_abort<T>(
         &mut self,
         cursor: EffectCursor,
@@ -690,100 +620,6 @@ impl EffectsCore {
         })
         .await?;
         Err(err)
-    }
-
-    /// FLOWIP-120h/120m: validate wrapper coordination before any I/O.
-    ///
-    /// Branch-shaped registrations (FLOWIP-120h) require the `Guarded`
-    /// wrapper, so a breaker branch always has a carrier that can decode it.
-    /// Outcome-shaped registrations (FLOWIP-120m) require the inverse: the
-    /// middleware synthesizes the effect's own outcome facts, so the handler
-    /// performs the plain effect and a `Guarded` wrapper is rejected.
-    /// Transactional effects route through the boundary for admission and
-    /// observation only (FLOWIP-120c H5, rejection-only in v1), so neither
-    /// shape can protect a transactional effect.
-    fn validate_typed_outcome_coordination<E>(&self) -> Result<(), EffectError>
-    where
-        E: Effect,
-    {
-        let synthesized = E::Outcome::synthesized_fact_types();
-        let registration = self.ctx.synthesized_outcome_registration(E::EFFECT_TYPE);
-
-        match (synthesized.is_empty(), registration) {
-            (true, None) => Ok(()),
-            (true, Some(registration))
-                if registration.kind == SynthesizedOutcomeKind::OutcomeShaped =>
-            {
-                if matches!(E::SAFETY, EffectSafety::Transactional) {
-                    return Err(EffectError::TypedOutcomeCoordination {
-                        stage_key: self.ctx.stage_key.clone(),
-                        effect_type: E::EFFECT_TYPE.to_string(),
-                        message: "transactional effects cannot be protected by an \
-                                  outcome-shaped fallback; the transactional path runs \
-                                  before the effect boundary"
-                            .to_string(),
-                    });
-                }
-                Ok(())
-            }
-            (true, Some(registration)) => Err(EffectError::TypedOutcomeCoordination {
-                stage_key: self.ctx.stage_key.clone(),
-                effect_type: E::EFFECT_TYPE.to_string(),
-                message: format!(
-                    "stage registers typed-outcome middleware '{}'; perform the guarded \
-                     wrapper so its branch facts can decode",
-                    registration.source_label,
-                ),
-            }),
-            (false, None) => Err(EffectError::TypedOutcomeCoordination {
-                stage_key: self.ctx.stage_key.clone(),
-                effect_type: E::EFFECT_TYPE.to_string(),
-                message: "guarded effect performed on a stage with no typed-outcome \
-                          middleware registration; declare the breaker in the \
-                          output_middleware: lane or perform the inner effect directly"
-                    .to_string(),
-            }),
-            (false, Some(registration))
-                if registration.kind == SynthesizedOutcomeKind::OutcomeShaped =>
-            {
-                Err(EffectError::TypedOutcomeCoordination {
-                    stage_key: self.ctx.stage_key.clone(),
-                    effect_type: E::EFFECT_TYPE.to_string(),
-                    message: "outcome-shaped fallback uses the plain perform; drop the \
-                              Guarded wrapper, because every branch resumes the handler \
-                              with the effect's own outcome carrier"
-                        .to_string(),
-                })
-            }
-            (false, Some(registration)) => {
-                if matches!(E::SAFETY, EffectSafety::Transactional) {
-                    return Err(EffectError::TypedOutcomeCoordination {
-                        stage_key: self.ctx.stage_key.clone(),
-                        effect_type: E::EFFECT_TYPE.to_string(),
-                        message: "transactional effects cannot be guarded; the transactional \
-                                  path runs before the effect boundary"
-                            .to_string(),
-                    });
-                }
-                for fact_type in &registration.fact_types {
-                    if !synthesized
-                        .iter()
-                        .any(|member| member.event_type == fact_type.event_type)
-                    {
-                        return Err(EffectError::TypedOutcomeCoordination {
-                            stage_key: self.ctx.stage_key.clone(),
-                            effect_type: E::EFFECT_TYPE.to_string(),
-                            message: format!(
-                                "registered branch fact '{}' is not a member of the guarded \
-                                 carrier's synthesized fact set",
-                                fact_type.event_type,
-                            ),
-                        });
-                    }
-                }
-                Ok(())
-            }
-        }
     }
 
     pub(crate) async fn capture<T>(
@@ -1061,30 +897,6 @@ impl EffectsCore {
                 self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
                 result
             }
-            SingleUseEffectBoundaryOutcome::FallbackRejected { source } => {
-                // H5 v1: no fallback synthesis for transactional effects; the
-                // skip is recorded as a failed outcome so replay reproduces it.
-                self.restore_output_ordinal(output_ordinal);
-                let err = EffectError::BoundaryRejected {
-                    rejected_by: EffectFailureSource::new(
-                        source.as_deref().unwrap_or("effect_boundary"),
-                    ),
-                    code: EffectFailureCode::new("transactional_fallback_unsupported"),
-                    message: "transactional effects accept no boundary fallback synthesis"
-                        .to_string(),
-                    retry: RetryDisposition::NotRetryable,
-                };
-                self.append_failed_record(cursor, descriptor_hash, descriptor, &err)
-                    .await?;
-                self.observe_effect_outcome(
-                    E::EFFECT_TYPE,
-                    crate::stages::observer::EffectObserverOutcome::Failed {
-                        message: err.error_message(),
-                    },
-                )
-                .await?;
-                Err(err)
-            }
             SingleUseEffectBoundaryOutcome::Aborted(reason) => {
                 self.restore_output_ordinal(output_ordinal);
                 let result = self
@@ -1278,13 +1090,9 @@ impl EffectsCore {
                 facts,
                 origin: recorded_origin,
             } => {
-                // The recorded origin wins (FLOWIP-120m): it rides the fact's
-                // provenance, so replay reconstructs the branch origin without
-                // consulting registrations, which is ambiguous once an
-                // outcome-shaped fallback synthesizes the effect's own facts.
-                // Registration-based derivation remains only as the fallback
-                // for pre-120h journals whose records carry no origin.
-                let origin = recorded_origin.or_else(|| self.derive_replayed_origin(&facts));
+                // The recorded provenance wins. Older records without an
+                // explicit origin came from the effect itself.
+                let origin = recorded_origin.or(Some(EffectFactOrigin::Effect));
                 self.append_success_facts(cursor, descriptor_hash, descriptor, facts, origin)
                     .await
             }
@@ -1295,22 +1103,5 @@ impl EffectsCore {
                 Ok(())
             }
         }
-    }
-
-    fn derive_replayed_origin(&self, facts: &[TypedFact]) -> Option<EffectFactOrigin> {
-        let synthesized = self.ctx.synthesized_outcomes.iter().find(|registration| {
-            facts.iter().all(|fact| {
-                registration
-                    .fact_types
-                    .iter()
-                    .any(|branch| branch.event_type == fact.event_type)
-            })
-        });
-        Some(match synthesized {
-            Some(registration) => EffectFactOrigin::MiddlewareSynthesized {
-                label: registration.source_label.clone(),
-            },
-            None => EffectFactOrigin::Effect,
-        })
     }
 }

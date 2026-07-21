@@ -369,6 +369,7 @@ impl StageInstrumentation {
             cb_requests_total: 0,
             cb_successes_total: 0,
             cb_failures_total: 0,
+            cb_slow_total: 0,
             cb_rejections_total: 0,
             cb_opened_total: 0,
             cb_time_closed_seconds: 0.0,
@@ -399,6 +400,7 @@ impl StageInstrumentation {
             ctx.cb_requests_total = cb.requests_total;
             ctx.cb_successes_total = cb.successes_total;
             ctx.cb_failures_total = cb.failures_total;
+            ctx.cb_slow_total = cb.slow_total;
             ctx.cb_rejections_total = cb.rejections_total;
             ctx.cb_opened_total = cb.opened_total;
             ctx.cb_time_closed_seconds = cb.time_closed_seconds;
@@ -431,6 +433,7 @@ impl StageInstrumentation {
                     cb_requests_total: cb.requests_total,
                     cb_successes_total: cb.successes_total,
                     cb_failures_total: cb.failures_total,
+                    cb_slow_total: cb.slow_total,
                     cb_rejections_total: cb.rejections_total,
                     cb_opened_total: cb.opened_total,
                     cb_time_closed_seconds: cb.time_closed_seconds,

@@ -113,6 +113,9 @@ pub struct AppMetricsSnapshot {
     /// These are calls that counted toward breaker opening (e.g. Timeout/Remote failures).
     pub circuit_breaker_failures_total: HashMap<StageId, u64>,
 
+    /// Circuit breaker slow physical calls by stage (monotonic counter).
+    pub circuit_breaker_slow_total: HashMap<StageId, u64>,
+
     /// Circuit breaker time spent in each state by stage (monotonic counter, seconds).
     /// Maps (StageId, state) -> seconds_total, where state is one of: "closed", "half_open", "open".
     pub circuit_breaker_time_in_state_seconds_total: HashMap<(StageId, String), f64>,
@@ -544,6 +547,7 @@ impl Default for AppMetricsSnapshot {
             circuit_breaker_opened_total: HashMap::new(),
             circuit_breaker_successes_total: HashMap::new(),
             circuit_breaker_failures_total: HashMap::new(),
+            circuit_breaker_slow_total: HashMap::new(),
             circuit_breaker_time_in_state_seconds_total: HashMap::new(),
             circuit_breaker_state_transitions_total: HashMap::new(),
             rate_limiter_utilization: HashMap::new(),

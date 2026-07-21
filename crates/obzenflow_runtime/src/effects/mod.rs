@@ -66,9 +66,7 @@ pub use boundary::{
 };
 pub use commit::EffectCommitHandle;
 pub use completion::StageCompletion;
-pub use context::{
-    EffectContext, EffectInvocationContext, SynthesizedOutcomeKind, SynthesizedOutcomeRegistration,
-};
+pub use context::{EffectContext, EffectInvocationContext};
 // FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.
 #[cfg(test)]
 pub(crate) use context::EffectRuntimeMode;

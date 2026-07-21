@@ -5,9 +5,7 @@
 //! Effect-boundary behaviour tests, grouped by concern. Shared fixtures live
 //! in [`support`] and stay private to this tree.
 
-mod concurrency;
 mod onion;
-mod recovery;
+mod resilience;
 mod single_use;
 mod support;
-mod timing;

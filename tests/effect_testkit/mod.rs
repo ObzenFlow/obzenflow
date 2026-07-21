@@ -14,9 +14,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{FlowId, JournalOwner, JournalWriterId, StageId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime::backpressure::BackpressureWriter;
-use obzenflow_runtime::effects::{
-    EffectDeclaration, EffectInvocationContext, EffectPortRegistry, SynthesizedOutcomeRegistration,
-};
+use obzenflow_runtime::effects::{EffectDeclaration, EffectInvocationContext, EffectPortRegistry};
 use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::feed_plan::StageOutputContract;
 use obzenflow_runtime::messaging::upstream_subscription::StageInputPosition;
@@ -38,7 +36,6 @@ pub struct EffectInvocationContextBuilder {
     runtime_execution: RuntimeExecution,
     effect_ports: EffectPortRegistry,
     effect_declarations: Vec<EffectDeclaration>,
-    synthesized_outcomes: Vec<SynthesizedOutcomeRegistration>,
     output_contract: StageOutputContract,
     emit_enabled: bool,
 }
@@ -67,7 +64,6 @@ impl EffectInvocationContextBuilder {
             runtime_execution: RuntimeExecution::new(RuntimeMode::Live, None),
             effect_ports: EffectPortRegistry::new(),
             effect_declarations: Vec::new(),
-            synthesized_outcomes: Vec::new(),
             output_contract: StageOutputContract::empty(),
             emit_enabled: false,
         }
@@ -112,7 +108,6 @@ impl EffectInvocationContextBuilder {
             runtime_execution: self.runtime_execution,
             effect_ports: self.effect_ports,
             effect_declarations: self.effect_declarations,
-            synthesized_outcomes: self.synthesized_outcomes,
             output_contract: self.output_contract,
             backpressure_writer: BackpressureWriter::disabled(),
             emit_enabled: self.emit_enabled,

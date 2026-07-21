@@ -547,11 +547,8 @@ pub struct EffectRecord {
     pub descriptor_hash: EffectDescriptorHash,
     pub descriptor: EffectDescriptor,
     pub outcome: EffectOutcomePayload,
-    /// Origin recorded on the fact's provenance (FLOWIP-120m). `None` on
-    /// framework rows and pre-120h journals. Read back on replay so origin
-    /// reconstruction never depends on registration fact-type membership,
-    /// which becomes ambiguous once an outcome-shaped fallback synthesizes
-    /// the effect's own facts.
+    /// Origin recorded on the fact's provenance. `None` on framework rows and
+    /// older journals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<EffectFactOrigin>,
 }
@@ -563,17 +560,12 @@ pub struct EffectRecord {
 /// replay. It keeps the effect cursor, descriptor, and multi-fact outcome group
 /// outside the domain payload while still letting `fx.perform` find and validate
 /// the recorded fact.
-/// How an effect outcome fact came to exist (FLOWIP-120h). Policy-neutral:
-/// it says a middleware synthesized the group instead of the effect port
-/// running, with a label naming which one, never a policy-specific type.
+/// How an effect outcome fact came to exist.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectFactOrigin {
     /// The effect port executed and produced this outcome.
     Effect,
-    /// A type-shaping middleware synthesized this outcome at the effect
-    /// boundary (e.g. a circuit-breaker fallback or rejection branch).
-    MiddlewareSynthesized { label: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -752,19 +744,19 @@ mod tests {
     fn effect_failure_cause_uses_typed_fields_with_string_wire_shape() {
         let cause: EffectFailureCause = serde_json::from_value(json!({
             "source": "circuit_breaker",
-            "code": "rejected_circuit_open"
+            "code": "circuit_open"
         }))
         .expect("string wire cause should deserialize into typed fields");
 
         assert_eq!(cause.source, "circuit_breaker");
-        assert_eq!(cause.code, "rejected_circuit_open");
+        assert_eq!(cause.code, "circuit_open");
 
         let serialized = serde_json::to_value(&cause).expect("cause should serialize");
         assert_eq!(
             serialized,
             json!({
                 "source": "circuit_breaker",
-                "code": "rejected_circuit_open"
+                "code": "circuit_open"
             })
         );
     }
@@ -790,14 +782,5 @@ mod tests {
         .expect("pre-120h provenance should deserialize with origin defaulted");
 
         assert_eq!(provenance.origin, None);
-
-        let synthesized = EffectFactOrigin::MiddlewareSynthesized {
-            label: "circuit_breaker".to_string(),
-        };
-        let round_tripped: EffectFactOrigin = serde_json::from_value(
-            serde_json::to_value(&synthesized).expect("origin should serialize"),
-        )
-        .expect("origin should round-trip");
-        assert_eq!(round_tripped, synthesized);
     }
 }

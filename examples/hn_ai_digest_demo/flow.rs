@@ -249,6 +249,11 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
         .build_reduce_seeded_with_prompt(digest_reduce_prompt, digest_reduce_parse)
         .await?;
 
+    let source_breaker = CircuitBreaker::builder()
+        .consecutive_failures(HN_SOURCE_BREAKER_FAILURES)
+        .open_for(Duration::from_secs(HN_SOURCE_BREAKER_COOLDOWN_SECS))
+        .build()?;
+
     FlowApplication::builder()
         .with_presentation(presentation)
         .run_async(flow! {
@@ -261,9 +266,7 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
                 // the external HN HTTP dependency; the limiter paces API reads.
                 // Replay reconstructs archived stories and suppresses both.
                 hn_stories = async_source!(HnStory => HttpPullSource::new(decoder, config), [
-                    CircuitBreaker::opens_after(HN_SOURCE_BREAKER_FAILURES)
-                        .cooldown(Duration::from_secs(HN_SOURCE_BREAKER_COOLDOWN_SECS))
-                        .build(),
+                    source_breaker,
                     RateLimiterBuilder::new(source_rate_limit).build()
                 ]);
                 formatter = transform!(HnStory -> FormattedStory => formatter);

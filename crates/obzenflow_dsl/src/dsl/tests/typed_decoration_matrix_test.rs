@@ -395,7 +395,7 @@ mod tests {
         );
 
         type WithPolicy = crate::__obzenflow_effect_manifest_types!(
-            TxEffect with [obzenflow_adapters::middleware::circuit_breaker(2)]
+            TxEffect with [obzenflow_adapters::middleware::RateLimiterBuilder::new(2.0).build()]
         );
         let mut with_policy = Vec::new();
         let mut with_policy_attachments = Vec::new();
@@ -403,7 +403,7 @@ mod tests {
             @entry with_policy,
             with_policy_attachments,
             [],
-            TxEffect with [obzenflow_adapters::middleware::circuit_breaker(2)]
+            TxEffect with [obzenflow_adapters::middleware::RateLimiterBuilder::new(2.0).build()]
         );
         assert_eq!(
             <WithPolicy as EffectSet>::effect_types(),

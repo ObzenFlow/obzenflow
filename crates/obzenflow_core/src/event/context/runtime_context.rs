@@ -100,6 +100,10 @@ pub struct RuntimeContext {
     #[serde(default)]
     pub cb_failures_total: u64,
 
+    /// Admitted physical calls at or above the configured slow threshold.
+    #[serde(default)]
+    pub cb_slow_total: u64,
+
     /// Total requests rejected by the breaker (Open / HalfOpen non-probe).
     #[serde(default)]
     pub cb_rejections_total: u64,
@@ -189,6 +193,8 @@ pub struct EffectCircuitBreakerContext {
     pub cb_requests_total: u64,
     pub cb_successes_total: u64,
     pub cb_failures_total: u64,
+    #[serde(default)]
+    pub cb_slow_total: u64,
     pub cb_rejections_total: u64,
     pub cb_opened_total: u64,
     pub cb_time_closed_seconds: f64,

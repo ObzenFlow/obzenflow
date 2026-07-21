@@ -14,7 +14,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::circuit_breaker;
+use obzenflow_adapters::middleware::CircuitBreaker;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
@@ -31,6 +31,13 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+
+fn breaker(failures: usize) -> CircuitBreaker {
+    CircuitBreaker::builder()
+        .consecutive_failures(failures.try_into().expect("test threshold fits u32"))
+        .build()
+        .expect("test breaker configuration")
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SinkBreakerEvent {
@@ -114,7 +121,7 @@ async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
         stages: {
             cb_source = source!(SinkBreakerEvent => source);
             cb_sink = sink!(SinkBreakerEvent => sink_handler, middleware: [
-                circuit_breaker(THRESHOLD)
+                breaker(THRESHOLD)
             ]);
         },
 

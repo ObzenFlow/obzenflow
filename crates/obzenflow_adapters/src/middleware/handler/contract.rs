@@ -142,7 +142,7 @@ pub trait Middleware: Send + Sync {
 pub struct MiddlewareAbortCause {
     /// Label of the rejecting middleware, e.g. "circuit_breaker".
     pub source: EffectFailureSource,
-    /// Stable machine-readable reason, e.g. "rejected_circuit_open".
+    /// Stable machine-readable reason, e.g. "circuit_open".
     pub code: EffectFailureCode,
     /// Human-readable detail for the recorded failure message.
     pub message: String,

@@ -25,7 +25,6 @@ mod contract;
 #[cfg(test)]
 mod tests;
 
-pub use attachment::{effect_policy_from_middleware, EffectPolicyAttachment};
-pub(in crate::middleware::control) use boundary::execute_chain_once;
+pub use attachment::EffectPolicyAttachment;
 pub use boundary::PerEffectPolicyBoundary;
 pub use contract::{EffectAttemptOutcome, EffectPolicy, EventAwareEffectPolicy, PolicyAdmission};

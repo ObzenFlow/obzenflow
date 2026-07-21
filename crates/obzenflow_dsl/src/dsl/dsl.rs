@@ -735,21 +735,8 @@ macro_rules! build_typed_flow {
         // tooling sees a typed error rather than a tracing warning.
         $crate::dsl::typing::validate_stage_typing_metadata(&descriptors)?;
 
-        // FLOWIP-120h: truncating middleware (e.g. OpenPolicy::Skip breakers)
-        // is incoherent at the effect boundary; reject it on effectful stages.
-        $crate::dsl::typing::validate_effectful_middleware_compatibility(
-            &descriptors,
-            &create_flow_middleware(),
-        )?;
-
-        // FLOWIP-120h: output_middleware lane contributions must be arrow
-        // members, disjoint from effect fact sets, and single-effect scoped.
-        $crate::dsl::typing::validate_type_shaping_contributions(&descriptors)?;
-
-        // FLOWIP-120m: producer-side effect-fact containment is unconditional.
-        // An effectful stage without an output_middleware lane must still fail
-        // the build, not the first post-I/O commit, when an effect fact is
-        // missing from the arrow contract.
+        // Producer-side effect-fact containment is unconditional and fails
+        // the build before the first live I/O.
         $crate::dsl::typing::validate_effect_fact_containment(&descriptors)?;
 
         if let Err(edge_errors) = $crate::dsl::typing::validate_edge_typing(

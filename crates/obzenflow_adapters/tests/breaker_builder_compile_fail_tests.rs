@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 #[test]
-fn incomplete_fallback_shapes_do_not_build() {
+fn unchecked_breaker_builders_are_not_middleware_factories() {
     let cases = trybuild::TestCases::new();
-    cases.compile_fail("tests/ui/breaker_builder/incomplete_branch_build.rs");
+    cases.compile_fail("tests/ui/breaker_builder/checked_builder_not_factory.rs");
 }

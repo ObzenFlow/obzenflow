@@ -199,37 +199,6 @@ pub enum FlowBuildError {
     UnspecifiedTypingOnApplicableSlot { stage_name: String, slot: String },
 
     #[error(
-        "Effectful stage '{stage_name}' carries middleware '{middleware_label}' whose '{policy}' \
-         policy silently drops events at the effect boundary. The handler awaits a value from \
-         `fx.perform`, so transport truncation has no coherent boundary behaviour; use \
-         `OpenPolicy::EmitFallback` with a typed fallback or `OpenPolicy::FailFast` instead \
-         (FLOWIP-120h)."
-    )]
-    MiddlewarePolicyIncompatibleWithEffectfulStage {
-        stage_name: String,
-        middleware_label: String,
-        policy: String,
-    },
-
-    #[error(
-        "Stage '{stage_name}' has a type-shaping middleware configuration error: {message} \
-         (FLOWIP-120h)."
-    )]
-    TypeShapingConfiguration { stage_name: String, message: String },
-
-    #[error(
-        "Stage '{stage_name}': middleware '{middleware_label}' may author branch fact '{fact}', \
-         which is not a member of the stage output contract {contract}. Add it to the arrow \
-         (FLOWIP-120h corrected Option A: membership is enforced, never inferred)."
-    )]
-    MiddlewareContributedFactNotInContract {
-        stage_name: String,
-        middleware_label: String,
-        fact: String,
-        contract: String,
-    },
-
-    #[error(
         "Stage '{stage_name}': effect '{effect_type}' may produce fact '{fact}', which is not a \
          member of the stage output contract {contract}. Add it to the arrow (FLOWIP-120m \
          unconditional producer-side containment check)."
@@ -252,26 +221,6 @@ pub enum FlowBuildError {
         event_type: String,
         first_member: String,
         second_member: String,
-    },
-
-    #[error(
-        "Stage '{stage_name}' declares both branch-shaped and outcome-shaped fallback \
-         registrations. A stage uses one fallback shape: the Guarded carrier with branch \
-         facts (build_typed) or the plain perform with an outcome-shaped fallback \
-         (build_outcome) (FLOWIP-120m)."
-    )]
-    MixedFallbackShapesOnStage { stage_name: String },
-
-    #[error(
-        "Stage '{stage_name}': outcome-shaped fallback '{middleware_label}' may synthesize \
-         fact '{fact}', which is not in effect '{effect_type}'s declared outcome fact set. \
-         An outcome-shaped fallback produces the protected effect's own facts (FLOWIP-120m)."
-    )]
-    OutcomeFallbackFactNotInEffectFactSet {
-        stage_name: String,
-        middleware_label: String,
-        fact: String,
-        effect_type: String,
     },
 
     #[error(

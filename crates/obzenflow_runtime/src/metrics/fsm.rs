@@ -218,6 +218,7 @@ pub struct MetricsStore {
     pub circuit_breaker_opened_total: HashMap<StageId, u64>,
     pub circuit_breaker_successes_total: HashMap<StageId, u64>,
     pub circuit_breaker_failures_total: HashMap<StageId, u64>,
+    pub circuit_breaker_slow_total: HashMap<StageId, u64>,
     pub circuit_breaker_time_in_state_seconds_total: HashMap<(StageId, String), f64>,
     pub circuit_breaker_state_transitions_total: HashMap<(StageId, String, String), u64>,
     circuit_breaker_last_state: HashMap<StageId, String>,
@@ -914,6 +915,7 @@ impl MetricsAggregatorContext {
         snapshot.circuit_breaker_opened_total = store.circuit_breaker_opened_total.clone();
         snapshot.circuit_breaker_successes_total = store.circuit_breaker_successes_total.clone();
         snapshot.circuit_breaker_failures_total = store.circuit_breaker_failures_total.clone();
+        snapshot.circuit_breaker_slow_total = store.circuit_breaker_slow_total.clone();
         snapshot.circuit_breaker_time_in_state_seconds_total =
             store.circuit_breaker_time_in_state_seconds_total.clone();
         snapshot.circuit_breaker_state_transitions_total =
@@ -1199,6 +1201,7 @@ impl MetricsStore {
             || runtime_ctx.cb_opened_total > 0
             || runtime_ctx.cb_successes_total > 0
             || runtime_ctx.cb_failures_total > 0
+            || runtime_ctx.cb_slow_total > 0
             || runtime_ctx.cb_time_closed_seconds > 0.0
             || runtime_ctx.cb_time_open_seconds > 0.0
             || runtime_ctx.cb_time_half_open_seconds > 0.0;
@@ -1233,6 +1236,9 @@ impl MetricsStore {
                 .entry(stage_id)
                 .or_insert(0);
             *failures = (*failures).max(runtime_ctx.cb_failures_total);
+
+            let slow = self.circuit_breaker_slow_total.entry(stage_id).or_insert(0);
+            *slow = (*slow).max(runtime_ctx.cb_slow_total);
 
             self.circuit_breaker_state
                 .insert(stage_id, runtime_ctx.cb_state);
@@ -2447,6 +2453,7 @@ mod tests {
         let mut store = MetricsStore::default();
         let mut runtime_ctx = StageInstrumentation::new().snapshot();
         runtime_ctx.cb_requests_total = 1;
+        runtime_ctx.cb_slow_total = 3;
         runtime_ctx.cb_opened_total = 1;
         runtime_ctx.cb_state = 1.0;
 
@@ -2454,6 +2461,7 @@ mod tests {
 
         assert_eq!(store.circuit_breaker_state.get(&stage_id), Some(&1.0));
         assert_eq!(store.circuit_breaker_opened_total.get(&stage_id), Some(&1));
+        assert_eq!(store.circuit_breaker_slow_total.get(&stage_id), Some(&3));
         assert!(
             !store.circuit_breaker_last_state.contains_key(&stage_id),
             "point-in-time snapshots must not advance lifecycle transition state"

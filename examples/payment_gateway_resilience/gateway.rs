@@ -42,21 +42,45 @@ pub struct AuthorizePayment {
     retry_proof: Option<Arc<GatewayRetryProof>>,
 }
 
-/// Shared deterministic backend script used by the circuit-breaker retry
-/// acceptance profile. Effect clones share this counter, so physical calls
-/// observe the sequence timeout, timeout, success under one logical effect
-/// cursor.
-#[derive(Debug, Default)]
+/// Shared deterministic backend script used by the circuit-breaker acceptance
+/// profiles. Effect clones share this counter, so physical calls observe one
+/// process-wide dependency history across logical effect cursors.
+#[derive(Debug)]
 pub struct GatewayRetryProof {
     calls: AtomicUsize,
     panic_on_call: bool,
+    behavior: GatewayProofBehavior,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GatewayProofBehavior {
+    FailFirst(usize),
+    Healthy,
+    AlwaysFail,
 }
 
 impl GatewayRetryProof {
+    /// Fail the first two physical calls, then recover. This preserves the
+    /// original retry control/treatment proof contract.
     pub fn new(panic_on_call: bool) -> Self {
+        Self::with_behavior(panic_on_call, GatewayProofBehavior::FailFirst(2))
+    }
+
+    /// Succeed every physical call.
+    pub fn healthy(panic_on_call: bool) -> Self {
+        Self::with_behavior(panic_on_call, GatewayProofBehavior::Healthy)
+    }
+
+    /// Fail every physical call so the breaker opens deterministically.
+    pub fn always_fail(panic_on_call: bool) -> Self {
+        Self::with_behavior(panic_on_call, GatewayProofBehavior::AlwaysFail)
+    }
+
+    fn with_behavior(panic_on_call: bool, behavior: GatewayProofBehavior) -> Self {
         Self {
             calls: AtomicUsize::new(0),
             panic_on_call,
+            behavior,
         }
     }
 
@@ -71,6 +95,14 @@ impl GatewayRetryProof {
             "strict replay attempted a live payment gateway call"
         );
         self.calls.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn should_timeout(&self, call: usize) -> bool {
+        match self.behavior {
+            GatewayProofBehavior::FailFirst(count) => call <= count,
+            GatewayProofBehavior::Healthy => false,
+            GatewayProofBehavior::AlwaysFail => true,
+        }
     }
 }
 
@@ -113,7 +145,7 @@ impl Effect for AuthorizePayment {
     async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         if let Some(proof) = &self.retry_proof {
             let call = proof.record_call();
-            if call <= 2 {
+            if proof.should_timeout(call) {
                 return Err(EffectError::Timeout(
                     "gateway_timeout_simulated".to_string(),
                 ));

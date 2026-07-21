@@ -461,8 +461,8 @@ where
 
         let default_reason = "map produced no partial output";
 
-        // Pre-allocate the failure marker so it survives middleware short-circuit paths
-        // (e.g., circuit breaker OpenPolicy::Skip/EmitFallback without fallback).
+        // Pre-allocate the failure marker so it survives middleware
+        // short-circuit paths.
         let failure = AiMapReduceChunkFailed {
             job_key,
             chunk_index: header.chunk_index,

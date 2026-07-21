@@ -22,8 +22,7 @@
 //!     or retry row on the source, effect, OR sink stage.
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::circuit_breaker;
-use obzenflow_adapters::middleware::control::circuit_breaker::{CircuitBreaker, OpenPolicy, Retry};
+use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, Retry};
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
@@ -53,7 +52,6 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -252,80 +250,6 @@ impl EffectfulTransformHandler for RetryTransform {
     }
 }
 
-/// Original FLOWIP-115b composition fixture: a typed-ineligible failure opens
-/// the breaker and exercises its fallback path independently of retry.
-#[derive(Clone, Debug)]
-struct AlwaysFailingEffect {
-    value: u64,
-    calls: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl Effect for AlwaysFailingEffect {
-    const EFFECT_TYPE: &'static str = "cb_composition.always_failing";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-
-    type Outcome = CompEffectValue;
-
-    fn label(&self) -> &str {
-        "always_failing"
-    }
-
-    fn canonical_input(&self) -> serde_json::Value {
-        json!({ "value": self.value })
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(EffectError::Execution(
-            "simulated_dependency_down".to_string(),
-        ))
-    }
-
-    fn idempotency_key(&self) -> Option<IdempotencyKey> {
-        Some(IdempotencyKey(format!("always-failing:{}", self.value)))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct FallbackTransform {
-    calls: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl EffectfulTransformHandler for FallbackTransform {
-    type Input = CompInput;
-    type Output = obzenflow_core::stage_fact_set![CompOutput, CompEffectValue];
-    type AllowedEffects = obzenflow_runtime::effect_set![AlwaysFailingEffect];
-
-    async fn process(
-        &self,
-        input: CompInput,
-        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        let effect_value = fx
-            .perform(AlwaysFailingEffect {
-                value: input.value,
-                calls: self.calls.clone(),
-            })
-            .await
-            .map_err(|e| HandlerError::Timeout(e.to_string()))?;
-
-        fx.emit(CompOutput {
-            value: input.value,
-            effect_value: effect_value.effect_value,
-        })
-        .await
-        .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(fx.complete()?)
-    }
-
-    fn stage_logic_version(&self) -> &str {
-        "cb-composition-fallback-v1"
-    }
-}
-
 #[derive(Clone, Debug)]
 struct CollectSink {
     outputs: Arc<Mutex<Vec<CompOutput>>>,
@@ -357,6 +281,23 @@ fn build_retry_flow(
     calls: Arc<Mutex<BTreeMap<u64, usize>>>,
     outputs: Arc<Mutex<Vec<CompOutput>>>,
 ) -> FlowDefinition {
+    let source_breaker = CircuitBreaker::builder()
+        .consecutive_failures(5)
+        .build()
+        .expect("source breaker configuration");
+    let effect_resilience = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(2)
+            .build()
+            .expect("effect breaker configuration"),
+    )
+    .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(2))
+    .build()
+    .expect("effect resilience configuration");
+    let sink_breaker = CircuitBreaker::builder()
+        .consecutive_failures(5)
+        .build()
+        .expect("sink breaker configuration");
     flow! {
         name: "circuit_breaker_composition",
         journals: disk_journals(journal_base),
@@ -365,60 +306,20 @@ fn build_retry_flow(
         stages: {
             // Source breaker (stays closed; the scripted source never fails) proves
             // the breaker binds onto the source-poll surface and is replay-safe.
-            inputs = source!(CompInput => CompSource::new(), [ circuit_breaker(5) ]);
+            inputs = source!(CompInput => CompSource::new(), [source_breaker]);
             // Fan-out: one source event becomes two downstream inputs.
             fan_out = transform!(CompInput -> CompInput => FanOutTransform::new());
             // Every derived cursor times out once and then recovers. Intermediate
-            // failures remain private to the recovery session, so the shared
-            // breaker settles one terminal success per logical invocation.
+            // failures are physical breaker samples; the threshold permits the
+            // immediate retry, whose success resets the consecutive count.
             effectful = effectful_transform!(
                 CompInput -> { CompOutput, CompEffectValue } => RetryTransform { calls },
-                effects: [RetryOnceEffect],
-                middleware: [
-                    CircuitBreaker::opens_after(1)
-                        .retry(Retry::fixed(Duration::ZERO).attempts(2))
-                        .build()
-                ]
+                effects: [RetryOnceEffect with [effect_resilience]],
+                middleware: []
             );
             // Sink breaker (stays closed; deliveries succeed) proves the breaker
             // binds onto the sink-delivery boundary and is replay-safe.
-            collector = sink!(CompOutput => CollectSink { outputs }, middleware: [circuit_breaker(5)]);
-        },
-
-        topology: {
-            inputs |> fan_out;
-            fan_out |> effectful;
-            effectful |> collector;
-        }
-    }
-}
-
-fn build_fallback_flow(
-    journal_base: PathBuf,
-    calls: Arc<AtomicUsize>,
-    outputs: Arc<Mutex<Vec<CompOutput>>>,
-) -> FlowDefinition {
-    flow! {
-        name: "circuit_breaker_composition",
-        journals: disk_journals(journal_base),
-        middleware: [],
-
-        stages: {
-            inputs = source!(CompInput => CompSource::new(), [ circuit_breaker(5) ]);
-            fan_out = transform!(CompInput -> CompInput => FanOutTransform::new());
-            effectful = effectful_transform!(
-                CompInput -> { CompOutput, CompEffectValue } => FallbackTransform { calls },
-                effects: [AlwaysFailingEffect],
-                middleware: [
-                    CircuitBreaker::opens_after(1)
-                        .when_open(OpenPolicy::EmitFallback)
-                        .transitional_fallback_fact(|input: &CompInput| CompEffectValue {
-                            effect_value: input.value + 900,
-                        })
-                        .build()
-                ]
-            );
-            collector = sink!(CompOutput => CollectSink { outputs }, middleware: [circuit_breaker(5)]);
+            collector = sink!(CompOutput => CollectSink { outputs }, middleware: [sink_breaker]);
         },
 
         topology: {
@@ -515,11 +416,6 @@ fn expected_calls() -> BTreeMap<u64, usize> {
         .collect()
 }
 
-fn sorted(mut outputs: Vec<CompOutput>) -> Vec<CompOutput> {
-    outputs.sort_by_key(|output| (output.value, output.effect_value));
-    outputs
-}
-
 fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {
     let mut cursors: HashMap<EffectCursor, (usize, usize)> = HashMap::new();
     let mut retry_rows = 0;
@@ -539,7 +435,7 @@ fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {
             } => {
                 retry_rows += 1;
                 assert_eq!(*next_attempt, 2);
-                assert_eq!(*delay_ms, 0);
+                assert_eq!(*delay_ms, 1);
                 cursors.entry(cursor.clone()).or_default().0 += 1;
             }
             CircuitBreakerEvent::RetrySucceeded {
@@ -572,69 +468,6 @@ fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {
         cursors.values().all(|counts| *counts == (1, 1)),
         "each cursor should have exactly one scheduled and one succeeded row: {cursors:?}"
     );
-}
-
-#[tokio::test]
-async fn built_in_breaker_composes_source_effect_sink_with_replay_suppression() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let journal_base = temp.path().join("journals");
-
-    let live_calls = Arc::new(AtomicUsize::new(0));
-    let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
-        .with_cli_args(vec![OsString::from("obzenflow")])
-        .run_async(build_fallback_flow(
-            journal_base.clone(),
-            live_calls.clone(),
-            live_outputs.clone(),
-        ))
-        .await
-        .expect("live composition flow should complete");
-
-    let live_domain_outputs = sorted(live_outputs.lock().expect("outputs lock poisoned").clone());
-    assert!(
-        !live_domain_outputs.is_empty(),
-        "the live run should deliver at least one fallback output through the composed breakers"
-    );
-
-    let live_run = latest_run_dir(&journal_base);
-    let live_effect_breaker_events = circuit_breaker_events_in_stage(&live_run, "effectful").await;
-    assert!(
-        live_effect_breaker_events > 0,
-        "the effect breaker must trip and journal lifecycle rows on the live path"
-    );
-
-    let replay_calls = Arc::new(AtomicUsize::new(0));
-    let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
-        .with_cli_args(vec![
-            OsString::from("obzenflow"),
-            OsString::from("--replay-from"),
-            live_run.as_os_str().to_os_string(),
-        ])
-        .run_async(build_fallback_flow(
-            journal_base.clone(),
-            replay_calls.clone(),
-            replay_outputs.clone(),
-        ))
-        .await
-        .expect("strict replay should complete");
-
-    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        sorted(
-            replay_outputs
-                .lock()
-                .expect("outputs lock poisoned")
-                .clone()
-        ),
-        live_domain_outputs
-    );
-
-    let replay_run = latest_run_dir(&journal_base);
-    for stage in ["inputs", "effectful", "collector"] {
-        assert_eq!(circuit_breaker_events_in_stage(&replay_run, stage).await, 0);
-    }
 }
 
 #[tokio::test]

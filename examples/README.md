@@ -55,7 +55,7 @@ These examples don't have tutorials, but they demonstrate concrete framework con
   - Run: `cargo run -p obzenflow --example csv_demo_support_sla`
   - Code: [`examples/csv_demo_support_sla/flow.rs`](csv_demo_support_sla/flow.rs)
 
-- **`payment_gateway_resilience`** — Circuit breakers, fallback behavior, and operator-facing resilience against unreliable dependencies. Use this when you care about runtime protections and failure semantics.
+- **`payment_gateway_resilience`** — Per-effect circuit breaking, retry, rate limiting, fail-fast rejection, and operator-facing resilience against unreliable dependencies. Use this when you care about runtime protections and replay-stable failure semantics.
   - Pillars: [Production-Grade Primitives](https://obzenflow.dev/pillars/batteries-included/), [Correctness Guarantees](https://obzenflow.dev/pillars/correctness-guarantees/)
   - Run: `cargo run -p obzenflow --example payment_gateway_resilience`
   - Run with metrics: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --config examples/payment_gateway_resilience/obzenflow.server.toml`

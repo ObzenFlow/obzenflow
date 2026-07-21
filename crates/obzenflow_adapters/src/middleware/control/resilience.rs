@@ -5,17 +5,16 @@
 //! Fixed effect-bound resilience aggregate (FLOWIP-115n).
 
 use super::circuit_breaker::{
-    effect_error_event, CircuitBreaker, CircuitBreakerConfigError, CircuitBreakerFactory,
-    CircuitBreakerFailureMode, CircuitBreakerMiddleware, FailureClassification, FailureWindow,
-    Retry,
+    CircuitBreaker, CircuitBreakerConfigError, CircuitBreakerFactory, CircuitBreakerFailureMode,
+    CircuitBreakerMiddleware, FailureClassification, FailureWindow, Retry,
 };
 use super::rate_limiter::{RateLimiter, RateLimiterConfigError, RateLimiterMiddleware};
 use crate::middleware::context_keys::{CircuitBreakerRetryAfterMs, EffectCallDurationNanos};
 use crate::middleware::{
-    validate_attachment_request, EffectPolicyAttachment, EventAwareEffectPolicy,
-    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
-    MiddlewareHints, MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety,
-    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, PolicyAdmission,
+    validate_attachment_request, EffectPolicyAttachment, MiddlewareAttachmentRequest,
+    MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError, MiddlewareHints,
+    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety, MiddlewareSurface,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, PolicyAdmission,
 };
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
@@ -149,9 +148,7 @@ impl EffectResilienceFactory {
                 minimum_calls,
             } => {
                 defaults.push(default_text(RESILIENCE_BREAKER_MODE_KEY, "rate_based"));
-                let FailureWindow::Count { size } = window else {
-                    unreachable!("checked effect breakers only support count windows")
-                };
+                let FailureWindow::Count { size } = window;
                 defaults.push(default_u64(
                     RESILIENCE_BREAKER_COUNT_WINDOW_KEY,
                     *size as u64,
@@ -190,12 +187,7 @@ impl EffectResilienceFactory {
         ));
         defaults.push(DslConfigDefault {
             key_path: RESILIENCE_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
-            value: ConfigValue::Bool(
-                self.breaker
-                    .config
-                    .failure_classification_policy
-                    .rate_limited_counts_as_failure,
-            ),
+            value: ConfigValue::Bool(self.breaker.config.rate_limited_counts_as_failure),
         });
         defaults
     }
@@ -516,10 +508,6 @@ impl Drop for AttemptSettlementGuard {
 }
 
 impl EffectResilienceMiddleware {
-    pub(in crate::middleware::control) fn label(&self) -> &'static str {
-        "effect_resilience"
-    }
-
     pub(in crate::middleware::control) async fn execute_repeatable(
         &self,
         identity: &EffectIdentity,
@@ -537,7 +525,7 @@ impl EffectResilienceMiddleware {
         loop {
             let precheck = self.breaker.effect_precheck(event, ctx).await;
             if !matches!(precheck, PolicyAdmission::Admit) {
-                return report_from_admission(precheck, self.label(), ctx);
+                return report_from_admission(precheck, ctx);
             }
 
             let admission_started = Instant::now();
@@ -546,11 +534,10 @@ impl EffectResilienceMiddleware {
                 None => None,
             };
 
-            let final_admission =
-                EventAwareEffectPolicy::admit(self.breaker.as_ref(), event, ctx).await;
+            let final_admission = self.breaker.effect_admit(event, ctx);
             if !matches!(final_admission, PolicyAdmission::Admit) {
                 drop(reservation);
-                return report_from_admission(final_admission, self.label(), ctx);
+                return report_from_admission(final_admission, ctx);
             }
             let admission_wait = admission_started.elapsed();
 
@@ -625,16 +612,7 @@ impl EffectResilienceMiddleware {
                 }
                 return executed(result, ctx);
             };
-            if physical_outcome != PhysicalCallOutcome::Failed
-                || !retryable_error(error)
-                || !matches!(
-                    classification.as_ref(),
-                    Some(
-                        FailureClassification::TransientFailure
-                            | FailureClassification::RateLimited(_)
-                    )
-                )
-            {
+            if physical_outcome != PhysicalCallOutcome::Failed || !retryable_error(error) {
                 if attempts > 1 {
                     ctx.write_control_event(
                         ChainEventFactory::circuit_breaker_retry_stopped_non_retryable(
@@ -670,19 +648,7 @@ impl EffectResilienceMiddleware {
                 return executed(result, ctx);
             }
 
-            let generated = retry
-                .policy
-                .calculate_delay(attempts.saturating_sub(1) as usize)
-                .min(retry.limits.max_single_delay);
-            let floor = match error {
-                EffectError::RateLimited { retry_after, .. } => *retry_after,
-                _ => Duration::ZERO,
-            };
-            let classification_floor = match classification.as_ref() {
-                Some(FailureClassification::RateLimited(delay)) => *delay,
-                _ => Duration::ZERO,
-            };
-            let delay = generated.max(floor).max(classification_floor);
+            let delay = retry_delay(retry, attempts, error);
             if started.elapsed().saturating_add(delay) >= retry.limits.max_attempt_start_window {
                 write_exhausted(
                     self.breaker.as_ref(),
@@ -742,7 +708,7 @@ impl EffectResilienceMiddleware {
 
         let precheck = self.breaker.effect_precheck(event, ctx).await;
         if !matches!(precheck, PolicyAdmission::Admit) {
-            return single_use_report_from_admission(precheck, self.label(), ctx, operation);
+            return single_use_report_from_admission(precheck, ctx, operation);
         }
 
         let admission_started = Instant::now();
@@ -750,11 +716,10 @@ impl EffectResilienceMiddleware {
             Some(limiter) => Some(limiter.reserve_permit_async(ctx).await),
             None => None,
         };
-        let final_admission =
-            EventAwareEffectPolicy::admit(self.breaker.as_ref(), event, ctx).await;
+        let final_admission = self.breaker.effect_admit(event, ctx);
         if !matches!(final_admission, PolicyAdmission::Admit) {
             drop(reservation);
-            return single_use_report_from_admission(final_admission, self.label(), ctx, operation);
+            return single_use_report_from_admission(final_admission, ctx, operation);
         }
         let admission_wait = admission_started.elapsed();
 
@@ -813,48 +778,45 @@ impl EffectResilienceMiddleware {
 
 fn single_use_report_from_admission(
     admission: PolicyAdmission,
-    label: &'static str,
     ctx: &mut crate::middleware::MiddlewareContext,
     operation: SingleUseEffectOperation,
 ) -> SingleUseEffectBoundaryReport {
     match admission {
         PolicyAdmission::Admit => unreachable!("admitted calls do not return early"),
-        PolicyAdmission::Synthesize { .. } => {
-            operation.reject_fallback(Some(label.to_string()), ctx.take_control_events())
+        PolicyAdmission::Reject(cause) => {
+            let cause = *cause;
+            operation.abort(
+                EffectAbortReason {
+                    cause: EffectFailureCause {
+                        source: cause.source,
+                        code: cause.code,
+                    },
+                    message: cause.message,
+                    retry: cause.retry,
+                },
+                ctx.take_control_events(),
+            )
         }
-        PolicyAdmission::Reject(cause) => operation.abort(
-            EffectAbortReason {
+    }
+}
+
+fn report_from_admission(
+    admission: PolicyAdmission,
+    ctx: &mut crate::middleware::MiddlewareContext,
+) -> EffectBoundaryReport {
+    let outcome = match admission {
+        PolicyAdmission::Admit => unreachable!("admitted calls do not return early"),
+        PolicyAdmission::Reject(cause) => {
+            let cause = *cause;
+            EffectBoundaryOutcome::Aborted(EffectAbortReason {
                 cause: EffectFailureCause {
                     source: cause.source,
                     code: cause.code,
                 },
                 message: cause.message,
                 retry: cause.retry,
-            },
-            ctx.take_control_events(),
-        ),
-    }
-}
-
-fn report_from_admission(
-    admission: PolicyAdmission,
-    label: &'static str,
-    ctx: &mut crate::middleware::MiddlewareContext,
-) -> EffectBoundaryReport {
-    let outcome = match admission {
-        PolicyAdmission::Admit => unreachable!("admitted calls do not return early"),
-        PolicyAdmission::Synthesize { results, .. } => EffectBoundaryOutcome::Skipped {
-            results,
-            source: Some(label.to_string()),
-        },
-        PolicyAdmission::Reject(cause) => EffectBoundaryOutcome::Aborted(EffectAbortReason {
-            cause: EffectFailureCause {
-                source: cause.source,
-                code: cause.code,
-            },
-            message: cause.message,
-            retry: cause.retry,
-        }),
+            })
+        }
     };
     EffectBoundaryReport {
         outcome,
@@ -900,12 +862,7 @@ fn classify_physical_result(
         }
         (PhysicalCallOutcome::Succeeded, Err(_)) => Some(FailureClassification::Success),
         (PhysicalCallOutcome::Failed, Err(error)) if error_has_health_observation(error) => {
-            let error_event = effect_error_event(event, error);
-            Some(
-                breaker
-                    .classify_call(event, std::slice::from_ref(&error_event), ctx)
-                    .0,
-            )
+            Some(breaker.classify_effect_error(event, error, ctx))
         }
         (PhysicalCallOutcome::Failed, Err(_)) => None,
         (PhysicalCallOutcome::Failed, Ok(outputs)) => {
@@ -939,7 +896,6 @@ fn error_has_health_observation(error: &EffectError) -> bool {
         | EffectError::DuplicateRecordedEffect { .. }
         | EffectError::DescriptorMismatch { .. }
         | EffectError::BoundaryRejected { .. }
-        | EffectError::TypedOutcomeCoordination { .. }
         | EffectError::EffectProvenanceMismatch(_)
         | EffectError::IncompleteOutcomeGroup { .. }
         | EffectError::MissingIdempotencyKey { .. }
@@ -961,6 +917,18 @@ fn retryable_error(error: &EffectError) -> bool {
     )
 }
 
+fn retry_delay(retry: &Retry, completed_attempts: u32, error: &EffectError) -> Duration {
+    let generated = retry
+        .policy
+        .calculate_delay(completed_attempts.saturating_sub(1) as usize)
+        .min(retry.limits.max_single_delay);
+    let provider_floor = match error {
+        EffectError::RateLimited { retry_after, .. } => *retry_after,
+        _ => Duration::ZERO,
+    };
+    generated.max(provider_floor)
+}
+
 fn evidence_classification(
     classification: Option<&FailureClassification>,
 ) -> CircuitBreakerHealthClassification {
@@ -974,9 +942,6 @@ fn evidence_classification(
         }
         Some(FailureClassification::RateLimited(_)) => {
             CircuitBreakerHealthClassification::RateLimited
-        }
-        Some(FailureClassification::PartialSuccess { .. }) => {
-            CircuitBreakerHealthClassification::PartialSuccess
         }
         Some(FailureClassification::Ignored) => CircuitBreakerHealthClassification::Ignored,
         None => CircuitBreakerHealthClassification::NoObservation,
@@ -1104,13 +1069,64 @@ mod tests {
 
     #[test]
     fn aggregate_validates_retry_without_panicking() {
-        let result = EffectResilience::with_breaker(valid_breaker())
-            .retry(Retry::fixed(Duration::ZERO))
-            .build();
         assert!(matches!(
-            result,
+            EffectResilience::with_breaker(valid_breaker())
+                .retry(Retry::fixed(Duration::ZERO))
+                .build(),
             Err(EffectResilienceConfigError::ZeroFixedDelay)
         ));
+        assert!(matches!(
+            EffectResilience::with_breaker(valid_breaker())
+                .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(0))
+                .build(),
+            Err(EffectResilienceConfigError::ZeroRetryAttempts)
+        ));
+        assert!(matches!(
+            EffectResilience::with_breaker(valid_breaker())
+                .retry(Retry::fixed(Duration::from_millis(1)).max_backoff(Duration::ZERO))
+                .build(),
+            Err(EffectResilienceConfigError::ZeroMaxBackoff)
+        ));
+        assert!(matches!(
+            EffectResilience::with_breaker(valid_breaker())
+                .retry(Retry::fixed(Duration::from_millis(1)).attempt_start_window(Duration::ZERO))
+                .build(),
+            Err(EffectResilienceConfigError::ZeroAttemptStartWindow)
+        ));
+    }
+
+    #[test]
+    fn health_classification_cannot_veto_or_promote_retry() {
+        assert!(retryable_error(&EffectError::Timeout("slow".to_string())));
+        assert!(retryable_error(&EffectError::Transport(
+            "offline".to_string()
+        )));
+        assert!(!retryable_error(&EffectError::Permanent(
+            "denied".to_string()
+        )));
+        assert!(!retryable_error(&EffectError::Domain(
+            "declined".to_string()
+        )));
+    }
+
+    #[test]
+    fn provider_retry_after_is_the_only_delay_floor_and_is_not_capped() {
+        let retry = Retry::fixed(Duration::from_millis(50)).max_backoff(Duration::from_millis(10));
+        assert_eq!(
+            retry_delay(&retry, 1, &EffectError::Timeout("slow".to_string())),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            retry_delay(
+                &retry,
+                1,
+                &EffectError::RateLimited {
+                    message: "slow down".to_string(),
+                    retry_after: Duration::from_millis(250),
+                },
+            ),
+            Duration::from_millis(250)
+        );
     }
 
     #[test]

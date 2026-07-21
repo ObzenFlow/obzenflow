@@ -1153,57 +1153,30 @@ mod tests {
 
     struct EffectBoundaryPostControlMiddleware;
 
-    impl Middleware for EffectBoundaryPostControlMiddleware {
+    #[async_trait]
+    impl crate::middleware::EventAwareEffectPolicy for EffectBoundaryPostControlMiddleware {
         fn label(&self) -> &'static str {
             "test.effect_boundary_post_control"
         }
 
-        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
-            crate::middleware::SourceMiddlewarePhase::Ordinary
-        }
-
-        fn post_handle(
+        async fn admit(
             &self,
             _event: &ChainEvent,
-            _results: &[ChainEvent],
+            _ctx: &mut MiddlewareContext,
+        ) -> crate::middleware::PolicyAdmission {
+            crate::middleware::PolicyAdmission::Admit
+        }
+
+        fn observe(
+            &self,
+            _event: &ChainEvent,
+            _attempt: &crate::middleware::EffectAttemptOutcome<'_>,
             ctx: &mut MiddlewareContext,
         ) {
             ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
                 obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
                 json!({"boundary": "post"}),
             ));
-        }
-    }
-
-    struct EffectBoundarySkipControlMiddleware;
-
-    impl Middleware for EffectBoundarySkipControlMiddleware {
-        fn label(&self) -> &'static str {
-            "test.effect_boundary_skip_control"
-        }
-
-        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
-            crate::middleware::SourceMiddlewarePhase::Ordinary
-        }
-
-        fn kind(&self) -> crate::middleware::MiddlewareKind {
-            // Exercises boundary Skip mechanics, so it declares the policy kind.
-            crate::middleware::MiddlewareKind::Policy
-        }
-
-        fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
-            ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
-                obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
-                json!({"boundary": "skip"}),
-            ));
-            MiddlewareAction::Skip {
-                results: vec![ChainEventFactory::data_event(
-                    event.writer_id,
-                    "test.effect_fallback",
-                    json!({"effect_value": 42}),
-                )],
-                cause: None,
-            }
         }
     }
 
@@ -1216,11 +1189,12 @@ mod tests {
         }
     }
 
-    fn boundary_for(middleware: Arc<dyn Middleware>) -> crate::middleware::PerEffectPolicyBoundary {
-        let chain: Arc<Vec<crate::middleware::EffectPolicyAttachment>> =
-            Arc::new(vec![crate::middleware::effect_policy_from_middleware(
-                middleware,
-            )]);
+    fn boundary_for(
+        policy: Arc<dyn crate::middleware::EventAwareEffectPolicy>,
+    ) -> crate::middleware::PerEffectPolicyBoundary {
+        let chain: Arc<Vec<crate::middleware::EffectPolicyAttachment>> = Arc::new(vec![
+            crate::middleware::EffectPolicyAttachment::event_aware(policy),
+        ]);
         let mut chains = std::collections::HashMap::new();
         chains.insert("test.effect", chain);
         crate::middleware::PerEffectPolicyBoundary::new(chains)
@@ -1253,57 +1227,20 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn effect_boundary_skip_returns_control_events_without_polling_execution() {
-        let boundary = boundary_for(Arc::new(EffectBoundarySkipControlMiddleware));
-        let event = ChainEventFactory::data_event(
-            obzenflow_core::WriterId::from(StageId::new()),
-            "test.input",
-            json!({}),
-        );
-
-        let polled = Arc::new(AtomicBool::new(false));
-        let polled_probe = polled.clone();
-        let execute = RepeatableEffectOperation::new(move || {
-            let polled_probe = polled_probe.clone();
-            async move {
-                polled_probe.store(true, Ordering::SeqCst);
-                Ok(Vec::new())
-            }
-        });
-
-        let report = boundary
-            .around_repeatable_effect(&test_effect_identity(), &event, execute)
-            .await;
-
-        match report.outcome {
-            EffectBoundaryOutcome::Skipped { results, source } => {
-                assert_eq!(results.len(), 1);
-                assert_eq!(results[0].payload()["effect_value"], json!(42));
-                assert_eq!(source.as_deref(), Some("test.effect_boundary_skip_control"));
-            }
-            _ => panic!("boundary middleware should skip with fallback"),
-        }
-        assert!(
-            !polled.load(Ordering::SeqCst),
-            "a skip must short-circuit without polling the execution future"
-        );
-        assert_eq!(report.control_events.len(), 1);
-        assert!(report.control_events[0].is_lifecycle());
-        assert_eq!(
-            report.control_events[0].event_type(),
-            "lifecycle.metrics.state"
-        );
-    }
-
     #[test]
     fn retrying_breaker_does_not_declare_the_handler_surface() {
-        use crate::middleware::control::{CircuitBreaker, Retry};
+        use crate::middleware::control::{CircuitBreaker, EffectResilience, Retry};
         use crate::middleware::{MiddlewareFactory, MiddlewareSurfaceKind};
 
-        let factory = CircuitBreaker::opens_after(5)
-            .retry(Retry::fixed(StdDuration::from_millis(1)).attempts(3))
-            .build();
+        let factory = EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .consecutive_failures(5)
+                .build()
+                .expect("breaker configuration"),
+        )
+        .retry(Retry::fixed(StdDuration::from_millis(1)).max_attempts(3))
+        .build()
+        .expect("resilience configuration");
         assert!(
             !factory
                 .declaration()

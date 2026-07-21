@@ -10,7 +10,7 @@
 //! deterministically before a run or shutdown contract can be produced.
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::circuit_breaker;
+use obzenflow_adapters::middleware::CircuitBreaker;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{TypedPayload, WriterId};
@@ -23,6 +23,13 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+fn breaker(failures: u32) -> CircuitBreaker {
+    CircuitBreaker::builder()
+        .consecutive_failures(failures)
+        .build()
+        .expect("test breaker configuration")
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BreakerTestEvent {
@@ -92,7 +99,7 @@ async fn breaker_handler_shell_is_rejected_before_shutdown_contracts_exist() {
                 writer_id: WriterId::from(obzenflow_core::StageId::new()),
             });
             failing_transform = async_transform!(BreakerTestEvent -> BreakerTestEvent => AsyncPassthrough, [
-                circuit_breaker(2)
+                breaker(2)
             ]);
             sink = sink!(BreakerTestEvent => NullSink);
         },

@@ -191,13 +191,15 @@ impl EventAwareEffectPolicy for HookProofEffectPolicy {
             self.counters
                 .effect_rejections
                 .fetch_add(1, Ordering::SeqCst);
-            return PolicyAdmission::Reject(obzenflow_adapters::middleware::MiddlewareAbortCause {
-                source: EffectFailureSource::new("hook_proof_control"),
-                code: EffectFailureCode::new("rejected_by_hook_proof"),
-                message: "hook proof effect rejected".to_string(),
-                retry: RetryDisposition::NotRetryable,
-                event: None,
-            });
+            return PolicyAdmission::Reject(Box::new(
+                obzenflow_adapters::middleware::MiddlewareAbortCause {
+                    source: EffectFailureSource::new("hook_proof_control"),
+                    code: EffectFailureCode::new("rejected_by_hook_proof"),
+                    message: "hook proof effect rejected".to_string(),
+                    retry: RetryDisposition::NotRetryable,
+                    event: None,
+                },
+            ));
         }
         self.counters.effect_admits.fetch_add(1, Ordering::SeqCst);
         PolicyAdmission::Admit

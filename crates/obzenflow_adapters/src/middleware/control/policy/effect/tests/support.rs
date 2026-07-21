@@ -5,9 +5,7 @@
 //! Shared fixtures for the effect-boundary tests. Everything here is private
 //! to `effect::tests`; production code never sees these helpers.
 
-pub(super) use crate::middleware::control::circuit_breaker::{
-    failure_rate, CircuitBreaker, CircuitBreakerMiddleware, FailureClassification, Retry,
-};
+pub(super) use crate::middleware::control::circuit_breaker::{CircuitBreaker, Retry};
 pub(super) use crate::middleware::control::policy::effect::{
     EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment, PerEffectPolicyBoundary,
     PolicyAdmission,
@@ -15,25 +13,20 @@ pub(super) use crate::middleware::control::policy::effect::{
 pub(super) use crate::middleware::control::ControlMiddlewareAggregator;
 pub(super) use crate::middleware::{MiddlewareAbortCause, MiddlewareContext};
 pub(super) use async_trait::async_trait;
-pub(super) use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
-    MiddlewareLifecycle, ObservabilityPayload,
-};
 pub(super) use obzenflow_core::event::{
-    ChainEventContent, ChainEventFactory, EffectFailureCode, EffectFailureSource, RetryDisposition,
+    ChainEventFactory, EffectFailureCode, EffectFailureSource, RetryDisposition,
 };
 pub(super) use obzenflow_core::{ChainEvent, StageId, StageKey, WriterId};
 pub(super) use obzenflow_runtime::control_plane::ControlPlaneProvider;
 pub(super) use obzenflow_runtime::effects::{
-    EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectCursor, EffectError,
-    EffectIdentity, EffectSafety, RepeatableEffectOperation,
+    EffectBoundary, EffectBoundaryOutcome, EffectCursor, EffectError, EffectIdentity, EffectSafety,
+    RepeatableEffectOperation,
 };
 pub(super) use std::collections::HashMap;
 pub(super) use std::sync::atomic::{AtomicUsize, Ordering};
 pub(super) use std::sync::{Arc, Mutex};
 pub(super) use std::time::Duration;
 
-use crate::middleware::control::rate_limiter::RateLimiterBuilder;
 use crate::middleware::{
     EffectSurface, EffectTypeKey, EffectUnitId, MiddlewareAttachmentRequest,
     MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareMaterializationContext,
@@ -64,12 +57,6 @@ pub(super) fn data_event() -> ChainEvent {
 
 pub(super) fn ok_execute() -> RepeatableEffectOperation {
     RepeatableEffectOperation::new(|| async { Ok(Vec::new()) })
-}
-
-pub(super) fn failing_execute() -> RepeatableEffectOperation {
-    RepeatableEffectOperation::new(|| async {
-        Err(EffectError::Execution("simulated_failure".to_string()))
-    })
 }
 
 pub(super) fn test_stage_config(factory: &dyn MiddlewareFactory) -> StageConfig {
@@ -151,89 +138,10 @@ pub(super) fn materialize_effect_attachment(
     }
 }
 
-pub(super) fn retrying_breaker_fixture(
-    factory: Box<dyn MiddlewareFactory>,
-) -> (
-    EffectPolicyAttachment,
-    Arc<ControlMiddlewareAggregator>,
-    StageId,
-) {
-    let config = test_stage_config(factory.as_ref());
-    let stage_id = config.stage_id;
-    let control = Arc::new(ControlMiddlewareAggregator::new());
-    let attachment = materialize_effect_attachment(
-        factory.as_ref(),
-        &config,
-        &control,
-        0,
-        EffectSafety::Idempotent,
-    )
-    .expect("retrying breaker should materialize for an idempotent effect");
-    (attachment, control, stage_id)
-}
-
-pub(super) fn retrying_breaker_attachment(
-    factory: Box<dyn MiddlewareFactory>,
-) -> EffectPolicyAttachment {
-    retrying_breaker_fixture(factory).0
-}
-
-pub(super) fn rate_limiter_fixture() -> (
-    EffectPolicyAttachment,
-    Arc<ControlMiddlewareAggregator>,
-    StageId,
-) {
-    let factory = RateLimiterBuilder::new(1_000.0).with_burst(10.0).build();
-    let config = test_stage_config(factory.as_ref());
-    let stage_id = config.stage_id;
-    let control = Arc::new(ControlMiddlewareAggregator::new());
-    let attachment = materialize_effect_attachment(
-        factory.as_ref(),
-        &config,
-        &control,
-        1,
-        EffectSafety::Idempotent,
-    )
-    .expect("rate limiter should materialize for an effect");
-    (attachment, control, stage_id)
-}
-
 pub(super) fn boundary_with_chain(chain: Vec<EffectPolicyAttachment>) -> PerEffectPolicyBoundary {
     let mut chains = HashMap::new();
     chains.insert("effect.retry", Arc::new(chain));
     PerEffectPolicyBoundary::new(chains)
-}
-
-pub(super) fn retry_events(report: &EffectBoundaryReport) -> Vec<&CircuitBreakerEvent> {
-    report
-        .control_events
-        .iter()
-        .filter_map(|event| match &event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(event),
-            )) if matches!(
-                event,
-                CircuitBreakerEvent::RetryScheduled { .. }
-                    | CircuitBreakerEvent::RetrySucceeded { .. }
-                    | CircuitBreakerEvent::RetryExhausted { .. }
-                    | CircuitBreakerEvent::RetryStoppedNonRetryable { .. }
-            ) =>
-            {
-                Some(event)
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-pub(super) fn scheduled_delays(report: &EffectBoundaryReport) -> Vec<u64> {
-    retry_events(report)
-        .into_iter()
-        .filter_map(|event| match event {
-            CircuitBreakerEvent::RetryScheduled { delay_ms, .. } => Some(*delay_ms),
-            _ => None,
-        })
-        .collect()
 }
 
 pub(super) fn effect_limiter_events(
@@ -247,16 +155,4 @@ pub(super) fn effect_limiter_events(
         "one effect limiter should be registered"
     );
     snapshots[0].1().events_total
-}
-
-pub(super) fn scripted_operation(
-    calls: Arc<AtomicUsize>,
-    result_for_call: impl Fn(usize) -> Result<Vec<ChainEvent>, EffectError> + Send + Sync + 'static,
-) -> RepeatableEffectOperation {
-    let result_for_call = Arc::new(result_for_call);
-    RepeatableEffectOperation::new(move || {
-        let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
-        let result_for_call = result_for_call.clone();
-        async move { result_for_call(call) }
-    })
 }

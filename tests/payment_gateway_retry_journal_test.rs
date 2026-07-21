@@ -71,7 +71,18 @@ fn payment_effect_outcome_group_count(jsonl: &str) -> usize {
         .len()
 }
 
-fn last_payment_breaker_counts(jsonl: &str) -> (u64, u64, u64) {
+#[derive(Debug, PartialEq)]
+struct BreakerCounts {
+    requests: u64,
+    successes: u64,
+    failures: u64,
+    slow: u64,
+    rejections: u64,
+    opened: u64,
+    state: f64,
+}
+
+fn last_payment_breaker_counts(jsonl: &str) -> BreakerCounts {
     let mut last = None;
     for row in exported_events(jsonl) {
         let Some(breakers) = row
@@ -84,24 +95,38 @@ fn last_payment_breaker_counts(jsonl: &str) -> (u64, u64, u64) {
             if breaker.get("effect_type").and_then(|value| value.as_str())
                 == Some("payment.authorize")
             {
-                last = Some((
-                    breaker["cb_requests_total"]
+                last = Some(BreakerCounts {
+                    requests: breaker["cb_requests_total"]
                         .as_u64()
                         .expect("request count"),
-                    breaker["cb_successes_total"]
+                    successes: breaker["cb_successes_total"]
                         .as_u64()
                         .expect("success count"),
-                    breaker["cb_failures_total"]
+                    failures: breaker["cb_failures_total"]
                         .as_u64()
                         .expect("failure count"),
-                ));
+                    slow: breaker["cb_slow_total"].as_u64().expect("slow count"),
+                    rejections: breaker["cb_rejections_total"]
+                        .as_u64()
+                        .expect("rejection count"),
+                    opened: breaker["cb_opened_total"].as_u64().expect("open count"),
+                    state: breaker["cb_state"].as_f64().expect("breaker state"),
+                });
             }
         }
     }
     last.expect("payment breaker metrics should appear in the exported journal")
 }
 
-fn last_payment_limiter_counts(jsonl: &str) -> (u64, f64) {
+#[derive(Debug, PartialEq)]
+struct LimiterCounts {
+    events: u64,
+    delayed: u64,
+    tokens: f64,
+    delay_seconds: f64,
+}
+
+fn last_payment_limiter_counts(jsonl: &str) -> LimiterCounts {
     let mut last = None;
     for row in exported_events(jsonl) {
         let Some(limiters) = row
@@ -114,14 +139,20 @@ fn last_payment_limiter_counts(jsonl: &str) -> (u64, f64) {
             if limiter.get("effect_type").and_then(|value| value.as_str())
                 == Some("payment.authorize")
             {
-                last = Some((
-                    limiter["rl_events_total"]
+                last = Some(LimiterCounts {
+                    events: limiter["rl_events_total"]
                         .as_u64()
                         .expect("admitted attempt count"),
-                    limiter["rl_tokens_consumed_total"]
+                    delayed: limiter["rl_delayed_total"]
+                        .as_u64()
+                        .expect("delayed attempt count"),
+                    tokens: limiter["rl_tokens_consumed_total"]
                         .as_f64()
                         .expect("committed permit count"),
-                ));
+                    delay_seconds: limiter["rl_delay_seconds_total"]
+                        .as_f64()
+                        .expect("cumulative delay"),
+                });
             }
         }
     }
@@ -130,6 +161,55 @@ fn last_payment_limiter_counts(jsonl: &str) -> (u64, f64) {
 
 #[test]
 fn payment_gateway_retry_journal_test() {
+    // Canonical healthy profile: five dependency calls at one per second.
+    // The journal proves limiter pacing is real and that fast successes never
+    // increment the breaker's slow-call counter.
+    let healthy_root = tempfile::tempdir().expect("healthy journal root");
+    let healthy_proof = Arc::new(gateway::GatewayRetryProof::healthy(false));
+    obzenflow_infra::application::FlowApplication::builder()
+        .with_cli_args(["payment_gateway_retry_journal_test"])
+        .run_blocking(proof::build_flow_for_profile(
+            proof::RetryProofProfile::Healthy,
+            Some(healthy_proof.clone()),
+            healthy_root.path().to_path_buf(),
+        ))
+        .expect("healthy proof flow should complete");
+    assert_eq!(healthy_proof.calls(), 5);
+    let healthy = exported_run(
+        &only_run(healthy_root.path()),
+        &healthy_root.path().join("healthy.jsonl"),
+    );
+    assert_eq!(data_event_count(&healthy, "payment.authorized.v1"), 5);
+    assert_eq!(
+        data_event_count(&healthy, "payment.authorization_unavailable.v1"),
+        0
+    );
+    assert_eq!(payment_effect_outcome_group_count(&healthy), 5);
+    assert_eq!(
+        last_payment_breaker_counts(&healthy),
+        BreakerCounts {
+            requests: 5,
+            successes: 5,
+            failures: 0,
+            slow: 0,
+            rejections: 0,
+            opened: 0,
+            state: 0.0,
+        }
+    );
+    let healthy_limiter = last_payment_limiter_counts(&healthy);
+    assert_eq!(healthy_limiter.events, 5);
+    assert_eq!(healthy_limiter.tokens, 5.0);
+    assert!(
+        healthy_limiter.delayed >= 4,
+        "all calls after the initial burst token should be paced: {healthy_limiter:?}"
+    );
+    assert!(
+        healthy_limiter.delay_seconds > 0.0,
+        "healthy profile must prove non-zero limiter delay: {healthy_limiter:?}"
+    );
+    assert_eq!(occurrences(&healthy, "\"action\":\"attempt_settled\""), 5);
+
     let control_root = tempfile::tempdir().expect("control journal root");
     let control_proof = Arc::new(gateway::GatewayRetryProof::new(false));
     obzenflow_infra::application::FlowApplication::builder()
@@ -151,8 +231,20 @@ fn payment_gateway_retry_journal_test() {
     );
     assert_eq!(data_event_count(&control, "payment.authorized.v1"), 0);
     assert_eq!(payment_effect_outcome_group_count(&control), 1);
-    assert_eq!(last_payment_breaker_counts(&control), (1, 0, 1));
-    assert_eq!(last_payment_limiter_counts(&control), (1, 1.0));
+    assert_eq!(
+        last_payment_breaker_counts(&control),
+        BreakerCounts {
+            requests: 1,
+            successes: 0,
+            failures: 1,
+            slow: 0,
+            rejections: 0,
+            opened: 0,
+            state: 0.0,
+        }
+    );
+    assert_eq!(last_payment_limiter_counts(&control).events, 1);
+    assert_eq!(last_payment_limiter_counts(&control).tokens, 1.0);
     assert_eq!(occurrences(&control, "\"action\":\"attempt_settled\""), 1);
     assert!(!control.contains("\"action\":\"retry_scheduled\""));
     assert!(!control.contains("\"action\":\"retry_succeeded\""));
@@ -180,8 +272,20 @@ fn payment_gateway_retry_journal_test() {
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&treatment), 1);
-    assert_eq!(last_payment_breaker_counts(&treatment), (3, 1, 2));
-    assert_eq!(last_payment_limiter_counts(&treatment), (3, 3.0));
+    assert_eq!(
+        last_payment_breaker_counts(&treatment),
+        BreakerCounts {
+            requests: 3,
+            successes: 1,
+            failures: 2,
+            slow: 0,
+            rejections: 0,
+            opened: 0,
+            state: 0.0,
+        }
+    );
+    assert_eq!(last_payment_limiter_counts(&treatment).events, 3);
+    assert_eq!(last_payment_limiter_counts(&treatment).tokens, 3.0);
     assert_eq!(occurrences(&treatment, "\"action\":\"attempt_settled\""), 3);
     assert_eq!(occurrences(&treatment, "\"attempt\":1"), 1);
     assert_eq!(occurrences(&treatment, "\"attempt\":2"), 1);
@@ -233,5 +337,78 @@ fn payment_gateway_retry_journal_test() {
     assert!(
         !replay.contains("\"action\":\"attempt_settled\""),
         "strict replay must not emit fresh physical-attempt evidence"
+    );
+
+    // Five failures satisfy the tutorial breaker's count window; the sixth
+    // logical effect is rejected without a dependency call or limiter permit.
+    let open_root = tempfile::tempdir().expect("open-rejection journal root");
+    let open_proof = Arc::new(gateway::GatewayRetryProof::always_fail(false));
+    obzenflow_infra::application::FlowApplication::builder()
+        .with_cli_args(["payment_gateway_retry_journal_test"])
+        .run_blocking(proof::build_flow_for_profile(
+            proof::RetryProofProfile::OpenRejection,
+            Some(open_proof.clone()),
+            open_root.path().to_path_buf(),
+        ))
+        .expect("open-rejection proof flow should complete");
+    assert_eq!(open_proof.calls(), 5);
+    let open_run = only_run(open_root.path());
+    let open = exported_run(&open_run, &open_root.path().join("open.jsonl"));
+    assert_eq!(
+        data_event_count(&open, "payment.authorization_unavailable.v1"),
+        6
+    );
+    assert_eq!(data_event_count(&open, "payment.authorized.v1"), 0);
+    assert_eq!(
+        last_payment_breaker_counts(&open),
+        BreakerCounts {
+            requests: 5,
+            successes: 0,
+            failures: 5,
+            slow: 0,
+            rejections: 1,
+            opened: 1,
+            state: 1.0,
+        }
+    );
+    assert_eq!(last_payment_limiter_counts(&open).events, 5);
+    assert_eq!(last_payment_limiter_counts(&open).tokens, 5.0);
+    assert_eq!(occurrences(&open, "\"action\":\"attempt_settled\""), 5);
+    assert!(
+        open.contains("\"code\":\"circuit_open\""),
+        "open rejection must carry the stable machine-readable cause code"
+    );
+    assert!(!open.contains("\"action\":\"retry_"));
+
+    let open_replay_root = tempfile::tempdir().expect("open-rejection replay root");
+    let open_replay_proof = Arc::new(gateway::GatewayRetryProof::always_fail(true));
+    obzenflow_infra::application::FlowApplication::builder()
+        .with_cli_args([
+            "payment_gateway_retry_journal_test",
+            "--replay-from",
+            open_run
+                .to_str()
+                .expect("open-rejection path should be UTF-8"),
+            "--verify",
+        ])
+        .run_blocking(proof::build_flow_for_profile(
+            proof::RetryProofProfile::OpenRejection,
+            Some(open_replay_proof.clone()),
+            open_replay_root.path().to_path_buf(),
+        ))
+        .expect("open-rejection strict replay should verify without live gateway I/O");
+    assert_eq!(open_replay_proof.calls(), 0);
+    let open_replay = exported_run(
+        &only_run(open_replay_root.path()),
+        &open_replay_root.path().join("open-replay.jsonl"),
+    );
+    assert_eq!(
+        data_event_count(&open_replay, "payment.authorization_unavailable.v1"),
+        6
+    );
+    assert!(!open_replay.contains("\"action\":\"retry_"));
+    assert!(
+        !open_replay.contains("\"action\":\"attempt_settled\""),
+        "open-rejection replay must not emit fresh physical-attempt evidence"
     );
 }

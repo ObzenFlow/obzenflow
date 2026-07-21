@@ -966,6 +966,30 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
+        // Circuit breaker slow physical calls total
+        if !snapshot.circuit_breaker_slow_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_circuit_breaker_slow_total Physical calls at or above the configured slow threshold"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_circuit_breaker_slow_total counter"
+            )?;
+
+            for (stage_id, count) in &snapshot.circuit_breaker_slow_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_circuit_breaker_slow_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
         // Circuit breaker time in each state (monotonic)
         if !snapshot
             .circuit_breaker_time_in_state_seconds_total

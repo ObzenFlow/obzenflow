@@ -214,7 +214,6 @@ pub enum CircuitBreakerHealthClassification {
     TransientFailure,
     PermanentFailure,
     RateLimited,
-    PartialSuccess,
     Ignored,
     NoObservation,
 }

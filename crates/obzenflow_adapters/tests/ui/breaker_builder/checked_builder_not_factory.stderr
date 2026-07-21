@@ -1,0 +1,15 @@
+error[E0277]: the trait bound `CheckedCircuitBreakerBuilder: MiddlewareFactory` is not satisfied
+  --> tests/ui/breaker_builder/checked_builder_not_factory.rs:12:19
+   |
+12 |     needs_factory(&unchecked);
+   |                   ^^^^^^^^^^ the trait `MiddlewareFactory` is not implemented for `CheckedCircuitBreakerBuilder`
+   |
+   = help: the following other types implement trait `MiddlewareFactory`:
+             AiMapReduceChunkManifestFactory<Chunk>
+             AiMapReduceMapFactory<Chunk, Partial>
+             Box<F>
+             IndicatorMiddlewareFactory
+             LoggingMiddlewareFactory
+             RateLimiterFactory
+             obzenflow_adapters::middleware::CircuitBreaker
+   = note: required for the cast from `&CheckedCircuitBreakerBuilder` to `&dyn MiddlewareFactory`

@@ -28,7 +28,7 @@ use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::{
     effects::{
         EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
-        SinkDeliverySafety, SynthesizedOutcomeRegistration,
+        SinkDeliverySafety,
     },
     metrics::instrumentation::{InstrumentationConfig, StageInstrumentation},
     stages::StageResources,
@@ -620,18 +620,6 @@ pub trait StageDescriptor: Send + Sync {
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        Vec::new()
-    }
-
-    /// Typed-outcome middleware registrations from the `output_middleware:`
-    /// lane (FLOWIP-120h). Default: none.
-    fn synthesized_outcome_registrations(&self) -> Vec<SynthesizedOutcomeRegistration> {
-        Vec::new()
-    }
-
-    /// Configuration errors detected by the `output_middleware:` lane while
-    /// branch types were nameable. Default: none.
-    fn type_shaping_config_errors(&self) -> Vec<String> {
         Vec::new()
     }
 }
@@ -1530,14 +1518,11 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     }
 }
 
-/// Per-effect policy attachment (FLOWIP-120c H7): the policies declared
-/// inline on one `effects:` entry (`Effect with [...]`), plus the
-/// typed-outcome registrations their builders carry.
+/// Per-effect policy attachment: the policies declared inline on one
+/// `effects:` entry (`Effect with [...]`).
 pub struct EffectPolicyAttachment {
     pub effect_type: &'static str,
     pub factories: Vec<Box<dyn MiddlewareFactory>>,
-    pub synthesized: Vec<SynthesizedOutcomeRegistration>,
-    pub config_errors: Vec<String>,
 }
 
 /// Descriptor for replay-safe effectful async transform stages.
@@ -1549,12 +1534,6 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     /// Per-effect policy attachments from the `effects:` clause
     /// (FLOWIP-120c H7).
     pub effect_policies: Vec<EffectPolicyAttachment>,
-    /// Typed-outcome registrations from the `output_middleware:` lane
-    /// (FLOWIP-120h). Their factories are already in `middleware`.
-    pub synthesized_outcomes: Vec<SynthesizedOutcomeRegistration>,
-    /// Configuration errors detected by the lane while branch types were
-    /// nameable; surfaced as flow build failures.
-    pub type_shaping_errors: Vec<String>,
     pub backpressure: Option<BackpressureClause>,
 }
 
@@ -1590,22 +1569,6 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         self.effects.clone()
     }
 
-    fn synthesized_outcome_registrations(&self) -> Vec<SynthesizedOutcomeRegistration> {
-        let mut registrations = self.synthesized_outcomes.clone();
-        for attachment in &self.effect_policies {
-            registrations.extend(attachment.synthesized.clone());
-        }
-        registrations
-    }
-
-    fn type_shaping_config_errors(&self) -> Vec<String> {
-        let mut errors = self.type_shaping_errors.clone();
-        for attachment in &self.effect_policies {
-            errors.extend(attachment.config_errors.clone());
-        }
-        errors
-    }
-
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
@@ -1631,13 +1594,6 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         let effect_declarations = self.effects.clone();
         validate_effect_declarations(&self.name, &effect_declarations, &resources.effect_ports)?;
         resources.effect_declarations = effect_declarations.clone();
-        resources.synthesized_outcomes = {
-            let mut registrations = self.synthesized_outcomes.clone();
-            for attachment in &self.effect_policies {
-                registrations.extend(attachment.synthesized.clone());
-            }
-            registrations
-        };
 
         for factory in &self.middleware {
             let validation_result =
@@ -1663,12 +1619,10 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        // FLOWIP-120c placement split: policy kinds guard individual effects
-        // at the boundary; observation and structural kinds stay on the
-        // handler shell. Policy factories still arriving through the stage
-        // `middleware:` lane (the transitional `output_middleware:` surface)
-        // attach to the stage's single declared effect; a multi-effect stage
-        // must name the guarded effect per entry.
+        // Policy kinds guard individual effects at the boundary; observation
+        // and structural kinds stay on the handler shell. A stage-level
+        // policy attaches only when the stage declares one effect; a
+        // multi-effect stage must name the protected effect per entry.
         let mut shell_specs = Vec::new();
         let mut transitional_policy_specs = Vec::new();
         let mut effect_observers = StageObserverSet::default();
@@ -2786,7 +2740,7 @@ fn check_join_state<H>(state: &JoinState<H>) -> crate::stage_handle_adapter::Sta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_adapters::middleware::control::circuit_breaker::circuit_breaker;
+    use obzenflow_adapters::middleware::CircuitBreaker;
     use obzenflow_core::event::{JournalEvent, SystemEvent};
     use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, StageKey, TypedPayload};
     use obzenflow_runtime::control_plane::ControlPlaneProvider;
@@ -3341,14 +3295,17 @@ mod tests {
     #[tokio::test]
     async fn finite_source_with_circuit_breaker_uses_cb_strategy() {
         let stage_id = StageId::new();
-        let breaker = circuit_breaker(1);
+        let breaker = CircuitBreaker::builder()
+            .consecutive_failures(1)
+            .build()
+            .expect("source breaker configuration");
         let config = StageConfig {
             stage_id,
             name: "cb_source".to_string(),
             flow_name: "test_flow".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
-            effective_config: effective_config_for_stage("cb_source", &[breaker.as_ref()]),
+            effective_config: effective_config_for_stage("cb_source", &[&breaker]),
         };
 
         // Minimal StageResources: journals are never actually written in this unit test.
@@ -3506,7 +3463,6 @@ mod tests {
             ),
             effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
             effect_declarations: Vec::new(),
-            synthesized_outcomes: Vec::new(),
             deterministic_fan_in: false,
             seq_ordered_fan_in: false,
         };
@@ -3514,7 +3470,7 @@ mod tests {
         let descriptor = FiniteSourceDescriptor {
             name: "cb_source".to_string(),
             handler: DummyFiniteSource,
-            middleware: vec![breaker],
+            middleware: vec![Box::new(breaker)],
             backpressure: None,
         };
 

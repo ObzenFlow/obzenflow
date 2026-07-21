@@ -323,24 +323,6 @@ impl SingleUseEffectOperation {
             provenance,
         }
     }
-
-    /// Report an attempted fallback before execution.
-    ///
-    /// Transactional effects do not accept synthesized fallback results. The
-    /// runtime records this report as a deterministic boundary rejection.
-    pub fn reject_fallback(
-        self,
-        source: Option<String>,
-        control_events: Vec<ChainEvent>,
-    ) -> SingleUseEffectBoundaryReport {
-        let Self { call, provenance } = self;
-        drop(call);
-        SingleUseEffectBoundaryReport {
-            outcome: SingleUseEffectBoundaryOutcome::FallbackRejected { source },
-            control_events,
-            provenance,
-        }
-    }
 }
 
 /// Runtime-held invocation brand for a single-use effect capability.
@@ -400,20 +382,13 @@ pub struct EffectAbortReason {
     pub retry: RetryDisposition,
 }
 
-/// How one guarded effect invocation ended at the boundary.
+/// How one policy-bound effect invocation ended at the boundary.
 pub enum EffectBoundaryOutcome {
     /// The boundary admitted the effect and polled it to completion. The
     /// payload is the execution result: observation copies on success, the
     /// effect's own error on failure. `Effects::perform` records the real
     /// outcome from its own state, not from these copies.
     Executed(Result<Vec<ChainEvent>, EffectError>),
-    /// A policy short-circuited execution and synthesized fallback results
-    /// (or none). `source` labels the synthesizing middleware, recorded as
-    /// the outcome group's `EffectFactOrigin` (FLOWIP-120h).
-    Skipped {
-        results: Vec<ChainEvent>,
-        source: Option<String>,
-    },
     /// A policy rejected execution outright; recorded as a `Failed` outcome
     /// under the effect cursor so strict replay reproduces the rejection.
     Aborted(EffectAbortReason),
@@ -434,7 +409,6 @@ pub struct EffectBoundaryReport {
 /// a [`SingleUseEffectOperation`] or [`SingleUseEffectExecution`].
 pub(crate) enum SingleUseEffectBoundaryOutcome {
     Executed(SingleUseEffectExecution),
-    FallbackRejected { source: Option<String> },
     Aborted(EffectAbortReason),
 }
 
@@ -450,8 +424,7 @@ impl SingleUseEffectBoundaryReport {
     pub fn execution_result(&self) -> Option<&Result<Vec<ChainEvent>, EffectError>> {
         match &self.outcome {
             SingleUseEffectBoundaryOutcome::Executed(execution) => Some(execution.result()),
-            SingleUseEffectBoundaryOutcome::FallbackRejected { .. }
-            | SingleUseEffectBoundaryOutcome::Aborted(_) => None,
+            SingleUseEffectBoundaryOutcome::Aborted(_) => None,
         }
     }
 
@@ -459,18 +432,7 @@ impl SingleUseEffectBoundaryReport {
     pub fn abort_reason(&self) -> Option<&EffectAbortReason> {
         match &self.outcome {
             SingleUseEffectBoundaryOutcome::Aborted(reason) => Some(reason),
-            SingleUseEffectBoundaryOutcome::Executed(_)
-            | SingleUseEffectBoundaryOutcome::FallbackRejected { .. } => None,
-        }
-    }
-
-    /// Read the policy label that attempted an unsupported transactional
-    /// fallback, when present.
-    pub fn fallback_source(&self) -> Option<Option<&str>> {
-        match &self.outcome {
-            SingleUseEffectBoundaryOutcome::FallbackRejected { source } => Some(source.as_deref()),
-            SingleUseEffectBoundaryOutcome::Executed(_)
-            | SingleUseEffectBoundaryOutcome::Aborted(_) => None,
+            SingleUseEffectBoundaryOutcome::Executed(_) => None,
         }
     }
 

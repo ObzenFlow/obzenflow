@@ -21,8 +21,9 @@
 //!   rejects, or synthesizes at a live-I/O boundary.
 //!
 //! Built-in observers are constructed with `indicator()` / `latency()` and
-//! `log()`; built-in control middleware with `circuit_breaker()` and
-//! `rate_limit()`. In the DSL, middleware is attached per stage as an array.
+//! `log()`; built-in control middleware with the checked
+//! `CircuitBreaker::builder()` and `rate_limit()`. In the DSL, middleware is
+//! attached per stage as an array.
 //!
 //! ## Monitoring
 //!
@@ -113,7 +114,6 @@ mod context;
 mod context_keys;
 mod function;
 mod hints;
-pub mod type_shaping;
 
 // Middleware categories
 pub mod ai;
@@ -165,22 +165,21 @@ pub use carrier::{
 };
 pub use context::MiddlewareContext;
 pub use control::policy::{
-    effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment,
-    EventAwareEffectPolicy, PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary,
-    PerSourcePolicyBoundary, PolicyAdmission, SinkAdmission, SinkAdmissionGuard,
-    SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard,
-    SourceAfterPoll, SourceBatchFacts, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+    EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy,
+    PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary,
+    PolicyAdmission, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome, SinkPolicy,
+    SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard, SourceAfterPoll, SourceBatchFacts,
+    SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::indicator::{indicator, latency, IndicatorKind, IndicatorMiddlewareFactory};
 pub use observer::StageObserverSet;
-pub use type_shaping::{IntoEffectPolicyParts, OutcomeShapingMiddleware, TypeShapingMiddleware};
 
 // Control middleware
 pub use control::{
-    circuit_breaker, failure_rate, rate_limit, rate_limit_with_burst, CircuitBreaker,
-    CircuitBreakerBuilder, CircuitBreakerMiddleware, EffectResilience, EffectResilienceConfigError,
+    rate_limit, rate_limit_with_burst, CircuitBreaker, CircuitBreakerConfigError,
+    CircuitBreakerMiddleware, EffectResilience, EffectResilienceConfigError, FailureHealth,
     RateLimiter, RateLimiterBuilder, RateLimiterFactory, RateLimiterMiddleware, Retry,
 };
 

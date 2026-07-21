@@ -424,6 +424,7 @@ mod tests {
             cb_requests_total: 0,
             cb_successes_total: 0,
             cb_failures_total: 0,
+            cb_slow_total: 0,
             cb_rejections_total: 0,
             cb_opened_total: 0,
             cb_time_closed_seconds: 0.0,

@@ -21,8 +21,8 @@ pub mod sink;
 pub mod source;
 
 pub use effect::{
-    effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment,
-    EventAwareEffectPolicy, PerEffectPolicyBoundary, PolicyAdmission,
+    EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy,
+    PerEffectPolicyBoundary, PolicyAdmission,
 };
 pub use sink::{
     PerSinkDeliveryPolicyBoundary, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome,

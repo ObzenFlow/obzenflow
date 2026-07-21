@@ -24,9 +24,9 @@ use obzenflow_core::event::{
     ChainEventFactory, CircuitBreakerSummaryEventParams, EffectFailureCode, EffectFailureSource,
     RetryDisposition,
 };
-use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::control_plane::cb_state;
+use obzenflow_runtime::effects::EffectError;
 use serde_json::json;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -35,48 +35,27 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod classifier;
 mod config;
-mod criteria;
 mod factory;
-mod fallback;
 mod hook_adapters;
 mod retry;
 mod state;
 mod window;
 
 pub(crate) use classifier::effect_error_event;
-pub use classifier::{FailureClassification, FailureClassificationPolicy, UnknownErrorKindPolicy};
+pub(in crate::middleware::control) use classifier::FailureClassification;
+pub use classifier::FailureHealth;
+pub use config::CircuitBreakerConfigError;
 use config::HalfOpenPolicy;
-pub use config::{CircuitBreakerConfigError, OpenPolicy};
-pub use criteria::{failure_rate, FailureRateCriteria, RateCriteria};
-pub use factory::{
-    ai_circuit_breaker, circuit_breaker, shape, CheckedCircuitBreakerBuilder, CircuitBreaker,
-    CircuitBreakerBuilder, CircuitBreakerFactory,
-};
+pub(in crate::middleware::control) use factory::CircuitBreakerFactory;
+pub use factory::{ai_circuit_breaker, CheckedCircuitBreakerBuilder, CircuitBreaker};
 pub use retry::Retry;
-use retry::RetryLimits;
 
 use classifier::FailureClassificationClassifier;
 pub(in crate::middleware::control) use config::CircuitBreakerFailureMode;
-#[cfg(test)]
-use hook_adapters::CircuitBreakerSourcePolicy;
 use hook_adapters::{SourceAdmit, SourceOutcome, SourceProbeGuard};
-use retry::CircuitBreakerRetryPolicy;
 use state::CircuitState;
 pub(in crate::middleware::control) use window::FailureWindow;
 use window::{CallSample, FailureWindowState};
-
-type FallbackFn = Arc<
-    dyn Fn(&ChainEvent, obzenflow_core::config::LineagePolicy) -> Vec<ChainEvent> + Send + Sync,
->;
-type RejectionFn = Arc<
-    dyn Fn(
-            &ChainEvent,
-            CircuitBreakerRejectionReason,
-            obzenflow_core::config::LineagePolicy,
-        ) -> Vec<ChainEvent>
-        + Send
-        + Sync,
->;
 
 const CIRCUIT_BREAKER_ABORT_SOURCE: &str = "circuit_breaker";
 
@@ -98,8 +77,8 @@ impl CircuitBreakerAbortCode {
 
     fn as_str(self) -> &'static str {
         match self {
-            Self::CircuitOpen => "rejected_circuit_open",
-            Self::ProbeInProgress => "rejected_probe_in_progress",
+            Self::CircuitOpen => "circuit_open",
+            Self::ProbeInProgress => "probe_in_progress",
             Self::Rejected => "rejected",
         }
     }
@@ -116,26 +95,15 @@ impl CircuitBreakerAbortCode {
     }
 }
 
-/// Typed-outcome configuration (FLOWIP-120h): when the breaker is declared in
-/// the `output_middleware:` lane and the handler performs the guarded
-/// wrapper, a rejection synthesizes the author-named rejection fact instead of
-/// aborting, so the recorded group is success-shaped and replays as the
-/// `Rejected` branch.
-#[derive(Clone)]
-pub(crate) struct TypedOutcomeConfig {
-    pub(crate) build_rejection: RejectionFn,
-}
-
 pub struct CircuitBreakerFamily;
 
 /// Circuit breaker middleware that prevents cascading failures.
 ///
-/// FLOWIP-114o (no-refund note): the breaker and the rate limiter are
-/// independent instances with independent buckets. A breaker rejection does not
-/// refund a rate-limiter token already consumed earlier in the chain: an event
-/// that the limiter admitted (and possibly delayed) and that the breaker then
-/// rejects still counted its limiter admission. Admission accounting is
-/// per-policy and is not reconciled across policies.
+/// Stage-level breaker and limiter instances remain independent controls. At
+/// the effect boundary, [`EffectResilience`](super::super::EffectResilience)
+/// instead owns an affine limiter reservation and commits it only immediately
+/// before an admitted physical call, so an open-circuit rejection consumes no
+/// permit.
 pub struct CircuitBreakerMiddleware {
     /// Current state of the circuit breaker
     state: Arc<AtomicU8>,
@@ -179,6 +147,7 @@ pub struct CircuitBreakerMiddleware {
     requests_total: Arc<AtomicU64>,
     successes_total: Arc<AtomicU64>,
     failures_total: Arc<AtomicU64>,
+    slow_total: Arc<AtomicU64>,
     rejections_total: Arc<AtomicU64>,
     opened_total: Arc<AtomicU64>,
     time_in_closed: Arc<Mutex<Duration>>,
@@ -189,38 +158,11 @@ pub struct CircuitBreakerMiddleware {
     /// This must match the stage's writer_id so vector-clock watermarks and
     /// stage attribution remain correct in downstream consumers.
     writer_id: WriterId,
-    /// Optional fallback generator used when the circuit is open.
-    ///
-    /// When configured, requests that would normally be rejected in the
-    /// Open or HalfOpen (non‑probe) states will instead be short‑circuited
-    /// to these synthetic results via `MiddlewareAction::Skip { results, .. }`.
-    ///
-    /// This keeps the handler itself unaware of circuit breaker policy while
-    /// allowing flows to provide domain‑specific degraded responses purely
-    /// via circuit breaker configuration.
-    fallback: Option<FallbackFn>,
-    /// Typed-outcome mode (FLOWIP-120h): rejection branch synthesis for
-    /// stages that perform the guarded wrapper.
-    typed_outcome: Option<TypedOutcomeConfig>,
-    /// FLOWIP-010 §7: build-resolved lineage policy, set by the factory from
-    /// `StageConfig.lineage`; consumed by the typed fallback builders.
-    lineage: obzenflow_core::config::LineagePolicy,
-    /// Optional classifier that can fully classify a call outcome.
-    ///
-    /// When set, this overrides the default classification derived from output
-    /// `ProcessingStatus` values.
+    /// Optional typed failure-only health override.
     failure_classification_classifier: Option<FailureClassificationClassifier>,
-    /// Policy controlling behaviour while the circuit is Open.
-    open_policy: OpenPolicy,
     /// Policy controlling behaviour while the circuit is HalfOpen.
     half_open_policy: HalfOpenPolicy,
-    /// Policy for how Unknown/None ErrorKind should be treated.
-    unknown_error_kind_policy: UnknownErrorKindPolicy,
-
-    // ---- Effect-bound recovery configuration (FLOWIP-115h) ----
-    retry_policy: Option<CircuitBreakerRetryPolicy>,
-    retry_limits: RetryLimits,
-    failure_classification_policy: FailureClassificationPolicy,
+    rate_limited_counts_as_failure: bool,
 }
 
 #[derive(Debug)]
@@ -252,26 +194,25 @@ impl Default for CircuitBreakerStats {
 impl CircuitBreakerMiddleware {
     /// Create a new circuit breaker with the given failure threshold
     pub fn new(threshold: usize) -> Self {
-        Self::with_cooldown_and_fallback(threshold, Duration::from_secs(60), None, None, None)
+        Self::construct(threshold, Duration::from_secs(60), None, None)
     }
 
     /// Create a circuit breaker with custom cooldown duration
     pub fn with_cooldown(threshold: usize, cooldown: Duration) -> Self {
-        Self::with_cooldown_and_fallback(threshold, cooldown, None, None, None)
+        Self::construct(threshold, cooldown, None, None)
     }
 
-    /// Create a circuit breaker with custom cooldown and optional fallback.
-    ///
-    /// This is primarily used by CircuitBreakerFactory so that flows can
-    /// configure domain‑specific fallback behavior via the builder API
-    /// without coupling handler logic to circuit breaker internals.
-    ///
-    /// When `shared_state` is provided, the middleware reuses that `Arc`
-    /// instead of allocating a fresh one.
-    pub fn with_cooldown_and_fallback(
+    pub(in crate::middleware::control) fn with_cooldown_for_stage(
         threshold: usize,
         cooldown: Duration,
-        fallback: Option<FallbackFn>,
+        stage_id: StageId,
+    ) -> Self {
+        Self::construct(threshold, cooldown, Some(stage_id), None)
+    }
+
+    fn construct(
+        threshold: usize,
+        cooldown: Duration,
         stage_id: Option<StageId>,
         shared_state: Option<Arc<AtomicU8>>,
     ) -> Self {
@@ -307,6 +248,7 @@ impl CircuitBreakerMiddleware {
             requests_total: Arc::new(AtomicU64::new(0)),
             successes_total: Arc::new(AtomicU64::new(0)),
             failures_total: Arc::new(AtomicU64::new(0)),
+            slow_total: Arc::new(AtomicU64::new(0)),
             rejections_total: Arc::new(AtomicU64::new(0)),
             opened_total: Arc::new(AtomicU64::new(0)),
             time_in_closed: Arc::new(Mutex::new(Duration::from_secs(0))),
@@ -315,28 +257,14 @@ impl CircuitBreakerMiddleware {
             writer_id: stage_id
                 .map(WriterId::from)
                 .unwrap_or_else(|| WriterId::from(StageId::new())),
-            fallback,
-            typed_outcome: None,
-            lineage: obzenflow_core::config::LineagePolicy::default(),
             failure_classification_classifier: None,
-            open_policy: OpenPolicy::default(),
             half_open_policy: HalfOpenPolicy::default(),
-            unknown_error_kind_policy: UnknownErrorKindPolicy::TreatAsInfraFailure,
-
-            retry_policy: None,
-            retry_limits: RetryLimits::default(),
-            failure_classification_policy: FailureClassificationPolicy::default(),
+            rate_limited_counts_as_failure: false,
         }
     }
 
     fn current_state(&self) -> CircuitState {
         CircuitState::from(self.state.load(Ordering::SeqCst))
-    }
-
-    fn effect_retry_config(&self) -> Option<(CircuitBreakerRetryPolicy, RetryLimits)> {
-        self.retry_policy
-            .clone()
-            .map(|policy| (policy, self.retry_limits.clone()))
     }
 
     fn effect_recovery_open_epoch_at_admission(&self, ctx: &mut MiddlewareContext) -> bool {
@@ -383,7 +311,7 @@ impl CircuitBreakerMiddleware {
         &self,
         counted_as_failure: bool,
         call_duration: Option<Duration>,
-        now: Instant,
+        _now: Instant,
     ) -> Option<ChainEvent> {
         let consecutive_failures = if counted_as_failure {
             self.failure_count.fetch_add(1, Ordering::SeqCst) + 1
@@ -422,7 +350,6 @@ impl CircuitBreakerMiddleware {
                         let capacity = state.capacity();
                         if capacity > 0 {
                             state.push(CallSample {
-                                timestamp: now,
                                 is_failure: counted_as_failure,
                                 is_slow,
                             });
@@ -432,31 +359,15 @@ impl CircuitBreakerMiddleware {
                         let mut failures = 0usize;
                         let mut slow_calls = 0usize;
 
-                        match window {
-                            FailureWindow::Count { size } => {
-                                let max = (*size as usize).min(state.capacity());
-                                for sample in state.iter().take(max) {
-                                    observed += 1;
-                                    if sample.is_failure {
-                                        failures += 1;
-                                    }
-                                    if sample.is_slow {
-                                        slow_calls += 1;
-                                    }
-                                }
+                        let FailureWindow::Count { size } = window;
+                        let max = (*size as usize).min(state.capacity());
+                        for sample in state.iter().take(max) {
+                            observed += 1;
+                            if sample.is_failure {
+                                failures += 1;
                             }
-                            FailureWindow::Time { duration } => {
-                                for sample in state.iter() {
-                                    if now.duration_since(sample.timestamp) <= *duration {
-                                        observed += 1;
-                                        if sample.is_failure {
-                                            failures += 1;
-                                        }
-                                        if sample.is_slow {
-                                            slow_calls += 1;
-                                        }
-                                    }
-                                }
+                            if sample.is_slow {
+                                slow_calls += 1;
                             }
                         }
 
@@ -496,42 +407,17 @@ impl CircuitBreakerMiddleware {
             FailureClassification::Success => false,
             FailureClassification::TransientFailure => true,
             FailureClassification::PermanentFailure => true,
-            FailureClassification::RateLimited(_) => {
-                self.failure_classification_policy
-                    .rate_limited_counts_as_failure
-            }
-            FailureClassification::PartialSuccess { failed_ratio } => {
-                *failed_ratio >= self.failure_classification_policy.partial_failure_threshold
-            }
+            FailureClassification::RateLimited(_) => self.rate_limited_counts_as_failure,
             FailureClassification::Ignored => false,
         }
     }
 
     pub(in crate::middleware::control) fn classify_call(
         &self,
-        event: &ChainEvent,
+        _event: &ChainEvent,
         outputs: &[ChainEvent],
         ctx: &MiddlewareContext,
     ) -> (FailureClassification, Option<ErrorKind>, Option<String>) {
-        if let Some(classifier) = &self.failure_classification_classifier {
-            let classification = classifier(event, outputs);
-            if matches!(classification, FailureClassification::Success) {
-                return (FailureClassification::Success, None, None);
-            }
-
-            let mut first_error_kind: Option<ErrorKind> = None;
-            let mut first_error_message: Option<String> = None;
-            for out in outputs {
-                if let ProcessingStatus::Error { kind, message } = &out.processing_info.status {
-                    first_error_kind = kind.clone();
-                    first_error_message = Some(message.clone());
-                    break;
-                }
-            }
-
-            return (classification, first_error_kind, first_error_message);
-        }
-
         let retry_after_ms = ctx.get::<CircuitBreakerRetryAfterMs>().copied();
         let retry_after = retry_after_ms.map(Duration::from_millis);
 
@@ -574,14 +460,7 @@ impl CircuitBreakerMiddleware {
                     Some(ErrorKind::Validation) | Some(ErrorKind::Domain) => {
                         // Caller/domain failures are ignored for breaker health.
                     }
-                    None | Some(ErrorKind::Unknown) => {
-                        if matches!(
-                            self.unknown_error_kind_policy,
-                            UnknownErrorKindPolicy::TreatAsInfraFailure
-                        ) {
-                            saw_transient = true;
-                        }
-                    }
+                    None | Some(ErrorKind::Unknown) => saw_transient = true,
                 }
             }
         }
@@ -601,6 +480,35 @@ impl CircuitBreakerMiddleware {
         };
 
         (base_classification, first_error_kind, first_error_message)
+    }
+
+    pub(in crate::middleware::control) fn classify_effect_error(
+        &self,
+        event: &ChainEvent,
+        error: &EffectError,
+        ctx: &MiddlewareContext,
+    ) -> FailureClassification {
+        let error_event = effect_error_event(event, error);
+        let default = self
+            .classify_call(event, std::slice::from_ref(&error_event), ctx)
+            .0;
+        let Some(classifier) = &self.failure_classification_classifier else {
+            return default;
+        };
+        match classifier(error) {
+            FailureHealth::Ignored => FailureClassification::Ignored,
+            FailureHealth::CountedFailure => match default {
+                FailureClassification::TransientFailure
+                | FailureClassification::PermanentFailure => default,
+                FailureClassification::RateLimited(_) if self.rate_limited_counts_as_failure => {
+                    default
+                }
+                FailureClassification::RateLimited(_) => FailureClassification::TransientFailure,
+                FailureClassification::Ignored | FailureClassification::Success => {
+                    FailureClassification::PermanentFailure
+                }
+            },
+        }
     }
 
     pub(in crate::middleware::control) fn is_slow_dependency_call(
@@ -627,6 +535,13 @@ impl CircuitBreakerMiddleware {
             stats.requests_processed += 1;
         }
         self.requests_total.fetch_add(1, Ordering::Relaxed);
+        let call_duration = ctx
+            .get::<crate::middleware::context_keys::EffectCallDurationNanos>()
+            .copied()
+            .map(Duration::from_nanos);
+        if call_duration.is_some_and(|duration| self.is_slow_dependency_call(duration)) {
+            self.slow_total.fetch_add(1, Ordering::Relaxed);
+        }
 
         if ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false) {
             let _probe_gate = self
@@ -905,6 +820,14 @@ impl CircuitBreakerMiddleware {
             }
             self.requests_total.fetch_add(1, Ordering::Relaxed);
         }
+        if matches!(
+            outcome,
+            SourceOutcome::Success { poll_duration }
+                | SourceOutcome::Failure { poll_duration }
+                if self.is_slow_dependency_call(poll_duration)
+        ) {
+            self.slow_total.fetch_add(1, Ordering::Relaxed);
+        }
 
         let pending = self
             .source_pending_probe
@@ -967,17 +890,10 @@ impl CircuitBreakerMiddleware {
         self.maybe_emit_summary(ctx);
     }
 
-    /// Apply an Open-like policy (Open or HalfOpen non-probe behaviour).
-    ///
-    /// At the live effect boundary a rejection without fallback data must abort
-    /// with a structured cause so the runtime records a failure under the
-    /// effect cursor and strict replay reproduces the same rejection. An empty
-    /// skip there would leave the input with no recorded outcome (FLOWIP-120h).
+    /// Reject Open and probe-busy calls with one stable framework cause.
     fn handle_open_like(
         &self,
-        event: &ChainEvent,
         ctx: &mut MiddlewareContext,
-        policy: &OpenPolicy,
         reason: CircuitBreakerRejectionReason,
     ) -> MiddlewareAction {
         // Track rejection for summaries.
@@ -986,82 +902,10 @@ impl CircuitBreakerMiddleware {
         }
         self.rejections_total.fetch_add(1, Ordering::Relaxed);
 
-        let at_effect_boundary =
-            ctx.execution_scope() == MiddlewareExecutionScope::LiveEffectBoundary;
-
-        // Typed-outcome mode (FLOWIP-120h): at the effect boundary a rejection
-        // synthesizes the author-named rejection fact, a success-shaped group
-        // the guarded carrier decodes as `Rejected`, so the input completes
-        // and strict replay reconstructs the same branch.
-        let typed_rejection = |reason: CircuitBreakerRejectionReason| -> Option<MiddlewareAction> {
-            if !at_effect_boundary {
-                return None;
-            }
-            self.typed_outcome
-                .as_ref()
-                .map(|typed| MiddlewareAction::Skip {
-                    results: (typed.build_rejection)(event, reason, self.lineage),
-                    cause: None,
-                })
-        };
-
-        let action = match policy {
-            OpenPolicy::EmitFallback => {
-                if let Some(fallback) = &self.fallback {
-                    let results = (fallback)(event, self.lineage);
-                    MiddlewareAction::Skip {
-                        results,
-                        cause: None,
-                    }
-                } else if let Some(action) = typed_rejection(reason) {
-                    action
-                } else if at_effect_boundary {
-                    MiddlewareAction::Abort {
-                        cause: Some(self.rejection_abort_cause(reason)),
-                    }
-                } else {
-                    MiddlewareAction::Skip {
-                        results: vec![],
-                        cause: None,
-                    }
-                }
-            }
-            OpenPolicy::FailFast => {
-                if let Some(action) = typed_rejection(reason) {
-                    action
-                } else if at_effect_boundary {
-                    MiddlewareAction::Abort {
-                        cause: Some(self.rejection_abort_cause(reason)),
-                    }
-                } else {
-                    MiddlewareAction::Skip {
-                        results: vec![],
-                        cause: None,
-                    }
-                }
-            }
-            OpenPolicy::Skip => {
-                if at_effect_boundary {
-                    // Transport truncation is incoherent at the effect boundary;
-                    // build validation rejects this configuration on effectful
-                    // stages, and this arm is the defensive backstop.
-                    MiddlewareAction::Abort {
-                        cause: Some(self.rejection_abort_cause(reason)),
-                    }
-                } else {
-                    MiddlewareAction::Skip {
-                        results: vec![],
-                        cause: None,
-                    }
-                }
-            }
-        };
-
-        // The middleware wrapper returns early for Skip actions, so post_handle is not invoked.
-        // Emit summaries here as well so rejection counters stay scrape-visible while Open.
         self.maybe_emit_summary(ctx);
-
-        action
+        MiddlewareAction::Abort {
+            cause: Some(self.rejection_abort_cause(reason)),
+        }
     }
 
     fn rejection_abort_cause(&self, reason: CircuitBreakerRejectionReason) -> MiddlewareAbortCause {
@@ -1163,1261 +1007,122 @@ impl CircuitBreakerMiddleware {
 
 #[cfg(test)]
 mod tests {
-    use super::fallback::{build_outcome_fallback_events, build_typed_fallback_event};
     use super::*;
-    use crate::middleware::{
-        Middleware, MiddlewareFactory, SourceBatchFacts, SourcePolicy, SourcePolicyCtx,
-        SourcePollOutcome,
-    };
-    use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-    use obzenflow_core::TypedPayload;
-    use std::num::NonZeroU32;
-    use std::time::Duration as StdDuration;
+    use crate::middleware::{Middleware, MiddlewareAction};
+    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::MiddlewareExecutionScope;
+    use serde_json::json;
 
-    fn create_test_event() -> ChainEvent {
-        ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}))
-    }
-
-    // ── FLOWIP-120m: outcome-shaped fallback ────────────────────────────────
-
-    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-    struct OutcomeInput {
-        value: u64,
-    }
-
-    impl TypedPayload for OutcomeInput {
-        const EVENT_TYPE: &'static str = "cb_outcome.input";
-    }
-
-    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-    struct OutcomeFirst {
-        value: u64,
-    }
-
-    impl TypedPayload for OutcomeFirst {
-        const EVENT_TYPE: &'static str = "cb_outcome.first";
-    }
-
-    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-    struct OutcomeSecond {
-        value: u64,
-    }
-
-    impl TypedPayload for OutcomeSecond {
-        const EVENT_TYPE: &'static str = "cb_outcome.second";
-    }
-
-    #[derive(Clone, Debug, PartialEq, obzenflow_core::EffectOutcomeFacts)]
-    struct DemoProductOutcome {
-        first: OutcomeFirst,
-        second: OutcomeSecond,
-    }
-
-    #[derive(Clone, Debug)]
-    struct DemoOutcomeEffect;
-
-    #[async_trait::async_trait]
-    impl obzenflow_runtime::effects::Effect for DemoOutcomeEffect {
-        const EFFECT_TYPE: &'static str = "cb_outcome.demo";
-        const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: obzenflow_runtime::effects::EffectSafety =
-            obzenflow_runtime::effects::EffectSafety::Idempotent;
-
-        type Outcome = DemoProductOutcome;
-
-        fn label(&self) -> &str {
-            "demo_outcome"
-        }
-
-        fn canonical_input(&self) -> serde_json::Value {
-            json!({})
-        }
-
-        async fn execute(
-            &self,
-            _ctx: &mut obzenflow_runtime::effects::EffectContext,
-        ) -> Result<Self::Outcome, obzenflow_runtime::effects::EffectError> {
-            Ok(DemoProductOutcome {
-                first: OutcomeFirst { value: 1 },
-                second: OutcomeSecond { value: 2 },
-            })
-        }
-    }
-
-    // The former build_typed/build_outcome misconfigurations (missing
-    // producer, effect-type mismatch, mixed shapes) are unrepresentable under
-    // the typestate builder; a compile-fail fixture in
-    // breaker_builder_compile_fail_tests locks that in.
-
-    #[test]
-    fn outcome_fallback_builds_one_derived_event_per_fact() {
-        let input_event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            OutcomeInput::EVENT_TYPE,
-            json!(OutcomeInput { value: 7 }),
-        );
-
-        let closure = |input: &OutcomeInput| DemoProductOutcome {
-            first: OutcomeFirst {
-                value: input.value + 900,
-            },
-            second: OutcomeSecond {
-                value: input.value + 1900,
-            },
-        };
-        let events = build_outcome_fallback_events::<DemoOutcomeEffect, OutcomeInput, _>(
-            &closure,
-            &input_event,
-            obzenflow_core::config::LineagePolicy::default(),
-        );
-
-        assert_eq!(events.len(), 2, "one derived event per carrier fact");
-        assert_eq!(events[0].event_type(), "cb_outcome.first.v1");
-        assert_eq!(events[1].event_type(), "cb_outcome.second.v1");
-        assert_eq!(events[0].payload()["value"], 907);
-        assert_eq!(events[1].payload()["value"], 1907);
-        for event in &events {
-            assert!(
-                event.causality.parent_ids.contains(&input_event.id),
-                "fallback facts must be parented on the protected input"
-            );
-        }
-    }
-
-    fn ctx_has_rejection(ctx: &MiddlewareContext) -> bool {
-        ctx.ephemeral_events().iter().any(|event| {
-            matches!(
-                &event.content,
-                obzenflow_core::event::ChainEventContent::Observability(
-                    ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                        CircuitBreakerEvent::Rejected { .. }
-                    ))
-                )
-            )
-        })
+    fn event() -> ChainEvent {
+        ChainEventFactory::data_event(WriterId::from(StageId::new()), "test.input", json!({}))
     }
 
     #[test]
-    fn test_circuit_breaker_closed_to_open() {
-        let cb = CircuitBreakerMiddleware::new(3);
-
-        // First 2 failures shouldn't open the circuit
-        for _ in 0..2 {
-            let event = create_test_event();
-            let mut ctx = MiddlewareContext::live_handler();
-            assert!(matches!(
-                cb.pre_handle(&event, &mut ctx),
-                MiddlewareAction::Continue
-            ));
-            // Mark output as an explicit error so the breaker treats this as a failure.
-            let mut failed_output = create_test_event();
-            failed_output.processing_info.status =
-                ProcessingStatus::error("simulated_failure_closed_to_open");
-            cb.post_handle(&event, &[failed_output], &mut ctx);
-        }
-
-        // Third failure should open the circuit
-        let event = create_test_event();
-        let mut ctx = MiddlewareContext::live_handler();
-        assert!(matches!(
-            cb.pre_handle(&event, &mut ctx),
-            MiddlewareAction::Continue
-        ));
-        let mut failed_output = create_test_event();
-        failed_output.processing_info.status =
-            ProcessingStatus::error("simulated_failure_closed_to_open");
-        cb.post_handle(&event, &[failed_output], &mut ctx); // This triggers the opening
-
-        // Next request should be rejected
-        let event = create_test_event();
-        let mut ctx = MiddlewareContext::live_handler();
-        assert!(matches!(
-            cb.pre_handle(&event, &mut ctx),
-            MiddlewareAction::Skip { .. }
-        ));
-        assert!(ctx_has_rejection(&ctx));
-    }
-
-    #[test]
-    fn test_circuit_breaker_success_resets_count() {
-        let cb = CircuitBreakerMiddleware::new(3);
-
-        // Two failures
-        for _ in 0..2 {
-            let event = create_test_event();
-            let mut ctx = MiddlewareContext::live_handler();
-            let _ = cb.pre_handle(&event, &mut ctx);
-            let mut failed_output = create_test_event();
-            failed_output.processing_info.status =
-                ProcessingStatus::error("simulated_failure_success_resets");
-            cb.post_handle(&event, &[failed_output], &mut ctx);
-        }
-
-        // Success should reset the count
-        let event = create_test_event();
-        let mut ctx = MiddlewareContext::live_handler();
-        let _ = cb.pre_handle(&event, &mut ctx);
-        let outputs = vec![create_test_event()]; // Non-empty = success
-        cb.post_handle(&event, &outputs, &mut ctx);
-
-        // Should now need 3 more failures to open
-        for _ in 0..2 {
-            let event = create_test_event();
-            let mut ctx = MiddlewareContext::live_handler();
-            assert!(matches!(
-                cb.pre_handle(&event, &mut ctx),
-                MiddlewareAction::Continue
-            ));
-            cb.post_handle(&event, &[], &mut ctx);
-        }
-
-        // Still closed
-        let event = create_test_event();
-        let mut ctx = MiddlewareContext::live_handler();
-        assert!(matches!(
-            cb.pre_handle(&event, &mut ctx),
-            MiddlewareAction::Continue
-        ));
-    }
-
-    // Criteria-to-failure-mode lowering is tested beside the criteria types
-    // in `criteria.rs`; the builder no longer exposes internal fields.
-
-    #[test]
-    fn factory_exposes_only_typed_control_surfaces() {
-        let factory = circuit_breaker(3);
-        let declaration = factory.declaration();
-        assert!(declaration.is_control());
-        assert!(declaration
-            .surfaces
-            .contains(&crate::middleware::MiddlewareSurfaceKind::SourcePoll));
-        assert!(declaration
-            .surfaces
-            .contains(&crate::middleware::MiddlewareSurfaceKind::Effect));
-        assert!(!declaration
-            .surfaces
-            .contains(&crate::middleware::MiddlewareSurfaceKind::Handler));
-    }
-
-    #[test]
-    fn rate_based_count_window_opens_after_failure_rate_threshold() {
-        // Configure a rate-based breaker with a count window of 5 and a 60% failure threshold.
-        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
-            1,
-            StdDuration::from_secs(60),
-            None,
-            None,
-            None,
-        );
-
-        cb.failure_mode = CircuitBreakerFailureMode::RateBased {
-            window: FailureWindow::Count { size: 5 },
-            failure_rate_threshold: 0.6,
-            slow_call_rate_threshold: None,
-            slow_call_duration_threshold: None,
-            minimum_calls: NonZeroU32::new(5).unwrap(),
-        };
-        cb.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(5))));
-
-        // Pattern: F, F, S, F, S over 5 calls => 3/5 = 0.6 failures.
-        let patterns = [true, true, false, true, false];
-
-        for (idx, is_failure) in patterns.iter().enumerate() {
-            let event = create_test_event();
-            let mut ctx = MiddlewareContext::live_handler();
-            let action = cb.pre_handle(&event, &mut ctx);
-            assert!(
-                matches!(action, MiddlewareAction::Continue),
-                "expected Continue in Closed state"
-            );
-
-            let output = if *is_failure {
-                let mut failed = create_test_event();
-                failed.processing_info.status =
-                    ProcessingStatus::error(format!("simulated_failure_{idx}"));
-                vec![failed]
-            } else {
-                vec![create_test_event()]
-            };
-
-            cb.post_handle(&event, &output, &mut ctx);
-        }
-
-        // After the fifth call the failure rate crosses the threshold and the breaker should open.
-        assert!(
-            matches!(cb.current_state(), CircuitState::Open),
-            "expected circuit to be Open after rate-based threshold exceeded"
-        );
-    }
-
-    #[test]
-    fn rate_based_slow_call_opens_after_slow_threshold() {
-        // Configure a rate-based breaker with a count window of 5.
-        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
-            1,
-            StdDuration::from_secs(60),
-            None,
-            None,
-            None,
-        );
-
-        cb.failure_mode = CircuitBreakerFailureMode::RateBased {
-            window: FailureWindow::Count { size: 5 },
-            // Require 100% actual failures so that only slow-call rate can open.
-            failure_rate_threshold: 1.0,
-            slow_call_rate_threshold: Some(0.6),
-            slow_call_duration_threshold: Some(StdDuration::from_millis(50)),
-            minimum_calls: NonZeroU32::new(5).unwrap(),
-        };
-        cb.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(5))));
-
-        // Pattern: slow, slow, fast, slow, fast => 3/5 slow = 0.6
-        let pattern = [true, true, false, true, false];
-
-        for is_slow in pattern.iter() {
-            let event = create_test_event();
-            let mut ctx = MiddlewareContext::live_handler();
-            let action = cb.pre_handle(&event, &mut ctx);
-            assert!(
-                matches!(action, MiddlewareAction::Continue),
-                "expected Continue in Closed state"
-            );
-
-            // FLOWIP-115f: the breaker reads the protected call's wall-clock
-            // duration from the effect-boundary context, not from the output's
-            // `processing_time` (which is now stamped at commit, after observe).
-            ctx.insert::<crate::middleware::context_keys::EffectCallDurationNanos>(if *is_slow {
-                StdDuration::from_millis(100).as_nanos() as u64
-            } else {
-                StdDuration::from_millis(10).as_nanos() as u64
-            });
-
-            let out = create_test_event();
-            cb.post_handle(&event, &[out], &mut ctx);
-        }
-
-        assert!(
-            matches!(cb.current_state(), CircuitState::Open),
-            "expected circuit to be Open after slow-call rate threshold exceeded"
-        );
-    }
-
-    #[test]
-    fn source_rate_based_count_window_opens_after_failure_rate_threshold() {
-        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
-            1,
-            StdDuration::from_secs(60),
-            None,
-            None,
-            None,
-        );
-        cb.failure_mode = CircuitBreakerFailureMode::RateBased {
-            window: FailureWindow::Count { size: 5 },
-            failure_rate_threshold: 0.6,
-            slow_call_rate_threshold: None,
-            slow_call_duration_threshold: None,
-            minimum_calls: NonZeroU32::new(5).unwrap(),
-        };
-        cb.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(5))));
-
-        for is_failure in [true, true, false, true, false] {
-            let outcome = if is_failure {
-                SourceOutcome::Failure {
-                    poll_duration: StdDuration::from_millis(1),
-                }
-            } else {
-                SourceOutcome::Success {
-                    poll_duration: StdDuration::from_millis(1),
-                }
-            };
-            cb.source_settle(outcome);
-        }
-
-        assert!(
-            matches!(cb.current_state(), CircuitState::Open),
-            "expected source circuit to open after rate-based failure threshold"
-        );
-    }
-
-    #[test]
-    fn source_rate_based_slow_call_opens_after_slow_threshold() {
-        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
-            1,
-            StdDuration::from_secs(60),
-            None,
-            None,
-            None,
-        );
-        cb.failure_mode = CircuitBreakerFailureMode::RateBased {
-            window: FailureWindow::Count { size: 5 },
-            failure_rate_threshold: 1.0,
-            slow_call_rate_threshold: Some(0.6),
-            slow_call_duration_threshold: Some(StdDuration::from_millis(50)),
-            minimum_calls: NonZeroU32::new(5).unwrap(),
-        };
-        cb.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(5))));
-
-        for is_slow in [true, true, false, true, false] {
-            cb.source_settle(SourceOutcome::Success {
-                poll_duration: if is_slow {
-                    StdDuration::from_millis(100)
-                } else {
-                    StdDuration::from_millis(10)
-                },
-            });
-        }
-
-        assert!(
-            matches!(cb.current_state(), CircuitState::Open),
-            "expected source circuit to open after slow-call rate threshold"
-        );
-    }
-
-    #[test]
-    fn source_policy_error_marked_delivery_counts_as_breaker_failure() {
-        let breaker = Arc::new(CircuitBreakerMiddleware::with_cooldown(
-            1,
-            StdDuration::from_secs(60),
-        ));
-        let policy = CircuitBreakerSourcePolicy {
-            breaker: breaker.clone(),
-        };
-        let mut failed = create_test_event();
-        failed.processing_info.status = ProcessingStatus::error("source_error_marked_delivery");
-        let mut ctx = SourcePolicyCtx::new(WriterId::from(StageId::new()));
-
-        policy.observe(
-            &SourcePollOutcome::Delivered {
-                batch: SourceBatchFacts::from_events(std::slice::from_ref(&failed)),
-                poll_duration: StdDuration::from_millis(1),
-            },
-            &mut ctx,
-        );
-
-        assert!(
-            matches!(breaker.current_state(), CircuitState::Open),
-            "error-marked delivered source batch must count as a breaker failure"
-        );
-        assert!(
-            ctx.take_control_events().iter().any(|event| {
-                matches!(
-                    &event.content,
-                    obzenflow_core::event::ChainEventContent::Observability(
-                        ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                            CircuitBreakerEvent::Opened { .. }
-                        ))
-                    )
-                )
-            }),
-            "source breaker opening must be returned through the boundary outbox"
-        );
-    }
-
-    #[test]
-    fn default_failure_classifier_uses_errorkind() {
-        let cb = CircuitBreakerMiddleware::new(1);
-        let event = create_test_event();
-        let mut ctx = MiddlewareContext::live_handler();
-
-        // Domain/validation error should NOT count as a breaker failure by default.
-        let mut domain_err = create_test_event();
-        domain_err.processing_info.status =
-            ProcessingStatus::error_with_kind("validation_failed", Some(ErrorKind::Validation));
-        cb.post_handle(&event, &[domain_err], &mut ctx);
-        assert!(
-            matches!(cb.current_state(), CircuitState::Closed),
-            "expected circuit to remain Closed for validation/domain errors"
-        );
-        assert_eq!(cb.requests_total.load(Ordering::Relaxed), 1);
-        assert_eq!(cb.successes_total.load(Ordering::Relaxed), 0);
-        assert_eq!(cb.failures_total.load(Ordering::Relaxed), 0);
-
-        // Timeout (infra) error SHOULD count as a breaker failure.
-        let mut timeout_err = create_test_event();
-        timeout_err.processing_info.status =
-            ProcessingStatus::error_with_kind("gateway_timeout", Some(ErrorKind::Timeout));
-        cb.post_handle(&event, &[timeout_err], &mut ctx);
-        assert!(
-            matches!(cb.current_state(), CircuitState::Open),
-            "expected circuit to be Open after infra/timeout error"
-        );
-        assert_eq!(cb.requests_total.load(Ordering::Relaxed), 2);
-        assert_eq!(cb.successes_total.load(Ordering::Relaxed), 0);
-        assert_eq!(cb.failures_total.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn open_policy_skip_drops_requests_while_open() {
-        let mut cb = CircuitBreakerMiddleware::new(1);
-        // Force the breaker into the Open state without an opened_at timestamp
-        // so that it does not immediately transition to HalfOpen.
-        cb.state.store(CircuitState::Open as u8, Ordering::SeqCst);
-        cb.open_policy = OpenPolicy::Skip;
-
-        let event = create_test_event();
-        let mut ctx = MiddlewareContext::live_handler();
-        let action = cb.pre_handle(&event, &mut ctx);
-
-        match action {
-            MiddlewareAction::Skip { results, .. } => assert!(results.is_empty()),
-            other => panic!("expected Skip action while Open, got {other:?}"),
-        }
-        assert!(ctx_has_rejection(&ctx));
-    }
-
-    #[test]
-    fn half_open_on_rejected_uses_configured_policy() {
-        let mut cb = CircuitBreakerMiddleware::new(1);
-        cb.half_open_policy = HalfOpenPolicy::new(NonZeroU32::new(1).unwrap(), OpenPolicy::Skip);
-
-        // Force HalfOpen with one probe already in flight so that any
-        // additional calls are treated as non-probe requests.
-        cb.state
-            .store(CircuitState::HalfOpen as u8, Ordering::SeqCst);
-        cb.probe_in_flight.store(1, Ordering::SeqCst);
-
-        let event = create_test_event();
-        let mut ctx = MiddlewareContext::live_handler();
-        let action = cb.pre_handle(&event, &mut ctx);
-
-        match action {
-            MiddlewareAction::Skip { results, .. } => assert!(results.is_empty()),
-            other => panic!("expected Skip action for HalfOpen non-probe, got {other:?}"),
-        }
-        assert!(ctx_has_rejection(&ctx));
-    }
-
-    #[test]
-    fn halfopen_probe_slot_is_released_when_context_drops_before_post_handle() {
-        let mut cb = CircuitBreakerMiddleware::new(1);
-        cb.half_open_policy = HalfOpenPolicy::new(NonZeroU32::new(1).unwrap(), OpenPolicy::Skip);
-
-        cb.state
-            .store(CircuitState::HalfOpen as u8, Ordering::SeqCst);
-        cb.probe_in_flight.store(0, Ordering::SeqCst);
-
-        let event = create_test_event();
-
-        {
-            let mut ctx = MiddlewareContext::live_handler();
-            assert!(matches!(
-                cb.pre_handle(&event, &mut ctx),
-                MiddlewareAction::Continue
-            ));
-            assert_eq!(ctx.get::<CircuitBreakerIsProbe>().copied(), Some(true));
-        }
-
-        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 0);
-
-        let mut ctx2 = MiddlewareContext::live_handler();
-        assert!(matches!(
-            cb.pre_handle(&event, &mut ctx2),
-            MiddlewareAction::Continue
-        ));
-    }
-
-    #[test]
-    fn halfopen_waiter_rechecks_state_after_active_probe_reopens() {
-        let mut cb = CircuitBreakerMiddleware::new(1);
-        cb.open_policy = OpenPolicy::Skip;
-        cb.half_open_policy = HalfOpenPolicy::new(NonZeroU32::new(2).unwrap(), OpenPolicy::Skip);
-        cb.state
-            .store(CircuitState::HalfOpen as u8, Ordering::SeqCst);
-
-        // Admit the active probe before enabling the race coordination hook.
-        let active_event = create_test_event();
-        let mut active_ctx = MiddlewareContext::live_handler();
-        assert!(matches!(
-            cb.pre_handle(&active_event, &mut active_ctx),
-            MiddlewareAction::Continue
-        ));
-        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
-
-        let waiter_observed_half_open = Arc::new(std::sync::Barrier::new(2));
-        let settlement_holds_probe_gate = Arc::new(std::sync::Barrier::new(2));
-        let release_settlement = Arc::new(std::sync::Barrier::new(2));
-        cb.half_open_race_test_hook = Some(HalfOpenRaceTestHook {
-            waiter_observed_half_open: waiter_observed_half_open.clone(),
-            settlement_holds_probe_gate: settlement_holds_probe_gate.clone(),
-            release_settlement: release_settlement.clone(),
-        });
-        let cb = Arc::new(cb);
-
-        let settling_cb = cb.clone();
-        let settling = std::thread::spawn(move || {
-            let mut failed = create_test_event();
-            failed.processing_info.status = ProcessingStatus::error("probe failed");
-            settling_cb.post_handle(&active_event, &[failed], &mut active_ctx);
-        });
-
-        // The active probe owns probe_gate but has not transitioned yet.
-        settlement_holds_probe_gate.wait();
-
-        let waiting_cb = cb.clone();
-        let waiting = std::thread::spawn(move || {
-            let event = create_test_event();
-            let mut ctx = MiddlewareContext::live_handler();
-            let action = waiting_cb.pre_handle(&event, &mut ctx);
-            let reserved_probe = ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false);
-            (action, reserved_probe)
-        });
-
-        // The waiter selected HalfOpen and is now queued behind probe_gate.
-        waiter_observed_half_open.wait();
-        release_settlement.wait();
-
-        settling
-            .join()
-            .expect("active probe settlement should finish");
-        let (action, reserved_probe) = waiting.join().expect("waiting admission should finish");
-        assert!(
-            matches!(
-                action,
-                MiddlewareAction::Skip { .. } | MiddlewareAction::Abort { .. }
-            ),
-            "the stale waiter must be rejected without reaching a backend"
-        );
-        assert!(
-            !reserved_probe,
-            "the stale waiter must not reserve a probe slot"
-        );
-        assert_eq!(cb.current_state(), CircuitState::Open);
-        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn stale_halfopen_probe_does_not_corrupt_new_generation() {
-        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
-            1,
-            StdDuration::from_millis(0),
-            None,
-            None,
-            None,
-        );
-        cb.open_policy = OpenPolicy::Skip;
-        cb.half_open_policy = HalfOpenPolicy::new(NonZeroU32::new(1).unwrap(), OpenPolicy::Skip);
-
-        let event = create_test_event();
-        let mut ctx = MiddlewareContext::live_handler();
-        assert!(matches!(
-            cb.pre_handle(&event, &mut ctx),
-            MiddlewareAction::Continue
-        ));
-        let mut failed = create_test_event();
-        failed.processing_info.status = ProcessingStatus::error("initial_failure");
-        cb.post_handle(&event, &[failed], &mut ctx);
-        assert_eq!(cb.current_state(), CircuitState::Open);
-
-        let stale_probe = create_test_event();
-        let mut stale_ctx = MiddlewareContext::live_handler();
-        assert!(matches!(
-            cb.pre_handle(&stale_probe, &mut stale_ctx),
-            MiddlewareAction::Continue
-        ));
-        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
-        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
-
-        let mut reopen_ctx = MiddlewareContext::live_handler();
-        assert!(cb.transition_to(CircuitState::Open, &mut reopen_ctx));
-
-        let blocked_probe = create_test_event();
-        let mut blocked_ctx = MiddlewareContext::live_handler();
-        assert!(matches!(
-            cb.pre_handle(&blocked_probe, &mut blocked_ctx),
-            MiddlewareAction::Skip { results, .. } if results.is_empty()
-        ));
-        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
-        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
-
-        cb.post_handle(&stale_probe, &[create_test_event()], &mut stale_ctx);
-        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
-        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 0);
-
-        let fresh_probe = create_test_event();
-        let mut fresh_ctx = MiddlewareContext::live_handler();
-        assert!(matches!(
-            cb.pre_handle(&fresh_probe, &mut fresh_ctx),
-            MiddlewareAction::Continue
-        ));
-        cb.post_handle(&fresh_probe, &[create_test_event()], &mut fresh_ctx);
-
-        assert_eq!(cb.current_state(), CircuitState::Closed);
-        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // T1 + T7: Full HalfOpen → Closed recovery lifecycle with success_count
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn full_lifecycle_closed_open_halfopen_closed_tracks_success_count() {
-        // Use a very short cooldown so we can trigger HalfOpen without sleeping.
-        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
-            2,
-            StdDuration::from_millis(0), // instant cooldown
-            None,
-            None,
-            None,
-        );
-        cb.open_policy = OpenPolicy::EmitFallback;
-
-        // Phase 1: Two failures → Open
-        for _ in 0..2 {
-            let event = create_test_event();
-            let mut ctx = MiddlewareContext::live_handler();
-            assert!(matches!(
-                cb.pre_handle(&event, &mut ctx),
-                MiddlewareAction::Continue
-            ));
-            let mut failed = create_test_event();
-            failed.processing_info.status = ProcessingStatus::error("simulated_failure_lifecycle");
-            cb.post_handle(&event, &[failed], &mut ctx);
-        }
-        assert_eq!(cb.current_state(), CircuitState::Open);
-
-        // Phase 2: Cooldown has already elapsed (0ms). Next pre_handle
-        // should transition Open → HalfOpen and admit a probe.
-        let probe_event = create_test_event();
-        let mut probe_ctx = MiddlewareContext::live_handler();
-        let action = cb.pre_handle(&probe_event, &mut probe_ctx);
-        assert!(
-            matches!(action, MiddlewareAction::Continue),
-            "expected probe to be admitted in HalfOpen"
-        );
-        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
-        assert_eq!(
-            probe_ctx.get::<CircuitBreakerIsProbe>().copied(),
-            Some(true)
-        );
-
-        // Verify success_count was reset to 0 on HalfOpen entry.
-        assert_eq!(
-            cb.success_count.load(Ordering::Relaxed),
-            0,
-            "success_count should be reset to 0 on HalfOpen entry"
-        );
-
-        // Phase 3: Probe succeeds → HalfOpen → Closed.
-        let success_output = create_test_event();
-        cb.post_handle(&probe_event, &[success_output], &mut probe_ctx);
-
-        assert_eq!(cb.current_state(), CircuitState::Closed);
-
-        // T7: Verify success_count was incremented by the probe.
-        assert_eq!(
-            cb.success_count.load(Ordering::Relaxed),
-            1,
-            "success_count should be 1 after one successful probe"
-        );
-
-        // The transition_to(Closed) emits a CircuitBreakerEvent::Closed control event.
-        assert!(
-            probe_ctx.control_events().iter().any(|event| matches!(
-                &event.content,
-                obzenflow_core::event::ChainEventContent::Observability(
-                    ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                        CircuitBreakerEvent::Closed { .. }
-                    ))
-                )
-            )),
-            "expected CircuitBreakerEvent::Closed control event after probe succeeded"
-        );
-
-        // Phase 4: Normal traffic should flow again.
-        let normal_event = create_test_event();
-        let mut normal_ctx = MiddlewareContext::live_handler();
-        assert!(matches!(
-            cb.pre_handle(&normal_event, &mut normal_ctx),
-            MiddlewareAction::Continue
-        ));
-    }
-
-    // -----------------------------------------------------------------------
-    // T1 variant: HalfOpen probe FAILS → circuit reopens
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn halfopen_probe_failure_reopens_circuit() {
-        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
-            1,
-            StdDuration::from_millis(0),
-            None,
-            None,
-            None,
-        );
-        cb.open_policy = OpenPolicy::EmitFallback;
-
-        // One failure → Open (threshold = 1)
-        let event = create_test_event();
-        let mut ctx = MiddlewareContext::live_handler();
-        cb.pre_handle(&event, &mut ctx);
-        let mut failed = create_test_event();
-        failed.processing_info.status = ProcessingStatus::error("simulated_failure_halfopen_fail");
-        cb.post_handle(&event, &[failed], &mut ctx);
-        assert_eq!(cb.current_state(), CircuitState::Open);
-
-        // Cooldown elapsed → HalfOpen, probe admitted.
-        let probe_event = create_test_event();
-        let mut probe_ctx = MiddlewareContext::live_handler();
-        let action = cb.pre_handle(&probe_event, &mut probe_ctx);
-        assert!(matches!(action, MiddlewareAction::Continue));
-        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
-
-        // Probe fails → reopens.
-        let mut probe_failed = create_test_event();
-        probe_failed.processing_info.status = ProcessingStatus::error("simulated_probe_failure");
-        cb.post_handle(&probe_event, &[probe_failed], &mut probe_ctx);
-        assert_eq!(cb.current_state(), CircuitState::Open);
-        assert!(
-            probe_ctx.control_events().iter().any(|event| matches!(
-                &event.content,
-                obzenflow_core::event::ChainEventContent::Observability(
-                    ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                        CircuitBreakerEvent::Opened { .. }
-                    ))
-                )
-            )),
-            "expected CircuitBreakerEvent::Opened control event after probe failed and circuit reopened"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // T2: Concurrent CAS transitions do not corrupt state
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn concurrent_transitions_do_not_corrupt_state() {
-        use std::sync::Arc;
-        use std::thread;
-
-        // A breaker with threshold=1 and instant cooldown so threads can
-        // race through Open → HalfOpen → Closed/Open transitions.
-        let cb = Arc::new({
-            let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
-                1,
-                StdDuration::from_millis(0),
-                None,
-                None,
-                None,
-            );
-            cb.open_policy = OpenPolicy::EmitFallback;
-            cb
-        });
-
-        let iterations = 200;
-        let num_threads = 4;
-
-        let handles: Vec<_> = (0..num_threads)
-            .map(|_| {
-                let cb = Arc::clone(&cb);
-                thread::spawn(move || {
-                    for idx in 0..iterations {
-                        let event = create_test_event();
-                        let mut ctx = MiddlewareContext::live_handler();
-                        let action = cb.pre_handle(&event, &mut ctx);
-
-                        match action {
-                            MiddlewareAction::Continue => {
-                                // Alternate between success and failure.
-                                if idx % 2 == 0 {
-                                    let mut failed = create_test_event();
-                                    failed.processing_info.status =
-                                        ProcessingStatus::error("concurrent_failure");
-                                    cb.post_handle(&event, &[failed], &mut ctx);
-                                } else {
-                                    cb.post_handle(&event, &[create_test_event()], &mut ctx);
-                                }
-                            }
-                            MiddlewareAction::Skip { .. } | MiddlewareAction::Abort { .. } => {
-                                // Rejected while Open or HalfOpen — normal.
-                            }
-                        }
-                    }
-                })
-            })
-            .collect();
-
-        for h in handles {
-            h.join().expect("thread panicked");
-        }
-
-        // The main invariant: state must be a valid CircuitState value.
-        let final_state = cb.current_state();
-        assert!(
-            matches!(
-                final_state,
-                CircuitState::Closed | CircuitState::Open | CircuitState::HalfOpen
-            ),
-            "state corrupted to invalid value"
-        );
-
-        // probe_in_flight must not have wrapped (would be near u32::MAX).
-        let probes = cb.probe_in_flight.load(Ordering::SeqCst);
-        assert!(
-            probes <= num_threads as u32,
-            "probe_in_flight looks corrupted: {probes}"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // T3: Deserialization is classified as permanent failure
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn deserialization_classified_as_permanent() {
-        let cb = CircuitBreakerMiddleware::new(5);
-        let event = create_test_event();
-        let ctx = MiddlewareContext::live_handler();
-
-        let mut deser_err = create_test_event();
-        deser_err.processing_info.status =
-            ProcessingStatus::error_with_kind("bad_json", Some(ErrorKind::Deserialization));
-
-        let (classification, _, _) = cb.classify_call(&event, &[deser_err], &ctx);
-        assert_eq!(
-            classification,
-            FailureClassification::PermanentFailure,
-            "Deserialization should be classified as PermanentFailure"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // FLOWIP-120h: rejection recording at the effect boundary
-    // -----------------------------------------------------------------------
-
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    struct FallbackIn {
-        n: u32,
-    }
-
-    impl TypedPayload for FallbackIn {
-        const EVENT_TYPE: &'static str = "test.fallback_in";
-    }
-
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    struct FallbackOut {
-        n: u32,
-    }
-
-    impl TypedPayload for FallbackOut {
-        const EVENT_TYPE: &'static str = "test.fallback_out";
-    }
-
-    #[test]
-    fn open_breaker_failfast_aborts_with_cause_at_effect_boundary() {
-        let mut cb = CircuitBreakerMiddleware::new(1);
-        cb.open_policy = OpenPolicy::FailFast;
+    fn consecutive_failures_open_the_circuit() {
+        let breaker = CircuitBreakerMiddleware::new(2);
         let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
-        cb.force_open(&mut ctx);
 
-        match cb.pre_handle(&create_test_event(), &mut ctx) {
+        breaker.settle_classified_call(&FailureClassification::TransientFailure, &mut ctx);
+        assert_eq!(breaker.current_state(), CircuitState::Closed);
+        breaker.settle_classified_call(&FailureClassification::TransientFailure, &mut ctx);
+
+        assert_eq!(breaker.current_state(), CircuitState::Open);
+        assert_eq!(breaker.requests_total.load(Ordering::Relaxed), 2);
+        assert_eq!(breaker.failures_total.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn slow_calls_are_counted_per_physical_attempt() {
+        let mut breaker = CircuitBreakerMiddleware::new(5);
+        breaker.failure_mode = CircuitBreakerFailureMode::RateBased {
+            window: FailureWindow::Count { size: 5 },
+            failure_rate_threshold: 2.0,
+            slow_call_rate_threshold: Some(1.0),
+            slow_call_duration_threshold: Some(Duration::from_millis(10)),
+            minimum_calls: NonZeroU32::new(1).unwrap(),
+        };
+        breaker.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(5))));
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        ctx.insert::<crate::middleware::context_keys::EffectCallDurationNanos>(
+            Duration::from_millis(10).as_nanos() as u64,
+        );
+
+        breaker.settle_classified_call(&FailureClassification::Success, &mut ctx);
+
+        assert_eq!(breaker.slow_total.load(Ordering::Relaxed), 1);
+        assert_eq!(breaker.current_state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn open_effect_path_returns_a_stable_framework_rejection() {
+        let breaker = CircuitBreakerMiddleware::new(1);
+        breaker.state.store(cb_state::OPEN, Ordering::SeqCst);
+        *breaker.opened_at.lock().unwrap() = Some(Instant::now());
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+
+        match Middleware::pre_handle(&breaker, &event(), &mut ctx) {
             MiddlewareAction::Abort { cause: Some(cause) } => {
-                assert_eq!(cause.source, "circuit_breaker");
-                assert_eq!(cause.code, "rejected_circuit_open");
-                assert!(cause.retry.is_retryable());
+                assert_eq!(cause.source.as_str(), CIRCUIT_BREAKER_ABORT_SOURCE);
+                assert_eq!(cause.code.as_str(), "circuit_open");
             }
-            other => panic!("expected Abort with cause at effect boundary, got {other:?}"),
+            _ => panic!("open breaker must abort with a typed cause"),
         }
     }
 
     #[test]
-    fn open_breaker_emit_fallback_without_fallback_aborts_at_effect_boundary() {
-        let cb = CircuitBreakerMiddleware::new(1); // default EmitFallback, no fallback configured
-        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
-        cb.force_open(&mut ctx);
+    fn busy_half_open_probe_returns_a_stable_framework_rejection() {
+        let breaker = CircuitBreakerMiddleware::new(1);
+        breaker.state.store(cb_state::HALF_OPEN, Ordering::SeqCst);
+        let input = event();
+        let mut first = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        let mut second =
+            MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
 
         assert!(matches!(
-            cb.pre_handle(&create_test_event(), &mut ctx),
-            MiddlewareAction::Abort { cause: Some(_) }
+            breaker.effect_admit(&input, &mut first),
+            crate::middleware::PolicyAdmission::Admit
+        ));
+        match breaker.effect_admit(&input, &mut second) {
+            crate::middleware::PolicyAdmission::Reject(cause) => {
+                assert_eq!(cause.source.as_str(), CIRCUIT_BREAKER_ABORT_SOURCE);
+                assert_eq!(cause.code.as_str(), "probe_in_progress");
+            }
+            crate::middleware::PolicyAdmission::Admit => {
+                panic!("a second concurrent half-open probe must be rejected")
+            }
+        }
+
+        drop(first);
+        let mut replacement =
+            MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        assert!(matches!(
+            breaker.effect_admit(&input, &mut replacement),
+            crate::middleware::PolicyAdmission::Admit
         ));
     }
 
     #[test]
-    fn open_breaker_rejection_keeps_legacy_skip_on_handler_lane() {
-        let mut cb = CircuitBreakerMiddleware::new(1);
-        cb.open_policy = OpenPolicy::FailFast;
-        let mut ctx = MiddlewareContext::live_handler();
-        cb.force_open(&mut ctx);
+    fn health_callback_observes_only_errors_and_cannot_reclassify_success() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let mut breaker = CircuitBreakerMiddleware::new(2);
+        breaker.failure_classification_classifier = Some(Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            FailureHealth::Ignored
+        }));
+        let ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        let input = event();
 
-        match cb.pre_handle(&create_test_event(), &mut ctx) {
-            MiddlewareAction::Skip { results, .. } => assert!(results.is_empty()),
-            other => panic!("expected legacy empty Skip on the handler lane, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn probe_rejection_cause_distinguishes_probe_in_progress() {
-        let cb = CircuitBreakerMiddleware::new(1);
-        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
-
-        match cb.handle_open_like(
-            &create_test_event(),
-            &mut ctx,
-            &OpenPolicy::FailFast,
-            CircuitBreakerRejectionReason::ProbeInProgress,
-        ) {
-            MiddlewareAction::Abort { cause: Some(cause) } => {
-                assert_eq!(cause.code, "rejected_probe_in_progress");
-            }
-            other => panic!("expected Abort with probe reason, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn typed_fallback_event_records_input_as_causality_parent() {
-        let input_event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            FallbackIn::EVENT_TYPE,
-            json!({ "n": 7 }),
-        );
-        let f = |input: &FallbackIn| FallbackOut { n: input.n };
-
-        let events = build_typed_fallback_event::<FallbackIn, FallbackOut, _>(
-            &f,
-            &input_event,
-            obzenflow_core::config::LineagePolicy::default(),
-        );
-        assert_eq!(events.len(), 1);
-        let fallback = &events[0];
         assert_eq!(
-            fallback.event_type(),
-            FallbackOut::versioned_event_type().as_str()
+            breaker.classify_call(&input, &[], &ctx).0,
+            FailureClassification::Success
         );
-        assert!(
-            fallback.causality.parent_ids.contains(&input_event.id),
-            "fallback event must record the guarded input as its causality parent"
-        );
-    }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
 
-    // -----------------------------------------------------------------------
-    // T6: force_close and force_open admin methods
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn force_open_transitions_closed_to_open() {
-        let cb = CircuitBreakerMiddleware::new(100);
-        assert_eq!(cb.current_state(), CircuitState::Closed);
-
-        let mut ctx = MiddlewareContext::live_handler();
-        cb.force_open(&mut ctx);
-        assert_eq!(cb.current_state(), CircuitState::Open);
-    }
-
-    #[test]
-    fn force_close_transitions_open_to_closed_and_resets_counters() {
-        let cb = CircuitBreakerMiddleware::new(1);
-
-        // Drive it to Open via a failure.
-        let event = create_test_event();
-        let mut ctx = MiddlewareContext::live_handler();
-        cb.pre_handle(&event, &mut ctx);
-        let mut failed = create_test_event();
-        failed.processing_info.status = ProcessingStatus::error("simulated_failure_force_close");
-        cb.post_handle(&event, &[failed], &mut ctx);
-        assert_eq!(cb.current_state(), CircuitState::Open);
-        assert!(
-            cb.failure_count.load(Ordering::SeqCst) > 0,
-            "failure_count should be > 0 before force_close"
-        );
-
-        // Admin reset.
-        let mut admin_ctx = MiddlewareContext::live_handler();
-        cb.force_close(&mut admin_ctx);
-        assert_eq!(cb.current_state(), CircuitState::Closed);
         assert_eq!(
-            cb.failure_count.load(Ordering::SeqCst),
-            0,
-            "failure_count should be reset after force_close"
+            breaker.classify_effect_error(&input, &EffectError::Timeout("slow".to_string()), &ctx,),
+            FailureClassification::Ignored
         );
-        assert_eq!(
-            cb.success_count.load(Ordering::Relaxed),
-            0,
-            "success_count should be reset after force_close"
-        );
-
-        // Normal traffic should flow.
-        let event = create_test_event();
-        let mut ctx = MiddlewareContext::live_handler();
-        assert!(matches!(
-            cb.pre_handle(&event, &mut ctx),
-            MiddlewareAction::Continue
-        ));
-    }
-
-    #[test]
-    fn force_close_from_halfopen_resets_cleanly() {
-        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
-            1,
-            StdDuration::from_millis(0),
-            None,
-            None,
-            None,
-        );
-        cb.open_policy = OpenPolicy::EmitFallback;
-
-        // Drive to HalfOpen: one failure → Open → instant cooldown → probe → HalfOpen.
-        let event = create_test_event();
-        let mut ctx = MiddlewareContext::live_handler();
-        cb.pre_handle(&event, &mut ctx);
-        let mut failed = create_test_event();
-        failed.processing_info.status = ProcessingStatus::error("simulated_failure_force_close_ho");
-        cb.post_handle(&event, &[failed], &mut ctx);
-        assert_eq!(cb.current_state(), CircuitState::Open);
-
-        let probe_event = create_test_event();
-        let mut probe_ctx = MiddlewareContext::live_handler();
-        cb.pre_handle(&probe_event, &mut probe_ctx);
-        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
-
-        // Admin force-close from HalfOpen.
-        let mut admin_ctx = MiddlewareContext::live_handler();
-        cb.force_close(&mut admin_ctx);
-        assert_eq!(cb.current_state(), CircuitState::Closed);
-        assert_eq!(cb.failure_count.load(Ordering::SeqCst), 0);
-    }
-
-    /// FLOWIP-115a (Risk 1): the source probe slot, reserved by `source_admit`
-    /// and released by `source_settle`, must return to zero on every terminal
-    /// outcome including an aborted attempt, now that the slot rides the runtime
-    /// attempt rather than a middleware-context guard. A leak would wedge the
-    /// breaker in HalfOpen; a double-release would underflow the counter.
-    #[test]
-    fn source_breaker_probe_slot_released_on_every_outcome() {
-        // Threshold 1 opens on a single Closed-state failure; zero cooldown makes
-        // HalfOpen reachable immediately, so the test needs no wall-clock wait.
-        let open_breaker = || {
-            let cb = CircuitBreakerMiddleware::with_cooldown(1, Duration::ZERO);
-            cb.source_settle(SourceOutcome::Failure {
-                poll_duration: Duration::from_millis(1),
-            });
-            assert_eq!(
-                cb.current_state(),
-                CircuitState::Open,
-                "one Closed-state failure opens a threshold-1 breaker"
-            );
-            assert_eq!(
-                cb.probe_in_flight.load(Ordering::SeqCst),
-                0,
-                "no probe slot is reserved while Open"
-            );
-            cb
-        };
-
-        let admit_probe = |cb: &CircuitBreakerMiddleware| match cb.source_admit() {
-            SourceAdmit::Continue {
-                guard: Some(guard),
-                event: _,
-            } => guard,
-            SourceAdmit::Continue { guard: None, .. } => {
-                panic!("expected source admission to reserve a probe slot")
-            }
-            SourceAdmit::Pause(delay) => {
-                panic!("expected source admission to proceed, got pause {delay:?}")
-            }
-        };
-
-        // A successful probe closes the breaker and releases the slot.
-        let cb = open_breaker();
-        let guard = admit_probe(&cb);
-        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
-        assert_eq!(
-            cb.probe_in_flight.load(Ordering::SeqCst),
-            1,
-            "admitting a probe reserves exactly one slot"
-        );
-        cb.source_settle(SourceOutcome::Success {
-            poll_duration: Duration::from_millis(1),
-        });
-        drop(guard);
-        assert_eq!(
-            cb.current_state(),
-            CircuitState::Closed,
-            "a successful probe closes the breaker"
-        );
-        assert_eq!(
-            cb.probe_in_flight.load(Ordering::SeqCst),
-            0,
-            "the probe slot is released on success"
-        );
-
-        // A failed probe reopens the breaker and releases the slot.
-        let cb = open_breaker();
-        let guard = admit_probe(&cb);
-        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
-        cb.source_settle(SourceOutcome::Failure {
-            poll_duration: Duration::from_millis(1),
-        });
-        drop(guard);
-        assert_eq!(
-            cb.current_state(),
-            CircuitState::Open,
-            "a failed probe reopens the breaker"
-        );
-        assert_eq!(
-            cb.probe_in_flight.load(Ordering::SeqCst),
-            0,
-            "the probe slot is released on failure"
-        );
-
-        // An empty probe is inconclusive: it releases the slot without changing
-        // state, leaving the breaker HalfOpen for a retry.
-        let cb = open_breaker();
-        let guard = admit_probe(&cb);
-        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
-        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
-        cb.source_settle(SourceOutcome::Inconclusive);
-        drop(guard);
-        assert_eq!(
-            cb.current_state(),
-            CircuitState::HalfOpen,
-            "an inconclusive probe leaves the breaker HalfOpen for the next probe"
-        );
-        assert_eq!(
-            cb.probe_in_flight.load(Ordering::SeqCst),
-            0,
-            "the probe slot is released on inconclusive poll"
-        );
-
-        // A policy rejection after breaker admission is explicitly settled as
-        // not-executed: the probe lease is released without classifying state.
-        let cb = open_breaker();
-        let guard = admit_probe(&cb);
-        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
-        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
-        cb.source_settle(SourceOutcome::NotExecuted);
-        drop(guard);
-        assert_eq!(
-            cb.current_state(),
-            CircuitState::HalfOpen,
-            "a not-executed probe leaves the breaker HalfOpen for the next probe"
-        );
-        assert_eq!(
-            cb.probe_in_flight.load(Ordering::SeqCst),
-            0,
-            "the probe slot is released on not-executed settlement"
-        );
-
-        // A cancelled boundary drops the guard without observing an outcome;
-        // the state remains HalfOpen and the slot is still released.
-        let cb = open_breaker();
-        let guard = admit_probe(&cb);
-        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
-        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
-        drop(guard);
-        assert_eq!(
-            cb.current_state(),
-            CircuitState::HalfOpen,
-            "a cancelled probe leaves the breaker HalfOpen for the next probe"
-        );
-        assert_eq!(
-            cb.probe_in_flight.load(Ordering::SeqCst),
-            0,
-            "the probe slot is released when the source boundary future is dropped"
-        );
-
-        // A fresh probe can be reserved after cancellation, proving the slot is
-        // genuinely free (not just decremented past a leaked reservation).
-        let _guard = admit_probe(&cb);
-        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

@@ -2,13 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Circuit-breaker retry acceptance profiles.
+//! Circuit-breaker acceptance profiles.
 //!
-//! The proof runs one scripted order against a gateway whose backend fails
-//! twice and then succeeds. The control profile disables breaker retry (one
-//! call, unavailable outcome); the treatment profile enables it (three calls,
-//! authorized outcome). Everything profile-shaped lives here so `flow.rs`
-//! stays the tutorial; both entry points share `flow::assemble_flow`.
+//! Control and treatment compare one scripted order against a gateway that
+//! fails twice and then succeeds. Healthy proves ordinary one-call-per-second
+//! pacing and zero slow classifications. Open rejection proves five physical
+//! failures open the breaker and the sixth logical effect fails fast. Everything
+//! profile-shaped lives here so `flow.rs` stays the tutorial; both entry points
+//! share `flow::assemble_flow`.
 
 use super::fixtures;
 use super::flow;
@@ -21,6 +22,8 @@ use std::time::Duration;
 pub enum RetryProofProfile {
     Control,
     Treatment,
+    Healthy,
+    OpenRejection,
 }
 
 fn retry_proof_profile() -> Option<RetryProofProfile> {
@@ -30,8 +33,10 @@ fn retry_proof_profile() -> Option<RetryProofProfile> {
         Err(error) => panic!("PAYMENT_DEMO_RETRY_PROOF could not be read: {error}"),
         Ok(value) if value == "control" => Some(RetryProofProfile::Control),
         Ok(value) if value == "treatment" => Some(RetryProofProfile::Treatment),
+        Ok(value) if value == "healthy" => Some(RetryProofProfile::Healthy),
+        Ok(value) if value == "open-rejection" => Some(RetryProofProfile::OpenRejection),
         Ok(value) => panic!(
-            "unknown PAYMENT_DEMO_RETRY_PROOF value '{value}'; expected 'control' or 'treatment'"
+            "unknown PAYMENT_DEMO_RETRY_PROOF value '{value}'; expected 'control', 'treatment', 'healthy', or 'open-rejection'"
         ),
     }
 }
@@ -43,9 +48,18 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
         None => flow::build_flow(),
         Some(profile) => {
             let replay_requested = std::env::args().any(|argument| argument == "--replay-from");
+            let proof = match profile {
+                RetryProofProfile::Control | RetryProofProfile::Treatment => {
+                    GatewayRetryProof::new(replay_requested)
+                }
+                RetryProofProfile::Healthy => GatewayRetryProof::healthy(replay_requested),
+                RetryProofProfile::OpenRejection => {
+                    GatewayRetryProof::always_fail(replay_requested)
+                }
+            };
             build_flow_for_profile(
                 profile,
-                Some(Arc::new(GatewayRetryProof::new(replay_requested))),
+                Some(Arc::new(proof)),
                 std::path::PathBuf::from(flow::DEMO_JOURNAL_ROOT),
             )
         }
@@ -63,7 +77,9 @@ pub fn build_flow_for_profile(
         .map(GatewayTransform::with_retry_proof)
         .unwrap_or_default();
     let gateway_retry = match profile {
-        RetryProofProfile::Control => None,
+        RetryProofProfile::Control
+        | RetryProofProfile::Healthy
+        | RetryProofProfile::OpenRejection => None,
         RetryProofProfile::Treatment => Some(
             Retry::fixed(Duration::from_millis(1))
                 .max_attempts(3)
@@ -71,14 +87,25 @@ pub fn build_flow_for_profile(
                 .attempt_start_window(Duration::from_secs(1)),
         ),
     };
+    let orders = match profile {
+        RetryProofProfile::Control | RetryProofProfile::Treatment => {
+            vec![fixtures::retry_proof_order()]
+        }
+        RetryProofProfile::Healthy => fixtures::healthy_proof_orders(),
+        RetryProofProfile::OpenRejection => fixtures::open_rejection_proof_orders(),
+    };
+    let calls_per_second = match profile {
+        RetryProofProfile::Healthy => 1.0,
+        RetryProofProfile::Control
+        | RetryProofProfile::Treatment
+        | RetryProofProfile::OpenRejection => 1_000.0,
+    };
     flow::assemble_flow(
-        vec![fixtures::retry_proof_order()],
+        orders,
         Vec::new(),
         gateway_transform,
         gateway_retry,
-        // The proof asserts on journal contents, not pacing; run the gateway
-        // effectively unthrottled so the acceptance test finishes quickly.
-        1_000.0,
+        calls_per_second,
         journal_root,
     )
 }
