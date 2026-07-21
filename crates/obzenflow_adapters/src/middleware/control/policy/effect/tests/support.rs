@@ -65,10 +65,23 @@ pub(super) fn test_stage_config(factory: &dyn MiddlewareFactory) -> StageConfig 
 }
 
 pub(super) fn test_stage_config_for_factories(factories: &[&dyn MiddlewareFactory]) -> StageConfig {
+    test_stage_config_for_factories_with_snapshot(
+        factories,
+        &ResolvedRuntimeConfig::builtin_defaults(),
+    )
+}
+
+pub(super) fn test_stage_config_for_factories_with_snapshot(
+    factories: &[&dyn MiddlewareFactory],
+    snapshot: &ResolvedRuntimeConfig,
+) -> StageConfig {
     let stage = StageKey::from("retrying_breaker_test");
     let effect_type = EffectType::from("effect.retry");
     let mut dsl = DslCandidates::default();
     for factory in factories {
+        for key_path in factory.consumed_config_keys() {
+            dsl.declare_effect_consumption(key_path, stage.clone(), effect_type.clone());
+        }
         for default in factory.dsl_config_defaults() {
             dsl.declare_for_effect(
                 default.key_path,
@@ -79,7 +92,7 @@ pub(super) fn test_stage_config_for_factories(factories: &[&dyn MiddlewareFactor
         }
     }
     let effective_config = materialize_flow_config(
-        &ResolvedRuntimeConfig::builtin_defaults(),
+        snapshot,
         FlowResolutionContext {
             flow_name: "retrying_breaker_test_flow".to_string(),
             stages: BTreeSet::from([stage.clone()]),
@@ -125,11 +138,7 @@ pub(super) fn materialize_effect_attachment(
         origin: &origin,
         declaration_index: MiddlewareDeclarationIndex::effect_policy(declaration_index),
     };
-    let context = MiddlewareMaterializationContext {
-        config,
-        control_middleware: control,
-        stage_type: StageType::Transform,
-    };
+    let context = MiddlewareMaterializationContext::new(config, control, StageType::Transform);
     match factory
         .materialize(request, &context)
         .map_err(|error| error.to_string())?

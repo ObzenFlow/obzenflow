@@ -715,11 +715,11 @@ mod tests {
             origin: &origin,
             declaration_index: MiddlewareDeclarationIndex::resolved(0),
         };
-        let context = MiddlewareMaterializationContext {
-            config: &config,
-            control_middleware: &control,
-            stage_type: obzenflow_core::event::context::StageType::Transform,
-        };
+        let context = MiddlewareMaterializationContext::new(
+            &config,
+            &control,
+            obzenflow_core::event::context::StageType::Transform,
+        );
         match factory
             .materialize(request, &context)
             .expect("FLOWIP-128g migration shell should materialize")

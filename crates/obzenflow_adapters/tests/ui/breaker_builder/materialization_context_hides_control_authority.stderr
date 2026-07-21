@@ -1,0 +1,5 @@
+error[E0616]: field `control_middleware` of struct `MiddlewareMaterializationContext` is private
+ --> tests/ui/breaker_builder/materialization_context_hides_control_authority.rs:8:32
+  |
+8 |     let _aggregator = &context.control_middleware;
+  |                                ^^^^^^^^^^^^^^^^^^ private field

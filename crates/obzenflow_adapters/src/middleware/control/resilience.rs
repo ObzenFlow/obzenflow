@@ -17,13 +17,14 @@ use crate::middleware::{
     validate_attachment_request, EffectPolicyAttachment, MiddlewareAttachmentRequest,
     MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError, MiddlewareHints,
     MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety, MiddlewareSurface,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, PolicyAdmission,
+    MiddlewareSurfaceAttachment, PolicyAdmission,
 };
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
 };
 use obzenflow_core::event::{
-    ChainEventFactory, CircuitBreakerAttemptSettledEventParams, EffectFailureCause,
+    ChainEventFactory, CircuitBreakerAttemptSettledEventParams,
+    CircuitBreakerRecoveryCompletedEventParams, EffectFailureCause,
 };
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 #[cfg(test)]
@@ -360,12 +361,40 @@ impl MiddlewareFactory for EffectResilienceFactory {
         defaults
     }
 
+    fn consumed_config_keys(&self) -> Vec<&'static str> {
+        let mut keys = vec![
+            RESILIENCE_BREAKER_MODE_KEY,
+            RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY,
+            RESILIENCE_BREAKER_COUNT_WINDOW_KEY,
+            RESILIENCE_BREAKER_MINIMUM_CALLS_KEY,
+            RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
+            RESILIENCE_BREAKER_SLOW_CALL_DURATION_MS_KEY,
+            RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
+            RESILIENCE_BREAKER_OPEN_FOR_MS_KEY,
+            RESILIENCE_BREAKER_PROBES_KEY,
+            RESILIENCE_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
+        ];
+        if self.retry.is_some() {
+            keys.extend([
+                RESILIENCE_RETRY_KIND_KEY,
+                RESILIENCE_RETRY_FIXED_DELAY_MS_KEY,
+                RESILIENCE_RETRY_MAX_ATTEMPTS_KEY,
+                RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY,
+                RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY,
+            ]);
+        }
+        if self.rate_limiter.is_some() {
+            keys.extend([
+                RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+                RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY,
+                RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY,
+            ]);
+        }
+        keys
+    }
+
     fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::control_with_family(
-            self.label(),
-            self.override_key().family_label(),
-            vec![MiddlewareSurfaceKind::Effect],
-        )
+        MiddlewareDeclaration::effect_resilience(self.label(), self.override_key().family_label())
     }
 
     fn materialize(
@@ -414,7 +443,7 @@ impl MiddlewareFactory for EffectResilienceFactory {
         let breaker = Arc::new(
             CircuitBreakerFactory::from_effect_breaker(&breaker).build_middleware_keyed(
                 context.config,
-                context.control_middleware.clone(),
+                context.control_middleware().clone(),
                 Some(effect.effect_type.clone()),
             )?,
         );
@@ -423,7 +452,7 @@ impl MiddlewareFactory for EffectResilienceFactory {
                 RateLimiterMiddleware::new_keyed(
                     context.config.stage_id,
                     config.validate().expect("resolved limiter was validated"),
-                    context.control_middleware.clone(),
+                    context.control_middleware().clone(),
                     Some(effect.effect_type.clone()),
                 )
                 .map(Arc::new)
@@ -492,6 +521,13 @@ enum RecoveryTerminalDecision {
     ReturnPhysicalResult,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RecoveryCompletion {
+    total_attempts: u32,
+    backoff_elapsed: Duration,
+    recovery_elapsed: Duration,
+}
+
 /// Invocation-local authority for effect recovery.
 ///
 /// In particular, the initial breaker epoch is write-once and the affine
@@ -510,6 +546,7 @@ struct EffectRecoveryController {
     cancellation_state: RecoveryCancellationState,
     last_physical_error: Option<EffectError>,
     terminal_decision: Option<RecoveryTerminalDecision>,
+    completion: Option<RecoveryCompletion>,
 }
 
 impl EffectRecoveryController {
@@ -527,6 +564,7 @@ impl EffectRecoveryController {
             cancellation_state: RecoveryCancellationState::Idle,
             last_physical_error: None,
             terminal_decision: None,
+            completion: None,
         }
     }
 
@@ -660,16 +698,28 @@ impl EffectRecoveryController {
 
     fn take_terminal_decision(&mut self) -> RecoveryTerminalDecision {
         self.cancellation_state = RecoveryCancellationState::Complete;
+        let completion = RecoveryCompletion {
+            total_attempts: self.attempt_ordinal,
+            backoff_elapsed: self.cumulative_backoff,
+            recovery_elapsed: self.session_started.elapsed(),
+        };
+        self.completion = Some(completion);
         tracing::trace!(
             attempts = self.attempt_ordinal,
             retries = self.retry_count,
-            recovery_elapsed_ms = duration_ms(self.session_started.elapsed()),
-            backoff_elapsed_ms = duration_ms(self.cumulative_backoff),
+            recovery_elapsed_ms = duration_ms(completion.recovery_elapsed),
+            backoff_elapsed_ms = duration_ms(completion.backoff_elapsed),
             "effect recovery reached a terminal decision"
         );
         self.terminal_decision
             .take()
             .expect("terminal decision must be installed before it is taken")
+    }
+
+    fn take_completion(&mut self) -> RecoveryCompletion {
+        self.completion
+            .take()
+            .expect("normal terminal selection must capture recovery clocks exactly once")
     }
 }
 
@@ -905,7 +955,14 @@ impl EffectResilienceMiddleware {
                 } => (outcome, dependency_elapsed),
                 PhysicalCallObservation::Prepared | PhysicalCallObservation::Started { .. } => {
                     self.breaker.settle_not_executed(ctx);
-                    return repeatable_physical_terminal(&mut recovery, result, ctx);
+                    return repeatable_physical_terminal(
+                        &mut recovery,
+                        self.breaker.as_ref(),
+                        identity,
+                        result,
+                        event,
+                        ctx,
+                    );
                 }
             };
             ctx.insert::<EffectCallDurationNanos>(
@@ -941,7 +998,14 @@ impl EffectResilienceMiddleware {
             ));
 
             let Some(retry) = &self.retry else {
-                return repeatable_physical_terminal(&mut recovery, result, ctx);
+                return repeatable_physical_terminal(
+                    &mut recovery,
+                    self.breaker.as_ref(),
+                    identity,
+                    result,
+                    event,
+                    ctx,
+                );
             };
             let Err(error) = &result else {
                 if recovery.attempts() > 1 {
@@ -953,7 +1017,14 @@ impl EffectResilienceMiddleware {
                         event.id,
                     ));
                 }
-                return repeatable_physical_terminal(&mut recovery, result, ctx);
+                return repeatable_physical_terminal(
+                    &mut recovery,
+                    self.breaker.as_ref(),
+                    identity,
+                    result,
+                    event,
+                    ctx,
+                );
             };
             if physical_outcome != PhysicalCallOutcome::Failed || !retryable_error(error) {
                 if recovery.attempts() > 1 {
@@ -966,7 +1037,14 @@ impl EffectResilienceMiddleware {
                         ),
                     );
                 }
-                return repeatable_physical_terminal(&mut recovery, result, ctx);
+                return repeatable_physical_terminal(
+                    &mut recovery,
+                    self.breaker.as_ref(),
+                    identity,
+                    result,
+                    event,
+                    ctx,
+                );
             }
             if recovery.attempts() >= retry.policy.max_attempts {
                 write_exhausted(
@@ -977,7 +1055,14 @@ impl EffectResilienceMiddleware {
                     event,
                     ctx,
                 );
-                return repeatable_physical_terminal(&mut recovery, result, ctx);
+                return repeatable_physical_terminal(
+                    &mut recovery,
+                    self.breaker.as_ref(),
+                    identity,
+                    result,
+                    event,
+                    ctx,
+                );
             }
             if self.breaker.is_effect_probe(ctx)
                 || !self.breaker.effect_recovery_epoch_is_current(
@@ -1062,6 +1147,13 @@ impl EffectResilienceMiddleware {
             Ok(epoch) => epoch,
             Err(cause) => {
                 let decision = recovery.finish_from_admission(cause);
+                write_recovery_completed(
+                    &mut recovery,
+                    self.breaker.as_ref(),
+                    identity,
+                    event,
+                    ctx,
+                );
                 return single_use_admission_terminal(decision, ctx, operation);
             }
         };
@@ -1083,6 +1175,7 @@ impl EffectResilienceMiddleware {
             self.breaker.effect_admit(ctx, recovery.admission_fence())
         {
             let decision = recovery.finish_from_admission(cause);
+            write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
             return single_use_admission_terminal(decision, ctx, operation);
         }
         let admission_wait = admission_started.elapsed();
@@ -1106,6 +1199,7 @@ impl EffectResilienceMiddleware {
                 terminal,
                 RecoveryTerminalDecision::ReturnPhysicalResult
             ));
+            write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
             return execution.into_report(ctx.take_control_events());
         };
 
@@ -1145,8 +1239,29 @@ impl EffectResilienceMiddleware {
             terminal,
             RecoveryTerminalDecision::ReturnPhysicalResult
         ));
+        write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
         execution.into_report(ctx.take_control_events())
     }
+}
+
+fn write_recovery_completed(
+    recovery: &mut EffectRecoveryController,
+    breaker: &CircuitBreakerMiddleware,
+    identity: &EffectIdentity,
+    event: &ChainEvent,
+    ctx: &mut crate::middleware::MiddlewareContext,
+) {
+    let completion = recovery.take_completion();
+    ctx.write_control_event(ChainEventFactory::circuit_breaker_recovery_completed(
+        breaker.evidence_writer_id(),
+        CircuitBreakerRecoveryCompletedEventParams {
+            cursor: identity.cursor.clone(),
+            total_attempts: completion.total_attempts,
+            backoff_elapsed_ms: duration_ms(completion.backoff_elapsed),
+            recovery_elapsed_ms: duration_ms(completion.recovery_elapsed),
+        },
+        event.id,
+    ));
 }
 
 fn repeatable_admission_rejected(
@@ -1157,7 +1272,9 @@ fn repeatable_admission_rejected(
     event: &ChainEvent,
     ctx: &mut crate::middleware::MiddlewareContext,
 ) -> EffectBoundaryReport {
-    match recovery.finish_from_admission(cause) {
+    let decision = recovery.finish_from_admission(cause);
+    write_recovery_completed(recovery, breaker, identity, event, ctx);
+    match decision {
         RecoveryTerminalDecision::BoundaryRejected(cause) => {
             report_from_admission(PolicyAdmission::Reject(cause), ctx)
         }
@@ -1187,7 +1304,9 @@ fn repeatable_retry_exhausted(
     ctx: &mut crate::middleware::MiddlewareContext,
 ) -> EffectBoundaryReport {
     write_exhausted(breaker, identity, recovery.attempts(), reason, event, ctx);
-    match recovery.finish_with_last_physical_error() {
+    let decision = recovery.finish_with_last_physical_error();
+    write_recovery_completed(recovery, breaker, identity, event, ctx);
+    match decision {
         RecoveryTerminalDecision::ReturnLastPhysicalError => {
             executed(Err(recovery.take_last_physical_error()), ctx)
         }
@@ -1200,10 +1319,15 @@ fn repeatable_retry_exhausted(
 
 fn repeatable_physical_terminal(
     recovery: &mut EffectRecoveryController,
+    breaker: &CircuitBreakerMiddleware,
+    identity: &EffectIdentity,
     result: Result<Vec<ChainEvent>, EffectError>,
+    event: &ChainEvent,
     ctx: &mut crate::middleware::MiddlewareContext,
 ) -> EffectBoundaryReport {
-    match recovery.finish_with_physical_result() {
+    let decision = recovery.finish_with_physical_result();
+    write_recovery_completed(recovery, breaker, identity, event, ctx);
+    match decision {
         RecoveryTerminalDecision::ReturnPhysicalResult => executed(result, ctx),
         RecoveryTerminalDecision::BoundaryRejected(_)
         | RecoveryTerminalDecision::ReturnLastPhysicalError => {
@@ -1477,6 +1601,7 @@ fn text_value<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::middleware::MiddlewareSurfaceKind;
 
     fn valid_breaker() -> CircuitBreaker {
         CircuitBreaker::builder()

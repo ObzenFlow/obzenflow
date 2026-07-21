@@ -202,6 +202,13 @@ impl MiddlewareFactory for RateLimiterFactory {
         defaults
     }
 
+    fn consumed_config_keys(&self) -> Vec<&'static str> {
+        vec![
+            obzenflow_runtime::runtime_config::RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+            obzenflow_runtime::runtime_config::RATE_LIMITER_BURST_CAPACITY_KEY,
+        ]
+    }
+
     fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
         Some(TopologyMiddlewareConfigSlot::RateLimiter)
     }
@@ -210,7 +217,7 @@ impl MiddlewareFactory for RateLimiterFactory {
         // FLOWIP-115d: the rate limiter is hook-bound control middleware that
         // attaches to the live-I/O boundary surfaces. The binder picks the
         // concrete surface per call site and routes it through `materialize`.
-        MiddlewareDeclaration::control_with_family(
+        MiddlewareDeclaration::rate_limiter(
             self.label(),
             self.override_key().family_label(),
             vec![
@@ -275,7 +282,7 @@ impl MiddlewareFactory for RateLimiterFactory {
                     RateLimiterMiddleware::new(
                         context.config.stage_id,
                         validated,
-                        context.control_middleware.clone(),
+                        context.control_middleware().clone(),
                     )
                     .map_err(|message| {
                         MiddlewareFactoryError::invalid_configuration(
@@ -300,7 +307,7 @@ impl MiddlewareFactory for RateLimiterFactory {
                 let middleware = RateLimiterMiddleware::new_keyed(
                     context.config.stage_id,
                     validated,
-                    context.control_middleware.clone(),
+                    context.control_middleware().clone(),
                     Some(effect_surface.effect_type.clone()),
                 )
                 .map_err(|message| {
@@ -319,7 +326,7 @@ impl MiddlewareFactory for RateLimiterFactory {
                     RateLimiterMiddleware::new(
                         context.config.stage_id,
                         validated,
-                        context.control_middleware.clone(),
+                        context.control_middleware().clone(),
                     )
                     .map_err(|message| {
                         MiddlewareFactoryError::invalid_configuration(
@@ -339,7 +346,7 @@ impl MiddlewareFactory for RateLimiterFactory {
                     RateLimiterMiddleware::new(
                         context.config.stage_id,
                         validated,
-                        context.control_middleware.clone(),
+                        context.control_middleware().clone(),
                     )
                     .map_err(|message| {
                         MiddlewareFactoryError::invalid_configuration(
@@ -440,6 +447,9 @@ mod tests {
     fn test_stage_config(name: &str, factory: &dyn MiddlewareFactory) -> StageConfig {
         let stage = StageKey::from(name);
         let mut dsl = DslCandidates::default();
+        for key_path in factory.consumed_config_keys() {
+            dsl.declare_stage_consumption(key_path, stage.clone());
+        }
         for default in factory.dsl_config_defaults() {
             dsl.declare(
                 default.key_path,
@@ -683,11 +693,8 @@ mod tests {
             origin: &origin,
             declaration_index: MiddlewareDeclarationIndex::resolved(0),
         };
-        let ctx = MiddlewareMaterializationContext {
-            config: &config,
-            control_middleware: &control,
-            stage_type: StageType::InfiniteSource,
-        };
+        let ctx =
+            MiddlewareMaterializationContext::new(&config, &control, StageType::InfiniteSource);
 
         // Burst capacity 1 (events_per_second defaults the burst), 1 event/sec.
         let boundary = match factory

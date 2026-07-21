@@ -153,8 +153,9 @@ pub use handler::{
 
 // Common utilities
 pub use carrier::{
-    validate_attachment_request, EffectSurface, EffectTypeKey, EffectUnitId,
-    Flowip128gLegacyShellAttachment, HostedIngressTargetKey, IngressEndpointKind,
+    validate_attachment_request, validate_effect_control_composition,
+    validate_materialized_attachment, EffectControlCompositionError, EffectSurface, EffectTypeKey,
+    EffectUnitId, Flowip128gLegacyShellAttachment, HostedIngressTargetKey, IngressEndpointKind,
     IngressRouteScope, IngressSurface, IngressUnitId, MiddlewareAttachmentId,
     MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError, MiddlewareCapability,
     MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareDeclarationScope,
@@ -178,9 +179,9 @@ pub use observer::StageObserverSet;
 
 // Control middleware
 pub use control::{
-    rate_limit, rate_limit_with_burst, CircuitBreaker, CircuitBreakerConfigError,
-    CircuitBreakerMiddleware, EffectResilience, EffectResilienceConfigError, FailureHealth,
-    RateLimiter, RateLimiterBuilder, RateLimiterFactory, RateLimiterMiddleware, Retry,
+    rate_limit, rate_limit_with_burst, CircuitBreaker, CircuitBreakerConfigError, EffectResilience,
+    EffectResilienceConfigError, FailureHealth, RateLimiter, RateLimiterBuilder,
+    RateLimiterFactory, RateLimiterMiddleware, Retry,
 };
 
 pub use observability::{log, LoggingMiddleware, LoggingMiddlewareFactory};

@@ -9,7 +9,7 @@
 //! control-plane port so runtime services can consume read-only control state
 //! without depending on adapter middleware traits.
 
-use crate::middleware::{EffectTypeKey, SourcePolicy};
+use crate::middleware::EffectTypeKey;
 use obzenflow_core::id::StageId;
 use obzenflow_runtime::control_plane::{
     CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlPlaneProvider,
@@ -42,9 +42,6 @@ type ControlKey = (StageId, Option<EffectTypeKey>);
 pub struct ControlMiddlewareAggregator {
     circuit_breakers: RwLock<HashMap<ControlKey, CircuitBreakerRegistration>>,
     rate_limiters: RwLock<HashMap<ControlKey, RateLimiterRegistration>>,
-    // FLOWIP-115a: adapter-owned source policy chains. The descriptor turns
-    // these into one runtime-neutral source boundary.
-    source_policies: RwLock<HashMap<ControlKey, Vec<Arc<dyn SourcePolicy>>>>,
 }
 
 impl ControlMiddlewareAggregator {
@@ -52,7 +49,7 @@ impl ControlMiddlewareAggregator {
         Self::default()
     }
 
-    pub fn register_circuit_breaker(
+    pub(crate) fn register_circuit_breaker(
         &self,
         stage_id: StageId,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
@@ -62,7 +59,7 @@ impl ControlMiddlewareAggregator {
     }
 
     /// Register a per-effect circuit breaker instance (FLOWIP-120c).
-    pub fn register_circuit_breaker_for_effect(
+    pub(crate) fn register_circuit_breaker_for_effect(
         &self,
         stage_id: StageId,
         effect_type: EffectTypeKey,
@@ -99,7 +96,7 @@ impl ControlMiddlewareAggregator {
         Ok(())
     }
 
-    pub fn register_rate_limiter(
+    pub(crate) fn register_rate_limiter(
         &self,
         stage_id: StageId,
         metrics_fn: Arc<RateLimiterSnapshotter>,
@@ -108,7 +105,7 @@ impl ControlMiddlewareAggregator {
     }
 
     /// Register a per-effect rate limiter instance (FLOWIP-120c).
-    pub fn register_rate_limiter_for_effect(
+    pub(crate) fn register_rate_limiter_for_effect(
         &self,
         stage_id: StageId,
         effect_type: EffectTypeKey,
@@ -137,27 +134,6 @@ impl ControlMiddlewareAggregator {
         }
         registrations.insert(key, registration);
         Ok(())
-    }
-
-    /// FLOWIP-115a: append a source policy for a stage, in declared order.
-    pub fn register_source_policy(&self, stage_id: StageId, policy: Arc<dyn SourcePolicy>) {
-        self.source_policies
-            .write()
-            .expect("ControlMiddlewareAggregator: source_policies poisoned write lock")
-            .entry((stage_id, None))
-            .or_default()
-            .push(policy);
-    }
-
-    /// FLOWIP-115a: the source policies registered for a stage, in declared
-    /// order.
-    pub fn source_policies(&self, stage_id: &StageId) -> Vec<Arc<dyn SourcePolicy>> {
-        self.source_policies
-            .read()
-            .expect("ControlMiddlewareAggregator: source_policies poisoned read lock")
-            .get(&(*stage_id, None))
-            .cloned()
-            .unwrap_or_default()
     }
 }
 

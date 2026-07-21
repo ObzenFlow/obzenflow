@@ -7,10 +7,18 @@
 
 use super::support::*;
 use crate::middleware::{EffectResilience, RateLimiter};
+use obzenflow_core::config::{ConfigAddress, ConfigSource};
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, CircuitBreakerRetryStopReason, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::ChainEventContent;
+use obzenflow_runtime::runtime_config::{
+    CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
+    RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY, RESILIENCE_BREAKER_COUNT_WINDOW_KEY,
+    RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY, RESILIENCE_BREAKER_MINIMUM_CALLS_KEY,
+    RESILIENCE_BREAKER_MODE_KEY, RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY,
+    RESILIENCE_RETRY_FIXED_DELAY_MS_KEY, RESILIENCE_RETRY_KIND_KEY,
+};
 
 fn scripted_operation(
     calls: Arc<AtomicUsize>,
@@ -31,7 +39,18 @@ fn materialized_resilience(
     Arc<ControlMiddlewareAggregator>,
     StageId,
 ) {
-    let config = test_stage_config(factory.as_ref());
+    materialized_resilience_with_snapshot(factory, &ResolvedRuntimeConfig::builtin_defaults())
+}
+
+fn materialized_resilience_with_snapshot(
+    factory: Box<dyn crate::middleware::MiddlewareFactory>,
+    snapshot: &ResolvedRuntimeConfig,
+) -> (
+    EffectPolicyAttachment,
+    Arc<ControlMiddlewareAggregator>,
+    StageId,
+) {
+    let config = test_stage_config_for_factories_with_snapshot(&[factory.as_ref()], snapshot);
     let stage_id = config.stage_id;
     let control = Arc::new(ControlMiddlewareAggregator::new());
     let attachment = materialize_effect_attachment(
@@ -45,6 +64,196 @@ fn materialized_resilience(
     (attachment, control, stage_id)
 }
 
+fn file_effect_snapshot(entries: &[(&str, ConfigValue)]) -> ResolvedRuntimeConfig {
+    let mut candidates = CandidateSet::default();
+    for (key_path, value) in entries {
+        candidates
+            .admit(ScopedCandidate {
+                key_path: (*key_path).to_string(),
+                address: ConfigAddress::effect("retrying_breaker_test", "effect.retry"),
+                source: ConfigSource::File,
+                value: value.clone(),
+            })
+            .expect("test file candidate should be valid");
+    }
+    ResolvedRuntimeConfig::new(candidates)
+}
+
+#[test]
+fn consumed_keys_cover_optional_and_mode_dependent_fields_without_creating_components() {
+    let breaker_only = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(2)
+            .build()
+            .expect("breaker-only config"),
+    )
+    .build()
+    .expect("breaker-only aggregate");
+    let breaker_keys = breaker_only.consumed_config_keys();
+    assert!(breaker_keys.contains(&RESILIENCE_BREAKER_COUNT_WINDOW_KEY));
+    assert!(breaker_keys.contains(&RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY));
+    assert!(!breaker_keys.contains(&RESILIENCE_RETRY_KIND_KEY));
+    assert!(!breaker_keys.contains(&RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY));
+
+    let complete = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(2)
+            .build()
+            .expect("complete config breaker"),
+    )
+    .retry(Retry::exponential().max_attempts(2))
+    .rate_limit_each_attempt(RateLimiter::per_second(10.0).expect("test limiter"))
+    .build()
+    .expect("complete aggregate");
+    let complete_keys = complete.consumed_config_keys();
+    assert!(complete_keys.contains(&RESILIENCE_RETRY_FIXED_DELAY_MS_KEY));
+    assert!(complete_keys.contains(&RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY));
+}
+
+#[tokio::test]
+async fn file_configuration_can_switch_consecutive_breaker_to_rate_based() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(1)
+            .build()
+            .expect("consecutive builder"),
+    )
+    .build()
+    .expect("switchable aggregate");
+    let snapshot = file_effect_snapshot(&[
+        (
+            RESILIENCE_BREAKER_MODE_KEY,
+            ConfigValue::Text("rate_based".to_string()),
+        ),
+        (RESILIENCE_BREAKER_COUNT_WINDOW_KEY, ConfigValue::U64(2)),
+        (RESILIENCE_BREAKER_MINIMUM_CALLS_KEY, ConfigValue::U64(2)),
+        (
+            RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
+            ConfigValue::F64(1.0),
+        ),
+    ]);
+    let (attachment, _, _) = materialized_resilience_with_snapshot(factory, &snapshot);
+    let boundary = boundary_with_chain(vec![attachment]);
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let first = boundary
+        .around_repeatable_effect(
+            &identity_at(101),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| {
+                Err(EffectError::Timeout("first rate sample".to_string()))
+            }),
+        )
+        .await;
+    assert!(matches!(
+        first.outcome,
+        EffectBoundaryOutcome::Executed(Err(EffectError::Timeout(_)))
+    ));
+    let second = boundary
+        .around_repeatable_effect(
+            &identity_at(102),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| Ok(Vec::new())),
+        )
+        .await;
+    assert!(matches!(
+        second.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn file_configuration_can_switch_rate_based_breaker_to_consecutive() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .count_window(5)
+            .minimum_calls(5)
+            .failure_rate_threshold(1.0)
+            .build()
+            .expect("rate-based builder"),
+    )
+    .build()
+    .expect("switchable aggregate");
+    let snapshot = file_effect_snapshot(&[
+        (
+            RESILIENCE_BREAKER_MODE_KEY,
+            ConfigValue::Text("consecutive".to_string()),
+        ),
+        (
+            RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY,
+            ConfigValue::U64(1),
+        ),
+    ]);
+    let (attachment, _, _) = materialized_resilience_with_snapshot(factory, &snapshot);
+    let boundary = boundary_with_chain(vec![attachment]);
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let _ = boundary
+        .around_repeatable_effect(
+            &identity_at(103),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| {
+                Err(EffectError::Timeout("open immediately".to_string()))
+            }),
+        )
+        .await;
+    let rejected = boundary
+        .around_repeatable_effect(
+            &identity_at(104),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| Ok(Vec::new())),
+        )
+        .await;
+    assert!(matches!(
+        rejected.outcome,
+        EffectBoundaryOutcome::Aborted(_)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn file_configuration_can_switch_retry_backoff_kind() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(3)
+            .build()
+            .expect("retry switch breaker"),
+    )
+    .retry(Retry::exponential().max_attempts(2))
+    .build()
+    .expect("switchable retry aggregate");
+    let snapshot = file_effect_snapshot(&[
+        (
+            RESILIENCE_RETRY_KIND_KEY,
+            ConfigValue::Text("fixed".to_string()),
+        ),
+        (RESILIENCE_RETRY_FIXED_DELAY_MS_KEY, ConfigValue::U64(7)),
+    ]);
+    let (attachment, _, _) = materialized_resilience_with_snapshot(factory, &snapshot);
+    let boundary = boundary_with_chain(vec![attachment]);
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let report = boundary
+        .around_repeatable_effect(
+            &identity_at(105),
+            &data_event(),
+            scripted_operation(calls, |call| {
+                if call == 1 {
+                    Err(EffectError::Timeout("retry once".to_string()))
+                } else {
+                    Ok(Vec::new())
+                }
+            }),
+        )
+        .await;
+    assert!(matches!(
+        report.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+    assert_eq!(retry_delays(&report), [7]);
+}
+
 fn retry_delays(report: &obzenflow_runtime::effects::EffectBoundaryReport) -> Vec<u64> {
     report
         .control_events
@@ -56,6 +265,26 @@ fn retry_delays(report: &obzenflow_runtime::effects::EffectBoundaryReport) -> Ve
                     ..
                 }),
             )) => Some(*delay_ms),
+            _ => None,
+        })
+        .collect()
+}
+
+fn recovery_completions(
+    report: &obzenflow_runtime::effects::EffectBoundaryReport,
+) -> Vec<(u32, u64, u64)> {
+    report
+        .control_events
+        .iter()
+        .filter_map(|event| match &event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RecoveryCompleted {
+                    total_attempts,
+                    backoff_elapsed_ms,
+                    recovery_elapsed_ms,
+                    ..
+                }),
+            )) => Some((*total_attempts, *backoff_elapsed_ms, *recovery_elapsed_ms)),
             _ => None,
         })
         .collect()
@@ -161,6 +390,7 @@ async fn fixed_backoff_delays_each_physical_continuation() {
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert_eq!(retry_delays(&report), [7, 7]);
     assert_eq!(started.elapsed(), Duration::from_millis(14));
+    assert_eq!(recovery_completions(&report), [(3, 14, 14)]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -672,6 +902,10 @@ async fn open_half_open_recovery_and_chronic_failure_share_one_authority() {
         rejected.outcome,
         EffectBoundaryOutcome::Aborted(_)
     ));
+    let rejected_completion = recovery_completions(&rejected);
+    assert_eq!(rejected_completion.len(), 1);
+    assert_eq!(rejected_completion[0].0, 0);
+    assert_eq!(rejected_completion[0].1, 0);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -775,6 +1009,7 @@ async fn limiter_wait_is_not_a_slow_dependency_sample() {
         })
         .expect("second call should publish one physical-attempt row");
     assert_eq!(settled, (false, 0, 1_000));
+    assert_eq!(recovery_completions(&second), [(1, 0, 1_000)]);
     assert!(matches!(
         first.outcome,
         EffectBoundaryOutcome::Executed(Ok(_))

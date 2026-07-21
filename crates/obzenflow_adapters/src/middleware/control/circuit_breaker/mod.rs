@@ -132,7 +132,7 @@ pub struct CircuitBreakerFamily;
 /// instead owns an affine limiter reservation and commits it only immediately
 /// before an admitted physical call, so an open-circuit rejection consumes no
 /// permit.
-pub struct CircuitBreakerMiddleware {
+pub(crate) struct CircuitBreakerMiddleware {
     /// Current state of the circuit breaker
     state: Arc<AtomicU8>,
     /// Number of consecutive successes
@@ -221,12 +221,14 @@ impl Default for CircuitBreakerStats {
 
 impl CircuitBreakerMiddleware {
     /// Create a new circuit breaker with the given failure threshold
-    pub fn new(threshold: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(threshold: usize) -> Self {
         Self::construct(threshold, Duration::from_secs(60), None, None)
     }
 
     /// Create a circuit breaker with custom cooldown duration
-    pub fn with_cooldown(threshold: usize, cooldown: Duration) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_cooldown(threshold: usize, cooldown: Duration) -> Self {
         Self::construct(threshold, cooldown, None, None)
     }
 
@@ -743,23 +745,6 @@ impl CircuitBreakerMiddleware {
             ctx.write_control_event(event);
         }
         transitioned
-    }
-
-    /// Force the circuit breaker into the Closed state, resetting failure
-    /// counters and clearing retry state. Intended for admin/operational use.
-    pub fn force_close(&self, ctx: &mut MiddlewareContext) {
-        let transitioned = self.transition_to(CircuitState::Closed, ctx);
-        if transitioned {
-            self.failure_count.store(0, Ordering::SeqCst);
-            self.success_count.store(0, Ordering::Relaxed);
-        }
-    }
-
-    /// Force the circuit breaker into the Open state, starting a fresh
-    /// cooldown period. Intended for admin/operational use (e.g., pre-emptive
-    /// protection during a known outage).
-    pub fn force_open(&self, ctx: &mut MiddlewareContext) {
-        self.transition_to(CircuitState::Open, ctx);
     }
 
     fn should_attempt_reset(&self) -> bool {

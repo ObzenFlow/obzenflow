@@ -459,11 +459,11 @@ impl MiddlewareFactory for CircuitBreaker {
             MiddlewareSurface::SourcePoll(_) => {
                 let breaker = Arc::new(materializer.build_middleware_keyed(
                     context.config,
-                    context.control_middleware.clone(),
+                    context.control_middleware().clone(),
                     None,
                 )?);
                 let view = context
-                    .control_middleware
+                    .control_middleware()
                     .circuit_breaker_state_view(&context.config.stage_id)
                     .expect("breaker just registered its state view");
                 let completion_gate: Arc<dyn CompletionGate> =
@@ -480,7 +480,7 @@ impl MiddlewareFactory for CircuitBreaker {
             MiddlewareSurface::SinkDelivery(_) => {
                 let breaker = Arc::new(materializer.build_middleware_keyed(
                     context.config,
-                    context.control_middleware.clone(),
+                    context.control_middleware().clone(),
                     None,
                 )?);
                 let policy: Arc<dyn SinkPolicy> = Arc::new(CircuitBreakerSinkPolicy { breaker });
@@ -582,7 +582,7 @@ impl MiddlewareFactory for AiCircuitBreakerFactory {
                 let middleware = CircuitBreakerFactory::from_effect_breaker(&resolved)
                     .build_middleware_keyed(
                         context.config,
-                        context.control_middleware.clone(),
+                        context.control_middleware().clone(),
                         None,
                     )?;
                 Ok(MiddlewareSurfaceAttachment::Flowip128gLegacyShell(

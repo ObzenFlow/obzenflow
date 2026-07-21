@@ -16,7 +16,7 @@ use obzenflow_core::config::{
 };
 use obzenflow_core::event::EffectType;
 use obzenflow_core::StageKey;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Where a knob is being resolved. Points are generated from the knob's
 /// target: Global-target knobs resolve at `Global`, Stage-target knobs once
@@ -157,25 +157,6 @@ fn value_for_source<'a>(
     }
 }
 
-/// Key-level applicability derived from one surviving factory default.
-///
-/// The standalone limiter's burst is optional: omitting it means "derive from
-/// the effective rate", so inventing a burst DSL candidate would change the
-/// meaning of a file override that supplies only the rate. A surviving limiter
-/// default for either field therefore proves consumption of both sibling keys.
-/// This is a narrow schema lookup, not a public or general consumer registry.
-fn consumed_key_paths(default_key_path: &str) -> Vec<&str> {
-    use super::schema::{RATE_LIMITER_BURST_CAPACITY_KEY, RATE_LIMITER_EVENTS_PER_SECOND_KEY};
-
-    match default_key_path {
-        RATE_LIMITER_EVENTS_PER_SECOND_KEY | RATE_LIMITER_BURST_CAPACITY_KEY => vec![
-            RATE_LIMITER_EVENTS_PER_SECOND_KEY,
-            RATE_LIMITER_BURST_CAPACITY_KEY,
-        ],
-        _ => vec![default_key_path],
-    }
-}
-
 /// Resolve one knob at one point. `Ok(None)` is a legal outcome only for
 /// `OptionalAbsent` knobs; `Required` knobs error with the full supply help.
 pub fn resolve_at(
@@ -287,34 +268,12 @@ pub fn materialize_flow_config(
     snapshot: &ResolvedRuntimeConfig,
     ctx: FlowResolutionContext,
 ) -> Result<FlowEffectiveConfig, ConfigResolveError> {
-    // Applicability is derived from the surviving factories' exact/default
-    // enumeration. No general consumer registry is created.
-    let mut effect_consumers: BTreeMap<String, BTreeSet<(StageKey, EffectType)>> = BTreeMap::new();
-    let mut stage_consumers: BTreeMap<String, BTreeSet<StageKey>> = BTreeMap::new();
-    for candidate in ctx.dsl.entries() {
-        for key_path in consumed_key_paths(&candidate.key_path) {
-            match (&candidate.address.scope, &candidate.address.subject) {
-                (ConfigScope::Stage { stage }, ConfigSubject::Effect { effect_type }) => {
-                    effect_consumers
-                        .entry(key_path.to_string())
-                        .or_default()
-                        .insert((stage.clone(), effect_type.clone()));
-                }
-                (ConfigScope::Stage { stage }, ConfigSubject::Unqualified) => {
-                    if matches!(
-                        crate::runtime_config::schema::knob(key_path).map(|s| s.target),
-                        Some(KnobTarget::StageOrEffect)
-                    ) {
-                        stage_consumers
-                            .entry(key_path.to_string())
-                            .or_default()
-                            .insert(stage.clone());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    // Applicability comes from the surviving factories' explicit consumption
+    // declarations, never from which defaults happened to be emitted for the
+    // selected mode. The index is consumed during this build and is not a
+    // runtime policy registry or state authority.
+    let effect_consumers = ctx.dsl.effect_consumers();
+    let stage_consumers = ctx.dsl.stage_consumers();
 
     let mut working = snapshot.candidates().clone();
     for candidate in ctx.dsl.entries() {
@@ -1108,8 +1067,30 @@ mod tests {
 
     fn effect_context(
         stage_effects: &[(&str, &[&str])],
-        dsl: crate::runtime_config::DslCandidates,
+        mut dsl: crate::runtime_config::DslCandidates,
     ) -> FlowResolutionContext {
+        // Most resolver fixtures model a default-producing effect factory. Its
+        // consumed key is the same key as the fixture candidate; the optional
+        // key test below adds its independent consumption declaration itself.
+        let default_consumers: Vec<_> = dsl
+            .entries()
+            .iter()
+            .filter_map(
+                |candidate| match (&candidate.address.scope, &candidate.address.subject) {
+                    (ConfigScope::Stage { stage }, ConfigSubject::Effect { effect_type }) => {
+                        Some((
+                            candidate.key_path.clone(),
+                            stage.clone(),
+                            effect_type.clone(),
+                        ))
+                    }
+                    _ => None,
+                },
+            )
+            .collect();
+        for (key_path, stage, effect_type) in default_consumers {
+            dsl.declare_effect_consumption(key_path, stage, effect_type);
+        }
         let declared_effects = stage_effects
             .iter()
             .map(|(stage, effects)| {
@@ -1325,6 +1306,7 @@ mod tests {
             effect_type.clone(),
             ConfigValue::F64(10.0),
         );
+        dsl.declare_effect_consumption(burst_key, stage.clone(), effect_type.clone());
 
         let without_burst = materialize_flow_config(
             &ResolvedRuntimeConfig::builtin_defaults(),
@@ -1345,7 +1327,7 @@ mod tests {
         .unwrap();
         let with_file_burst = materialize_flow_config(
             &ResolvedRuntimeConfig::new(file),
-            effect_context(&[("payments", &["payments.authorize"])], dsl),
+            effect_context(&[("payments", &["payments.authorize"])], dsl.clone()),
         )
         .unwrap();
         let burst = with_file_burst
@@ -1353,6 +1335,27 @@ mod tests {
             .expect("the surviving limiter consumes the optional burst key");
         assert_eq!(burst.value.as_f64(), Some(25.0));
         assert_eq!(burst.meta.source, ConfigSource::File);
+
+        let mut broadcast_file = CandidateSet::default();
+        broadcast_file
+            .admit(ScopedCandidate::unqualified(
+                burst_key,
+                ConfigScope::stage(stage.clone()),
+                ConfigSource::File,
+                ConfigValue::F64(30.0),
+            ))
+            .unwrap();
+        let with_broadcast_burst = materialize_flow_config(
+            &ResolvedRuntimeConfig::new(broadcast_file),
+            effect_context(&[("payments", &["payments.authorize"])], dsl),
+        )
+        .unwrap();
+        assert_eq!(
+            with_broadcast_burst
+                .effect_value(burst_key, &stage, &effect_type)
+                .and_then(|resolved| resolved.value.as_f64()),
+            Some(30.0)
+        );
     }
 
     #[test]

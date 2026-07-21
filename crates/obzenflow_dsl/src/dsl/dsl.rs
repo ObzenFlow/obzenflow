@@ -1029,17 +1029,31 @@ macro_rules! build_typed_flow {
                             | PolicyGuardSurface::Sink => {}
                         }
                     }
-                    for default in factory.dsl_config_defaults() {
-                        let exact_effect = if matches!(
-                            descriptor.policy_guard_surface(),
-                            $crate::dsl::stage_descriptor::PolicyGuardSurface::Effectful
-                        ) && factory.declaration().is_control()
-                        {
-                            let effects = descriptor.effect_declarations();
-                            (effects.len() == 1).then(|| effects[0].effect_type)
+                    let exact_effect = if matches!(
+                        descriptor.policy_guard_surface(),
+                        $crate::dsl::stage_descriptor::PolicyGuardSurface::Effectful
+                    ) && factory.declaration().is_control()
+                    {
+                        let effects = descriptor.effect_declarations();
+                        (effects.len() == 1).then(|| effects[0].effect_type)
+                    } else {
+                        None
+                    };
+                    for key_path in factory.consumed_config_keys() {
+                        if let Some(effect_type) = exact_effect {
+                            __dsl_candidates.declare_effect_consumption(
+                                key_path,
+                                obzenflow_core::StageKey::from(descriptor.name()),
+                                obzenflow_core::event::EffectType::from(effect_type),
+                            );
                         } else {
-                            None
-                        };
+                            __dsl_candidates.declare_stage_consumption(
+                                key_path,
+                                obzenflow_core::StageKey::from(descriptor.name()),
+                            );
+                        }
+                    }
+                    for default in factory.dsl_config_defaults() {
                         if let Some(effect_type) = exact_effect {
                             __dsl_candidates.declare_for_effect(
                                 default.key_path,
@@ -1065,6 +1079,13 @@ macro_rules! build_typed_flow {
 
                 for attachment in descriptor.effect_policy_attachments() {
                     for factory in &attachment.factories {
+                        for key_path in factory.consumed_config_keys() {
+                            __dsl_candidates.declare_effect_consumption(
+                                key_path,
+                                obzenflow_core::StageKey::from(descriptor.name()),
+                                obzenflow_core::event::EffectType::from(attachment.effect_type),
+                            );
+                        }
                         for default in factory.dsl_config_defaults() {
                             __dsl_candidates.declare_for_effect(
                                 default.key_path,

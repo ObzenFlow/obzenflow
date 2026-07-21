@@ -596,11 +596,12 @@ pub struct MiddlewareDeclaration {
     pub family_label: &'static str,
     pub capability: MiddlewareCapability,
     /// The surfaces this factory can attach to. A control middleware may span
-    /// several (the circuit breaker declares source poll, effect, and sink
-    /// delivery); the binder picks the concrete surface per call site and
+    /// several (the rate limiter declares source poll, effect, sink delivery,
+    /// and ingress); the binder picks the concrete surface per call site and
     /// validates membership. A declaration always names at least one surface.
     pub surfaces: Vec<MiddlewareSurfaceKind>,
     route: MiddlewareDeclarationRoute,
+    effect_control_role: EffectControlRole,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -609,6 +610,16 @@ enum MiddlewareDeclarationRoute {
     /// Sealed migration route for the two AI map-reduce shell adapters owned by
     /// FLOWIP-128g. External factories cannot construct this declaration.
     Flowip128gLegacyShell,
+}
+
+/// Sealed composition identity for built-in effect controls. This is not a
+/// public authoring role or execution-order API. It exists only so the binder
+/// can reject structural duplicates before any shared authority is mutated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectControlRole {
+    Ordinary,
+    ResilienceAggregate,
+    Standalone(&'static str),
 }
 
 impl MiddlewareDeclaration {
@@ -622,6 +633,7 @@ impl MiddlewareDeclaration {
             capability: MiddlewareCapability::Structural,
             surfaces: vec![MiddlewareSurfaceKind::Handler],
             route: MiddlewareDeclarationRoute::Flowip128gLegacyShell,
+            effect_control_role: EffectControlRole::Ordinary,
         }
     }
 
@@ -642,6 +654,33 @@ impl MiddlewareDeclaration {
             capability: MiddlewareCapability::Control,
             surfaces,
             route: MiddlewareDeclarationRoute::Typed,
+            effect_control_role: EffectControlRole::Ordinary,
+        }
+    }
+
+    pub(crate) fn effect_resilience(label: &'static str, family_label: &'static str) -> Self {
+        Self {
+            label,
+            family_label,
+            capability: MiddlewareCapability::Control,
+            surfaces: vec![MiddlewareSurfaceKind::Effect],
+            route: MiddlewareDeclarationRoute::Typed,
+            effect_control_role: EffectControlRole::ResilienceAggregate,
+        }
+    }
+
+    pub(crate) fn rate_limiter(
+        label: &'static str,
+        family_label: &'static str,
+        surfaces: Vec<MiddlewareSurfaceKind>,
+    ) -> Self {
+        Self {
+            label,
+            family_label,
+            capability: MiddlewareCapability::Control,
+            surfaces,
+            route: MiddlewareDeclarationRoute::Typed,
+            effect_control_role: EffectControlRole::Standalone("rate_limiter"),
         }
     }
 
@@ -662,6 +701,7 @@ impl MiddlewareDeclaration {
             capability: MiddlewareCapability::Observer,
             surfaces,
             route: MiddlewareDeclarationRoute::Typed,
+            effect_control_role: EffectControlRole::Ordinary,
         }
     }
 
@@ -708,6 +748,83 @@ impl MiddlewareDeclaration {
     }
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum EffectControlCompositionError {
+    #[error(
+        "effect '{effect_type}' on stage '{stage}' combines EffectResilience with standalone effect control(s): {conflicts:?}"
+    )]
+    AggregateWithStandalone {
+        stage: String,
+        effect_type: String,
+        conflicts: Vec<&'static str>,
+    },
+    #[error(
+        "effect '{effect_type}' on stage '{stage}' declares EffectResilience more than once: {labels:?}"
+    )]
+    DuplicateAggregate {
+        stage: String,
+        effect_type: String,
+        labels: Vec<&'static str>,
+    },
+    #[error(
+        "effect '{effect_type}' on stage '{stage}' declares standalone {control} more than once: {labels:?}"
+    )]
+    DuplicateStandalone {
+        stage: String,
+        effect_type: String,
+        control: &'static str,
+        labels: Vec<&'static str>,
+    },
+}
+
+/// Validate one effect's complete structural control set before any factory is
+/// materialised or any breaker/limiter authority is registered.
+#[doc(hidden)]
+pub fn validate_effect_control_composition(
+    stage: &str,
+    effect_type: &str,
+    declarations: &[MiddlewareDeclaration],
+) -> Result<(), EffectControlCompositionError> {
+    let effect_controls = declarations.iter().filter(|declaration| {
+        declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::Effect)
+    });
+    let mut aggregates = Vec::new();
+    let mut standalone: std::collections::BTreeMap<&'static str, Vec<&'static str>> =
+        std::collections::BTreeMap::new();
+    for declaration in effect_controls {
+        match declaration.effect_control_role {
+            EffectControlRole::Ordinary => {}
+            EffectControlRole::ResilienceAggregate => aggregates.push(declaration.label),
+            EffectControlRole::Standalone(kind) => {
+                standalone.entry(kind).or_default().push(declaration.label);
+            }
+        }
+    }
+    if aggregates.len() > 1 {
+        return Err(EffectControlCompositionError::DuplicateAggregate {
+            stage: stage.to_string(),
+            effect_type: effect_type.to_string(),
+            labels: aggregates,
+        });
+    }
+    if !aggregates.is_empty() && !standalone.is_empty() {
+        return Err(EffectControlCompositionError::AggregateWithStandalone {
+            stage: stage.to_string(),
+            effect_type: effect_type.to_string(),
+            conflicts: standalone.keys().copied().collect(),
+        });
+    }
+    if let Some((control, labels)) = standalone.into_iter().find(|(_, labels)| labels.len() > 1) {
+        return Err(EffectControlCompositionError::DuplicateStandalone {
+            stage: stage.to_string(),
+            effect_type: effect_type.to_string(),
+            control,
+            labels,
+        });
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Attachment validation
 // ---------------------------------------------------------------------------
@@ -734,6 +851,17 @@ pub enum MiddlewareAttachmentValidationError {
         label: &'static str,
         capability: MiddlewareCapability,
         surface: MiddlewareSurfaceKind,
+    },
+
+    #[error(
+        "middleware '{label}' returned {returned_capability:?}/{returned_surface:?} for a {requested_capability:?}/{requested_surface:?} request"
+    )]
+    ReturnedAttachmentMismatch {
+        label: &'static str,
+        requested_capability: MiddlewareCapability,
+        requested_surface: MiddlewareSurfaceKind,
+        returned_capability: MiddlewareCapability,
+        returned_surface: MiddlewareSurfaceKind,
     },
 
     #[error("surface {surface:?} is bound to stage {surface_stage}, but protected unit is bound to stage {unit_stage}")]
@@ -859,7 +987,10 @@ pub struct MiddlewareAttachmentRequest<'a> {
 /// inputs of `create`: the stage config and the flow-scoped control aggregator.
 pub struct MiddlewareMaterializationContext<'a> {
     pub config: &'a StageConfig,
-    pub control_middleware: &'a Arc<ControlMiddlewareAggregator>,
+    // Adapter-owned built-ins need the flow-scoped read/write authority while
+    // they construct their private cores. Third-party factories receive this
+    // same context but cannot reach the aggregator or register control state.
+    control_middleware: &'a Arc<ControlMiddlewareAggregator>,
     /// The type of the stage being attached to. Source-poll materialization uses
     /// this to choose the FLOWIP-114m charge position (infinite sources charge
     /// pre-poll, finite sources charge after a clean non-empty delivery); the
@@ -867,7 +998,26 @@ pub struct MiddlewareMaterializationContext<'a> {
     pub stage_type: StageType,
 }
 
-impl MiddlewareMaterializationContext<'_> {
+impl<'a> MiddlewareMaterializationContext<'a> {
+    /// Binder-only construction seam. The aggregator stays opaque to the
+    /// factory API; its mutation methods are adapter-crate-private as well.
+    #[doc(hidden)]
+    pub fn new(
+        config: &'a StageConfig,
+        control_middleware: &'a Arc<ControlMiddlewareAggregator>,
+        stage_type: StageType,
+    ) -> Self {
+        Self {
+            config,
+            control_middleware,
+            stage_type,
+        }
+    }
+
+    pub(crate) fn control_middleware(&self) -> &Arc<ControlMiddlewareAggregator> {
+        self.control_middleware
+    }
+
     /// Resolve the policy-neutral immutable config view for exactly the
     /// protected unit being materialised. Configuration cannot create a unit;
     /// callers can only request a view for an already validated attachment.
@@ -953,6 +1103,84 @@ pub enum MiddlewareSurfaceAttachment {
     /// to FLOWIP-128g. It is not constructible by external factories.
     #[doc(hidden)]
     Flowip128gLegacyShell(Flowip128gLegacyShellAttachment),
+}
+
+impl MiddlewareSurfaceAttachment {
+    fn capability_and_surface(&self) -> (MiddlewareCapability, MiddlewareSurfaceKind) {
+        match self {
+            Self::SourcePoll(_) => (
+                MiddlewareCapability::Control,
+                MiddlewareSurfaceKind::SourcePoll,
+            ),
+            Self::Effect(_) => (MiddlewareCapability::Control, MiddlewareSurfaceKind::Effect),
+            Self::SinkDelivery(_) => (
+                MiddlewareCapability::Control,
+                MiddlewareSurfaceKind::SinkDelivery,
+            ),
+            Self::Ingress(_) => (
+                MiddlewareCapability::Control,
+                MiddlewareSurfaceKind::Ingress,
+            ),
+            Self::SourcePollObserver(_) => (
+                MiddlewareCapability::Observer,
+                MiddlewareSurfaceKind::SourcePoll,
+            ),
+            Self::EffectObserver(_) => (
+                MiddlewareCapability::Observer,
+                MiddlewareSurfaceKind::Effect,
+            ),
+            Self::SinkDeliveryObserver(_) => (
+                MiddlewareCapability::Observer,
+                MiddlewareSurfaceKind::SinkDelivery,
+            ),
+            Self::HandlerObserver(_) => (
+                MiddlewareCapability::Observer,
+                MiddlewareSurfaceKind::Handler,
+            ),
+            Self::StatefulObserver(_) => (
+                MiddlewareCapability::Observer,
+                MiddlewareSurfaceKind::Stateful,
+            ),
+            Self::JoinObserver(_) => (MiddlewareCapability::Observer, MiddlewareSurfaceKind::Join),
+            Self::OutputCommitObserver(_) => (
+                MiddlewareCapability::Observer,
+                MiddlewareSurfaceKind::OutputCommit,
+            ),
+            Self::StageLifecycleObserver(_) => (
+                MiddlewareCapability::Observer,
+                MiddlewareSurfaceKind::StageLifecycle,
+            ),
+            Self::Flowip128gLegacyShell(_) => (
+                MiddlewareCapability::Structural,
+                MiddlewareSurfaceKind::Handler,
+            ),
+        }
+    }
+}
+
+/// Validate the value returned by a factory against the already-validated
+/// request. Declaration validation alone cannot stop a nominal observer from
+/// returning a control attachment or the wrong observer surface.
+pub fn validate_materialized_attachment(
+    declaration: &MiddlewareDeclaration,
+    request: &MiddlewareAttachmentRequest<'_>,
+    attachment: &MiddlewareSurfaceAttachment,
+) -> Result<(), MiddlewareAttachmentValidationError> {
+    validate_attachment_request(declaration, request)?;
+    let requested_surface = request.surface.kind();
+    let (returned_capability, returned_surface) = attachment.capability_and_surface();
+    if declaration.capability != returned_capability || requested_surface != returned_surface {
+        return Err(
+            MiddlewareAttachmentValidationError::ReturnedAttachmentMismatch {
+                label: declaration.label,
+                requested_capability: declaration.capability,
+                requested_surface,
+                returned_capability,
+                returned_surface,
+            },
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1218,5 +1446,44 @@ mod tests {
             err,
             MiddlewareAttachmentValidationError::ProtectedUnitMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn resilience_aggregate_rejects_standalone_effect_limiter_in_both_orders() {
+        let aggregate =
+            MiddlewareDeclaration::effect_resilience("effect_resilience", "effect_resilience");
+        let limiter = MiddlewareDeclaration::rate_limiter(
+            "rate_limiter",
+            "rate_limiter",
+            vec![MiddlewareSurfaceKind::Effect],
+        );
+
+        for declarations in [
+            vec![aggregate.clone(), limiter.clone()],
+            vec![limiter.clone(), aggregate.clone()],
+        ] {
+            let error = validate_effect_control_composition(
+                "payments",
+                "payments.authorize",
+                &declarations,
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                EffectControlCompositionError::AggregateWithStandalone { conflicts, .. }
+                    if conflicts == vec!["rate_limiter"]
+            ));
+        }
+    }
+
+    #[test]
+    fn observers_and_ordinary_effect_controls_can_coexist_with_resilience() {
+        let declarations = vec![
+            MiddlewareDeclaration::effect_resilience("effect_resilience", "effect_resilience"),
+            MiddlewareDeclaration::observer("effect_observer", vec![MiddlewareSurfaceKind::Effect]),
+            MiddlewareDeclaration::control("custom_control", vec![MiddlewareSurfaceKind::Effect]),
+        ];
+        validate_effect_control_composition("payments", "payments.authorize", &declarations)
+            .expect("only standalone built-in effect controls conflict with the aggregate");
     }
 }

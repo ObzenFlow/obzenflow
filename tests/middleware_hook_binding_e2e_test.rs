@@ -219,6 +219,76 @@ struct HookProofSinkPolicy {
     counters: Arc<HookCounters>,
 }
 
+struct BreakerCauseProofFamily;
+struct BreakerCauseProofFactory;
+struct BreakerCauseProofPolicy;
+
+impl MiddlewareFactory for BreakerCauseProofFactory {
+    fn label(&self) -> &'static str {
+        "breaker_cause_proof"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<BreakerCauseProofFamily>(self.label())
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::control(self.label(), vec![Effect])
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        validate_attachment_request(&self.declaration(), &request).map_err(|error| {
+            MiddlewareFactoryError::materialization_failed(
+                self.label(),
+                &context.config.name,
+                error,
+            )
+        })?;
+        Ok(MiddlewareSurfaceAttachment::Effect(
+            EffectPolicyAttachment::event_aware(Arc::new(BreakerCauseProofPolicy)),
+        ))
+    }
+}
+
+#[async_trait]
+impl EventAwareEffectPolicy for BreakerCauseProofPolicy {
+    fn label(&self) -> &'static str {
+        "breaker_cause_proof"
+    }
+
+    async fn admit(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> PolicyAdmission {
+        let value = HookInput::from_event(event)
+            .map(|input| input.value)
+            .unwrap_or_default();
+        let code = if value == 1 {
+            "circuit_open"
+        } else {
+            "probe_in_progress"
+        };
+        PolicyAdmission::Reject(Box::new(
+            obzenflow_adapters::middleware::MiddlewareAbortCause {
+                source: EffectFailureSource::new("circuit_breaker"),
+                code: EffectFailureCode::new(code),
+                message: format!("circuit breaker rejected effect execution: {code}"),
+                retry: RetryDisposition::NotRetryable,
+                event: None,
+            },
+        ))
+    }
+
+    fn observe(
+        &self,
+        _event: &ChainEvent,
+        _attempt: &obzenflow_adapters::middleware::EffectAttemptOutcome<'_>,
+        _ctx: &mut MiddlewareContext,
+    ) {
+    }
+}
+
 #[async_trait]
 impl SinkPolicy for HookProofSinkPolicy {
     fn label(&self) -> &'static str {
@@ -352,7 +422,10 @@ impl EffectfulTransformHandler for HookTransform {
 
         let path = match result {
             Ok(value) => format!("effect:{}", value.value),
-            Err(err) => err.semantic_reason().into_owned(),
+            Err(err) => err.failure_cause().map_or_else(
+                || err.semantic_reason().into_owned(),
+                |cause| format!("{}:{}", cause.source.as_str(), cause.code.as_str()),
+            ),
         };
 
         fx.emit(HookOutput {
@@ -410,6 +483,33 @@ fn build_flow(
             output = sink!(HookOutput => SinkTyped::with_delivery(probe).idempotent(), middleware: [
                 HookProofFactory::new(counters.clone(), 1)
             ]);
+        },
+
+        topology: {
+            input |> transform;
+            transform |> output;
+        }
+    }
+}
+
+fn build_failure_cause_flow(
+    journal_base: PathBuf,
+    effect_calls: Arc<AtomicUsize>,
+    delivered: &Delivered,
+) -> FlowDefinition {
+    let probe = sink_probe(delivered);
+    flow! {
+        name: "middleware_failure_cause_api",
+        journals: disk_journals(journal_base),
+        middleware: [],
+
+        stages: {
+            input = source!(HookInput => HookSource::new());
+            transform = effectful_transform!(
+                HookInput -> { HookOutput, HookEffectValue } => HookTransform { effect_calls },
+                effects: [HookEffect with [Box::new(BreakerCauseProofFactory)]],
+                middleware: []);
+            output = sink!(HookOutput => SinkTyped::with_delivery(probe).idempotent());
         },
 
         topology: {
@@ -482,7 +582,7 @@ async fn third_party_control_middleware_binds_all_surfaces_and_replays() {
         vec![
             HookOutput {
                 value: 1,
-                path: "hook proof effect rejected".to_string(),
+                path: "hook_proof_control:rejected_by_hook_proof".to_string(),
             },
             HookOutput {
                 value: 2,
@@ -554,6 +654,61 @@ async fn third_party_control_middleware_binds_all_surfaces_and_replays() {
 
     let replay_outputs = delivered_payloads(&replay_delivered, DeliveryProvenance::Replayed);
     assert_eq!(replay_outputs, live_outputs);
+}
+
+#[tokio::test]
+async fn public_failure_cause_is_identical_for_both_breaker_codes_live_and_replay() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let live_delivered = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_failure_cause_flow(
+            journal_base.clone(),
+            live_calls.clone(),
+            &live_delivered,
+        ))
+        .await
+        .expect("live cause flow should complete");
+    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+    let live_outputs = delivered_payloads(&live_delivered, DeliveryProvenance::Live);
+    assert_eq!(
+        live_outputs,
+        vec![
+            HookOutput {
+                value: 1,
+                path: "circuit_breaker:circuit_open".to_string(),
+            },
+            HookOutput {
+                value: 2,
+                path: "circuit_breaker:probe_in_progress".to_string(),
+            },
+        ]
+    );
+
+    let live_run = latest_run_dir(&journal_base);
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_delivered = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            live_run.as_os_str().to_os_string(),
+        ])
+        .run_async(build_failure_cause_flow(
+            journal_base,
+            replay_calls.clone(),
+            &replay_delivered,
+        ))
+        .await
+        .expect("strict replay cause flow should complete");
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        delivered_payloads(&replay_delivered, DeliveryProvenance::Replayed),
+        live_outputs
+    );
 }
 
 #[test]

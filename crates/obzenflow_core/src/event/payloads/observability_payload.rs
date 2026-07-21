@@ -180,6 +180,12 @@ pub enum CircuitBreakerEvent {
         cursor: EffectCursor,
         total_attempts: u32,
     },
+    RecoveryCompleted {
+        cursor: EffectCursor,
+        total_attempts: u32,
+        backoff_elapsed_ms: u64,
+        recovery_elapsed_ms: u64,
+    },
     Summary {
         window_duration_s: u64,
         requests_processed: u64,

@@ -291,11 +291,11 @@ mod tests {
             origin: &origin,
             declaration_index: crate::middleware::MiddlewareDeclarationIndex::resolved(0),
         };
-        let materialization = MiddlewareMaterializationContext {
-            config: &config,
-            control_middleware: &control,
-            stage_type: obzenflow_core::event::context::StageType::Sink,
-        };
+        let materialization = MiddlewareMaterializationContext::new(
+            &config,
+            &control,
+            obzenflow_core::event::context::StageType::Sink,
+        );
         let attachment = factory
             .materialize(request, &materialization)
             .expect("third-party factory should materialize a sink policy");

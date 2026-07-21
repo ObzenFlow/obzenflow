@@ -13,7 +13,7 @@ use super::error::ConfigResolveError;
 use super::schema::{knob, KnobTarget};
 use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSource, ConfigSubject};
 use obzenflow_core::event::EffectType;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A type-validated configuration value.
 #[derive(Debug, Clone, PartialEq)]
@@ -270,6 +270,11 @@ pub fn address_admitted(target: KnobTarget, address: &ConfigAddress) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct DslCandidates {
     entries: Vec<ScopedCandidate>,
+    // Build-only applicability supplied by surviving factories. This is
+    // deliberately separate from emitted values: an optional or inactive-mode
+    // key can be consumable without inventing a DSL candidate for it.
+    stage_consumers: BTreeMap<String, BTreeSet<obzenflow_core::StageKey>>,
+    effect_consumers: BTreeMap<String, BTreeSet<(obzenflow_core::StageKey, EffectType)>>,
 }
 
 impl DslCandidates {
@@ -299,6 +304,46 @@ impl DslCandidates {
 
     pub fn entries(&self) -> &[ScopedCandidate] {
         &self.entries
+    }
+
+    /// Declare that one surviving factory consumes `key_path` at a stage
+    /// resolution point. This is build metadata, not a runtime registry.
+    #[doc(hidden)]
+    pub fn declare_stage_consumption(
+        &mut self,
+        key_path: impl Into<String>,
+        stage: impl Into<obzenflow_core::StageKey>,
+    ) {
+        self.stage_consumers
+            .entry(key_path.into())
+            .or_default()
+            .insert(stage.into());
+    }
+
+    /// Declare that one surviving factory consumes `key_path` at an exact
+    /// effect resolution point. Configuration still cannot create the factory
+    /// or any optional aggregate component.
+    #[doc(hidden)]
+    pub fn declare_effect_consumption(
+        &mut self,
+        key_path: impl Into<String>,
+        stage: impl Into<obzenflow_core::StageKey>,
+        effect_type: impl Into<EffectType>,
+    ) {
+        self.effect_consumers
+            .entry(key_path.into())
+            .or_default()
+            .insert((stage.into(), effect_type.into()));
+    }
+
+    pub(crate) fn stage_consumers(&self) -> &BTreeMap<String, BTreeSet<obzenflow_core::StageKey>> {
+        &self.stage_consumers
+    }
+
+    pub(crate) fn effect_consumers(
+        &self,
+    ) -> &BTreeMap<String, BTreeSet<(obzenflow_core::StageKey, EffectType)>> {
+        &self.effect_consumers
     }
 
     pub fn is_empty(&self) -> bool {

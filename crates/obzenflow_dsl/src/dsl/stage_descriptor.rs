@@ -294,6 +294,11 @@ fn build_source_middleware_and_register_policies(
     });
 
     let mut completion_gate: Option<Arc<dyn CompletionGate>> = None;
+    // Source-policy composition is binder-local. The flow-scoped control
+    // aggregator publishes read-only snapshots only and is not a policy
+    // registration backchannel available to factories.
+    let mut source_policies: Vec<Arc<dyn obzenflow_adapters::middleware::SourcePolicy>> =
+        Vec::new();
     // FLOWIP-115d: the ingress boundary materialized for a source-backed hosted
     // ingress source, filled into the shared binding slot below.
     let mut ingress_boundary: Option<Arc<dyn obzenflow_core::ingress::IngressBoundaryMiddleware>> =
@@ -356,8 +361,8 @@ fn build_source_middleware_and_register_policies(
 
         // FLOWIP-115b: hook-bound control middleware that attaches to the source
         // poll surface is placed directly by its typed declaration.
-        // It is materialized into a source policy registered in declared order so
-        // it composes with any still-legacy source policy (the rate limiter), and
+        // It is materialized into a source policy collected in declared order so
+        // it composes with the other source policies, and
         // it supplies the completion-gate companion that shares its state view.
         if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::SourcePoll) {
             let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
@@ -369,7 +374,7 @@ fn build_source_middleware_and_register_policies(
                 &origin,
                 MiddlewareDeclarationIndex::resolved(middleware_index),
             )?;
-            control_middleware.register_source_policy(config.stage_id, binding.policy);
+            source_policies.push(binding.policy);
             if binding.completion_gate.is_some() {
                 completion_gate = binding.completion_gate;
             }
@@ -416,7 +421,6 @@ fn build_source_middleware_and_register_policies(
         }
     }
 
-    let source_policies = control_middleware.source_policies(&config.stage_id);
     let source_boundary = if source_policies.is_empty() {
         None
     } else {
@@ -1652,21 +1656,54 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             }
         }
 
+        if !transitional_policy_specs.is_empty() && effect_declarations.len() != 1 {
+            return Err(format!(
+                "Stage '{}' declares policy middleware in `middleware:` but {} effects; \
+                 attach each policy to the effect it guards (FLOWIP-120c H7)",
+                self.name,
+                effect_declarations.len()
+            )
+            .into());
+        }
+
+        // Validate the complete declaration set before materialising any
+        // factory. This prevents a breaker-only aggregate plus a standalone
+        // limiter from mutating the shared registry and only then discovering
+        // the forbidden composition.
+        for effect in &effect_declarations {
+            let mut declarations = Vec::new();
+            if effect_declarations.len() == 1 {
+                declarations.extend(
+                    transitional_policy_specs
+                        .iter()
+                        .map(|(_, spec)| spec.factory.declaration()),
+                );
+            }
+            declarations.extend(
+                self.effect_policies
+                    .iter()
+                    .filter(|attachment| attachment.effect_type == effect.effect_type)
+                    .flat_map(|attachment| {
+                        attachment
+                            .factories
+                            .iter()
+                            .map(|factory| factory.declaration())
+                    }),
+            );
+            obzenflow_adapters::middleware::validate_effect_control_composition(
+                &self.name,
+                effect.effect_type,
+                &declarations,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
         let mut effect_chains: std::collections::HashMap<
             &'static str,
             Vec<obzenflow_adapters::middleware::EffectPolicyAttachment>,
         > = std::collections::HashMap::new();
 
         if !transitional_policy_specs.is_empty() {
-            if effect_declarations.len() != 1 {
-                return Err(format!(
-                    "Stage '{}' declares policy middleware in `middleware:` but {} effects; \
-                     attach each policy to the effect it guards (FLOWIP-120c H7)",
-                    self.name,
-                    effect_declarations.len()
-                )
-                .into());
-            }
             let effect_type = effect_declarations[0].effect_type;
             for (middleware_index, spec) in transitional_policy_specs {
                 let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
@@ -2763,6 +2800,9 @@ mod tests {
 
         let mut dsl = DslCandidates::default();
         for factory in factories {
+            for key_path in factory.consumed_config_keys() {
+                dsl.declare_stage_consumption(key_path, StageKey::from(stage_name));
+            }
             for default in factory.dsl_config_defaults() {
                 dsl.declare(
                     default.key_path,
@@ -3112,12 +3152,9 @@ mod tests {
             .as_ref()
             .expect("the ingress boundary is materialized");
 
-        // FLOWIP-115d AC42: the limiter binds to Ingress, not source poll, so it
-        // does not also pace the internal mpsc-drain source poll.
-        assert!(
-            control.source_policies(&stage_id).is_empty(),
-            "a hosted ingress limiter is not also registered as a source-poll policy"
-        );
+        // FLOWIP-115d AC42: the limiter binds to Ingress, not source poll. The
+        // binder-local source policy list is empty, so only this slot boundary
+        // can pace the hosted request.
 
         // The materialized boundary rate-limits: the burst token admits, then a
         // fail-fast reject (never waiting).
@@ -3271,10 +3308,6 @@ mod tests {
         let filled = slot.filled().expect("slot filled");
         let boundary = filled.boundary.as_ref().expect("third-party boundary");
         assert_eq!(boundary.label(), "allow_once");
-        assert!(
-            control.source_policies(&stage_id).is_empty(),
-            "an ingress-only third party is not registered as a source-poll policy"
-        );
 
         let attempt = IngressAttemptContext {
             attempt_seq: IngressAttemptSeq(0),
@@ -3614,6 +3647,84 @@ mod observer_placement_negative_tests {
         }
     }
 
+    struct WrongSurfaceObserverFactory;
+    struct WrongSurfaceObserverFamily;
+
+    impl MiddlewareFactory for WrongSurfaceObserverFactory {
+        fn label(&self) -> &'static str {
+            "wrong-surface-observer"
+        }
+
+        fn override_key(&self) -> MiddlewareOverrideKey {
+            MiddlewareOverrideKey::of::<WrongSurfaceObserverFamily>(self.label())
+        }
+
+        fn declaration(&self) -> MiddlewareDeclaration {
+            MiddlewareDeclaration::observer(self.label(), vec![MiddlewareSurfaceKind::SourcePoll])
+        }
+
+        fn materialize(
+            &self,
+            _request: MiddlewareAttachmentRequest<'_>,
+            _context: &MiddlewareMaterializationContext<'_>,
+        ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+            Ok(MiddlewareSurfaceAttachment::HandlerObserver(Arc::new(
+                NoopObserver,
+            )))
+        }
+    }
+
+    struct ObserverReturningControlFactory;
+    struct ObserverReturningControlFamily;
+    struct NoopEffectControl;
+
+    #[async_trait::async_trait]
+    impl obzenflow_adapters::middleware::EffectPolicy for NoopEffectControl {
+        fn label(&self) -> &'static str {
+            "noop-effect-control"
+        }
+
+        async fn admit(
+            &self,
+            _ctx: &mut obzenflow_adapters::middleware::MiddlewareContext,
+        ) -> obzenflow_adapters::middleware::PolicyAdmission {
+            obzenflow_adapters::middleware::PolicyAdmission::Admit
+        }
+
+        fn observe(
+            &self,
+            _attempt: &obzenflow_adapters::middleware::EffectAttemptOutcome<'_>,
+            _ctx: &mut obzenflow_adapters::middleware::MiddlewareContext,
+        ) {
+        }
+    }
+
+    impl MiddlewareFactory for ObserverReturningControlFactory {
+        fn label(&self) -> &'static str {
+            "observer-returning-control"
+        }
+
+        fn override_key(&self) -> MiddlewareOverrideKey {
+            MiddlewareOverrideKey::of::<ObserverReturningControlFamily>(self.label())
+        }
+
+        fn declaration(&self) -> MiddlewareDeclaration {
+            MiddlewareDeclaration::observer(self.label(), vec![MiddlewareSurfaceKind::SourcePoll])
+        }
+
+        fn materialize(
+            &self,
+            _request: MiddlewareAttachmentRequest<'_>,
+            _context: &MiddlewareMaterializationContext<'_>,
+        ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+            Ok(MiddlewareSurfaceAttachment::Effect(
+                obzenflow_adapters::middleware::EffectPolicyAttachment::neutral(Arc::new(
+                    NoopEffectControl,
+                )),
+            ))
+        }
+    }
+
     #[test]
     fn observer_binds_through_placement_on_every_stage_type_without_legacy_create() {
         // StageType collapses transform / async transform / effectful transform
@@ -3658,5 +3769,49 @@ mod observer_placement_negative_tests {
                 "observer middleware must not be placed in the legacy shell for {stage_type:?}"
             );
         }
+    }
+
+    #[test]
+    fn binder_rejects_wrong_observer_surface_and_control_attachment() {
+        let config = StageConfig {
+            stage_id: StageId::new(),
+            name: "malicious_observer".to_string(),
+            flow_name: "observer_placement_negative".to_string(),
+            cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            effective_config: Arc::new(
+                obzenflow_runtime::runtime_config::FlowEffectiveConfig::default(),
+            ),
+        };
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let origin = obzenflow_adapters::middleware::MiddlewareOrigin::Stage;
+
+        let wrong_surface = match crate::dsl::binder::materialize_observer(
+            &WrongSurfaceObserverFactory,
+            &config,
+            StageType::InfiniteSource,
+            &control,
+            MiddlewareSurfaceKind::SourcePoll,
+            &origin,
+            MiddlewareDeclarationIndex::resolved(0),
+        ) {
+            Ok(_) => panic!("a source observer cannot return a handler observer"),
+            Err(error) => error,
+        };
+        assert!(wrong_surface.contains("returned Observer/Handler"));
+
+        let wrong_capability = match crate::dsl::binder::materialize_observer(
+            &ObserverReturningControlFactory,
+            &config,
+            StageType::InfiniteSource,
+            &control,
+            MiddlewareSurfaceKind::SourcePoll,
+            &origin,
+            MiddlewareDeclarationIndex::resolved(1),
+        ) {
+            Ok(_) => panic!("an observer cannot return a control attachment"),
+            Err(error) => error,
+        };
+        assert!(wrong_capability.contains("returned Control/Effect"));
     }
 }

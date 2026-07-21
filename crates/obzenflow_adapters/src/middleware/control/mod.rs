@@ -10,8 +10,7 @@ mod resilience;
 
 // Re-export key types for convenience
 pub use circuit_breaker::{
-    ai_circuit_breaker, CircuitBreaker, CircuitBreakerConfigError, CircuitBreakerMiddleware,
-    FailureHealth, Retry,
+    ai_circuit_breaker, CircuitBreaker, CircuitBreakerConfigError, FailureHealth, Retry,
 };
 pub use provider::ControlMiddlewareAggregator;
 pub use rate_limiter::{

@@ -1504,6 +1504,26 @@ async fn circuit_breaker_retry_events_in_stage(run_dir: &Path, stage_key: &str) 
         .count()
 }
 
+async fn circuit_breaker_recovery_completed_events_in_stage(
+    run_dir: &Path,
+    stage_key: &str,
+) -> usize {
+    read_stage_events(run_dir, stage_key)
+        .await
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event.content,
+                ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    MiddlewareLifecycle::CircuitBreaker(
+                        CircuitBreakerEvent::RecoveryCompleted { .. }
+                    )
+                ))
+            )
+        })
+        .count()
+}
+
 /// Count rate-limiter observability events of any variant in a stage journal.
 /// Source admission gate observability is deferred under FLOWIP-115a, so runtime
 /// counters are the authoritative replay-silence assertion for source policies.
@@ -1957,6 +1977,11 @@ async fn graceful_timeout_aborts_pending_recovery_and_resume_reuses_effect_ident
         0,
         "the aborted recovery session must commit no retry evidence"
     );
+    assert_eq!(
+        circuit_breaker_recovery_completed_events_in_stage(&cancelled_archive, "effectful").await,
+        0,
+        "the aborted recovery session must commit no terminal clock evidence"
+    );
 
     let cancelled_invocation = invocations
         .lock()
@@ -2064,6 +2089,11 @@ async fn graceful_timeout_aborts_pending_recovery_and_resume_reuses_effect_ident
         circuit_breaker_retry_events_in_stage(&resume_archive, "effectful").await,
         0,
         "a first-attempt resume success should not fabricate retry evidence"
+    );
+    assert_eq!(
+        circuit_breaker_recovery_completed_events_in_stage(&resume_archive, "effectful").await,
+        1,
+        "the resumed live invocation should commit one terminal clock row"
     );
 }
 

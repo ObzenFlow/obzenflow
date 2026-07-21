@@ -62,7 +62,7 @@ pub struct FlowResolutionContext {
     pub stages: BTreeSet<StageKey>,
     pub edges: BTreeSet<(StageKey, StageKey)>,
     /// Declared effect subjects, used only to validate exact file addresses.
-    /// Actual config consumers are derived from surviving DSL defaults.
+    /// Actual config consumers are carried separately from defaults in `dsl`.
     pub declared_effects: BTreeMap<StageKey, BTreeSet<EffectType>>,
     pub dsl: DslCandidates,
 }

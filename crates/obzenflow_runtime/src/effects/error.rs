@@ -249,7 +249,9 @@ impl EffectError {
 
     /// Structured cause carried into a recorded `Failed` outcome, present when
     /// execution was rejected by a named component such as boundary middleware.
-    pub(super) fn failure_cause(&self) -> Option<EffectFailureCause> {
+    /// Live `BoundaryRejected` errors and replayed `RecordedFailure` errors
+    /// return the same source/code pair.
+    pub fn failure_cause(&self) -> Option<EffectFailureCause> {
         match self {
             EffectError::BoundaryRejected {
                 rejected_by, code, ..

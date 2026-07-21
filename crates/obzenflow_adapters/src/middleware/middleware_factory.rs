@@ -125,6 +125,19 @@ pub trait MiddlewareFactory: Send + Sync {
         Vec::new()
     }
 
+    /// Configuration keys this factory can consume at a surviving attachment.
+    ///
+    /// The common case is exactly the emitted DSL defaults. Factories with
+    /// optional values or mode-dependent branches override this independently,
+    /// so file configuration can refine an existing attachment without a fake
+    /// default and can never create an attachment that the DSL omitted.
+    fn consumed_config_keys(&self) -> Vec<&'static str> {
+        self.dsl_config_defaults()
+            .into_iter()
+            .map(|default| default.key_path)
+            .collect()
+    }
+
     /// Typed topology slot for config snapshot placement.
     fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
         None
@@ -185,6 +198,10 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
 
     fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
         (**self).dsl_config_defaults()
+    }
+
+    fn consumed_config_keys(&self) -> Vec<&'static str> {
+        (**self).consumed_config_keys()
     }
 
     fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {

@@ -13,13 +13,13 @@
 use crate::middleware_resolution::MiddlewareSource;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    validate_attachment_request, EffectPolicyAttachment, EffectSurface, EffectTypeKey,
-    EffectUnitId, HostedIngressTargetKey, IngressRouteScope, IngressSurface, IngressUnitId,
-    Middleware, MiddlewareAttachmentRequest, MiddlewareDeclarationIndex, MiddlewareFactory,
-    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
-    SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SourcePolicy,
-    SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
+    validate_attachment_request, validate_materialized_attachment, EffectPolicyAttachment,
+    EffectSurface, EffectTypeKey, EffectUnitId, HostedIngressTargetKey, IngressRouteScope,
+    IngressSurface, IngressUnitId, Middleware, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareMaterializationContext,
+    MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+    ProtectedUnit, ProtectedUnitId, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
+    SinkPolicy, SourcePolicy, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
@@ -58,6 +58,20 @@ pub(crate) struct SourcePollBinding {
     pub completion_gate: Option<Arc<dyn CompletionGate>>,
 }
 
+fn materialize_checked(
+    factory: &dyn MiddlewareFactory,
+    declaration: &MiddlewareDeclaration,
+    request: MiddlewareAttachmentRequest<'_>,
+    context: &MiddlewareMaterializationContext<'_>,
+) -> Result<MiddlewareSurfaceAttachment, String> {
+    let attachment = factory
+        .materialize(request, context)
+        .map_err(|error| error.to_string())?;
+    validate_materialized_attachment(declaration, &request, &attachment)
+        .map_err(|error| error.to_string())?;
+    Ok(attachment)
+}
+
 /// Materialize one hook-bound control middleware onto the source-poll surface,
 /// returning the neutral pieces the descriptor wires into source runtime config.
 pub(crate) fn materialize_source_poll(
@@ -83,15 +97,8 @@ pub(crate) fn materialize_source_poll(
     };
     let declaration = factory.declaration();
     validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
-    let ctx = MiddlewareMaterializationContext {
-        config,
-        control_middleware,
-        stage_type,
-    };
-    match factory
-        .materialize(request, &ctx)
-        .map_err(|e| e.to_string())?
-    {
+    let ctx = MiddlewareMaterializationContext::new(config, control_middleware, stage_type);
+    match materialize_checked(factory, &declaration, request, &ctx)? {
         MiddlewareSurfaceAttachment::SourcePoll(attachment) => Ok(SourcePollBinding {
             policy: attachment.policy,
             completion_gate: attachment.completion_gate,
@@ -143,15 +150,8 @@ pub(crate) fn bind_effect_policy(
             declaration_index,
         };
         validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
-        let ctx = MiddlewareMaterializationContext {
-            config,
-            control_middleware,
-            stage_type,
-        };
-        match factory
-            .materialize(request, &ctx)
-            .map_err(|e| e.to_string())?
-        {
+        let ctx = MiddlewareMaterializationContext::new(config, control_middleware, stage_type);
+        match materialize_checked(factory, &declaration, request, &ctx)? {
             MiddlewareSurfaceAttachment::Effect(policy) => Ok(policy),
             _ => Err(format!(
                 "binder expected an Effect attachment from middleware '{}'",
@@ -208,11 +208,7 @@ pub(crate) fn materialize_flowip_128g_legacy_shell(
         declaration_index,
     };
     validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
-    let ctx = MiddlewareMaterializationContext {
-        config,
-        control_middleware,
-        stage_type,
-    };
+    let ctx = MiddlewareMaterializationContext::new(config, control_middleware, stage_type);
 
     tracing::warn!(
         middleware = factory.label(),
@@ -220,10 +216,7 @@ pub(crate) fn materialize_flowip_128g_legacy_shell(
         "FLOWIP-128g transitional AI map-reduce shell is still active"
     );
 
-    match factory
-        .materialize(request, &ctx)
-        .map_err(|e| e.to_string())?
-    {
+    match materialize_checked(factory, &declaration, request, &ctx)? {
         MiddlewareSurfaceAttachment::Flowip128gLegacyShell(shell) => Ok(shell.into_middleware()),
         _ => Err(format!(
             "FLOWIP-128g migration binder expected a sealed shell attachment from middleware '{}'",
@@ -261,15 +254,8 @@ pub(crate) fn materialize_effect_observer(
     };
     let declaration = factory.declaration();
     validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
-    let ctx = MiddlewareMaterializationContext {
-        config,
-        control_middleware,
-        stage_type,
-    };
-    match factory
-        .materialize(request, &ctx)
-        .map_err(|e| e.to_string())?
-    {
+    let ctx = MiddlewareMaterializationContext::new(config, control_middleware, stage_type);
+    match materialize_checked(factory, &declaration, request, &ctx)? {
         attachment @ MiddlewareSurfaceAttachment::EffectObserver(_) => Ok(attachment),
         _ => Err(format!(
             "binder expected an EffectObserver attachment from middleware '{}'",
@@ -345,14 +331,8 @@ pub(crate) fn materialize_observer(
     };
     let declaration = factory.declaration();
     validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
-    let ctx = MiddlewareMaterializationContext {
-        config,
-        control_middleware,
-        stage_type,
-    };
-    factory
-        .materialize(request, &ctx)
-        .map_err(|e| e.to_string())
+    let ctx = MiddlewareMaterializationContext::new(config, control_middleware, stage_type);
+    materialize_checked(factory, &declaration, request, &ctx)
 }
 
 /// Materialize one hook-bound control middleware onto the sink-delivery surface,
@@ -383,15 +363,8 @@ pub(crate) fn materialize_sink_delivery(
     };
     let declaration = factory.declaration();
     validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
-    let ctx = MiddlewareMaterializationContext {
-        config,
-        control_middleware,
-        stage_type,
-    };
-    match factory
-        .materialize(request, &ctx)
-        .map_err(|e| e.to_string())?
-    {
+    let ctx = MiddlewareMaterializationContext::new(config, control_middleware, stage_type);
+    match materialize_checked(factory, &declaration, request, &ctx)? {
         MiddlewareSurfaceAttachment::SinkDelivery(policy) => Ok(policy),
         _ => Err(format!(
             "binder expected a SinkDelivery attachment from middleware '{}'",
@@ -442,15 +415,8 @@ pub(crate) fn materialize_ingress(
     };
     let declaration = factory.declaration();
     validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
-    let ctx = MiddlewareMaterializationContext {
-        config,
-        control_middleware,
-        stage_type,
-    };
-    match factory
-        .materialize(request, &ctx)
-        .map_err(|e| e.to_string())?
-    {
+    let ctx = MiddlewareMaterializationContext::new(config, control_middleware, stage_type);
+    match materialize_checked(factory, &declaration, request, &ctx)? {
         MiddlewareSurfaceAttachment::Ingress(boundary) => Ok(boundary),
         _ => Err(format!(
             "binder expected an Ingress attachment from middleware '{}'",

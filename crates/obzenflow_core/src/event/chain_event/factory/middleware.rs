@@ -4,7 +4,8 @@
 
 use super::ChainEventFactory;
 use crate::event::chain_event::{
-    ChainEvent, CircuitBreakerAttemptSettledEventParams, CircuitBreakerSummaryEventParams,
+    ChainEvent, CircuitBreakerAttemptSettledEventParams,
+    CircuitBreakerRecoveryCompletedEventParams, CircuitBreakerSummaryEventParams,
 };
 use crate::event::context::causality_context::CausalityContext;
 use crate::event::payloads::effect_payload::EffectCursor;
@@ -121,6 +122,29 @@ impl ChainEventFactory {
             CircuitBreakerEvent::RetryStoppedNonRetryable {
                 cursor,
                 total_attempts,
+            },
+            cause,
+        )
+    }
+
+    pub fn circuit_breaker_recovery_completed(
+        writer_id: WriterId,
+        params: CircuitBreakerRecoveryCompletedEventParams,
+        cause: EventId,
+    ) -> ChainEvent {
+        let CircuitBreakerRecoveryCompletedEventParams {
+            cursor,
+            total_attempts,
+            backoff_elapsed_ms,
+            recovery_elapsed_ms,
+        } = params;
+        Self::circuit_breaker_retry_event(
+            writer_id,
+            CircuitBreakerEvent::RecoveryCompleted {
+                cursor,
+                total_attempts,
+                backoff_elapsed_ms,
+                recovery_elapsed_ms,
             },
             cause,
         )
