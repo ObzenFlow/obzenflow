@@ -16,6 +16,33 @@ use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSubject};
 pub const CIRCUIT_BREAKER_THRESHOLD_KEY: &str = "effects.circuit_breaker.threshold";
 pub const RATE_LIMITER_BURST_CAPACITY_KEY: &str = "effects.rate_limiter.burst_capacity";
 pub const RATE_LIMITER_EVENTS_PER_SECOND_KEY: &str = "effects.rate_limiter.events_per_second";
+pub const RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY: &str =
+    "effects.resilience.breaker.consecutive_failures";
+pub const RESILIENCE_BREAKER_COUNT_WINDOW_KEY: &str = "effects.resilience.breaker.count_window";
+pub const RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY: &str =
+    "effects.resilience.breaker.failure_rate_threshold";
+pub const RESILIENCE_BREAKER_MINIMUM_CALLS_KEY: &str = "effects.resilience.breaker.minimum_calls";
+pub const RESILIENCE_BREAKER_MODE_KEY: &str = "effects.resilience.breaker.mode";
+pub const RESILIENCE_BREAKER_OPEN_FOR_MS_KEY: &str = "effects.resilience.breaker.open_for_ms";
+pub const RESILIENCE_BREAKER_PROBES_KEY: &str = "effects.resilience.breaker.probes";
+pub const RESILIENCE_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY: &str =
+    "effects.resilience.breaker.rate_limited_counts_as_failure";
+pub const RESILIENCE_BREAKER_SLOW_CALL_DURATION_MS_KEY: &str =
+    "effects.resilience.breaker.slow_call_duration_ms";
+pub const RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY: &str =
+    "effects.resilience.breaker.slow_call_rate_threshold";
+pub const RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY: &str =
+    "effects.resilience.rate_limiter.burst_capacity";
+pub const RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY: &str =
+    "effects.resilience.rate_limiter.cost_per_attempt";
+pub const RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY: &str =
+    "effects.resilience.rate_limiter.events_per_second";
+pub const RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY: &str =
+    "effects.resilience.retry.attempt_start_window_ms";
+pub const RESILIENCE_RETRY_FIXED_DELAY_MS_KEY: &str = "effects.resilience.retry.fixed_delay_ms";
+pub const RESILIENCE_RETRY_KIND_KEY: &str = "effects.resilience.retry.kind";
+pub const RESILIENCE_RETRY_MAX_ATTEMPTS_KEY: &str = "effects.resilience.retry.max_attempts";
+pub const RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY: &str = "effects.resilience.retry.max_backoff_ms";
 
 /// The most specific scope a knob admits. The stage rung of an edge-target
 /// knob binds to one endpoint (§4c; backpressure binds upstream, matching
@@ -45,10 +72,21 @@ pub enum EdgeEndpoint {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum KnobType {
     Bool,
-    U64 { min: u64, max: u64 },
-    F64 { min_exclusive: f64 },
+    U64 {
+        min: u64,
+        max: u64,
+    },
+    F64 {
+        min_exclusive: f64,
+    },
+    F64Range {
+        min_exclusive: f64,
+        max_inclusive: f64,
+    },
     Text,
-    Token { allowed: &'static [&'static str] },
+    Token {
+        allowed: &'static [&'static str],
+    },
     Path,
 }
 
@@ -67,6 +105,21 @@ impl KnobType {
             (Self::F64 { min_exclusive }, ConfigValue::F64(v)) => {
                 if !v.is_finite() || v <= min_exclusive {
                     Err(format!("must be finite and > {min_exclusive}, got {v}"))
+                } else {
+                    Ok(())
+                }
+            }
+            (
+                Self::F64Range {
+                    min_exclusive,
+                    max_inclusive,
+                },
+                ConfigValue::F64(v),
+            ) => {
+                if !v.is_finite() || v <= min_exclusive || v > max_inclusive {
+                    Err(format!(
+                        "must be finite and in ({min_exclusive}, {max_inclusive}], got {v}"
+                    ))
                 } else {
                     Ok(())
                 }
@@ -205,6 +258,24 @@ fn effect_file_component(key_path: &str) -> Option<&'static str> {
         RATE_LIMITER_BURST_CAPACITY_KEY | RATE_LIMITER_EVENTS_PER_SECOND_KEY => {
             Some("rate_limiter")
         }
+        RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY
+        | RESILIENCE_BREAKER_COUNT_WINDOW_KEY
+        | RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY
+        | RESILIENCE_BREAKER_MINIMUM_CALLS_KEY
+        | RESILIENCE_BREAKER_MODE_KEY
+        | RESILIENCE_BREAKER_OPEN_FOR_MS_KEY
+        | RESILIENCE_BREAKER_PROBES_KEY
+        | RESILIENCE_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY
+        | RESILIENCE_BREAKER_SLOW_CALL_DURATION_MS_KEY
+        | RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY => Some("resilience.breaker"),
+        RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY
+        | RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY
+        | RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY => Some("resilience.rate_limiter"),
+        RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY
+        | RESILIENCE_RETRY_FIXED_DELAY_MS_KEY
+        | RESILIENCE_RETRY_KIND_KEY
+        | RESILIENCE_RETRY_MAX_ATTEMPTS_KEY
+        | RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY => Some("resilience.retry"),
         _ => None,
     }
 }
@@ -219,6 +290,8 @@ pub fn canonical_env_name(key_path: &str) -> String {
 
 const TOKENS_STRICT_MODE: &[&str] = &["abort", "warn"];
 const TOKENS_AI_PROVIDER: &[&str] = &["ollama", "openai", "openai_compatible"];
+const TOKENS_RESILIENCE_BREAKER_MODE: &[&str] = &["consecutive", "rate_based"];
+const TOKENS_RESILIENCE_RETRY_KIND: &[&str] = &["fixed", "exponential"];
 
 /// The first-pass registry: consumers-only namespaces (FLOWIP-010
 /// implementation shape). Sorted by key path; a unit test enforces it.
@@ -309,6 +382,226 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 file_path: None,
                 value_type: KnobType::F64 { min_exclusive: 0.0 },
                 target: KnobTarget::StageOrEffect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u32::MAX as u64,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_BREAKER_COUNT_WINDOW_KEY,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u32::MAX as u64,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
+                file_path: None,
+                value_type: KnobType::F64Range {
+                    min_exclusive: 0.0,
+                    max_inclusive: 1.0,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_BREAKER_MINIMUM_CALLS_KEY,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u32::MAX as u64,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_BREAKER_MODE_KEY,
+                file_path: None,
+                value_type: KnobType::Token {
+                    allowed: TOKENS_RESILIENCE_BREAKER_MODE,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_BREAKER_OPEN_FOR_MS_KEY,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u64::MAX,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_BREAKER_PROBES_KEY,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u32::MAX as u64,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
+                file_path: None,
+                value_type: KnobType::Bool,
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_BREAKER_SLOW_CALL_DURATION_MS_KEY,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u64::MAX,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
+                file_path: None,
+                value_type: KnobType::F64Range {
+                    min_exclusive: 0.0,
+                    max_inclusive: 1.0,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY,
+                file_path: None,
+                value_type: KnobType::F64 { min_exclusive: 0.0 },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY,
+                file_path: None,
+                value_type: KnobType::F64 { min_exclusive: 0.0 },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+                file_path: None,
+                value_type: KnobType::F64 { min_exclusive: 0.0 },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u64::MAX,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_RETRY_FIXED_DELAY_MS_KEY,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u64::MAX,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_RETRY_KIND_KEY,
+                file_path: None,
+                value_type: KnobType::Token {
+                    allowed: TOKENS_RESILIENCE_RETRY_KIND,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_RETRY_MAX_ATTEMPTS_KEY,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u32::MAX as u64,
+                },
+                target: KnobTarget::Effect,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY,
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u64::MAX,
+                },
+                target: KnobTarget::Effect,
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
                 redaction: Redaction::Plain,
@@ -550,6 +843,10 @@ pub fn schema_view() -> Vec<KnobSchemaDoc> {
                     KnobType::Bool => "bool".to_string(),
                     KnobType::U64 { min, max } => format!("u64 ({min}..={max})"),
                     KnobType::F64 { min_exclusive } => format!("f64 (> {min_exclusive})"),
+                    KnobType::F64Range {
+                        min_exclusive,
+                        max_inclusive,
+                    } => format!("f64 (({min_exclusive}, {max_inclusive}])"),
                     KnobType::Text => "text".to_string(),
                     KnobType::Token { allowed } => format!("token ({})", allowed.join(" | ")),
                     KnobType::Path => "path".to_string(),
@@ -702,5 +999,13 @@ mod tests {
         assert!(f.validate(&ConfigValue::F64(0.1)).is_ok());
         assert!(f.validate(&ConfigValue::F64(0.0)).is_err());
         assert!(f.validate(&ConfigValue::F64(f64::NAN)).is_err());
+
+        let rate = KnobType::F64Range {
+            min_exclusive: 0.0,
+            max_inclusive: 1.0,
+        };
+        assert!(rate.validate(&ConfigValue::F64(1.0)).is_ok());
+        assert!(rate.validate(&ConfigValue::F64(0.0)).is_err());
+        assert!(rate.validate(&ConfigValue::F64(1.01)).is_err());
     }
 }

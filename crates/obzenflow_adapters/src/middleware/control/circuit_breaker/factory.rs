@@ -3,7 +3,8 @@
 // https://obzenflow.dev
 
 use super::config::{
-    CircuitBreakerFailureMode, CircuitBreakerThresholdError, HalfOpenPolicy, OpenPolicy,
+    CircuitBreakerConfigError, CircuitBreakerFailureMode, CircuitBreakerThresholdError,
+    EffectCircuitBreakerConfig, HalfOpenPolicy, OpenPolicy,
 };
 use super::criteria::RateCriteria;
 use super::fallback::{
@@ -92,9 +93,49 @@ pub mod shape {
 /// builder in its plain state; fallback-shaping methods transition the state,
 /// and one `build()` per terminal state makes a mismatched build impossible
 /// to compile rather than a deferred flow-build error.
-pub struct CircuitBreaker;
+#[derive(Clone)]
+pub struct CircuitBreaker {
+    pub(in crate::middleware::control) config: EffectCircuitBreakerConfig,
+}
+
+/// Checked effect-breaker configuration builder used by `EffectResilience`.
+pub struct CheckedCircuitBreakerBuilder {
+    consecutive_failures: Option<u32>,
+    count_window: Option<u32>,
+    minimum_calls: Option<u32>,
+    failure_rate_threshold: Option<f64>,
+    slow_call_duration: Option<Duration>,
+    slow_call_rate_threshold: Option<f64>,
+    open_for: Duration,
+    probes: u32,
+    rate_limited_counts_as_failure: bool,
+    classifier: Option<FailureClassificationClassifier>,
+}
 
 impl CircuitBreaker {
+    pub fn builder() -> CheckedCircuitBreakerBuilder {
+        CheckedCircuitBreakerBuilder {
+            consecutive_failures: None,
+            count_window: None,
+            minimum_calls: None,
+            failure_rate_threshold: None,
+            slow_call_duration: None,
+            slow_call_rate_threshold: None,
+            open_for: Duration::from_secs(60),
+            probes: 1,
+            rate_limited_counts_as_failure: false,
+            classifier: None,
+        }
+    }
+
+    pub(in crate::middleware::control) fn inherit_classifier_from(
+        mut self,
+        authored: &CircuitBreaker,
+    ) -> Self {
+        self.config.classifier = authored.config.classifier.clone();
+        self
+    }
+
     /// Open after `failures` consecutive failures. The FLOWIP-010 key
     /// `effects.circuit_breaker.threshold` may override the count at build
     /// time.
@@ -116,6 +157,153 @@ impl CircuitBreaker {
             core: BuilderCore::new(threshold, Some(criteria.into_failure_mode())),
             shape: shape::Plain,
         }
+    }
+}
+
+impl CheckedCircuitBreakerBuilder {
+    pub fn consecutive_failures(mut self, failures: u32) -> Self {
+        self.consecutive_failures = Some(failures);
+        self
+    }
+
+    pub fn count_window(mut self, calls: u32) -> Self {
+        self.count_window = Some(calls);
+        self
+    }
+
+    pub fn minimum_calls(mut self, calls: u32) -> Self {
+        self.minimum_calls = Some(calls);
+        self
+    }
+
+    pub fn failure_rate_threshold(mut self, threshold: f64) -> Self {
+        self.failure_rate_threshold = Some(threshold);
+        self
+    }
+
+    pub fn slow_call_duration(mut self, duration: Duration) -> Self {
+        self.slow_call_duration = Some(duration);
+        self
+    }
+
+    pub fn slow_call_rate_threshold(mut self, threshold: f64) -> Self {
+        self.slow_call_rate_threshold = Some(threshold);
+        self
+    }
+
+    pub fn open_for(mut self, duration: Duration) -> Self {
+        self.open_for = duration;
+        self
+    }
+
+    pub fn probes(mut self, probes: u32) -> Self {
+        self.probes = probes;
+        self
+    }
+
+    pub fn rate_limited_counts_as_failure(mut self, enabled: bool) -> Self {
+        self.rate_limited_counts_as_failure = enabled;
+        self
+    }
+
+    pub fn classify_health_with<F>(mut self, classifier: F) -> Self
+    where
+        F: Fn(&ChainEvent, &[ChainEvent]) -> FailureClassification + Send + Sync + 'static,
+    {
+        self.classifier = Some(Arc::new(classifier));
+        self
+    }
+
+    pub fn build(self) -> Result<CircuitBreaker, CircuitBreakerConfigError> {
+        fn non_zero(
+            value: u32,
+            field: &'static str,
+        ) -> Result<NonZeroU32, CircuitBreakerConfigError> {
+            NonZeroU32::new(value).ok_or(CircuitBreakerConfigError::Zero { field })
+        }
+
+        fn rate(value: f64, field: &'static str) -> Result<f32, CircuitBreakerConfigError> {
+            if !(value.is_finite() && 0.0 < value && value <= 1.0) {
+                return Err(CircuitBreakerConfigError::InvalidRate { field, value });
+            }
+            Ok(value as f32)
+        }
+
+        if self.open_for.is_zero() {
+            return Err(CircuitBreakerConfigError::Zero { field: "open_for" });
+        }
+        let probes = non_zero(self.probes, "probes")?;
+        let has_rate_fields = self.minimum_calls.is_some()
+            || self.failure_rate_threshold.is_some()
+            || self.slow_call_duration.is_some()
+            || self.slow_call_rate_threshold.is_some();
+
+        let failure_mode = match (self.consecutive_failures, self.count_window) {
+            (Some(_), Some(_)) => return Err(CircuitBreakerConfigError::MixedModes),
+            (Some(_), None) if has_rate_fields => {
+                return Err(CircuitBreakerConfigError::MixedModes)
+            }
+            (Some(failures), None) => CircuitBreakerFailureMode::Consecutive {
+                max_failures: non_zero(failures, "consecutive_failures")?,
+            },
+            (None, Some(count_window)) => {
+                let count_window = non_zero(count_window, "count_window")?;
+                let minimum_calls = self
+                    .minimum_calls
+                    .ok_or(CircuitBreakerConfigError::MissingMinimumCalls)
+                    .and_then(|value| non_zero(value, "minimum_calls"))?;
+                if minimum_calls.get() > count_window.get() {
+                    return Err(CircuitBreakerConfigError::MinimumCallsExceedsWindow {
+                        minimum_calls: minimum_calls.get(),
+                        count_window: count_window.get(),
+                    });
+                }
+                let slow_pair = match (self.slow_call_duration, self.slow_call_rate_threshold) {
+                    (None, None) => None,
+                    (Some(duration), Some(threshold)) => {
+                        if duration.is_zero() {
+                            return Err(CircuitBreakerConfigError::Zero {
+                                field: "slow_call_duration",
+                            });
+                        }
+                        Some((duration, rate(threshold, "slow_call_rate_threshold")?))
+                    }
+                    _ => return Err(CircuitBreakerConfigError::IncompleteSlowCallTrigger),
+                };
+                if self.failure_rate_threshold.is_none() && slow_pair.is_none() {
+                    return Err(CircuitBreakerConfigError::MissingRateTrigger);
+                }
+                CircuitBreakerFailureMode::RateBased {
+                    window: FailureWindow::Count {
+                        size: count_window.get(),
+                    },
+                    // A value above the admitted domain disables this trigger
+                    // when the rate-based mode is slow-call-only.
+                    failure_rate_threshold: self
+                        .failure_rate_threshold
+                        .map(|value| rate(value, "failure_rate_threshold"))
+                        .transpose()?
+                        .unwrap_or(2.0),
+                    slow_call_rate_threshold: slow_pair.map(|(_, threshold)| threshold),
+                    slow_call_duration_threshold: slow_pair.map(|(duration, _)| duration),
+                    minimum_calls,
+                }
+            }
+            (None, None) => return Err(CircuitBreakerConfigError::MissingMode),
+        };
+
+        Ok(CircuitBreaker {
+            config: EffectCircuitBreakerConfig {
+                failure_mode,
+                open_for: self.open_for,
+                probes,
+                classifier: self.classifier,
+                failure_classification_policy: FailureClassificationPolicy {
+                    partial_failure_threshold: 0.5,
+                    rate_limited_counts_as_failure: self.rate_limited_counts_as_failure,
+                },
+            },
+        })
     }
 }
 
@@ -481,9 +669,38 @@ pub struct CircuitBreakerFactory {
 }
 
 impl CircuitBreakerFactory {
+    pub(in crate::middleware::control) fn from_effect_breaker(breaker: &CircuitBreaker) -> Self {
+        let threshold = match &breaker.config.failure_mode {
+            CircuitBreakerFailureMode::Consecutive { max_failures } => max_failures.get() as usize,
+            CircuitBreakerFailureMode::RateBased { window, .. } => match window {
+                FailureWindow::Count { size } => *size as usize,
+                FailureWindow::Time { .. } => {
+                    unreachable!("checked effect circuit breakers do not support time windows")
+                }
+            },
+        };
+        Self {
+            threshold,
+            cooldown: breaker.config.open_for,
+            fallback: None,
+            typed_outcome: None,
+            failure_classification_classifier: breaker.config.classifier.clone(),
+            failure_mode: Some(breaker.config.failure_mode.clone()),
+            open_policy: Some(OpenPolicy::FailFast),
+            half_open_policy: Some(HalfOpenPolicy::new(
+                breaker.config.probes,
+                OpenPolicy::FailFast,
+            )),
+            unknown_error_kind_policy: UnknownErrorKindPolicy::TreatAsInfraFailure,
+            retry_policy: None,
+            retry_limits: RetryLimits::default(),
+            failure_classification_policy: breaker.config.failure_classification_policy.clone(),
+        }
+    }
+
     /// Shared materialization for stage-level and per-effect instances
     /// (FLOWIP-120c): the key decides where the snapshotter registers.
-    fn build_middleware_keyed(
+    pub(in crate::middleware::control) fn build_middleware_keyed(
         &self,
         config: &StageConfig,
         control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
@@ -561,6 +778,7 @@ impl CircuitBreakerFactory {
                 generation: middleware.probe_generation.clone(),
             });
         let cb_state_view_for_snap = cb_state_view.clone();
+        let requests_total = middleware.requests_total.clone();
         let successes_total = middleware.successes_total.clone();
         let failures_total = middleware.failures_total.clone();
         let rejections_total = middleware.rejections_total.clone();
@@ -572,9 +790,9 @@ impl CircuitBreakerFactory {
         let snapshotter: std::sync::Arc<CircuitBreakerSnapshotter> = Arc::new(move || {
             let state = cb_state_view_for_snap.snapshot().state;
 
+            let requests = requests_total.load(Ordering::Relaxed);
             let successes = successes_total.load(Ordering::Relaxed);
             let failures = failures_total.load(Ordering::Relaxed);
-            let requests_total = successes.saturating_add(failures);
 
             let rejections = rejections_total.load(Ordering::Relaxed);
             let opened = opened_total.load(Ordering::Relaxed);
@@ -595,7 +813,7 @@ impl CircuitBreakerFactory {
             }
 
             CircuitBreakerMetrics {
-                requests_total,
+                requests_total: requests,
                 successes_total: successes,
                 failures_total: failures,
                 rejections_total: rejections,

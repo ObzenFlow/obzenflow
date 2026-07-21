@@ -408,11 +408,26 @@ impl Middleware for CircuitBreakerMiddleware {
 }
 
 impl CircuitBreakerMiddleware {
+    /// Read-only fast path used before a limiter wait. Only a circuit that is
+    /// definitely still Open rejects here. Cooldown transitions and half-open
+    /// probe ownership remain deferred to authoritative final admission.
+    pub(in crate::middleware::control) async fn effect_precheck(
+        &self,
+        event: &ChainEvent,
+        ctx: &mut MiddlewareContext,
+    ) -> crate::middleware::PolicyAdmission {
+        if matches!(self.current_state(), CircuitState::Open) && !self.should_attempt_reset() {
+            EventAwareEffectPolicy::admit(self, event, ctx).await
+        } else {
+            crate::middleware::PolicyAdmission::Admit
+        }
+    }
+
     /// Settle breaker health from an already final classification. Recovery
     /// uses this path so a stateful custom classifier is invoked exactly once
     /// per physical result and that same value drives retry, health, and
     /// terminal evidence.
-    pub(super) fn settle_classified_call(
+    pub(in crate::middleware::control) fn settle_classified_call(
         &self,
         classification: &FailureClassification,
         ctx: &mut MiddlewareContext,
@@ -425,13 +440,14 @@ impl CircuitBreakerMiddleware {
         if let Ok(mut stats) = self.stats.lock() {
             stats.requests_processed += 1;
         }
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
 
         let is_success = matches!(classification, FailureClassification::Success);
-
         let counted_as_failure = self.counts_as_failure(classification);
+        let contributes_health = is_success || counted_as_failure;
         if counted_as_failure {
             self.failures_total.fetch_add(1, Ordering::Relaxed);
-        } else {
+        } else if is_success {
             self.successes_total.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -457,7 +473,8 @@ impl CircuitBreakerMiddleware {
             }
             drop(ctx.remove::<CircuitBreakerProbeSlot>());
 
-            if probe_generation == Some(self.probe_generation.load(Ordering::SeqCst))
+            if contributes_health
+                && probe_generation == Some(self.probe_generation.load(Ordering::SeqCst))
                 && matches!(self.current_state(), CircuitState::HalfOpen)
             {
                 if is_success {
@@ -487,10 +504,12 @@ impl CircuitBreakerMiddleware {
 
         match self.current_state() {
             CircuitState::Closed => {
-                if let Some(event) =
-                    self.record_closed_outcome(counted_as_failure, call_duration, now)
-                {
-                    ctx.write_control_event(event);
+                if contributes_health {
+                    if let Some(event) =
+                        self.record_closed_outcome(counted_as_failure, call_duration, now)
+                    {
+                        ctx.write_control_event(event);
+                    }
                 }
             }
 

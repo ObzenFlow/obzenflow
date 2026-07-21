@@ -46,23 +46,24 @@ mod window;
 pub(crate) use classifier::effect_error_event;
 pub use classifier::{FailureClassification, FailureClassificationPolicy, UnknownErrorKindPolicy};
 use config::HalfOpenPolicy;
-pub use config::OpenPolicy;
+pub use config::{CircuitBreakerConfigError, OpenPolicy};
 pub use criteria::{failure_rate, FailureRateCriteria, RateCriteria};
 pub use factory::{
-    ai_circuit_breaker, circuit_breaker, shape, CircuitBreaker, CircuitBreakerBuilder,
-    CircuitBreakerFactory,
+    ai_circuit_breaker, circuit_breaker, shape, CheckedCircuitBreakerBuilder, CircuitBreaker,
+    CircuitBreakerBuilder, CircuitBreakerFactory,
 };
 pub use retry::Retry;
 use retry::RetryLimits;
 
 use classifier::FailureClassificationClassifier;
-use config::CircuitBreakerFailureMode;
+pub(in crate::middleware::control) use config::CircuitBreakerFailureMode;
 #[cfg(test)]
 use hook_adapters::CircuitBreakerSourcePolicy;
 use hook_adapters::{SourceAdmit, SourceOutcome, SourceProbeGuard};
 use retry::CircuitBreakerRetryPolicy;
 use state::CircuitState;
-use window::{CallSample, FailureWindow, FailureWindowState};
+pub(in crate::middleware::control) use window::FailureWindow;
+use window::{CallSample, FailureWindowState};
 
 type FallbackFn = Arc<
     dyn Fn(&ChainEvent, obzenflow_core::config::LineagePolicy) -> Vec<ChainEvent> + Send + Sync,
@@ -175,6 +176,7 @@ pub struct CircuitBreakerMiddleware {
     /// When the last state change occurred
     last_state_change: Arc<Mutex<Instant>>,
     // ---- Cumulative circuit breaker metrics (FLOWIP-059a-2) ----
+    requests_total: Arc<AtomicU64>,
     successes_total: Arc<AtomicU64>,
     failures_total: Arc<AtomicU64>,
     rejections_total: Arc<AtomicU64>,
@@ -302,6 +304,7 @@ impl CircuitBreakerMiddleware {
                 last_summary: Instant::now(),
             })),
             last_state_change: Arc::new(Mutex::new(Instant::now())),
+            requests_total: Arc::new(AtomicU64::new(0)),
             successes_total: Arc::new(AtomicU64::new(0)),
             failures_total: Arc::new(AtomicU64::new(0)),
             rejections_total: Arc::new(AtomicU64::new(0)),
@@ -359,11 +362,20 @@ impl CircuitBreakerMiddleware {
             && self.effect_recovery_open_epoch.load(Ordering::SeqCst) == admitted_epoch
     }
 
-    fn is_effect_probe(&self, ctx: &MiddlewareContext) -> bool {
+    pub(in crate::middleware::control) fn is_effect_probe(&self, ctx: &MiddlewareContext) -> bool {
         ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false)
     }
 
-    fn evidence_writer_id(&self) -> WriterId {
+    pub(in crate::middleware::control) fn effect_retry_may_continue(
+        &self,
+        ctx: &MiddlewareContext,
+    ) -> bool {
+        ctx.get::<CircuitBreakerRecoveryOpenEpoch>()
+            .copied()
+            .is_some_and(|epoch| self.effect_recovery_epoch_is_current(epoch))
+    }
+
+    pub(in crate::middleware::control) fn evidence_writer_id(&self) -> WriterId {
         self.writer_id
     }
 
@@ -491,10 +503,11 @@ impl CircuitBreakerMiddleware {
             FailureClassification::PartialSuccess { failed_ratio } => {
                 *failed_ratio >= self.failure_classification_policy.partial_failure_threshold
             }
+            FailureClassification::Ignored => false,
         }
     }
 
-    fn classify_call(
+    pub(in crate::middleware::control) fn classify_call(
         &self,
         event: &ChainEvent,
         outputs: &[ChainEvent],
@@ -579,11 +592,61 @@ impl CircuitBreakerMiddleware {
             FailureClassification::RateLimited(delay)
         } else if saw_transient {
             FailureClassification::TransientFailure
+        } else if first_error_kind.is_some() {
+            // Validation and domain outcomes are real dependency results, but
+            // neither success nor dependency-health failure.
+            FailureClassification::Ignored
         } else {
             FailureClassification::Success
         };
 
         (base_classification, first_error_kind, first_error_message)
+    }
+
+    pub(in crate::middleware::control) fn is_slow_dependency_call(
+        &self,
+        dependency_elapsed: Duration,
+    ) -> bool {
+        match &self.failure_mode {
+            CircuitBreakerFailureMode::RateBased {
+                slow_call_duration_threshold: Some(threshold),
+                ..
+            } => dependency_elapsed >= *threshold,
+            _ => false,
+        }
+    }
+
+    pub(in crate::middleware::control) fn settle_unobserved_call(
+        &self,
+        ctx: &mut MiddlewareContext,
+    ) {
+        // The protected operation did execute, so it is an admitted request,
+        // but framework/journal/coordination failures must not manufacture a
+        // breaker success or failure sample.
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.requests_processed += 1;
+        }
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
+
+        if ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false) {
+            let _probe_gate = self
+                .probe_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            drop(ctx.remove::<CircuitBreakerProbeSlot>());
+        }
+        self.maybe_emit_summary(ctx);
+    }
+
+    pub(in crate::middleware::control) fn settle_cancelled_in_flight(&self) {
+        // Cancellation has no async outbox on which to emit evidence. It is
+        // nevertheless an admitted physical attempt once the runtime receipt
+        // reached Started, so count the request without inventing a health
+        // sample. Any half-open probe lease is released by its context guard.
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.requests_processed += 1;
+        }
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Attempt an atomic state transition. Returns `true` if this call won
@@ -840,6 +903,7 @@ impl CircuitBreakerMiddleware {
             if let Ok(mut stats) = self.stats.lock() {
                 stats.requests_processed += 1;
             }
+            self.requests_total.fetch_add(1, Ordering::Relaxed);
         }
 
         let pending = self
@@ -895,7 +959,7 @@ impl CircuitBreakerMiddleware {
 
     /// Settle an admitted effect probe whose protected call was skipped or
     /// rejected by a later policy. No breaker outcome is classified.
-    fn settle_not_executed(&self, ctx: &mut MiddlewareContext) {
+    pub(in crate::middleware::control) fn settle_not_executed(&self, ctx: &mut MiddlewareContext) {
         if ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false) {
             let _probe_gate = self.probe_gate.lock().ok();
             drop(ctx.remove::<CircuitBreakerProbeSlot>());
@@ -1564,6 +1628,9 @@ mod tests {
             matches!(cb.current_state(), CircuitState::Closed),
             "expected circuit to remain Closed for validation/domain errors"
         );
+        assert_eq!(cb.requests_total.load(Ordering::Relaxed), 1);
+        assert_eq!(cb.successes_total.load(Ordering::Relaxed), 0);
+        assert_eq!(cb.failures_total.load(Ordering::Relaxed), 0);
 
         // Timeout (infra) error SHOULD count as a breaker failure.
         let mut timeout_err = create_test_event();
@@ -1574,6 +1641,9 @@ mod tests {
             matches!(cb.current_state(), CircuitState::Open),
             "expected circuit to be Open after infra/timeout error"
         );
+        assert_eq!(cb.requests_total.load(Ordering::Relaxed), 2);
+        assert_eq!(cb.successes_total.load(Ordering::Relaxed), 0);
+        assert_eq!(cb.failures_total.load(Ordering::Relaxed), 1);
     }
 
     #[test]

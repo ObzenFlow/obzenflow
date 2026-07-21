@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::boundary::PhysicalCallOutcome;
 use super::*;
 
 /// Slot a guarded execution future fills with the real typed outcome, so
@@ -445,13 +446,29 @@ impl EffectsCore {
             let parent_event = self.ctx.parent.event.clone();
             let lineage = self.ctx.lineage;
             let base_context = self.live_effect_context();
-            RepeatableEffectOperation::new(move || {
+            RepeatableEffectOperation::new_with_lifecycle(move |lifecycle| {
                 let effect = effect.clone();
                 let mut effect_ctx = base_context.clone();
                 let slot = slot.clone();
                 let parent_event = parent_event.clone();
                 async move {
-                    let (output, facts) = Self::execute_into_facts(effect, &mut effect_ctx).await?;
+                    lifecycle.mark_started();
+                    let output = match effect.execute(&mut effect_ctx).await {
+                        Ok(output) => {
+                            lifecycle.mark_completed(PhysicalCallOutcome::Succeeded);
+                            output
+                        }
+                        Err(err) => {
+                            lifecycle.mark_completed(PhysicalCallOutcome::Failed);
+                            return Err(err);
+                        }
+                    };
+                    let facts = output.clone().into_facts().map_err(effect_fact_set_error)?;
+                    if facts.is_empty() {
+                        return Err(EffectError::Execution(
+                            "effect success output must author at least one fact".to_string(),
+                        ));
+                    }
                     let observation = facts
                         .iter()
                         .map(|fact| {
@@ -938,13 +955,27 @@ impl EffectsCore {
             let slot = settle_slot.clone();
             let observer = commit_observer.clone();
             let executor_name = executor.to_string();
-            SingleUseEffectOperation::new(move || {
+            SingleUseEffectOperation::new_with_lifecycle(move |lifecycle| {
                 async move {
+                    lifecycle.mark_started();
                     let port_result = port
                         .execute_and_commit(effect, &mut effect_ctx, commit)
                         .await
                         .map(|_| ());
                     let outcome = observer.committed_outcome();
+                    // A committed failure is the dependency result even when the
+                    // transactional port returned `Ok`; conversely, a committed
+                    // success remains authoritative if the port later returned an
+                    // error. No-commit and append failures retain their typed
+                    // coordination/journal errors for health classification.
+                    lifecycle.mark_completed(match &outcome {
+                        Some(CommittedEffectOutcome::Success { .. }) => {
+                            PhysicalCallOutcome::Succeeded
+                        }
+                        Some(CommittedEffectOutcome::Failure(_)) => PhysicalCallOutcome::Failed,
+                        None if port_result.is_err() => PhysicalCallOutcome::Failed,
+                        None => PhysicalCallOutcome::Succeeded,
+                    });
                     // The boundary observes a faithful classification of how the
                     // operation ended; the precise error the caller sees is settled
                     // from the slot, never from this observation result.
@@ -960,7 +991,7 @@ impl EffectsCore {
                                 ),
                             })
                         }
-                        (Err(err), None) => Err(EffectError::Execution(err.to_string())),
+                        (Err(err), None) => Err(err.clone()),
                         (Ok(()), None) => Err(EffectError::TransactionalCommitMissing {
                             effect_type: E::EFFECT_TYPE.to_string(),
                             executor: executor_name,

@@ -101,6 +101,33 @@ fn last_payment_breaker_counts(jsonl: &str) -> (u64, u64, u64) {
     last.expect("payment breaker metrics should appear in the exported journal")
 }
 
+fn last_payment_limiter_counts(jsonl: &str) -> (u64, f64) {
+    let mut last = None;
+    for row in exported_events(jsonl) {
+        let Some(limiters) = row
+            .pointer("/event/runtime_context/effect_rate_limiters")
+            .and_then(|value| value.as_array())
+        else {
+            continue;
+        };
+        for limiter in limiters {
+            if limiter.get("effect_type").and_then(|value| value.as_str())
+                == Some("payment.authorize")
+            {
+                last = Some((
+                    limiter["rl_events_total"]
+                        .as_u64()
+                        .expect("admitted attempt count"),
+                    limiter["rl_tokens_consumed_total"]
+                        .as_f64()
+                        .expect("committed permit count"),
+                ));
+            }
+        }
+    }
+    last.expect("payment limiter metrics should appear in the exported journal")
+}
+
 #[test]
 fn payment_gateway_retry_journal_test() {
     let control_root = tempfile::tempdir().expect("control journal root");
@@ -125,6 +152,8 @@ fn payment_gateway_retry_journal_test() {
     assert_eq!(data_event_count(&control, "payment.authorized.v1"), 0);
     assert_eq!(payment_effect_outcome_group_count(&control), 1);
     assert_eq!(last_payment_breaker_counts(&control), (1, 0, 1));
+    assert_eq!(last_payment_limiter_counts(&control), (1, 1.0));
+    assert_eq!(occurrences(&control, "\"action\":\"attempt_settled\""), 1);
     assert!(!control.contains("\"action\":\"retry_scheduled\""));
     assert!(!control.contains("\"action\":\"retry_succeeded\""));
     assert!(!control.contains("\"action\":\"retry_exhausted\""));
@@ -151,7 +180,12 @@ fn payment_gateway_retry_journal_test() {
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&treatment), 1);
-    assert_eq!(last_payment_breaker_counts(&treatment), (1, 1, 0));
+    assert_eq!(last_payment_breaker_counts(&treatment), (3, 1, 2));
+    assert_eq!(last_payment_limiter_counts(&treatment), (3, 3.0));
+    assert_eq!(occurrences(&treatment, "\"action\":\"attempt_settled\""), 3);
+    assert_eq!(occurrences(&treatment, "\"attempt\":1"), 1);
+    assert_eq!(occurrences(&treatment, "\"attempt\":2"), 1);
+    assert_eq!(occurrences(&treatment, "\"attempt\":3"), 1);
     assert_eq!(occurrences(&treatment, "\"action\":\"retry_scheduled\""), 2);
     assert_eq!(occurrences(&treatment, "\"action\":\"retry_succeeded\""), 1);
     assert!(!treatment.contains("\"action\":\"retry_exhausted\""));
@@ -195,5 +229,9 @@ fn payment_gateway_retry_journal_test() {
     assert!(
         !replay.contains("\"action\":\"retry_"),
         "strict replay must not emit fresh circuit-breaker retry evidence"
+    );
+    assert!(
+        !replay.contains("\"action\":\"attempt_settled\""),
+        "strict replay must not emit fresh physical-attempt evidence"
     );
 }

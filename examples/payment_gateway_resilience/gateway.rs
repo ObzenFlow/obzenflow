@@ -19,8 +19,7 @@ use super::domain::{
     PaymentDeclineReason, PaymentDeclined, PaymentMethodState, TrafficPhase, ValidatedOrder,
 };
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::circuit_breaker::FailureClassification;
-use obzenflow_core::{event::chain_event::ChainEvent, EffectOutcomeFacts, TypedPayload};
+use obzenflow_core::EffectOutcomeFacts;
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
 };
@@ -297,34 +296,6 @@ impl EffectfulTransformHandler for GatewayTransform {
 /// handling here (FLOWIP-120i).
 fn authorization_unavailable_reason(err: EffectError) -> String {
     err.semantic_reason().into_owned()
-}
-
-/// Tell the circuit breaker which scripted inputs represent dependency failure.
-///
-/// Error-marked outputs cover genuine gateway failures; the input-phase check
-/// covers the scripted outage. Breaker-refused calls never reach
-/// `post_handle` (the boundary short-circuits), so refusals do not re-count
-/// as failures. The classification is health authority plus recovery veto
-/// only: returning `TransientFailure` cannot make an ineligible raw failure
-/// retry.
-pub fn classify_simulated_gateway_unavailability(
-    event: &ChainEvent,
-    outputs: &[ChainEvent],
-) -> FailureClassification {
-    let failed = outputs.iter().any(|output| {
-        matches!(
-            output.processing_info.status,
-            obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }
-        )
-    }) || matches!(
-        ValidatedOrder::from_event(event).map(|order| order.phase),
-        Some(TrafficPhase::Outage)
-    );
-    if failed {
-        FailureClassification::TransientFailure
-    } else {
-        FailureClassification::Success
-    }
 }
 
 /// Deliberately no cancellation here: unavailability means no payment decision

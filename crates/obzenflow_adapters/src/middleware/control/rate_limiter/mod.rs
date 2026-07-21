@@ -60,7 +60,10 @@ mod factory;
 mod hook_adapters;
 mod telemetry;
 
-use admission_core::{acquire_admission, AdmissionDecision, RateLimitDelayEvent, RateLimiterCore};
+use admission_core::{
+    acquire_admission, acquire_reservation, AdmissionDecision, RateLimitDelayEvent,
+    RateLimitReservation, RateLimiterCore,
+};
 use config::ValidatedRateLimiterConfig;
 use telemetry::{delayed_event, rate_limiter_event};
 
@@ -76,7 +79,10 @@ use std::sync::Arc;
 use tokio::time::Instant;
 use tracing::info;
 
-pub use factory::{rate_limit, rate_limit_with_burst, RateLimiterBuilder, RateLimiterFactory};
+pub use config::RateLimiterConfigError;
+pub use factory::{
+    rate_limit, rate_limit_with_burst, RateLimiter, RateLimiterBuilder, RateLimiterFactory,
+};
 
 /// Marker type for the rate-limiter override-key family. Kept in the module root
 /// so its type path (and the derived family label) is stable across the
@@ -107,18 +113,18 @@ impl RateLimiterMiddleware {
         stage_id: StageId,
         config: ValidatedRateLimiterConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         Self::new_keyed(stage_id, config, control_middleware, None)
     }
 
     /// Construct a limiter registered under a per-effect key (FLOWIP-120c):
     /// one policy instance per protected dependency.
-    fn new_keyed(
+    pub(in crate::middleware::control) fn new_keyed(
         stage_id: StageId,
         config: ValidatedRateLimiterConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
         effect_type: Option<EffectTypeKey>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         // FLOWIP-120i: under strict replay the limiter is constructed because
         // topology and contracts must match the recorded run, but it consumes
         // no live tokens and moves no admission state. The setup log must not
@@ -162,12 +168,12 @@ impl RateLimiterMiddleware {
                 snapshotter,
             ),
             None => control_middleware.register_rate_limiter(stage_id, snapshotter),
-        }
+        }?;
 
-        Self {
+        Ok(Self {
             core,
             writer_id: WriterId::from(stage_id),
-        }
+        })
     }
 
     fn limit_rate(&self) -> f64 {
@@ -227,6 +233,25 @@ impl RateLimiterMiddleware {
         .await;
     }
 
+    pub(in crate::middleware::control) async fn reserve_permit_async(
+        &self,
+        ctx: &mut MiddlewareContext,
+    ) -> RateLimitReservation {
+        let writer_id = self.writer_id;
+        acquire_reservation(&self.core, |info: RateLimitDelayEvent| {
+            ctx.write_control_event(delayed_event(writer_id, info));
+        })
+        .await
+    }
+
+    pub(in crate::middleware::control) fn observe_resilience_attempt(
+        &self,
+        ctx: &mut MiddlewareContext,
+    ) {
+        self.maybe_emit_activity_pulse(ctx);
+        self.maybe_emit_summary(ctx);
+    }
+
     /// FLOWIP-115d: fail-fast ingress admission. Non-blocking: it never waits for
     /// a token while a listener request is held. Charges one token per
     /// validation-accepted event on accept. Returns `None` when admitted (token
@@ -261,6 +286,7 @@ fn test_middleware(
         validated,
         Arc::new(super::ControlMiddlewareAggregator::new()),
     )
+    .expect("test rate limiter registration should be unique")
 }
 
 #[cfg(test)]
@@ -302,7 +328,8 @@ mod tests {
             validated_rate_limiter_config(10.0, Some(10.0), 1.0)
                 .expect("snapshotter test configuration should be valid"),
             control.clone(),
-        );
+        )
+        .expect("snapshotter test registration should be unique");
         let snapshotter = control
             .rate_limiter_snapshotter(&stage_id)
             .expect("rate limiter snapshotter should be registered");

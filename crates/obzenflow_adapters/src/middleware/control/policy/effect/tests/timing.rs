@@ -6,6 +6,7 @@
 //! slow-call session sample.
 
 use super::support::*;
+use crate::middleware::{EffectResilience, RateLimiter};
 
 #[tokio::test(start_paused = true)]
 async fn fixed_backoff_waits_exactly_before_each_continuation() {
@@ -224,4 +225,241 @@ async fn recovered_session_settles_breaker_health_once_and_can_be_slow() {
         metrics.opened_total, 1,
         "the whole 10 ms session is one slow sample"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn resilience_limiter_wait_is_not_a_slow_dependency_sample() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .count_window(2)
+            .minimum_calls(2)
+            .slow_call_duration(Duration::from_millis(50))
+            .slow_call_rate_threshold(0.5)
+            .open_for(Duration::from_secs(5))
+            .build()
+            .expect("slow-call test breaker"),
+    )
+    .rate_limit_each_attempt(
+        RateLimiter::per_second(1.0)
+            .unwrap()
+            .with_burst(1.0)
+            .unwrap(),
+    )
+    .build()
+    .expect("slow-call resilience aggregate");
+    let config = test_stage_config(factory.as_ref());
+    let stage_id = config.stage_id;
+    let control = Arc::new(ControlMiddlewareAggregator::new());
+    let attachment = materialize_effect_attachment(
+        factory.as_ref(),
+        &config,
+        &control,
+        0,
+        EffectSafety::Idempotent,
+    )
+    .expect("aggregate should materialize");
+    let boundary = boundary_with_chain(vec![attachment]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let started = tokio::time::Instant::now();
+
+    let first = boundary
+        .around_repeatable_effect(
+            &identity_for("effect.retry"),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| Ok(Vec::new())),
+        )
+        .await;
+    let second = boundary
+        .around_repeatable_effect(
+            &identity_for("effect.retry"),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| Ok(Vec::new())),
+        )
+        .await;
+
+    assert_eq!(started.elapsed(), Duration::from_secs(1));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let attempt = second
+        .control_events
+        .iter()
+        .find_map(|event| match &event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::AttemptSettled {
+                    slow,
+                    dependency_elapsed_ms,
+                    admission_wait_ms,
+                    ..
+                }),
+            )) => Some((*slow, *dependency_elapsed_ms, *admission_wait_ms)),
+            _ => None,
+        })
+        .expect("second call should publish one physical-attempt row");
+    assert_eq!(attempt, (false, 0, 1_000));
+    assert!(matches!(
+        first.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+    assert!(matches!(
+        second.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+
+    let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
+    let metrics = breaker[0].1();
+    assert_eq!(metrics.requests_total, 2);
+    assert_eq!(metrics.successes_total, 2);
+    assert_eq!(metrics.failures_total, 0);
+    assert_eq!(metrics.opened_total, 0);
+    assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_breaker_admission_cancels_a_stale_limiter_reservation() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(1)
+            .open_for(Duration::from_secs(30))
+            .build()
+            .expect("concurrency test breaker"),
+    )
+    .rate_limit_each_attempt(
+        RateLimiter::per_second(1.0)
+            .unwrap()
+            .with_burst(1.0)
+            .unwrap(),
+    )
+    .build()
+    .expect("concurrency resilience aggregate");
+    let config = test_stage_config(factory.as_ref());
+    let stage_id = config.stage_id;
+    let control = Arc::new(ControlMiddlewareAggregator::new());
+    let attachment = materialize_effect_attachment(
+        factory.as_ref(),
+        &config,
+        &control,
+        0,
+        EffectSafety::Idempotent,
+    )
+    .expect("aggregate should materialize");
+    let boundary = Arc::new(boundary_with_chain(vec![attachment]));
+    let first_started = Arc::new(tokio::sync::Notify::new());
+    let release_first = Arc::new(tokio::sync::Notify::new());
+
+    let first_task = {
+        let boundary = boundary.clone();
+        let first_started = first_started.clone();
+        let release_first = release_first.clone();
+        tokio::spawn(async move {
+            boundary
+                .around_repeatable_effect(
+                    &identity_for("effect.retry"),
+                    &data_event(),
+                    RepeatableEffectOperation::new(move || {
+                        let first_started = first_started.clone();
+                        let release_first = release_first.clone();
+                        async move {
+                            first_started.notify_one();
+                            release_first.notified().await;
+                            Err(EffectError::Timeout("opens circuit".to_string()))
+                        }
+                    }),
+                )
+                .await
+        })
+    };
+    first_started.notified().await;
+
+    let second_calls = Arc::new(AtomicUsize::new(0));
+    let second_task = {
+        let boundary = boundary.clone();
+        let second_calls = second_calls.clone();
+        tokio::spawn(async move {
+            boundary
+                .around_repeatable_effect(
+                    &identity_for("effect.retry"),
+                    &data_event(),
+                    scripted_operation(second_calls, |_| Ok(Vec::new())),
+                )
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 1);
+
+    release_first.notify_one();
+    let first = first_task.await.unwrap();
+    assert!(matches!(
+        first.outcome,
+        EffectBoundaryOutcome::Executed(Err(_))
+    ));
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let second = second_task.await.unwrap();
+    assert!(matches!(second.outcome, EffectBoundaryOutcome::Aborted(_)));
+    assert_eq!(second_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        effect_limiter_events(control.as_ref(), stage_id),
+        1,
+        "the breaker-rejected reservation must not become a committed permit"
+    );
+
+    let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
+    let metrics = breaker[0].1();
+    assert_eq!(metrics.requests_total, 1);
+    assert_eq!(metrics.failures_total, 1);
+    assert_eq!(metrics.rejections_total, 1);
+}
+
+#[tokio::test]
+async fn cancelling_an_in_flight_resilience_attempt_records_no_health_sample() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(2)
+            .build()
+            .expect("cancellation test breaker"),
+    )
+    .rate_limit_each_attempt(RateLimiter::per_second(100.0).unwrap())
+    .build()
+    .expect("cancellation resilience aggregate");
+    let config = test_stage_config(factory.as_ref());
+    let stage_id = config.stage_id;
+    let control = Arc::new(ControlMiddlewareAggregator::new());
+    let attachment = materialize_effect_attachment(
+        factory.as_ref(),
+        &config,
+        &control,
+        0,
+        EffectSafety::Idempotent,
+    )
+    .expect("aggregate should materialize");
+    let boundary = boundary_with_chain(vec![attachment]);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let task = {
+        let started = started.clone();
+        tokio::spawn(async move {
+            boundary
+                .around_repeatable_effect(
+                    &identity_for("effect.retry"),
+                    &data_event(),
+                    RepeatableEffectOperation::new(move || {
+                        let started = started.clone();
+                        async move {
+                            started.notify_one();
+                            std::future::pending::<Result<Vec<ChainEvent>, EffectError>>().await
+                        }
+                    }),
+                )
+                .await
+        })
+    };
+
+    started.notified().await;
+    task.abort();
+    assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+    assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 1);
+    let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
+    let metrics = breaker[0].1();
+    assert_eq!(metrics.requests_total, 1);
+    assert_eq!(metrics.successes_total, 0);
+    assert_eq!(metrics.failures_total, 0);
 }

@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use crate::event::payloads::effect_payload::EffectCursor;
+use crate::event::payloads::observability_payload::CircuitBreakerHealthClassification;
 use crate::event::types::{
     Count, DurationMs, EventId, JournalIndex, JournalPath, RouteKey, SeqNo, ViolationCause,
 };
@@ -59,4 +61,14 @@ pub struct CircuitBreakerSummaryEventParams {
     pub time_in_closed_seconds: f64,
     pub time_in_open_seconds: f64,
     pub time_in_half_open_seconds: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CircuitBreakerAttemptSettledEventParams {
+    pub cursor: EffectCursor,
+    pub attempt: u32,
+    pub health_classification: CircuitBreakerHealthClassification,
+    pub slow: bool,
+    pub dependency_elapsed_ms: u64,
+    pub admission_wait_ms: u64,
 }

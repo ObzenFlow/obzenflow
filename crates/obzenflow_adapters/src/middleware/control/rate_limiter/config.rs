@@ -11,7 +11,7 @@
 
 use thiserror::Error;
 
-pub(crate) const DEFAULT_COST_PER_EVENT: f64 = 1.0;
+pub(in crate::middleware::control) const DEFAULT_COST_PER_EVENT: f64 = 1.0;
 
 pub(crate) fn effective_capacity(
     events_per_second: f64,
@@ -26,11 +26,11 @@ pub(crate) fn effective_limit_rate(events_per_second: f64, cost_per_event: f64) 
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct ValidatedRateLimiterConfig {
-    pub(crate) events_per_second: f64,
-    pub(crate) configured_burst_capacity: Option<f64>,
-    pub(crate) burst_capacity: f64,
-    pub(crate) cost_per_event: f64,
+pub(in crate::middleware::control) struct ValidatedRateLimiterConfig {
+    pub(in crate::middleware::control) events_per_second: f64,
+    pub(in crate::middleware::control) configured_burst_capacity: Option<f64>,
+    pub(in crate::middleware::control) burst_capacity: f64,
+    pub(in crate::middleware::control) cost_per_event: f64,
 }
 
 impl ValidatedRateLimiterConfig {
@@ -40,7 +40,7 @@ impl ValidatedRateLimiterConfig {
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq)]
-pub(crate) enum RateLimiterConfigError {
+pub enum RateLimiterConfigError {
     #[error("rate_limiter events_per_second must be finite and > 0, got {events_per_second}")]
     InvalidEventsPerSecond { events_per_second: f64 },
 
@@ -59,7 +59,7 @@ pub(crate) enum RateLimiterConfigError {
     },
 }
 
-pub(crate) fn validated_rate_limiter_config(
+pub(in crate::middleware::control) fn validated_rate_limiter_config(
     events_per_second: f64,
     burst_capacity: Option<f64>,
     cost_per_event: f64,

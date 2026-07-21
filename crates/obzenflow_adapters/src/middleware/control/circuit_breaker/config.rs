@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::classifier::{FailureClassificationClassifier, FailureClassificationPolicy};
 use super::FailureWindow;
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -9,7 +10,7 @@ use thiserror::Error;
 
 /// How the circuit breaker decides when to open while in the Closed state.
 #[derive(Debug, Clone)]
-pub(super) enum CircuitBreakerFailureMode {
+pub(in crate::middleware::control) enum CircuitBreakerFailureMode {
     /// Simple consecutive-failures threshold (current default behaviour).
     Consecutive { max_failures: NonZeroU32 },
     /// Rate-based mode over a sliding window of recent calls.
@@ -20,6 +21,38 @@ pub(super) enum CircuitBreakerFailureMode {
         slow_call_duration_threshold: Option<Duration>,
         minimum_calls: NonZeroU32,
     },
+}
+
+#[derive(Debug, Error, Clone, PartialEq)]
+pub enum CircuitBreakerConfigError {
+    #[error("circuit breaker requires exactly one mode: consecutive_failures or count_window")]
+    MissingMode,
+    #[error("circuit breaker cannot combine consecutive_failures with count_window")]
+    MixedModes,
+    #[error("count-window mode requires minimum_calls")]
+    MissingMinimumCalls,
+    #[error("count-window mode requires failure_rate_threshold or paired slow-call settings")]
+    MissingRateTrigger,
+    #[error("slow_call_duration and slow_call_rate_threshold must be configured together")]
+    IncompleteSlowCallTrigger,
+    #[error("{field} must be greater than zero")]
+    Zero { field: &'static str },
+    #[error("{field} must be finite and in (0, 1], got {value}")]
+    InvalidRate { field: &'static str, value: f64 },
+    #[error("minimum_calls ({minimum_calls}) must be <= count_window ({count_window})")]
+    MinimumCallsExceedsWindow {
+        minimum_calls: u32,
+        count_window: u32,
+    },
+}
+
+#[derive(Clone)]
+pub(in crate::middleware::control) struct EffectCircuitBreakerConfig {
+    pub(in crate::middleware::control) failure_mode: CircuitBreakerFailureMode,
+    pub(in crate::middleware::control) open_for: Duration,
+    pub(in crate::middleware::control) probes: NonZeroU32,
+    pub(in crate::middleware::control) classifier: Option<FailureClassificationClassifier>,
+    pub(in crate::middleware::control) failure_classification_policy: FailureClassificationPolicy,
 }
 
 /// Behaviour while the circuit breaker is in the Open state.

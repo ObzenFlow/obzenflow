@@ -66,9 +66,9 @@ pub fn build_flow_for_profile(
         RetryProofProfile::Control => None,
         RetryProofProfile::Treatment => Some(
             Retry::fixed(Duration::from_millis(1))
-                .attempts(3)
-                .max_delay(Duration::from_millis(10))
-                .start_window(Duration::from_secs(1)),
+                .max_attempts(3)
+                .max_backoff(Duration::from_millis(10))
+                .attempt_start_window(Duration::from_secs(1)),
         ),
     };
     flow::assemble_flow(

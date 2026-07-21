@@ -30,6 +30,48 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
 use std::sync::Arc;
 
+/// Inert per-attempt limiter configuration owned by `EffectResilience`.
+#[derive(Debug, Clone)]
+pub struct RateLimiter {
+    pub(in crate::middleware::control) events_per_second: f64,
+    pub(in crate::middleware::control) burst_capacity: Option<f64>,
+    pub(in crate::middleware::control) cost_per_attempt: f64,
+}
+
+impl RateLimiter {
+    pub fn per_second(events_per_second: f64) -> Result<Self, RateLimiterConfigError> {
+        let value = Self {
+            events_per_second,
+            burst_capacity: None,
+            cost_per_attempt: DEFAULT_COST_PER_EVENT,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub fn with_burst(mut self, capacity: f64) -> Result<Self, RateLimiterConfigError> {
+        self.burst_capacity = Some(capacity);
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn with_cost_per_attempt(mut self, cost: f64) -> Result<Self, RateLimiterConfigError> {
+        self.cost_per_attempt = cost;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub(in crate::middleware::control) fn validate(
+        &self,
+    ) -> Result<ValidatedRateLimiterConfig, RateLimiterConfigError> {
+        validated_rate_limiter_config(
+            self.events_per_second,
+            self.burst_capacity,
+            self.cost_per_attempt,
+        )
+    }
+}
+
 /// Builder for constructing rate limiter middleware factories.
 ///
 /// Every factory built here produces independent per-attachment buckets; see the
@@ -229,11 +271,20 @@ impl MiddlewareFactory for RateLimiterFactory {
                     StageType::InfiniteSource => SourceRateLimitPosition::PrePoll,
                     _ => SourceRateLimitPosition::AfterPoll,
                 };
-                let middleware = Arc::new(RateLimiterMiddleware::new(
-                    context.config.stage_id,
-                    validated,
-                    context.control_middleware.clone(),
-                ));
+                let middleware = Arc::new(
+                    RateLimiterMiddleware::new(
+                        context.config.stage_id,
+                        validated,
+                        context.control_middleware.clone(),
+                    )
+                    .map_err(|message| {
+                        MiddlewareFactoryError::invalid_configuration(
+                            self.label(),
+                            &context.config.name,
+                            std::io::Error::other(message),
+                        )
+                    })?,
+                );
                 let policy: Arc<dyn SourcePolicy> =
                     Arc::new(RateLimiterSourcePolicy::new(middleware, charge_at));
                 Ok(MiddlewareSurfaceAttachment::SourcePoll(
@@ -251,28 +302,53 @@ impl MiddlewareFactory for RateLimiterFactory {
                     validated,
                     context.control_middleware.clone(),
                     Some(effect_surface.effect_type.clone()),
-                );
+                )
+                .map_err(|message| {
+                    MiddlewareFactoryError::invalid_configuration(
+                        self.label(),
+                        &context.config.name,
+                        std::io::Error::other(message),
+                    )
+                })?;
                 Ok(MiddlewareSurfaceAttachment::Effect(
                     EffectPolicyAttachment::neutral(Arc::new(middleware)),
                 ))
             }
             MiddlewareSurface::SinkDelivery(_) => {
-                let middleware = Arc::new(RateLimiterMiddleware::new(
-                    context.config.stage_id,
-                    validated,
-                    context.control_middleware.clone(),
-                ));
+                let middleware = Arc::new(
+                    RateLimiterMiddleware::new(
+                        context.config.stage_id,
+                        validated,
+                        context.control_middleware.clone(),
+                    )
+                    .map_err(|message| {
+                        MiddlewareFactoryError::invalid_configuration(
+                            self.label(),
+                            &context.config.name,
+                            std::io::Error::other(message),
+                        )
+                    })?,
+                );
                 let policy: Arc<dyn SinkPolicy> = Arc::new(RateLimiterSinkPolicy::new(middleware));
                 Ok(MiddlewareSurfaceAttachment::SinkDelivery(policy))
             }
             MiddlewareSurface::Ingress(_) => {
                 // FLOWIP-115d: source-backed hosted ingress. One core per hosted
                 // protected unit; the adapter is fail-fast at the listener edge.
-                let middleware = Arc::new(RateLimiterMiddleware::new(
-                    context.config.stage_id,
-                    validated,
-                    context.control_middleware.clone(),
-                ));
+                let middleware = Arc::new(
+                    RateLimiterMiddleware::new(
+                        context.config.stage_id,
+                        validated,
+                        context.control_middleware.clone(),
+                    )
+                    .map_err(|message| {
+                        MiddlewareFactoryError::invalid_configuration(
+                            self.label(),
+                            &context.config.name,
+                            std::io::Error::other(message),
+                        )
+                    })?,
+                );
                 let policy: Arc<dyn IngressBoundaryMiddleware> =
                     Arc::new(RateLimiterIngressPolicy::new(middleware));
                 Ok(MiddlewareSurfaceAttachment::Ingress(policy))

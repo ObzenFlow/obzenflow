@@ -4,7 +4,7 @@
 
 use super::*;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum EffectError {
     #[error("effect serialization failed: {0}")]
     Serialization(String),

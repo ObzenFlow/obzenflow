@@ -15,7 +15,7 @@
 //! (FLOWIP-115d AC20). It returns plain data; the adapters turn that data into
 //! lifecycle/control facts.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::{info, trace};
@@ -75,6 +75,11 @@ impl TokenBucket {
             trace!("try_consume: FAILED, insufficient tokens");
             false
         }
+    }
+
+    fn refund(&mut self, tokens: f64, now: Instant) {
+        self.refill(now);
+        self.tokens = (self.tokens + tokens).min(self.capacity);
     }
 
     /// Get time until enough tokens are available.
@@ -189,6 +194,36 @@ pub(crate) enum AdmissionDecision {
     WouldWait { retry_after: Duration },
 }
 
+/// Private affine reservation used by `EffectResilience`.
+///
+/// Reserving removes capacity from the shared bucket but does not move
+/// admitted counters. Committing consumes the handle and accounts exactly one
+/// physical attempt; dropping an uncommitted handle refunds its capacity.
+#[must_use = "an uncommitted rate-limit reservation is cancelled on drop"]
+pub(in crate::middleware::control) struct RateLimitReservation {
+    core: Arc<RateLimiterCore>,
+    cost: f64,
+    committed: bool,
+}
+
+impl RateLimitReservation {
+    pub(in crate::middleware::control) fn commit(mut self) {
+        self.core.record_admitted(self.cost);
+        self.committed = true;
+    }
+}
+
+impl Drop for RateLimitReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Ok(mut bucket) = self.core.bucket.lock() {
+            bucket.refund(self.cost, Instant::now());
+        }
+    }
+}
+
 /// Plain-data inputs for the one-shot "delayed" lifecycle fact (FLOWIP-115d).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RateLimitDelayEvent {
@@ -275,6 +310,21 @@ impl RateLimiterCore {
                 .time_until_available(cost, now)
                 .unwrap_or(Duration::from_millis(10));
             AdmissionDecision::WouldWait { retry_after }
+        }
+    }
+
+    fn try_reserve_at(
+        self: &Arc<Self>,
+        cost: f64,
+        now: Instant,
+    ) -> Result<RateLimitReservation, Duration> {
+        match self.try_admit_at(cost, now) {
+            AdmissionDecision::Admitted => Ok(RateLimitReservation {
+                core: self.clone(),
+                cost,
+                committed: false,
+            }),
+            AdmissionDecision::WouldWait { retry_after } => Err(retry_after),
         }
     }
 
@@ -518,9 +568,43 @@ where
     }
 }
 
+/// Acquire cancellable capacity without accounting it as an admitted call.
+/// The returned affine handle must be committed immediately before the
+/// physical call; cancellation or breaker rejection simply drops it.
+pub(in crate::middleware::control) async fn acquire_reservation<F>(
+    core: &Arc<RateLimiterCore>,
+    mut on_first_delay: F,
+) -> RateLimitReservation
+where
+    F: FnMut(RateLimitDelayEvent),
+{
+    let cost = core.cost_per_event;
+    let mut delayed_this_acquire = false;
+    loop {
+        match core.try_reserve_at(cost, Instant::now()) {
+            Ok(reservation) => return reservation,
+            Err(retry_after) => {
+                if !delayed_this_acquire {
+                    delayed_this_acquire = true;
+                    let current_rate = core.note_first_delay();
+                    on_first_delay(RateLimitDelayEvent {
+                        delay_ms: retry_after.as_millis() as u64,
+                        current_rate,
+                        limit_rate: core.limit_rate,
+                    });
+                }
+                let wait_start = Instant::now();
+                tokio::time::sleep(retry_after).await;
+                core.record_waited(wait_start.elapsed());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::middleware::control::rate_limiter::config::validated_rate_limiter_config;
 
     #[test]
     fn test_token_bucket_basic() {
@@ -547,5 +631,33 @@ mod tests {
         // Should need 2.5 seconds to get 5 tokens
         let wait = bucket.time_until_available(5.0, Instant::now()).unwrap();
         assert!((wait.as_secs_f64() - 2.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn uncommitted_reservation_refunds_capacity_without_accounting_an_attempt() {
+        let config = validated_rate_limiter_config(1.0, Some(1.0), 1.0).unwrap();
+        let core = Arc::new(RateLimiterCore::new(config));
+        let reservation = core.try_reserve_at(1.0, Instant::now()).unwrap();
+
+        assert_eq!(core.bucket.lock().unwrap().tokens, 0.0);
+        assert_eq!(core.snapshot().events_total, 0);
+        drop(reservation);
+
+        assert_eq!(core.bucket.lock().unwrap().tokens, 1.0);
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.events_total, 0);
+        assert_eq!(snapshot.tokens_consumed_total, 0.0);
+    }
+
+    #[test]
+    fn committed_reservation_accounts_exactly_one_physical_attempt() {
+        let config = validated_rate_limiter_config(1.0, Some(1.0), 1.0).unwrap();
+        let core = Arc::new(RateLimiterCore::new(config));
+        core.try_reserve_at(1.0, Instant::now()).unwrap().commit();
+
+        assert!(core.bucket.lock().unwrap().tokens < 0.001);
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.events_total, 1);
+        assert_eq!(snapshot.tokens_consumed_total, 1.0);
     }
 }

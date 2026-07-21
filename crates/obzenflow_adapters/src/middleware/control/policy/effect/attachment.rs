@@ -6,6 +6,7 @@ use super::contract::{
     EffectAttemptOutcome, EffectPolicy, EventAwareEffectPolicy, PolicyAdmission,
 };
 use crate::middleware::control::circuit_breaker::{effect_error_event, CircuitBreakerMiddleware};
+use crate::middleware::control::EffectResilienceMiddleware;
 use crate::middleware::{Middleware, MiddlewareAbortCause, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::ChainEvent;
@@ -25,6 +26,7 @@ enum EffectPolicyAttachmentKind {
     Neutral(Arc<dyn EffectPolicy>),
     EventAware(Arc<dyn EventAwareEffectPolicy>),
     CircuitBreaker(Arc<CircuitBreakerMiddleware>),
+    EffectResilience(Arc<EffectResilienceMiddleware>),
 }
 
 impl EffectPolicyAttachment {
@@ -46,12 +48,27 @@ impl EffectPolicyAttachment {
         }
     }
 
+    pub(in crate::middleware::control) fn effect_resilience(
+        policy: Arc<EffectResilienceMiddleware>,
+    ) -> Self {
+        Self {
+            kind: EffectPolicyAttachmentKind::EffectResilience(policy),
+        }
+    }
+
+    pub(super) fn effect_resilience_policy(&self) -> Option<&Arc<EffectResilienceMiddleware>> {
+        match &self.kind {
+            EffectPolicyAttachmentKind::EffectResilience(policy) => Some(policy),
+            _ => None,
+        }
+    }
+
     pub(super) fn circuit_breaker_policy(&self) -> Option<&Arc<CircuitBreakerMiddleware>> {
         match &self.kind {
             EffectPolicyAttachmentKind::CircuitBreaker(policy) => Some(policy),
-            EffectPolicyAttachmentKind::Neutral(_) | EffectPolicyAttachmentKind::EventAware(_) => {
-                None
-            }
+            EffectPolicyAttachmentKind::Neutral(_)
+            | EffectPolicyAttachmentKind::EventAware(_)
+            | EffectPolicyAttachmentKind::EffectResilience(_) => None,
         }
     }
 
@@ -62,6 +79,7 @@ impl EffectPolicyAttachment {
             EffectPolicyAttachmentKind::CircuitBreaker(policy) => {
                 Middleware::label(policy.as_ref())
             }
+            EffectPolicyAttachmentKind::EffectResilience(policy) => policy.label(),
         }
     }
 
@@ -74,6 +92,7 @@ impl EffectPolicyAttachment {
             EffectPolicyAttachmentKind::Neutral(policy) => policy.admit(ctx).await,
             EffectPolicyAttachmentKind::EventAware(policy) => policy.admit(event, ctx).await,
             EffectPolicyAttachmentKind::CircuitBreaker(policy) => policy.admit(event, ctx).await,
+            EffectPolicyAttachmentKind::EffectResilience(_) => PolicyAdmission::Admit,
         }
     }
 
@@ -89,6 +108,7 @@ impl EffectPolicyAttachment {
             EffectPolicyAttachmentKind::CircuitBreaker(policy) => {
                 policy.observe(event, attempt, ctx)
             }
+            EffectPolicyAttachmentKind::EffectResilience(_) => {}
         }
     }
 }

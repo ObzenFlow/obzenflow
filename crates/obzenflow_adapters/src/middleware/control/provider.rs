@@ -103,8 +103,8 @@ impl ControlMiddlewareAggregator {
         &self,
         stage_id: StageId,
         metrics_fn: Arc<RateLimiterSnapshotter>,
-    ) {
-        self.register_rate_limiter_keyed(stage_id, None, metrics_fn);
+    ) -> Result<(), String> {
+        self.register_rate_limiter_keyed(stage_id, None, metrics_fn)
     }
 
     /// Register a per-effect rate limiter instance (FLOWIP-120c).
@@ -113,8 +113,8 @@ impl ControlMiddlewareAggregator {
         stage_id: StageId,
         effect_type: EffectTypeKey,
         metrics_fn: Arc<RateLimiterSnapshotter>,
-    ) {
-        self.register_rate_limiter_keyed(stage_id, Some(effect_type), metrics_fn);
+    ) -> Result<(), String> {
+        self.register_rate_limiter_keyed(stage_id, Some(effect_type), metrics_fn)
     }
 
     fn register_rate_limiter_keyed(
@@ -122,12 +122,21 @@ impl ControlMiddlewareAggregator {
         stage_id: StageId,
         effect_type: Option<EffectTypeKey>,
         metrics_fn: Arc<RateLimiterSnapshotter>,
-    ) {
+    ) -> Result<(), String> {
         let registration = RateLimiterRegistration { metrics_fn };
-        self.rate_limiters
+        let mut registrations = self
+            .rate_limiters
             .write()
-            .expect("ControlMiddlewareAggregator: rate_limiters poisoned write lock")
-            .insert((stage_id, effect_type), registration);
+            .expect("ControlMiddlewareAggregator: rate_limiters poisoned write lock");
+        let key = (stage_id, effect_type);
+        if registrations.contains_key(&key) {
+            return Err(format!(
+                "a rate limiter is already registered for stage {stage_id} and effect {:?}",
+                key.1.as_ref().map(EffectTypeKey::as_str)
+            ));
+        }
+        registrations.insert(key, registration);
+        Ok(())
     }
 
     /// FLOWIP-115a: append a source policy for a stage, in declared order.

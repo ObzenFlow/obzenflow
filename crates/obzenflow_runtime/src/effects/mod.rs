@@ -60,8 +60,9 @@ mod tests;
 pub(crate) use boundary::SingleUseEffectBoundaryOutcome;
 pub use boundary::{
     EffectAbortReason, EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectIdentity,
-    RepeatableEffectOperation, SingleUseEffectBoundaryReport, SingleUseEffectExecution,
-    SingleUseEffectOperation,
+    PhysicalCallObservation, PhysicalCallOutcome, PhysicalCallReceipt,
+    PreparedRepeatableEffectCall, PreparedSingleUseEffectCall, RepeatableEffectOperation,
+    SingleUseEffectBoundaryReport, SingleUseEffectExecution, SingleUseEffectOperation,
 };
 pub use commit::EffectCommitHandle;
 pub use completion::StageCompletion;

@@ -5,6 +5,7 @@
 use super::attachment::EffectPolicyAttachment;
 use super::contract::{EffectAttemptOutcome, PolicyAdmission};
 use crate::middleware::control::circuit_breaker::CircuitBreakerMiddleware;
+use crate::middleware::control::EffectResilienceMiddleware;
 use crate::middleware::{
     EventAwareEffectPolicy, Middleware, MiddlewareAbortCause, MiddlewareContext,
 };
@@ -30,10 +31,26 @@ enum CompiledEffectChain {
         breaker: Arc<CircuitBreakerMiddleware>,
         inner: Vec<EffectPolicyAttachment>,
     },
+    Resilient {
+        outer: Vec<EffectPolicyAttachment>,
+        resilience: Arc<EffectResilienceMiddleware>,
+    },
 }
 
 impl CompiledEffectChain {
     fn compile(chain: Arc<Vec<EffectPolicyAttachment>>) -> Self {
+        if let Some(resilience) = chain
+            .iter()
+            .find_map(EffectPolicyAttachment::effect_resilience_policy)
+            .cloned()
+        {
+            let outer = chain
+                .iter()
+                .filter(|attachment| attachment.effect_resilience_policy().is_none())
+                .cloned()
+                .collect();
+            return Self::Resilient { outer, resilience };
+        }
         let mut outer = Vec::new();
         let mut breaker: Option<Arc<CircuitBreakerMiddleware>> = None;
         let mut inner = Vec::new();
@@ -192,7 +209,7 @@ impl EffectBoundary for PerEffectPolicyBoundary {
         event: &ChainEvent,
         mut operation: RepeatableEffectOperation,
     ) -> EffectBoundaryReport {
-        let (outer, breaker, inner) = match self.chains.get(identity.effect_type) {
+        let (outer, breaker, inner, resilience) = match self.chains.get(identity.effect_type) {
             None => {
                 return EffectBoundaryReport {
                     outcome: EffectBoundaryOutcome::Executed(operation.execute().await),
@@ -207,7 +224,10 @@ impl EffectBoundary for PerEffectPolicyBoundary {
                 outer,
                 breaker,
                 inner,
-            }) => (outer, breaker, inner),
+            }) => (outer, Some(breaker), Some(inner), None),
+            Some(CompiledEffectChain::Resilient { outer, resilience }) => {
+                (outer, None, None, Some(resilience))
+            }
         };
 
         let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
@@ -237,6 +257,38 @@ impl EffectBoundary for PerEffectPolicyBoundary {
             }
         }
 
+        if let Some(resilience) = resilience {
+            let mut report = resilience
+                .execute_repeatable(identity, event, &mut ctx, &mut operation)
+                .await;
+            match &report.outcome {
+                EffectBoundaryOutcome::Executed(result) => {
+                    let attempt = EffectAttemptOutcome::Executed(result);
+                    observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
+                }
+                EffectBoundaryOutcome::Skipped { source, .. } => {
+                    let label = source.as_deref().unwrap_or("effect_resilience");
+                    let attempt = EffectAttemptOutcome::SkippedBy(label);
+                    observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
+                }
+                EffectBoundaryOutcome::Aborted(reason) => {
+                    let cause = MiddlewareAbortCause {
+                        source: reason.cause.source.clone(),
+                        code: reason.cause.code.clone(),
+                        message: reason.message.clone(),
+                        retry: reason.retry,
+                        event: None,
+                    };
+                    let attempt = EffectAttemptOutcome::RejectedBy(&cause);
+                    observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
+                }
+            }
+            report.control_events.extend(ctx.take_control_events());
+            return report;
+        }
+
+        let breaker = breaker.expect("legacy recovering chain has a breaker");
+        let inner = inner.expect("legacy recovering chain has inner policies");
         let breaker_label = Middleware::label(breaker.as_ref());
         match EventAwareEffectPolicy::admit(breaker.as_ref(), event, &mut ctx).await {
             PolicyAdmission::Admit => {}
@@ -297,12 +349,57 @@ impl EffectBoundary for PerEffectPolicyBoundary {
         event: &ChainEvent,
         operation: SingleUseEffectOperation,
     ) -> SingleUseEffectBoundaryReport {
-        let chain = match self.chains.get(identity.effect_type) {
+        let (outer, resilience) = match self.chains.get(identity.effect_type) {
             None => return operation.execute().await.into_report(Vec::new()),
             Some(CompiledEffectChain::Plain(chain))
-            | Some(CompiledEffectChain::Recovering { chain, .. }) => chain,
+            | Some(CompiledEffectChain::Recovering { chain, .. }) => {
+                return execute_single_use_chain_once(chain, event, operation).await;
+            }
+            Some(CompiledEffectChain::Resilient { outer, resilience }) => (outer, resilience),
         };
 
-        execute_single_use_chain_once(chain, event, operation).await
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        let mut admitted_outer: Vec<&EffectPolicyAttachment> = Vec::new();
+        for policy in outer {
+            match policy.admit(event, &mut ctx).await {
+                PolicyAdmission::Admit => admitted_outer.push(policy),
+                PolicyAdmission::Synthesize { .. } => {
+                    let source = policy.label();
+                    let attempt = EffectAttemptOutcome::SkippedBy(source);
+                    observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
+                    return operation
+                        .reject_fallback(Some(source.to_string()), ctx.take_control_events());
+                }
+                PolicyAdmission::Reject(cause) => {
+                    let attempt = EffectAttemptOutcome::RejectedBy(&cause);
+                    observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
+                    return operation
+                        .abort(abort_reason_from_cause(cause), ctx.take_control_events());
+                }
+            }
+        }
+
+        let mut report = resilience
+            .execute_single_use(identity, event, &mut ctx, operation)
+            .await;
+        if let Some(result) = report.execution_result() {
+            let attempt = EffectAttemptOutcome::Executed(result);
+            observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
+        } else if let Some(reason) = report.abort_reason() {
+            let cause = MiddlewareAbortCause {
+                source: reason.cause.source.clone(),
+                code: reason.cause.code.clone(),
+                message: reason.message.clone(),
+                retry: reason.retry,
+                event: None,
+            };
+            let attempt = EffectAttemptOutcome::RejectedBy(&cause);
+            observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
+        } else if let Some(source) = report.fallback_source() {
+            let attempt = EffectAttemptOutcome::SkippedBy(source.unwrap_or("effect_resilience"));
+            observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
+        }
+        report.extend_control_events(ctx.take_control_events());
+        report
     }
 }

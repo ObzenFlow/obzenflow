@@ -5,6 +5,7 @@
 //! Cardinality, admission, and observation for single-use effect operations.
 
 use super::support::*;
+use crate::middleware::{EffectResilience, RateLimiter, RateLimiterBuilder};
 use obzenflow_core::event::EventEnvelope;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader};
 use obzenflow_core::{FlowId, JournalId, JournalOwner, JournalWriterId, TypedPayload};
@@ -141,6 +142,13 @@ impl Effect for TransactionProbe {
 struct TransactionProbePort {
     calls: Arc<AtomicUsize>,
     trace: Arc<Mutex<Vec<String>>>,
+    mode: TransactionProbeMode,
+}
+
+#[derive(Clone, Copy)]
+enum TransactionProbeMode {
+    CommitTimeout,
+    MissingCommit,
 }
 
 #[async_trait]
@@ -153,9 +161,14 @@ impl TransactionalEffectPort<TransactionProbe> for TransactionProbePort {
     ) -> Result<TransactionProbeOutput, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.trace.lock().unwrap().push("execute".to_string());
-        let error = EffectError::Timeout("single attempt".to_string());
-        commit.commit_failure(&error).await?;
-        Err(error)
+        match self.mode {
+            TransactionProbeMode::CommitTimeout => {
+                let error = EffectError::Timeout("single attempt".to_string());
+                commit.commit_failure(&error).await?;
+                Err(error)
+            }
+            TransactionProbeMode::MissingCommit => Ok(TransactionProbeOutput { value: 1 }),
+        }
     }
 }
 
@@ -164,6 +177,7 @@ fn effect_context_with_boundary(
     boundary: PerEffectPolicyBoundary,
     calls: Arc<AtomicUsize>,
     trace: Arc<Mutex<Vec<String>>>,
+    mode: TransactionProbeMode,
 ) -> EffectInvocationContext {
     let writer_id = WriterId::from(stage_id);
     let parent = EventEnvelope::new(
@@ -177,7 +191,7 @@ fn effect_context_with_boundary(
     let mut effect_ports = EffectPortRegistry::new();
     effect_ports.insert::<dyn TransactionalEffectPort<TransactionProbe>>(
         "tx",
-        Arc::new(TransactionProbePort { calls, trace }),
+        Arc::new(TransactionProbePort { calls, trace, mode }),
     );
 
     EffectInvocationContext {
@@ -244,7 +258,24 @@ async fn invoke_with_boundary(
     calls: Arc<AtomicUsize>,
     trace: Arc<Mutex<Vec<String>>>,
 ) -> EffectError {
-    let context = effect_context_with_boundary(stage_id, boundary, calls, trace);
+    invoke_with_boundary_mode(
+        stage_id,
+        boundary,
+        calls,
+        trace,
+        TransactionProbeMode::CommitTimeout,
+    )
+    .await
+}
+
+async fn invoke_with_boundary_mode(
+    stage_id: StageId,
+    boundary: PerEffectPolicyBoundary,
+    calls: Arc<AtomicUsize>,
+    trace: Arc<Mutex<Vec<String>>>,
+    mode: TransactionProbeMode,
+) -> EffectError {
+    let context = effect_context_with_boundary(stage_id, boundary, calls, trace, mode);
     let input = context.parent.event.clone();
     let terminal_error = Arc::new(Mutex::new(None));
     let adapter = EffectfulTransformHandlerAdapter(TransactionProbeHandler {
@@ -399,4 +430,161 @@ async fn single_use_rejection_runs_no_effect_and_finalizes_admitted_policies() {
             "admitted:observe:rejected:test.rejector",
         ]
     );
+}
+
+#[tokio::test]
+async fn effect_resilience_guards_transactional_calls_without_retrying_them() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(3)
+            .open_for(Duration::from_secs(1))
+            .build()
+            .expect("transactional test breaker"),
+    )
+    .rate_limit_each_attempt(RateLimiter::per_second(100.0).unwrap())
+    .build()
+    .expect("transactional resilience configuration");
+    let config = test_stage_config(factory.as_ref());
+    let stage_id = config.stage_id;
+    let control = Arc::new(ControlMiddlewareAggregator::new());
+    let resilience = materialize_effect_attachment(
+        factory.as_ref(),
+        &config,
+        &control,
+        0,
+        EffectSafety::Transactional,
+    )
+    .expect("breaker-only transactional resilience should materialize");
+    let boundary = boundary_with_chain(vec![resilience]);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let error = invoke_with_boundary(
+        stage_id,
+        boundary,
+        calls.clone(),
+        Arc::new(Mutex::new(Vec::new())),
+    )
+    .await;
+    assert!(matches!(error, EffectError::RecordedFailure { .. }));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
+    assert_eq!(breaker.len(), 1);
+    let breaker = breaker[0].1();
+    assert_eq!(breaker.requests_total, 1);
+    assert_eq!(breaker.failures_total, 1);
+    assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 1);
+}
+
+#[tokio::test]
+async fn transactional_missing_commit_consumes_attempt_without_health_sample() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(1)
+            .open_for(Duration::from_secs(1))
+            .build()
+            .expect("transactional test breaker"),
+    )
+    .build()
+    .expect("transactional resilience configuration");
+    let config = test_stage_config(factory.as_ref());
+    let stage_id = config.stage_id;
+    let control = Arc::new(ControlMiddlewareAggregator::new());
+    let resilience = materialize_effect_attachment(
+        factory.as_ref(),
+        &config,
+        &control,
+        0,
+        EffectSafety::Transactional,
+    )
+    .expect("transactional resilience should materialize");
+    let boundary = boundary_with_chain(vec![resilience]);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let error = invoke_with_boundary_mode(
+        stage_id,
+        boundary,
+        calls.clone(),
+        Arc::new(Mutex::new(Vec::new())),
+        TransactionProbeMode::MissingCommit,
+    )
+    .await;
+    assert!(matches!(
+        error,
+        EffectError::TransactionalCommitMissing { .. }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
+    let breaker = breaker[0].1();
+    assert_eq!(breaker.requests_total, 1);
+    assert_eq!(breaker.successes_total, 0);
+    assert_eq!(breaker.failures_total, 0);
+    assert!(matches!(
+        breaker.state,
+        obzenflow_runtime::control_plane::CircuitBreakerState::Closed
+    ));
+}
+
+#[test]
+fn effect_resilience_rejects_retry_for_transactional_effects_at_materialization() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(3)
+            .build()
+            .expect("transactional test breaker"),
+    )
+    .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(2))
+    .build()
+    .expect("retry configuration is intrinsically valid");
+    let config = test_stage_config(factory.as_ref());
+    let control = Arc::new(ControlMiddlewareAggregator::new());
+
+    let error = match materialize_effect_attachment(
+        factory.as_ref(),
+        &config,
+        &control,
+        0,
+        EffectSafety::Transactional,
+    ) {
+        Ok(_) => panic!("transactional effects cannot acquire retry authority"),
+        Err(error) => error,
+    };
+    assert!(error.contains("retry is not eligible"), "{error}");
+}
+
+#[test]
+fn effect_resilience_and_standalone_limiter_cannot_share_one_effect_key() {
+    let resilience = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(3)
+            .build()
+            .expect("duplicate test breaker"),
+    )
+    .rate_limit_each_attempt(RateLimiter::per_second(100.0).unwrap())
+    .build()
+    .expect("duplicate test resilience");
+    let standalone = RateLimiterBuilder::new(100.0).build();
+    let config = test_stage_config_for_factories(&[resilience.as_ref(), standalone.as_ref()]);
+    let control = Arc::new(ControlMiddlewareAggregator::new());
+
+    materialize_effect_attachment(
+        resilience.as_ref(),
+        &config,
+        &control,
+        0,
+        EffectSafety::Idempotent,
+    )
+    .expect("aggregate should claim the effect limiter key");
+    let error = match materialize_effect_attachment(
+        standalone.as_ref(),
+        &config,
+        &control,
+        1,
+        EffectSafety::Idempotent,
+    ) {
+        Ok(_) => panic!("a second effect limiter must fail"),
+        Err(error) => error,
+    };
+    assert!(error.contains("already registered"), "{error}");
 }

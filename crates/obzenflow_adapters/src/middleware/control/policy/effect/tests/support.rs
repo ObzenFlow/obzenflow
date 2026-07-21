@@ -73,16 +73,22 @@ pub(super) fn failing_execute() -> RepeatableEffectOperation {
 }
 
 pub(super) fn test_stage_config(factory: &dyn MiddlewareFactory) -> StageConfig {
+    test_stage_config_for_factories(&[factory])
+}
+
+pub(super) fn test_stage_config_for_factories(factories: &[&dyn MiddlewareFactory]) -> StageConfig {
     let stage = StageKey::from("retrying_breaker_test");
     let effect_type = EffectType::from("effect.retry");
     let mut dsl = DslCandidates::default();
-    for default in factory.dsl_config_defaults() {
-        dsl.declare_for_effect(
-            default.key_path,
-            stage.clone(),
-            effect_type.clone(),
-            default.value,
-        );
+    for factory in factories {
+        for default in factory.dsl_config_defaults() {
+            dsl.declare_for_effect(
+                default.key_path,
+                stage.clone(),
+                effect_type.clone(),
+                default.value,
+            );
+        }
     }
     let effective_config = materialize_flow_config(
         &ResolvedRuntimeConfig::builtin_defaults(),

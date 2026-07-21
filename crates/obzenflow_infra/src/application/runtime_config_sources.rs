@@ -274,6 +274,7 @@ fn admit_file_candidates(
         ConfigScope::Global.into(),
         &file.effects.circuit_breaker,
         &file.effects.rate_limiter,
+        &file.effects.resilience,
         "effects",
     )?;
     admit_effects_fields(
@@ -281,6 +282,7 @@ fn admit_file_candidates(
         ConfigScope::Flow.into(),
         &file.effects.flow.circuit_breaker,
         &file.effects.flow.rate_limiter,
+        &file.effects.flow.resilience,
         "effects.flow",
     )?;
     for (stage, entry) in &file.effects.stages {
@@ -289,6 +291,7 @@ fn admit_file_candidates(
             ConfigScope::stage(stage.as_str()).into(),
             &entry.circuit_breaker,
             &entry.rate_limiter,
+            &entry.resilience,
             &format!("effects.stages.{stage}"),
         )?;
         for (effect_type, exact) in &entry.by_type {
@@ -297,6 +300,7 @@ fn admit_file_candidates(
                 ConfigAddress::effect(stage.as_str(), effect_type.as_str()),
                 &exact.circuit_breaker,
                 &exact.rate_limiter,
+                &exact.resilience,
                 &format!("effects.stages.{stage}.by_type.\"{effect_type}\""),
             )?;
         }
@@ -372,6 +376,7 @@ fn admit_effects_fields(
     address: ConfigAddress,
     breaker: &super::config::RawBreakerFields,
     limiter: &super::config::RawLimiterFields,
+    resilience: &super::config::RawResilienceFields,
     at_prefix: &str,
 ) -> Result<(), ConfigError> {
     file_u64!(
@@ -395,11 +400,165 @@ fn admit_effects_fields(
         admit(
             set,
             "effects.rate_limiter.burst_capacity",
-            address,
+            address.clone(),
             ConfigSource::File,
             ConfigValue::F64(burst),
             &format!("{at_prefix}.rate_limiter.burst_capacity"),
         )?;
+    }
+
+    let rb = &resilience.breaker;
+    if let Some(mode) = &rb.mode {
+        admit(
+            set,
+            "effects.resilience.breaker.mode",
+            address.clone(),
+            ConfigSource::File,
+            ConfigValue::Text(mode.clone()),
+            &format!("{at_prefix}.resilience.breaker.mode"),
+        )?;
+    }
+    file_u64!(
+        set,
+        "effects.resilience.breaker.consecutive_failures",
+        address.clone(),
+        rb.consecutive_failures,
+        &format!("{at_prefix}.resilience.breaker.consecutive_failures")
+    );
+    file_u64!(
+        set,
+        "effects.resilience.breaker.count_window",
+        address.clone(),
+        rb.count_window,
+        &format!("{at_prefix}.resilience.breaker.count_window")
+    );
+    file_u64!(
+        set,
+        "effects.resilience.breaker.minimum_calls",
+        address.clone(),
+        rb.minimum_calls,
+        &format!("{at_prefix}.resilience.breaker.minimum_calls")
+    );
+    if let Some(value) = rb.failure_rate_threshold {
+        admit(
+            set,
+            "effects.resilience.breaker.failure_rate_threshold",
+            address.clone(),
+            ConfigSource::File,
+            ConfigValue::F64(value),
+            &format!("{at_prefix}.resilience.breaker.failure_rate_threshold"),
+        )?;
+    }
+    file_u64!(
+        set,
+        "effects.resilience.breaker.slow_call_duration_ms",
+        address.clone(),
+        rb.slow_call_duration_ms,
+        &format!("{at_prefix}.resilience.breaker.slow_call_duration_ms")
+    );
+    if let Some(value) = rb.slow_call_rate_threshold {
+        admit(
+            set,
+            "effects.resilience.breaker.slow_call_rate_threshold",
+            address.clone(),
+            ConfigSource::File,
+            ConfigValue::F64(value),
+            &format!("{at_prefix}.resilience.breaker.slow_call_rate_threshold"),
+        )?;
+    }
+    file_u64!(
+        set,
+        "effects.resilience.breaker.open_for_ms",
+        address.clone(),
+        rb.open_for_ms,
+        &format!("{at_prefix}.resilience.breaker.open_for_ms")
+    );
+    file_u64!(
+        set,
+        "effects.resilience.breaker.probes",
+        address.clone(),
+        rb.probes,
+        &format!("{at_prefix}.resilience.breaker.probes")
+    );
+    if let Some(value) = rb.rate_limited_counts_as_failure {
+        admit(
+            set,
+            "effects.resilience.breaker.rate_limited_counts_as_failure",
+            address.clone(),
+            ConfigSource::File,
+            ConfigValue::Bool(value),
+            &format!("{at_prefix}.resilience.breaker.rate_limited_counts_as_failure"),
+        )?;
+    }
+
+    let retry = &resilience.retry;
+    if let Some(kind) = &retry.kind {
+        admit(
+            set,
+            "effects.resilience.retry.kind",
+            address.clone(),
+            ConfigSource::File,
+            ConfigValue::Text(kind.clone()),
+            &format!("{at_prefix}.resilience.retry.kind"),
+        )?;
+    }
+    file_u64!(
+        set,
+        "effects.resilience.retry.fixed_delay_ms",
+        address.clone(),
+        retry.fixed_delay_ms,
+        &format!("{at_prefix}.resilience.retry.fixed_delay_ms")
+    );
+    file_u64!(
+        set,
+        "effects.resilience.retry.max_attempts",
+        address.clone(),
+        retry.max_attempts,
+        &format!("{at_prefix}.resilience.retry.max_attempts")
+    );
+    file_u64!(
+        set,
+        "effects.resilience.retry.max_backoff_ms",
+        address.clone(),
+        retry.max_backoff_ms,
+        &format!("{at_prefix}.resilience.retry.max_backoff_ms")
+    );
+    file_u64!(
+        set,
+        "effects.resilience.retry.attempt_start_window_ms",
+        address.clone(),
+        retry.attempt_start_window_ms,
+        &format!("{at_prefix}.resilience.retry.attempt_start_window_ms")
+    );
+
+    let resilience_limiter = &resilience.rate_limiter;
+    for (key, value, at) in [
+        (
+            "effects.resilience.rate_limiter.events_per_second",
+            resilience_limiter.events_per_second,
+            "events_per_second",
+        ),
+        (
+            "effects.resilience.rate_limiter.burst_capacity",
+            resilience_limiter.burst_capacity,
+            "burst_capacity",
+        ),
+        (
+            "effects.resilience.rate_limiter.cost_per_attempt",
+            resilience_limiter.cost_per_attempt,
+            "cost_per_attempt",
+        ),
+    ] {
+        if let Some(value) = value {
+            admit(
+                set,
+                key,
+                address.clone(),
+                ConfigSource::File,
+                ConfigValue::F64(value),
+                &format!("{at_prefix}.resilience.rate_limiter.{at}"),
+            )?;
+        }
     }
     Ok(())
 }
@@ -418,7 +577,7 @@ fn admit_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
             KnobType::U64 { .. } => env_var::<u64>(&name)
                 .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
                 .map(ConfigValue::U64),
-            KnobType::F64 { .. } => env_var::<f64>(&name)
+            KnobType::F64 { .. } | KnobType::F64Range { .. } => env_var::<f64>(&name)
                 .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
                 .map(ConfigValue::F64),
             KnobType::Text | KnobType::Token { .. } | KnobType::Path => env_var::<String>(&name)

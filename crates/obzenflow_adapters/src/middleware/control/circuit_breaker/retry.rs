@@ -28,8 +28,8 @@ use std::time::Duration;
 /// failure allowlist at materialisation and in the recovery session.
 #[derive(Debug, Clone)]
 pub struct Retry {
-    pub(super) policy: CircuitBreakerRetryPolicy,
-    pub(super) limits: RetryLimits,
+    pub(in crate::middleware::control) policy: CircuitBreakerRetryPolicy,
+    pub(in crate::middleware::control) limits: RetryLimits,
 }
 
 impl Retry {
@@ -62,18 +62,23 @@ impl Retry {
     }
 
     /// Total physical calls, including the first. Zero is invalid.
-    pub fn attempts(mut self, attempts: u32) -> Self {
-        assert!(
-            attempts > 0,
-            "circuit-breaker max_attempts must be greater than zero"
-        );
+    pub fn attempts(self, attempts: u32) -> Self {
+        assert!(attempts > 0, "max_attempts must be greater than zero");
+        self.max_attempts(attempts)
+    }
+
+    pub fn max_attempts(mut self, attempts: u32) -> Self {
         self.policy.max_attempts = attempts;
         self
     }
 
     /// Cap the breaker-generated delay between calls. A provider's rate-limit
     /// floor may be longer and is never shortened by this cap.
-    pub fn max_delay(mut self, delay: Duration) -> Self {
+    pub fn max_delay(self, delay: Duration) -> Self {
+        self.max_backoff(delay)
+    }
+
+    pub fn max_backoff(mut self, delay: Duration) -> Self {
         self.limits.max_single_delay = delay;
         self
     }
@@ -81,7 +86,11 @@ impl Retry {
     /// The window, measured from the first call, in which another physical
     /// call may start. It gates attempt starts; it does not cancel a call
     /// already in flight.
-    pub fn start_window(mut self, window: Duration) -> Self {
+    pub fn start_window(self, window: Duration) -> Self {
+        self.attempt_start_window(window)
+    }
+
+    pub fn attempt_start_window(mut self, window: Duration) -> Self {
         self.limits.max_attempt_start_window = window;
         self
     }
@@ -95,12 +104,12 @@ impl Retry {
 
 /// Retry limits enforced by the circuit breaker.
 #[derive(Debug, Clone)]
-pub(super) struct RetryLimits {
+pub(in crate::middleware::control) struct RetryLimits {
     /// Maximum breaker-generated delay between physical calls. A provider's
     /// rate-limit floor may be longer and is never shortened by this cap.
-    pub max_single_delay: Duration,
+    pub(in crate::middleware::control) max_single_delay: Duration,
     /// Maximum elapsed time at which another physical call may start.
-    pub max_attempt_start_window: Duration,
+    pub(in crate::middleware::control) max_attempt_start_window: Duration,
 }
 
 impl Default for RetryLimits {
@@ -114,15 +123,15 @@ impl Default for RetryLimits {
 
 /// Configuration for integrated per-event retry inside the circuit breaker.
 #[derive(Debug, Clone)]
-pub(super) struct CircuitBreakerRetryPolicy {
-    pub max_attempts: u32,
-    pub backoff: BackoffStrategy,
+pub(in crate::middleware::control) struct CircuitBreakerRetryPolicy {
+    pub(in crate::middleware::control) max_attempts: u32,
+    pub(in crate::middleware::control) backoff: BackoffStrategy,
     #[cfg(test)]
     pub(super) deterministic_jitter_samples: Option<Vec<f64>>,
 }
 
 impl CircuitBreakerRetryPolicy {
-    pub(crate) fn calculate_delay(&self, attempt: usize) -> Duration {
+    pub(in crate::middleware::control) fn calculate_delay(&self, attempt: usize) -> Duration {
         #[cfg(test)]
         if let Some(samples) = &self.deterministic_jitter_samples {
             let sample = samples
@@ -210,6 +219,7 @@ fn evidence_classification(
         FailureClassification::PartialSuccess { .. } => {
             CircuitBreakerHealthClassification::PartialSuccess
         }
+        FailureClassification::Ignored => CircuitBreakerHealthClassification::Ignored,
     }
 }
 
