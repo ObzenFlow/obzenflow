@@ -6,6 +6,7 @@
 //! with both provenance axes, so "what configuration was this run executed
 //! under" is answerable from the run directory alone.
 
+use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::journal::run_manifest::RunManifest;
@@ -16,6 +17,7 @@ use obzenflow_runtime::journal::RunSubstrateState;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
+    RATE_LIMITER_BURST_CAPACITY_KEY,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
@@ -97,6 +99,30 @@ fn build_flow_future(
         stages: {
             src = source!(Item => OneShotSource { emitted: false, writer_id: WriterId::from(StageId::new()) });
             snk = sink!(Item => NullSink);
+        },
+
+        topology: {
+            src |> snk;
+        }
+    }
+    .build(ctx)
+}
+
+fn build_rate_limited_flow_future(
+    base: std::path::PathBuf,
+    ctx: FlowBuildContext,
+) -> impl std::future::Future<
+    Output = Result<obzenflow_runtime::prelude::FlowHandle, obzenflow_dsl::dsl::FlowBuildFailure>,
+> {
+    let limiter = rate_limit(10.0);
+    flow! {
+        name: "effective_config_manifest_with_optional_limiter_burst",
+        journals: disk_journals(base),
+        middleware: [],
+
+        stages: {
+            src = source!(Item => OneShotSource { emitted: false, writer_id: WriterId::from(StageId::new()) });
+            snk = sink!(Item => NullSink, middleware: [limiter]);
         },
 
         topology: {
@@ -190,5 +216,43 @@ async fn manifest_records_default_provenance_for_a_hostless_build() {
             .count(),
         1,
         "identical per-stage resolutions collapse to one doc"
+    );
+}
+
+#[tokio::test]
+async fn manifest_records_a_file_supplied_optional_key_for_a_surviving_factory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut candidates = CandidateSet::default();
+    candidates
+        .admit(ScopedCandidate::unqualified(
+            RATE_LIMITER_BURST_CAPACITY_KEY,
+            obzenflow_core::config::ConfigScope::stage("snk"),
+            obzenflow_core::config::ConfigSource::File,
+            ConfigValue::F64(3.0),
+        ))
+        .expect("optional burst candidate admits");
+
+    let snapshot = Arc::new(ResolvedRuntimeConfig::new(candidates));
+    let handle =
+        build_rate_limited_flow_future(dir.path().to_path_buf(), FlowBuildContext::new(snapshot))
+            .await
+            .expect("the surviving limiter must consume its optional burst key");
+
+    let manifest = manifest_for(&handle);
+    let evidence = manifest
+        .effective_config
+        .expect("manifest must record effective config evidence");
+    let burst = evidence
+        .values
+        .iter()
+        .find(|doc| doc.key_path == RATE_LIMITER_BURST_CAPACITY_KEY)
+        .expect("the supplied optional value must appear in effective-config evidence");
+
+    assert_eq!(burst.scope, "stage:snk");
+    assert_eq!(burst.source, "file");
+    assert_eq!(burst.value, json!(3.0));
+    assert!(
+        burst.resolved_for.is_none(),
+        "a stage middleware value resolves for the stage itself"
     );
 }

@@ -1450,13 +1450,19 @@ mod tests {
 
     #[test]
     fn resilience_aggregate_rejects_standalone_effect_limiter_in_both_orders() {
-        let aggregate =
-            MiddlewareDeclaration::effect_resilience("effect_resilience", "effect_resilience");
-        let limiter = MiddlewareDeclaration::rate_limiter(
-            "rate_limiter",
-            "rate_limiter",
-            vec![MiddlewareSurfaceKind::Effect],
-        );
+        use crate::middleware::{CircuitBreaker, EffectResilience, RateLimiterBuilder};
+
+        let breaker_only_aggregate = EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .consecutive_failures(2)
+                .build()
+                .expect("breaker-only aggregate configuration"),
+        )
+        .build()
+        .expect("breaker-only aggregate factory");
+        let standalone_limiter = RateLimiterBuilder::new(10.0).build();
+        let aggregate = breaker_only_aggregate.declaration();
+        let limiter = standalone_limiter.declaration();
 
         for declarations in [
             vec![aggregate.clone(), limiter.clone()],

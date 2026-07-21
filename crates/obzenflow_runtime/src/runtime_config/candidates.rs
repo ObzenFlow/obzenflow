@@ -265,16 +265,50 @@ pub fn address_admitted(target: KnobTarget, address: &ConfigAddress) -> bool {
     specificity <= max
 }
 
+/// Build-only applicability supplied by surviving factories, independently of
+/// the values those factories emit as DSL defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ConfigConsumptionIndex {
+    stage_consumers: BTreeMap<String, BTreeSet<obzenflow_core::StageKey>>,
+    effect_consumers: BTreeMap<String, BTreeSet<(obzenflow_core::StageKey, EffectType)>>,
+}
+
+impl ConfigConsumptionIndex {
+    fn consume_stage(
+        &mut self,
+        key_path: impl Into<String>,
+        stage: impl Into<obzenflow_core::StageKey>,
+    ) {
+        self.stage_consumers
+            .entry(key_path.into())
+            .or_default()
+            .insert(stage.into());
+    }
+
+    fn consume_effect(
+        &mut self,
+        key_path: impl Into<String>,
+        stage: impl Into<obzenflow_core::StageKey>,
+        effect_type: impl Into<EffectType>,
+    ) {
+        self.effect_consumers
+            .entry(key_path.into())
+            .or_default()
+            .insert((stage.into(), effect_type.into()));
+    }
+}
+
 /// DSL-declared candidates collected during flow build (§4a: declaration-
-/// site scope, one candidate per knob and site; source is always `Dsl`).
+/// site scope, one candidate per knob and site; source is always `Dsl`). The
+/// private consumption index travels in the same transient carrier but is not
+/// itself a value candidate or runtime registry.
 #[derive(Debug, Clone, Default)]
 pub struct DslCandidates {
     entries: Vec<ScopedCandidate>,
     // Build-only applicability supplied by surviving factories. This is
     // deliberately separate from emitted values: an optional or inactive-mode
     // key can be consumable without inventing a DSL candidate for it.
-    stage_consumers: BTreeMap<String, BTreeSet<obzenflow_core::StageKey>>,
-    effect_consumers: BTreeMap<String, BTreeSet<(obzenflow_core::StageKey, EffectType)>>,
+    consumption: ConfigConsumptionIndex,
 }
 
 impl DslCandidates {
@@ -314,10 +348,7 @@ impl DslCandidates {
         key_path: impl Into<String>,
         stage: impl Into<obzenflow_core::StageKey>,
     ) {
-        self.stage_consumers
-            .entry(key_path.into())
-            .or_default()
-            .insert(stage.into());
+        self.consumption.consume_stage(key_path, stage);
     }
 
     /// Declare that one surviving factory consumes `key_path` at an exact
@@ -330,20 +361,18 @@ impl DslCandidates {
         stage: impl Into<obzenflow_core::StageKey>,
         effect_type: impl Into<EffectType>,
     ) {
-        self.effect_consumers
-            .entry(key_path.into())
-            .or_default()
-            .insert((stage.into(), effect_type.into()));
+        self.consumption
+            .consume_effect(key_path, stage, effect_type);
     }
 
     pub(crate) fn stage_consumers(&self) -> &BTreeMap<String, BTreeSet<obzenflow_core::StageKey>> {
-        &self.stage_consumers
+        &self.consumption.stage_consumers
     }
 
     pub(crate) fn effect_consumers(
         &self,
     ) -> &BTreeMap<String, BTreeSet<(obzenflow_core::StageKey, EffectType)>> {
-        &self.effect_consumers
+        &self.consumption.effect_consumers
     }
 
     pub fn is_empty(&self) -> bool {
@@ -455,6 +484,35 @@ mod tests {
                 if address == ConfigAddress::effect("payments", "payments.authorize")
         ));
         assert_eq!(set.addresses_for(key).count(), 2);
+    }
+
+    #[test]
+    fn consumption_index_is_an_order_independent_idempotent_set_union() {
+        let key = crate::runtime_config::RATE_LIMITER_BURST_CAPACITY_KEY;
+        let mut first = DslCandidates::default();
+        first.declare_stage_consumption(key, "source");
+        first.declare_stage_consumption(key, "source");
+        first.declare_effect_consumption(key, "payments", "payments.refund");
+        first.declare_effect_consumption(key, "payments", "payments.authorize");
+
+        let mut reordered = DslCandidates::default();
+        reordered.declare_effect_consumption(key, "payments", "payments.authorize");
+        reordered.declare_effect_consumption(key, "payments", "payments.refund");
+        reordered.declare_stage_consumption(key, "source");
+
+        assert_eq!(first.consumption, reordered.consumption);
+        assert_eq!(first.stage_consumers()[key].len(), 1);
+        assert_eq!(first.effect_consumers()[key].len(), 2);
+    }
+
+    #[test]
+    fn declaring_a_default_does_not_imply_a_consumption_point() {
+        let key = crate::runtime_config::RATE_LIMITER_EVENTS_PER_SECOND_KEY;
+        let mut dsl = DslCandidates::default();
+        dsl.declare_for_effect(key, "payments", "payments.authorize", ConfigValue::F64(5.0));
+
+        assert!(dsl.effect_consumers().get(key).is_none());
+        assert_eq!(dsl.entries().len(), 1);
     }
 
     #[test]

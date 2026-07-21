@@ -1316,6 +1316,11 @@ mod tests {
         assert!(without_burst
             .effect_value(burst_key, &stage, &effect_type)
             .is_none());
+        assert!(without_burst
+            .manifest_evidence()
+            .values
+            .iter()
+            .all(|row| row.key_path != burst_key));
 
         let mut file = CandidateSet::default();
         file.admit(ScopedCandidate {
@@ -1335,6 +1340,26 @@ mod tests {
             .expect("the surviving limiter consumes the optional burst key");
         assert_eq!(burst.value.as_f64(), Some(25.0));
         assert_eq!(burst.meta.source, ConfigSource::File);
+        let exact_row = with_file_burst
+            .manifest_evidence()
+            .values
+            .into_iter()
+            .find(|row| row.key_path == burst_key)
+            .expect("the supplied optional value should use the normal evidence projection");
+        assert_eq!(exact_row.source, "file");
+        assert_eq!(
+            exact_row.winner_subject,
+            Some(ConfigSubject::Effect {
+                effect_type: effect_type.clone(),
+            })
+        );
+        assert_eq!(
+            exact_row.resolved_for,
+            Some(obzenflow_core::config::ResolvedForDoc::Effect {
+                stage: stage.as_str().to_string(),
+                effect_type: effect_type.as_str().to_string(),
+            })
+        );
 
         let mut broadcast_file = CandidateSet::default();
         broadcast_file
@@ -1356,6 +1381,111 @@ mod tests {
                 .and_then(|resolved| resolved.value.as_f64()),
             Some(30.0)
         );
+        let broadcast_row = with_broadcast_burst
+            .manifest_evidence()
+            .values
+            .into_iter()
+            .find(|row| row.key_path == burst_key)
+            .expect("the inherited optional value should retain exact attribution");
+        assert_eq!(broadcast_row.source, "file");
+        assert_eq!(
+            broadcast_row.winner_subject,
+            Some(ConfigSubject::Unqualified)
+        );
+        assert_eq!(
+            broadcast_row.resolved_for,
+            Some(obzenflow_core::config::ResolvedForDoc::Effect {
+                stage: stage.as_str().to_string(),
+                effect_type: effect_type.as_str().to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn attached_and_unattached_effects_remain_distinct_for_broadcast_and_exact_addresses() {
+        let key = crate::runtime_config::RATE_LIMITER_BURST_CAPACITY_KEY;
+        let stage = StageKey::from("payments");
+        let attached = EffectType::from("payments.authorize");
+        let unattached = EffectType::from("payments.refund");
+        let mut dsl = crate::runtime_config::DslCandidates::default();
+        dsl.declare_effect_consumption(key, stage.clone(), attached.clone());
+
+        let mut broadcast = CandidateSet::default();
+        broadcast
+            .admit(ScopedCandidate::unqualified(
+                key,
+                ConfigScope::stage(stage.clone()),
+                ConfigSource::File,
+                ConfigValue::F64(20.0),
+            ))
+            .unwrap();
+        let broadcast_effective = materialize_flow_config(
+            &ResolvedRuntimeConfig::new(broadcast),
+            effect_context(
+                &[("payments", &["payments.authorize", "payments.refund"])],
+                dsl.clone(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            broadcast_effective
+                .effect_value(key, &stage, &attached)
+                .and_then(|resolved| resolved.value.as_f64()),
+            Some(20.0)
+        );
+        assert!(broadcast_effective
+            .effect_value(key, &stage, &unattached)
+            .is_none());
+        assert_eq!(
+            broadcast_effective
+                .manifest_evidence()
+                .values
+                .into_iter()
+                .filter(|row| row.key_path == key)
+                .count(),
+            1
+        );
+
+        let exact_snapshot = |effect_type: EffectType| {
+            let mut candidates = CandidateSet::default();
+            candidates
+                .admit(ScopedCandidate {
+                    key_path: key.to_string(),
+                    address: ConfigAddress::effect(stage.clone(), effect_type),
+                    source: ConfigSource::File,
+                    value: ConfigValue::F64(25.0),
+                })
+                .unwrap();
+            ResolvedRuntimeConfig::new(candidates)
+        };
+        let exact_attached = materialize_flow_config(
+            &exact_snapshot(attached.clone()),
+            effect_context(
+                &[("payments", &["payments.authorize", "payments.refund"])],
+                dsl.clone(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            exact_attached
+                .effect_value(key, &stage, &attached)
+                .and_then(|resolved| resolved.value.as_f64()),
+            Some(25.0)
+        );
+
+        let error = materialize_flow_config(
+            &exact_snapshot(unattached.clone()),
+            effect_context(
+                &[("payments", &["payments.authorize", "payments.refund"])],
+                dsl,
+            ),
+        )
+        .expect_err("a declared but unattached exact subject must remain rejected");
+        assert!(matches!(
+            error,
+            ConfigResolveError::UnattachedEffectSubject { effect_type, .. }
+                if effect_type == unattached.as_str()
+        ));
     }
 
     #[test]

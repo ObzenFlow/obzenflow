@@ -38,7 +38,8 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::EffectType;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::runtime_config::{
-    materialize_flow_config, DslCandidates, FlowResolutionContext, ResolvedRuntimeConfig,
+    materialize_flow_config, ConfigResolveError, DslCandidates, FlowEffectiveConfig,
+    FlowResolutionContext, ResolvedRuntimeConfig,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,6 +76,23 @@ pub(super) fn test_stage_config_for_factories_with_snapshot(
     factories: &[&dyn MiddlewareFactory],
     snapshot: &ResolvedRuntimeConfig,
 ) -> StageConfig {
+    let effective_config = test_effective_config_for_factories_with_snapshot(factories, snapshot)
+        .expect("middleware defaults should resolve for the test effect");
+
+    StageConfig {
+        stage_id: StageId::new(),
+        name: "retrying_breaker_test".to_string(),
+        flow_name: "retrying_breaker_test_flow".to_string(),
+        cycle_guard: None,
+        lineage: obzenflow_core::config::LineagePolicy::default(),
+        effective_config: Arc::new(effective_config),
+    }
+}
+
+pub(super) fn test_effective_config_for_factories_with_snapshot(
+    factories: &[&dyn MiddlewareFactory],
+    snapshot: &ResolvedRuntimeConfig,
+) -> Result<FlowEffectiveConfig, Box<ConfigResolveError>> {
     let stage = StageKey::from("retrying_breaker_test");
     let effect_type = EffectType::from("effect.retry");
     let mut dsl = DslCandidates::default();
@@ -91,7 +109,7 @@ pub(super) fn test_stage_config_for_factories_with_snapshot(
             );
         }
     }
-    let effective_config = materialize_flow_config(
+    materialize_flow_config(
         snapshot,
         FlowResolutionContext {
             flow_name: "retrying_breaker_test_flow".to_string(),
@@ -101,16 +119,7 @@ pub(super) fn test_stage_config_for_factories_with_snapshot(
             dsl,
         },
     )
-    .expect("middleware defaults should resolve for the test effect");
-
-    StageConfig {
-        stage_id: StageId::new(),
-        name: "retrying_breaker_test".to_string(),
-        flow_name: "retrying_breaker_test_flow".to_string(),
-        cycle_guard: None,
-        lineage: obzenflow_core::config::LineagePolicy::default(),
-        effective_config: Arc::new(effective_config),
-    }
+    .map_err(Box::new)
 }
 
 pub(super) fn materialize_effect_attachment(

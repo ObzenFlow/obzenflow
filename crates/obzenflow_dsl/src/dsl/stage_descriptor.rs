@@ -1629,30 +1629,15 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         // multi-effect stage must name the protected effect per entry.
         let mut shell_specs = Vec::new();
         let mut transitional_policy_specs = Vec::new();
-        let mut effect_observers = StageObserverSet::default();
+        let mut pending_effect_observer_specs = Vec::new();
         for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
             let declaration = spec.factory.declaration();
             if declaration.is_observer() && declaration.supports(MiddlewareSurfaceKind::Effect) {
-                let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
-                materialize_effect_observers_for_declarations(
-                    &mut effect_observers,
-                    spec.factory.as_ref(),
-                    EffectObserverMaterialization {
-                        config: &config,
-                        stage_type: StageType::Transform,
-                        control_middleware: &control_middleware,
-                        origin: &origin,
-                        declaration_index: MiddlewareDeclarationIndex::resolved(middleware_index),
-                        effect_declarations: &effect_declarations,
-                    },
-                )?;
-                if declaration_has_stage_observer_surface(&declaration, StageType::Transform) {
-                    shell_specs.push(spec);
-                }
+                pending_effect_observer_specs.push((middleware_index, spec));
             } else if declaration.is_control() {
                 transitional_policy_specs.push((middleware_index, spec));
             } else {
-                shell_specs.push(spec);
+                shell_specs.push((middleware_index, spec));
             }
         }
 
@@ -1697,6 +1682,29 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             )
             .map_err(|error| error.to_string())?;
         }
+
+        let mut effect_observers = StageObserverSet::default();
+        for (middleware_index, spec) in pending_effect_observer_specs {
+            let declaration = spec.factory.declaration();
+            let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+            materialize_effect_observers_for_declarations(
+                &mut effect_observers,
+                spec.factory.as_ref(),
+                EffectObserverMaterialization {
+                    config: &config,
+                    stage_type: StageType::Transform,
+                    control_middleware: &control_middleware,
+                    origin: &origin,
+                    declaration_index: MiddlewareDeclarationIndex::resolved(middleware_index),
+                    effect_declarations: &effect_declarations,
+                },
+            )?;
+            if declaration_has_stage_observer_surface(&declaration, StageType::Transform) {
+                shell_specs.push((middleware_index, spec));
+            }
+        }
+        shell_specs.sort_by_key(|(middleware_index, _)| *middleware_index);
+        let shell_specs = shell_specs.into_iter().map(|(_, spec)| spec).collect();
 
         let mut effect_chains: std::collections::HashMap<
             &'static str,

@@ -535,23 +535,57 @@ mod tests {
     }
 
     #[test]
-    fn dsl_defaults_preserve_optional_burst_semantics() {
+    fn dsl_defaults_and_consumption_preserve_optional_burst_semantics() {
         use obzenflow_runtime::runtime_config::{
             RATE_LIMITER_BURST_CAPACITY_KEY, RATE_LIMITER_EVENTS_PER_SECOND_KEY,
         };
 
-        let implicit = RateLimiterFactory::new(10.0).dsl_config_defaults();
-        assert_eq!(implicit.len(), 1);
-        assert_eq!(implicit[0].key_path, RATE_LIMITER_EVENTS_PER_SECOND_KEY);
+        let implicit_factory = RateLimiterFactory::new(10.0);
+        let implicit_defaults = implicit_factory.dsl_config_defaults();
+        let implicit_consumed: BTreeSet<_> = implicit_factory
+            .consumed_config_keys()
+            .into_iter()
+            .collect();
+        assert_eq!(implicit_defaults.len(), 1);
+        assert_eq!(
+            implicit_defaults[0].key_path,
+            RATE_LIMITER_EVENTS_PER_SECOND_KEY
+        );
+        assert_eq!(
+            implicit_consumed,
+            BTreeSet::from([
+                RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+                RATE_LIMITER_BURST_CAPACITY_KEY,
+            ])
+        );
+        assert!(implicit_defaults
+            .iter()
+            .all(|default| implicit_consumed.contains(default.key_path)));
 
-        let explicit = RateLimiterFactory::new(10.0)
-            .with_burst(25.0)
-            .dsl_config_defaults();
-        assert_eq!(explicit.len(), 2);
-        assert!(explicit.iter().any(|default| {
+        let explicit_factory = RateLimiterFactory::new(10.0).with_burst(25.0);
+        let explicit_defaults = explicit_factory.dsl_config_defaults();
+        let explicit_consumed: BTreeSet<_> = explicit_factory
+            .consumed_config_keys()
+            .into_iter()
+            .collect();
+        assert_eq!(explicit_defaults.len(), 2);
+        assert!(explicit_defaults.iter().any(|default| {
             default.key_path == RATE_LIMITER_BURST_CAPACITY_KEY
                 && default.value.as_f64() == Some(25.0)
         }));
+        assert!(explicit_defaults
+            .iter()
+            .all(|default| explicit_consumed.contains(default.key_path)));
+
+        let boxed: Box<dyn MiddlewareFactory> = Box::new(implicit_factory);
+        assert_eq!(
+            boxed
+                .consumed_config_keys()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            implicit_consumed,
+            "boxed forwarding must preserve the concrete factory's optional-key override"
+        );
     }
 
     #[test]

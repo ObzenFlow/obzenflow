@@ -7,7 +7,7 @@
 
 use super::support::*;
 use crate::middleware::{EffectResilience, RateLimiter};
-use obzenflow_core::config::{ConfigAddress, ConfigSource};
+use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSource};
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, CircuitBreakerRetryStopReason, MiddlewareLifecycle, ObservabilityPayload,
 };
@@ -16,9 +16,15 @@ use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
     RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY, RESILIENCE_BREAKER_COUNT_WINDOW_KEY,
     RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY, RESILIENCE_BREAKER_MINIMUM_CALLS_KEY,
-    RESILIENCE_BREAKER_MODE_KEY, RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY,
+    RESILIENCE_BREAKER_MODE_KEY, RESILIENCE_BREAKER_OPEN_FOR_MS_KEY, RESILIENCE_BREAKER_PROBES_KEY,
+    RESILIENCE_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
+    RESILIENCE_BREAKER_SLOW_CALL_DURATION_MS_KEY, RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
+    RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY, RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY,
+    RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY, RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY,
     RESILIENCE_RETRY_FIXED_DELAY_MS_KEY, RESILIENCE_RETRY_KIND_KEY,
+    RESILIENCE_RETRY_MAX_ATTEMPTS_KEY, RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY,
 };
+use std::collections::BTreeSet;
 
 fn scripted_operation(
     calls: Arc<AtomicUsize>,
@@ -79,6 +85,33 @@ fn file_effect_snapshot(entries: &[(&str, ConfigValue)]) -> ResolvedRuntimeConfi
     ResolvedRuntimeConfig::new(candidates)
 }
 
+fn file_stage_snapshot(entries: &[(&str, ConfigValue)]) -> ResolvedRuntimeConfig {
+    let mut candidates = CandidateSet::default();
+    for (key_path, value) in entries {
+        candidates
+            .admit(ScopedCandidate::unqualified(
+                *key_path,
+                ConfigScope::stage("retrying_breaker_test"),
+                ConfigSource::File,
+                value.clone(),
+            ))
+            .expect("test file candidate should be valid");
+    }
+    ResolvedRuntimeConfig::new(candidates)
+}
+
+fn assert_defaults_are_consumed(factory: &dyn crate::middleware::MiddlewareFactory) {
+    let consumed: BTreeSet<_> = factory.consumed_config_keys().into_iter().collect();
+    for default in factory.dsl_config_defaults() {
+        assert!(
+            consumed.contains(default.key_path),
+            "factory '{}' emitted default '{}' without declaring it consumable",
+            factory.label(),
+            default.key_path
+        );
+    }
+}
+
 #[test]
 fn consumed_keys_cover_optional_and_mode_dependent_fields_without_creating_components() {
     let breaker_only = EffectResilience::with_breaker(
@@ -89,11 +122,21 @@ fn consumed_keys_cover_optional_and_mode_dependent_fields_without_creating_compo
     )
     .build()
     .expect("breaker-only aggregate");
-    let breaker_keys = breaker_only.consumed_config_keys();
-    assert!(breaker_keys.contains(&RESILIENCE_BREAKER_COUNT_WINDOW_KEY));
-    assert!(breaker_keys.contains(&RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY));
-    assert!(!breaker_keys.contains(&RESILIENCE_RETRY_KIND_KEY));
-    assert!(!breaker_keys.contains(&RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY));
+    assert_defaults_are_consumed(breaker_only.as_ref());
+    let breaker_keys: BTreeSet<_> = breaker_only.consumed_config_keys().into_iter().collect();
+    let expected_breaker_keys = BTreeSet::from([
+        RESILIENCE_BREAKER_MODE_KEY,
+        RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY,
+        RESILIENCE_BREAKER_COUNT_WINDOW_KEY,
+        RESILIENCE_BREAKER_MINIMUM_CALLS_KEY,
+        RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
+        RESILIENCE_BREAKER_SLOW_CALL_DURATION_MS_KEY,
+        RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
+        RESILIENCE_BREAKER_OPEN_FOR_MS_KEY,
+        RESILIENCE_BREAKER_PROBES_KEY,
+        RESILIENCE_BREAKER_RATE_LIMITED_COUNTS_AS_FAILURE_KEY,
+    ]);
+    assert_eq!(breaker_keys, expected_breaker_keys);
 
     let complete = EffectResilience::with_breaker(
         CircuitBreaker::builder()
@@ -105,9 +148,158 @@ fn consumed_keys_cover_optional_and_mode_dependent_fields_without_creating_compo
     .rate_limit_each_attempt(RateLimiter::per_second(10.0).expect("test limiter"))
     .build()
     .expect("complete aggregate");
-    let complete_keys = complete.consumed_config_keys();
-    assert!(complete_keys.contains(&RESILIENCE_RETRY_FIXED_DELAY_MS_KEY));
-    assert!(complete_keys.contains(&RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY));
+    assert_defaults_are_consumed(complete.as_ref());
+    let complete_keys: BTreeSet<_> = complete.consumed_config_keys().into_iter().collect();
+    let expected_complete_keys = expected_breaker_keys
+        .into_iter()
+        .chain([
+            RESILIENCE_RETRY_KIND_KEY,
+            RESILIENCE_RETRY_FIXED_DELAY_MS_KEY,
+            RESILIENCE_RETRY_MAX_ATTEMPTS_KEY,
+            RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY,
+            RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY,
+            RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+            RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY,
+            RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY,
+        ])
+        .collect();
+    assert_eq!(complete_keys, expected_complete_keys);
+
+    let other_shapes = [
+        EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .count_window(10)
+                .minimum_calls(5)
+                .failure_rate_threshold(0.5)
+                .build()
+                .expect("rate-based config"),
+        )
+        .build()
+        .expect("rate-based aggregate"),
+        EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .consecutive_failures(2)
+                .build()
+                .expect("fixed retry breaker"),
+        )
+        .retry(Retry::fixed(Duration::from_millis(5)))
+        .build()
+        .expect("fixed retry aggregate"),
+        EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .consecutive_failures(2)
+                .build()
+                .expect("explicit burst breaker"),
+        )
+        .rate_limit_each_attempt(
+            RateLimiter::per_second(10.0)
+                .expect("limiter")
+                .with_burst(25.0)
+                .expect("explicit burst"),
+        )
+        .build()
+        .expect("explicit burst aggregate"),
+    ];
+    for factory in other_shapes {
+        assert_defaults_are_consumed(factory.as_ref());
+    }
+}
+
+#[test]
+fn exact_configuration_cannot_create_omitted_retry_or_limiter_components() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(2)
+            .build()
+            .expect("breaker-only config"),
+    )
+    .build()
+    .expect("breaker-only aggregate");
+
+    for (key_path, value) in [
+        (
+            RESILIENCE_RETRY_KIND_KEY,
+            ConfigValue::Text("fixed".to_string()),
+        ),
+        (
+            RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY,
+            ConfigValue::F64(3.0),
+        ),
+    ] {
+        let snapshot = file_effect_snapshot(&[(key_path, value)]);
+        let error =
+            test_effective_config_for_factories_with_snapshot(&[factory.as_ref()], &snapshot)
+                .expect_err("an exact subject cannot attach a structurally omitted component");
+        assert!(matches!(
+            *error,
+            obzenflow_runtime::runtime_config::ConfigResolveError::UnattachedEffectSubject {
+                key_path: rejected,
+                ..
+            } if rejected == key_path
+        ));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stage_broadcast_configuration_cannot_create_omitted_retry_or_limiter_components() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(2)
+            .build()
+            .expect("breaker-only config"),
+    )
+    .build()
+    .expect("breaker-only aggregate");
+    let snapshot = file_stage_snapshot(&[
+        (
+            RESILIENCE_RETRY_KIND_KEY,
+            ConfigValue::Text("fixed".to_string()),
+        ),
+        (RESILIENCE_RETRY_FIXED_DELAY_MS_KEY, ConfigValue::U64(1)),
+        (
+            RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+            ConfigValue::F64(100.0),
+        ),
+        (
+            RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY,
+            ConfigValue::F64(10.0),
+        ),
+        (
+            RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY,
+            ConfigValue::F64(1.0),
+        ),
+    ]);
+    let effective =
+        test_effective_config_for_factories_with_snapshot(&[factory.as_ref()], &snapshot)
+            .expect("broadcast values for absent components have no resolution point");
+    let stage = StageKey::from("retrying_breaker_test");
+    let effect_type = obzenflow_core::event::EffectType::from("effect.retry");
+    for key_path in [
+        RESILIENCE_RETRY_KIND_KEY,
+        RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+    ] {
+        assert!(effective
+            .effect_value(key_path, &stage, &effect_type)
+            .is_none());
+    }
+
+    let (attachment, control, stage_id) = materialized_resilience_with_snapshot(factory, &snapshot);
+    let boundary = boundary_with_chain(vec![attachment]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let report = boundary
+        .around_repeatable_effect(
+            &identity_at(100),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| {
+                Err(EffectError::Timeout("no retry component".to_string()))
+            }),
+        )
+        .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(retry_delays(&report).is_empty());
+    assert!(control
+        .effect_rate_limiter_snapshotters(&stage_id)
+        .is_empty());
 }
 
 #[tokio::test]
@@ -213,6 +405,65 @@ async fn file_configuration_can_switch_rate_based_breaker_to_consecutive() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn file_configuration_can_supply_omitted_rate_based_slow_call_fields() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .count_window(2)
+            .minimum_calls(1)
+            .failure_rate_threshold(1.0)
+            .build()
+            .expect("rate-based builder without slow-call defaults"),
+    )
+    .build()
+    .expect("switchable aggregate");
+    let snapshot = file_effect_snapshot(&[
+        (
+            RESILIENCE_BREAKER_SLOW_CALL_DURATION_MS_KEY,
+            ConfigValue::U64(10),
+        ),
+        (
+            RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
+            ConfigValue::F64(1.0),
+        ),
+    ]);
+    let (attachment, _, _) = materialized_resilience_with_snapshot(factory, &snapshot);
+    let boundary = boundary_with_chain(vec![attachment]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let slow_calls = calls.clone();
+
+    let first = boundary
+        .around_repeatable_effect(
+            &identity_at(105),
+            &data_event(),
+            RepeatableEffectOperation::new(move || {
+                slow_calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    tokio::time::sleep(Duration::from_millis(11)).await;
+                    Ok(Vec::new())
+                }
+            }),
+        )
+        .await;
+    assert!(matches!(
+        first.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+
+    let rejected = boundary
+        .around_repeatable_effect(
+            &identity_at(106),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| Ok(Vec::new())),
+        )
+        .await;
+    assert!(matches!(
+        rejected.outcome,
+        EffectBoundaryOutcome::Aborted(_)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
 async fn file_configuration_can_switch_retry_backoff_kind() {
     let factory = EffectResilience::with_breaker(
         CircuitBreaker::builder()
@@ -252,6 +503,103 @@ async fn file_configuration_can_switch_retry_backoff_kind() {
         EffectBoundaryOutcome::Executed(Ok(_))
     ));
     assert_eq!(retry_delays(&report), [7]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn file_configuration_can_switch_fixed_retry_to_exponential() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(3)
+            .build()
+            .expect("retry switch breaker"),
+    )
+    .retry(Retry::fixed(Duration::from_millis(7)).max_attempts(2))
+    .build()
+    .expect("switchable retry aggregate");
+    let snapshot = file_effect_snapshot(&[(
+        RESILIENCE_RETRY_KIND_KEY,
+        ConfigValue::Text("exponential".to_string()),
+    )]);
+    let (attachment, _, _) = materialized_resilience_with_snapshot(factory, &snapshot);
+    let boundary = boundary_with_chain(vec![attachment]);
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let report = boundary
+        .around_repeatable_effect(
+            &identity_at(106),
+            &data_event(),
+            scripted_operation(calls, |call| {
+                if call == 1 {
+                    Err(EffectError::Timeout("retry once".to_string()))
+                } else {
+                    Ok(Vec::new())
+                }
+            }),
+        )
+        .await;
+    assert!(matches!(
+        report.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+    let delays = retry_delays(&report);
+    assert_eq!(delays.len(), 1);
+    assert!(
+        (225..=275).contains(&delays[0]),
+        "the switched exponential retry should apply ±10% jitter to its 250 ms initial delay, got {} ms",
+        delays[0]
+    );
+}
+
+async fn assert_resilience_limiter_uses_supplied_implicit_burst(snapshot: &ResolvedRuntimeConfig) {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(10)
+            .build()
+            .expect("burst proof breaker"),
+    )
+    .rate_limit_each_attempt(RateLimiter::per_second(1.0).expect("implicit-burst limiter"))
+    .build()
+    .expect("burst proof aggregate");
+    let (attachment, control, stage_id) = materialized_resilience_with_snapshot(factory, snapshot);
+    let boundary = boundary_with_chain(vec![attachment]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let started = tokio::time::Instant::now();
+
+    for input_seq in 201..204 {
+        let report = boundary
+            .around_repeatable_effect(
+                &identity_at(input_seq),
+                &data_event(),
+                scripted_operation(calls.clone(), |_| Ok(Vec::new())),
+            )
+            .await;
+        assert!(matches!(
+            report.outcome,
+            EffectBoundaryOutcome::Executed(Ok(_))
+        ));
+    }
+
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn exact_file_configuration_supplies_resilience_limiter_implicit_burst() {
+    let snapshot = file_effect_snapshot(&[(
+        RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY,
+        ConfigValue::F64(3.0),
+    )]);
+    assert_resilience_limiter_uses_supplied_implicit_burst(&snapshot).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn stage_broadcast_configuration_supplies_resilience_limiter_implicit_burst() {
+    let snapshot = file_stage_snapshot(&[(
+        RESILIENCE_RATE_LIMITER_BURST_CAPACITY_KEY,
+        ConfigValue::F64(3.0),
+    )]);
+    assert_resilience_limiter_uses_supplied_implicit_burst(&snapshot).await;
 }
 
 fn retry_delays(report: &obzenflow_runtime::effects::EffectBoundaryReport) -> Vec<u64> {
