@@ -12,7 +12,7 @@
 
 use super::config::{ConfigError, FlowConfig, RawFileStartupConfig};
 use crate::env::{env_bool, env_var};
-use obzenflow_core::config::{ConfigScope, ConfigSource};
+use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSource};
 use obzenflow_runtime::runtime_config::{
     knob_registry, CandidateSet, ConfigResolveError, ConfigValue, KnobType, ResolvedRuntimeConfig,
     ScopedCandidate,
@@ -34,14 +34,14 @@ pub(crate) fn build_runtime_config_snapshot(
 fn admit(
     set: &mut CandidateSet,
     key_path: &str,
-    scope: ConfigScope,
+    address: impl Into<ConfigAddress>,
     source: ConfigSource,
     value: ConfigValue,
     at: &str,
 ) -> Result<(), ConfigError> {
     set.admit(ScopedCandidate {
         key_path: key_path.to_string(),
-        scope,
+        address: address.into(),
         source,
         value,
     })
@@ -271,26 +271,39 @@ fn admit_file_candidates(
     // [effects] global/flow/stages.
     admit_effects_fields(
         set,
-        ConfigScope::Global,
+        ConfigScope::Global.into(),
         &file.effects.circuit_breaker,
         &file.effects.rate_limiter,
+        &file.effects.resilience,
         "effects",
     )?;
     admit_effects_fields(
         set,
-        ConfigScope::Flow,
+        ConfigScope::Flow.into(),
         &file.effects.flow.circuit_breaker,
         &file.effects.flow.rate_limiter,
+        &file.effects.flow.resilience,
         "effects.flow",
     )?;
     for (stage, entry) in &file.effects.stages {
         admit_effects_fields(
             set,
-            ConfigScope::stage(stage.as_str()),
+            ConfigScope::stage(stage.as_str()).into(),
             &entry.circuit_breaker,
             &entry.rate_limiter,
+            &entry.resilience,
             &format!("effects.stages.{stage}"),
         )?;
+        for (effect_type, exact) in &entry.by_type {
+            admit_effects_fields(
+                set,
+                ConfigAddress::effect(stage.as_str(), effect_type.as_str()),
+                &exact.circuit_breaker,
+                &exact.rate_limiter,
+                &exact.resilience,
+                &format!("effects.stages.{stage}.by_type.\"{effect_type}\""),
+            )?;
+        }
     }
 
     // [ai.models].
@@ -360,15 +373,16 @@ fn admit_file_candidates(
 
 fn admit_effects_fields(
     set: &mut CandidateSet,
-    scope: ConfigScope,
+    address: ConfigAddress,
     breaker: &super::config::RawBreakerFields,
     limiter: &super::config::RawLimiterFields,
+    resilience: &super::config::RawResilienceFields,
     at_prefix: &str,
 ) -> Result<(), ConfigError> {
     file_u64!(
         set,
         "effects.circuit_breaker.threshold",
-        scope.clone(),
+        address.clone(),
         breaker.threshold,
         &format!("{at_prefix}.circuit_breaker.threshold")
     );
@@ -376,7 +390,7 @@ fn admit_effects_fields(
         admit(
             set,
             "effects.rate_limiter.events_per_second",
-            scope.clone(),
+            address.clone(),
             ConfigSource::File,
             ConfigValue::F64(rate),
             &format!("{at_prefix}.rate_limiter.events_per_second"),
@@ -386,11 +400,165 @@ fn admit_effects_fields(
         admit(
             set,
             "effects.rate_limiter.burst_capacity",
-            scope,
+            address.clone(),
             ConfigSource::File,
             ConfigValue::F64(burst),
             &format!("{at_prefix}.rate_limiter.burst_capacity"),
         )?;
+    }
+
+    let rb = &resilience.breaker;
+    if let Some(mode) = &rb.mode {
+        admit(
+            set,
+            "effects.resilience.breaker.mode",
+            address.clone(),
+            ConfigSource::File,
+            ConfigValue::Text(mode.clone()),
+            &format!("{at_prefix}.resilience.breaker.mode"),
+        )?;
+    }
+    file_u64!(
+        set,
+        "effects.resilience.breaker.consecutive_failures",
+        address.clone(),
+        rb.consecutive_failures,
+        &format!("{at_prefix}.resilience.breaker.consecutive_failures")
+    );
+    file_u64!(
+        set,
+        "effects.resilience.breaker.count_window",
+        address.clone(),
+        rb.count_window,
+        &format!("{at_prefix}.resilience.breaker.count_window")
+    );
+    file_u64!(
+        set,
+        "effects.resilience.breaker.minimum_calls",
+        address.clone(),
+        rb.minimum_calls,
+        &format!("{at_prefix}.resilience.breaker.minimum_calls")
+    );
+    if let Some(value) = rb.failure_rate_threshold {
+        admit(
+            set,
+            "effects.resilience.breaker.failure_rate_threshold",
+            address.clone(),
+            ConfigSource::File,
+            ConfigValue::F64(value),
+            &format!("{at_prefix}.resilience.breaker.failure_rate_threshold"),
+        )?;
+    }
+    file_u64!(
+        set,
+        "effects.resilience.breaker.slow_call_duration_ms",
+        address.clone(),
+        rb.slow_call_duration_ms,
+        &format!("{at_prefix}.resilience.breaker.slow_call_duration_ms")
+    );
+    if let Some(value) = rb.slow_call_rate_threshold {
+        admit(
+            set,
+            "effects.resilience.breaker.slow_call_rate_threshold",
+            address.clone(),
+            ConfigSource::File,
+            ConfigValue::F64(value),
+            &format!("{at_prefix}.resilience.breaker.slow_call_rate_threshold"),
+        )?;
+    }
+    file_u64!(
+        set,
+        "effects.resilience.breaker.open_for_ms",
+        address.clone(),
+        rb.open_for_ms,
+        &format!("{at_prefix}.resilience.breaker.open_for_ms")
+    );
+    file_u64!(
+        set,
+        "effects.resilience.breaker.probes",
+        address.clone(),
+        rb.probes,
+        &format!("{at_prefix}.resilience.breaker.probes")
+    );
+    if let Some(value) = rb.rate_limited_counts_as_failure {
+        admit(
+            set,
+            "effects.resilience.breaker.rate_limited_counts_as_failure",
+            address.clone(),
+            ConfigSource::File,
+            ConfigValue::Bool(value),
+            &format!("{at_prefix}.resilience.breaker.rate_limited_counts_as_failure"),
+        )?;
+    }
+
+    let retry = &resilience.retry;
+    if let Some(kind) = &retry.kind {
+        admit(
+            set,
+            "effects.resilience.retry.kind",
+            address.clone(),
+            ConfigSource::File,
+            ConfigValue::Text(kind.clone()),
+            &format!("{at_prefix}.resilience.retry.kind"),
+        )?;
+    }
+    file_u64!(
+        set,
+        "effects.resilience.retry.fixed_delay_ms",
+        address.clone(),
+        retry.fixed_delay_ms,
+        &format!("{at_prefix}.resilience.retry.fixed_delay_ms")
+    );
+    file_u64!(
+        set,
+        "effects.resilience.retry.max_attempts",
+        address.clone(),
+        retry.max_attempts,
+        &format!("{at_prefix}.resilience.retry.max_attempts")
+    );
+    file_u64!(
+        set,
+        "effects.resilience.retry.max_backoff_ms",
+        address.clone(),
+        retry.max_backoff_ms,
+        &format!("{at_prefix}.resilience.retry.max_backoff_ms")
+    );
+    file_u64!(
+        set,
+        "effects.resilience.retry.attempt_start_window_ms",
+        address.clone(),
+        retry.attempt_start_window_ms,
+        &format!("{at_prefix}.resilience.retry.attempt_start_window_ms")
+    );
+
+    let resilience_limiter = &resilience.rate_limiter;
+    for (key, value, at) in [
+        (
+            "effects.resilience.rate_limiter.events_per_second",
+            resilience_limiter.events_per_second,
+            "events_per_second",
+        ),
+        (
+            "effects.resilience.rate_limiter.burst_capacity",
+            resilience_limiter.burst_capacity,
+            "burst_capacity",
+        ),
+        (
+            "effects.resilience.rate_limiter.cost_per_attempt",
+            resilience_limiter.cost_per_attempt,
+            "cost_per_attempt",
+        ),
+    ] {
+        if let Some(value) = value {
+            admit(
+                set,
+                key,
+                address.clone(),
+                ConfigSource::File,
+                ConfigValue::F64(value),
+                &format!("{at_prefix}.resilience.rate_limiter.{at}"),
+            )?;
+        }
     }
     Ok(())
 }
@@ -409,7 +577,7 @@ fn admit_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
             KnobType::U64 { .. } => env_var::<u64>(&name)
                 .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
                 .map(ConfigValue::U64),
-            KnobType::F64 { .. } => env_var::<f64>(&name)
+            KnobType::F64 { .. } | KnobType::F64Range { .. } => env_var::<f64>(&name)
                 .map_err(|err| ConfigError::at(spec.key_path, err.to_string()))?
                 .map(ConfigValue::F64),
             KnobType::Text | KnobType::Token { .. } | KnobType::Path => env_var::<String>(&name)
@@ -479,6 +647,13 @@ mod tests {
     use super::*;
     use crate::test_support::{env_lock, EnvGuard};
     use clap::Parser;
+    use obzenflow_core::event::EffectType;
+    use obzenflow_core::StageKey;
+    use obzenflow_runtime::runtime_config::{
+        materialize_flow_config, DslCandidates, FlowResolutionContext,
+        RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn parse_file(toml: &str) -> RawFileStartupConfig {
         toml::from_str(toml).expect("test TOML should parse")
@@ -547,6 +722,79 @@ mod tests {
     }
 
     #[test]
+    fn exact_effect_file_entries_parse_at_the_canonical_address_and_resolve() {
+        let _lock = env_lock();
+        let _guard = EnvGuard::new(&["OBZENFLOW_EFFECTS_RATE_LIMITER_EVENTS_PER_SECOND"]);
+        let snapshot = snapshot(
+            r#"
+            [effects.stages.authorize_payment.rate_limiter]
+            events_per_second = 8.0
+
+            [effects.stages.authorize_payment.by_type."payments.authorize".rate_limiter]
+            events_per_second = 5.0
+            "#,
+            &[],
+        );
+        let key = RATE_LIMITER_EVENTS_PER_SECOND_KEY;
+        let stage = StageKey::from("authorize_payment");
+        let authorize = EffectType::from("payments.authorize");
+        let refund = EffectType::from("payments.refund");
+
+        assert_eq!(
+            snapshot
+                .candidates()
+                .get_at(
+                    key,
+                    &ConfigAddress::effect(stage.clone(), authorize.clone())
+                )
+                .and_then(|slots| slots.file.as_ref()),
+            Some(&ConfigValue::F64(5.0))
+        );
+        assert_eq!(
+            snapshot
+                .candidates()
+                .get(key, &ConfigScope::stage(stage.clone()))
+                .and_then(|slots| slots.file.as_ref()),
+            Some(&ConfigValue::F64(8.0))
+        );
+
+        let mut dsl = DslCandidates::default();
+        dsl.declare_effect_consumption(key, stage.clone(), authorize.clone());
+        dsl.declare_effect_consumption(key, stage.clone(), refund.clone());
+        dsl.declare_for_effect(key, stage.clone(), authorize.clone(), ConfigValue::F64(2.0));
+        dsl.declare_for_effect(key, stage.clone(), refund.clone(), ConfigValue::F64(3.0));
+        let effective = materialize_flow_config(
+            &snapshot,
+            FlowResolutionContext {
+                flow_name: "payment_flow".to_string(),
+                stages: BTreeSet::from([stage.clone()]),
+                edges: BTreeSet::new(),
+                declared_effects: BTreeMap::from([(
+                    stage.clone(),
+                    BTreeSet::from([authorize.clone(), refund.clone()]),
+                )]),
+                dsl,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            effective
+                .effect_value(key, &stage, &authorize)
+                .and_then(|resolved| resolved.value.as_f64()),
+            Some(5.0),
+            "same-scope exact file refines the broadcast file value"
+        );
+        assert_eq!(
+            effective
+                .effect_value(key, &stage, &refund)
+                .and_then(|resolved| resolved.value.as_f64()),
+            Some(8.0),
+            "the stage file broadcast beats the exact DSL default"
+        );
+    }
+
+    #[test]
     fn deny_unknown_fields_rejects_typos_in_every_new_table() {
         for bad in [
             "[runtime]\nmax_lineage_dept = 7",
@@ -560,6 +808,21 @@ mod tests {
             assert!(
                 toml::from_str::<RawFileStartupConfig>(bad).is_err(),
                 "should reject: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn effect_subjects_are_rejected_outside_stage_by_type() {
+        for bad in [
+            "[effects.by_type.\"payments.authorize\".rate_limiter]\nevents_per_second = 1.0",
+            "[effects.flow.by_type.\"payments.authorize\".rate_limiter]\nevents_per_second = 1.0",
+            "[effects.stages.payments.edges.sink.by_type.\"payments.authorize\".rate_limiter]\nevents_per_second = 1.0",
+            "[runtime.stages.payments.by_type.\"payments.authorize\"]\nheartbeat_interval = 1",
+        ] {
+            assert!(
+                toml::from_str::<RawFileStartupConfig>(bad).is_err(),
+                "should reject a misplaced effect subject: {bad}"
             );
         }
     }

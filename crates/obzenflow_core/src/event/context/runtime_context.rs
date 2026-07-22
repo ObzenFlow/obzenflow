@@ -40,6 +40,14 @@ pub struct RuntimeContext {
     #[serde(default)]
     pub events_emitted_total: u64,
 
+    /// Atomic terminal outcome/evidence groups durably committed by this stage.
+    #[serde(default)]
+    pub terminal_groups_committed_total: u64,
+
+    /// Atomic terminal-group commits that failed before becoming visible.
+    #[serde(default)]
+    pub terminal_group_commit_failures_total: u64,
+
     /// Cumulative committed Data outputs, keyed by exact event type. This is
     /// the tail-seed for named composite output-port counters (FLOWIP-128a B3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -99,6 +107,10 @@ pub struct RuntimeContext {
     /// Allowed calls classified as failures by the breaker.
     #[serde(default)]
     pub cb_failures_total: u64,
+
+    /// Admitted physical calls at or above the configured slow threshold.
+    #[serde(default)]
+    pub cb_slow_total: u64,
 
     /// Total requests rejected by the breaker (Open / HalfOpen non-probe).
     #[serde(default)]
@@ -189,6 +201,8 @@ pub struct EffectCircuitBreakerContext {
     pub cb_requests_total: u64,
     pub cb_successes_total: u64,
     pub cb_failures_total: u64,
+    #[serde(default)]
+    pub cb_slow_total: u64,
     pub cb_rejections_total: u64,
     pub cb_opened_total: u64,
     pub cb_time_closed_seconds: f64,

@@ -4,22 +4,23 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    ControlMiddlewareRole, Middleware, MiddlewareContext, MiddlewareFactory, MiddlewareOverrideKey,
-    MiddlewarePlanContribution, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
+    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
+    MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{async_infinite_source, flow, sink};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncInfiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::observer::{
+    ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
+};
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
@@ -163,56 +164,67 @@ impl SinkHandler for CollectSink {
 }
 
 #[derive(Clone, Debug)]
-struct InjectFieldMiddleware;
+struct CountDataCommitObserver {
+    calls: Arc<AtomicU64>,
+}
 
-impl Middleware for InjectFieldMiddleware {
+impl OutputCommitObserver for CountDataCommitObserver {
     fn label(&self) -> &'static str {
-        "inject_field"
+        "count_data_commit"
     }
 
-    fn source_phase(&self) -> SourceMiddlewarePhase {
-        SourceMiddlewarePhase::Ordinary
-    }
-
-    fn pre_write(&self, event: &mut ChainEvent, _ctx: &MiddlewareContext) {
-        if let ChainEventContent::Data { payload, .. } = &mut event.content {
-            if payload.is_object() {
-                payload["mw"] = json!(true);
-            }
+    fn before_output_commit(
+        &self,
+        _ctx: &OutputCommitObserverContext<'_>,
+        event: &mut ChainEvent,
+    ) -> ObserverCommitResult {
+        if event.is_data() {
+            self.calls.fetch_add(1, Ordering::Relaxed);
         }
+        Ok(ObserverReport::empty())
     }
 }
 
 #[derive(Clone, Debug)]
-struct InjectFieldFactory;
+struct CountDataCommitFactory {
+    calls: Arc<AtomicU64>,
+}
 
-impl MiddlewareFactory for InjectFieldFactory {
+impl MiddlewareFactory for CountDataCommitFactory {
     fn label(&self) -> &'static str {
-        "inject_field"
+        "count_data_commit"
     }
 
     fn override_key(&self) -> MiddlewareOverrideKey {
-        MiddlewareOverrideKey::of::<InjectFieldFactory>("inject_field")
+        MiddlewareOverrideKey::of::<CountDataCommitFactory>("count_data_commit")
     }
 
-    fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::None
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::observer(self.label(), vec![MiddlewareSurfaceKind::OutputCommit])
     }
 
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
-    }
-
-    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-        None
-    }
-
-    fn create(
+    fn materialize(
         &self,
-        _config: &StageConfig,
-        _control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        Ok(Box::new(InjectFieldMiddleware))
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        validate_attachment_request(&self.declaration(), &request).map_err(|err| {
+            MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
+        })?;
+        match request.surface.kind() {
+            MiddlewareSurfaceKind::OutputCommit => {
+                Ok(MiddlewareSurfaceAttachment::output_commit_observer(
+                    Arc::new(CountDataCommitObserver {
+                        calls: self.calls.clone(),
+                    }),
+                ))
+            }
+            other => Err(MiddlewareFactoryError::materialization_failed(
+                self.label(),
+                &context.config.name,
+                std::io::Error::other(format!("unsupported observer surface {other:?}")),
+            )),
+        }
     }
 }
 
@@ -298,6 +310,8 @@ async fn async_infinite_source_stop_interrupts_blocked_next_and_calls_drain() ->
 async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Result<()> {
     let (source, tx, drain_calls) = TestAsyncInfiniteSource::new(32);
     let (sink, events, event_ready) = CollectSink::new();
+    let observer_calls = Arc::new(AtomicU64::new(0));
+    let observer_calls_for_flow = observer_calls.clone();
 
     let journal_root = unique_journal_dir("async_infinite_source_middleware");
 
@@ -308,7 +322,7 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
 
         stages: {
             source = async_infinite_source!(AsyncInfiniteEvent => source, [
-                InjectFieldFactory
+                CountDataCommitFactory { calls: observer_calls_for_flow.clone() }
             ]);
             sink = sink!(AsyncInfiniteEvent => sink);
         },
@@ -349,13 +363,11 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
         "expected at least two data events to reach the sink"
     );
 
-    for event in data_events {
-        assert_eq!(
-            event.payload().get("mw").and_then(|v| v.as_bool()),
-            Some(true),
-            "expected middleware to set payload.mw=true"
-        );
-    }
+    assert_eq!(
+        observer_calls.load(Ordering::Relaxed),
+        data_events.len() as u64,
+        "the typed output-commit observer sees every data event without mutating it"
+    );
 
     assert_eq!(
         drain_calls.load(Ordering::Relaxed),

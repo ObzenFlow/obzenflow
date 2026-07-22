@@ -3,7 +3,10 @@
 // https://obzenflow.dev
 
 use super::ChainEventFactory;
-use crate::event::chain_event::{ChainEvent, CircuitBreakerSummaryEventParams};
+use crate::event::chain_event::{
+    ChainEvent, CircuitBreakerAttemptSettledEventParams,
+    CircuitBreakerRecoveryCompletedEventParams, CircuitBreakerSummaryEventParams,
+};
 use crate::event::context::causality_context::CausalityContext;
 use crate::event::payloads::effect_payload::EffectCursor;
 use crate::event::payloads::observability_payload::{
@@ -40,6 +43,33 @@ impl ChainEventFactory {
                 cursor,
                 next_attempt,
                 delay_ms,
+            },
+            cause,
+        )
+    }
+
+    pub fn circuit_breaker_attempt_settled(
+        writer_id: WriterId,
+        params: CircuitBreakerAttemptSettledEventParams,
+        cause: EventId,
+    ) -> ChainEvent {
+        let CircuitBreakerAttemptSettledEventParams {
+            cursor,
+            attempt,
+            health_classification,
+            slow,
+            dependency_elapsed_ms,
+            admission_wait_ms,
+        } = params;
+        Self::circuit_breaker_retry_event(
+            writer_id,
+            CircuitBreakerEvent::AttemptSettled {
+                cursor,
+                attempt,
+                health_classification,
+                slow,
+                dependency_elapsed_ms,
+                admission_wait_ms,
             },
             cause,
         )
@@ -92,6 +122,29 @@ impl ChainEventFactory {
             CircuitBreakerEvent::RetryStoppedNonRetryable {
                 cursor,
                 total_attempts,
+            },
+            cause,
+        )
+    }
+
+    pub fn circuit_breaker_recovery_completed(
+        writer_id: WriterId,
+        params: CircuitBreakerRecoveryCompletedEventParams,
+        cause: EventId,
+    ) -> ChainEvent {
+        let CircuitBreakerRecoveryCompletedEventParams {
+            cursor,
+            total_attempts,
+            backoff_elapsed_ms,
+            recovery_elapsed_ms,
+        } = params;
+        Self::circuit_breaker_retry_event(
+            writer_id,
+            CircuitBreakerEvent::RecoveryCompleted {
+                cursor,
+                total_attempts,
+                backoff_elapsed_ms,
+                recovery_elapsed_ms,
             },
             cause,
         )

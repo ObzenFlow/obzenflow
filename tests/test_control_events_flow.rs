@@ -117,58 +117,6 @@ async fn test_control_events_are_appended() {
     println!("✓ Control events are properly appended to transform results");
 }
 
-#[tokio::test]
-async fn test_circuit_breaker_emits_control_events() {
-    use obzenflow_adapters::middleware::circuit_breaker::CircuitBreakerMiddleware;
-
-    let circuit_breaker = CircuitBreakerMiddleware::new(2); // Opens after 2 failures
-    let transform = PassthroughTransform;
-    let wrapped = MiddlewareTransform::new(transform).with_middleware(Box::new(circuit_breaker));
-
-    // First event - success
-    let event1 = ChainEventFactory::data_event(
-        WriterId::from(StageId::new()),
-        "test.success",
-        json!({"id": 1}),
-    );
-
-    let results1 = wrapped
-        .process(event1, None, MiddlewareExecutionScope::LiveHandler)
-        .await
-        .expect("PassthroughTransform should not fail in control-events flow test");
-    println!("First event produced {} results", results1.len());
-
-    // Process some failures to trigger state change
-    for i in 0..3 {
-        let fail_event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "test.fail",
-            json!({"id": i + 2}),
-        );
-
-        // Process event (circuit breaker middleware will track failures)
-        let results = wrapped
-            .process(fail_event, None, MiddlewareExecutionScope::LiveHandler)
-            .await
-            .expect("PassthroughTransform should not fail in control-events flow test");
-
-        println!("Failure {} produced {} results", i + 1, results.len());
-
-        // Check for control events
-        for (idx, event) in results.iter().enumerate() {
-            if event.is_control() || event.is_lifecycle() {
-                println!("  Result[{}] is control event: {}", idx, event.event_type());
-                println!(
-                    "  Payload: {}",
-                    serde_json::to_string_pretty(&event.payload()).unwrap()
-                );
-            }
-        }
-    }
-
-    println!("✓ Circuit breaker middleware can emit control events");
-}
-
 #[test]
 fn test_rate_limiter_emits_control_events() {
     // Note: RateLimiterMiddleware constructor is private, so we can't test it directly

@@ -6,19 +6,15 @@
 //!
 //! `indicator()` is the generic builder; `latency()` is the convenience
 //! constructor for the only implemented kind. The factory is hook-bound: it
-//! declares the handler observer surface and materializes a `HandlerObserver`,
-//! and its legacy `create()` path fails loudly because an observer has no
-//! legacy shell.
+//! declares the handler observer surface and materializes a `HandlerObserver`.
 
 use super::{IndicatorConfig, IndicatorMiddleware};
 use crate::middleware::{
-    validate_attachment_request, ControlMiddlewareRole, Middleware, MiddlewareAttachmentRequest,
-    MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
-    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewarePlanContribution,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, TopologyMiddlewareConfigSlot,
+    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
+    MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
 };
 use obzenflow_core::event::payloads::observability_payload::IndicatorKind;
-use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::observer::ObserverCommitError;
 use serde_json::json;
 use std::sync::Arc;
@@ -130,31 +126,6 @@ impl MiddlewareFactory for IndicatorMiddlewareFactory {
         MiddlewareOverrideKey::of::<IndicatorFamily>(self.label)
     }
 
-    fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::None
-    }
-
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
-    }
-
-    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-        None
-    }
-
-    fn create(
-        &self,
-        _config: &StageConfig,
-        _control_middleware: std::sync::Arc<
-            crate::middleware::control::ControlMiddlewareAggregator,
-        >,
-    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        // An indicator is a hook-bound observer with no legacy shell. The DSL
-        // placement planner rejects it before reaching here; this is the loud
-        // fallback if a caller bypasses the planner.
-        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
-    }
-
     fn config_snapshot(&self) -> Option<serde_json::Value> {
         Some(json!({
             "kind": serde_json::to_value(self.config.kind).ok(),
@@ -192,7 +163,7 @@ impl MiddlewareFactory for IndicatorMiddlewareFactory {
         let observer = Arc::new(IndicatorMiddleware::with_config(self.config.clone()));
         match request.surface.kind() {
             MiddlewareSurfaceKind::Handler => {
-                Ok(MiddlewareSurfaceAttachment::HandlerObserver(observer))
+                Ok(MiddlewareSurfaceAttachment::handler_observer(observer))
             }
             surface => Err(MiddlewareFactoryError::materialization_failed(
                 self.label(),

@@ -19,8 +19,7 @@ use super::domain::{
     PaymentDeclineReason, PaymentDeclined, PaymentMethodState, TrafficPhase, ValidatedOrder,
 };
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::circuit_breaker::FailureClassification;
-use obzenflow_core::{event::chain_event::ChainEvent, EffectOutcomeFacts, TypedPayload};
+use obzenflow_core::EffectOutcomeFacts;
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
 };
@@ -43,21 +42,97 @@ pub struct AuthorizePayment {
     retry_proof: Option<Arc<GatewayRetryProof>>,
 }
 
-/// Shared deterministic backend script used by the circuit-breaker retry
-/// acceptance profile. Effect clones share this counter, so physical calls
-/// observe the sequence timeout, timeout, success under one logical effect
-/// cursor.
-#[derive(Debug, Default)]
+/// Shared deterministic backend script used by the circuit-breaker acceptance
+/// profiles. Effect clones share this counter, so physical calls observe one
+/// process-wide dependency history across logical effect cursors.
+#[derive(Debug)]
 pub struct GatewayRetryProof {
     calls: AtomicUsize,
+    #[cfg(test)]
+    invocations: AtomicUsize,
     panic_on_call: bool,
+    behavior: GatewayProofBehavior,
+    #[cfg(test)]
+    pause_before_invocation: Option<InvocationPause>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GatewayProofBehavior {
+    FailFirst(usize),
+    Healthy,
+    AlwaysFail,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct InvocationPause {
+    invocation: usize,
+    duration: std::time::Duration,
 }
 
 impl GatewayRetryProof {
+    /// Fail the first two physical calls, then recover. This preserves the
+    /// original retry control/treatment proof contract.
     pub fn new(panic_on_call: bool) -> Self {
+        Self::fail_first(2, panic_on_call)
+    }
+
+    /// Fail the first `count` physical calls, then recover.
+    pub fn fail_first(count: usize, panic_on_call: bool) -> Self {
+        Self::with_behavior(panic_on_call, GatewayProofBehavior::FailFirst(count))
+    }
+
+    /// Succeed every physical call.
+    pub fn healthy(panic_on_call: bool) -> Self {
+        Self::with_behavior(panic_on_call, GatewayProofBehavior::Healthy)
+    }
+
+    /// Fail every physical call so the breaker opens deterministically.
+    pub fn always_fail(panic_on_call: bool) -> Self {
+        Self::with_behavior(panic_on_call, GatewayProofBehavior::AlwaysFail)
+    }
+
+    fn with_behavior(panic_on_call: bool, behavior: GatewayProofBehavior) -> Self {
         Self {
             calls: AtomicUsize::new(0),
+            #[cfg(test)]
+            invocations: AtomicUsize::new(0),
             panic_on_call,
+            behavior,
+            #[cfg(test)]
+            pause_before_invocation: None,
+        }
+    }
+
+    /// Delay one logical invocation before breaker admission.
+    ///
+    /// The half-open release witness uses this example-local fixture to let the
+    /// real five-second cooldown expire. Strict replay skips the wall-clock
+    /// pause while retaining the same flow policy and scripted inputs.
+    #[cfg(test)]
+    pub fn pause_before_invocation(
+        mut self,
+        invocation: usize,
+        duration: std::time::Duration,
+    ) -> Self {
+        assert!(invocation > 0, "proof invocation ordinals are one-based");
+        self.pause_before_invocation = Some(InvocationPause {
+            invocation,
+            duration,
+        });
+        self
+    }
+
+    #[cfg(test)]
+    async fn prepare_invocation(&self) {
+        let invocation = self.invocations.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.panic_on_call {
+            return;
+        }
+        if let Some(pause) = self.pause_before_invocation {
+            if pause.invocation == invocation {
+                tokio::time::sleep(pause.duration).await;
+            }
         }
     }
 
@@ -72,6 +147,14 @@ impl GatewayRetryProof {
             "strict replay attempted a live payment gateway call"
         );
         self.calls.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn should_timeout(&self, call: usize) -> bool {
+        match self.behavior {
+            GatewayProofBehavior::FailFirst(count) => call <= count,
+            GatewayProofBehavior::Healthy => false,
+            GatewayProofBehavior::AlwaysFail => true,
+        }
     }
 }
 
@@ -114,7 +197,7 @@ impl Effect for AuthorizePayment {
     async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         if let Some(proof) = &self.retry_proof {
             let call = proof.record_call();
-            if call <= 2 {
+            if proof.should_timeout(call) {
                 return Err(EffectError::Timeout(
                     "gateway_timeout_simulated".to_string(),
                 ));
@@ -235,6 +318,11 @@ impl EffectfulTransformHandler for GatewayTransform {
             ));
         }
 
+        #[cfg(test)]
+        if let Some(proof) = &self.retry_proof {
+            proof.prepare_invocation().await;
+        }
+
         // Plain fail-fast breaker path (FLOWIP-115n direction): when the
         // breaker prevents the call, `perform` returns a recorded
         // `BoundaryRejected` error; the breaker never synthesizes a fact to
@@ -297,34 +385,6 @@ impl EffectfulTransformHandler for GatewayTransform {
 /// handling here (FLOWIP-120i).
 fn authorization_unavailable_reason(err: EffectError) -> String {
     err.semantic_reason().into_owned()
-}
-
-/// Tell the circuit breaker which scripted inputs represent dependency failure.
-///
-/// Error-marked outputs cover genuine gateway failures; the input-phase check
-/// covers the scripted outage. Breaker-refused calls never reach
-/// `post_handle` (the boundary short-circuits), so refusals do not re-count
-/// as failures. The classification is health authority plus recovery veto
-/// only: returning `TransientFailure` cannot make an ineligible raw failure
-/// retry.
-pub fn classify_simulated_gateway_unavailability(
-    event: &ChainEvent,
-    outputs: &[ChainEvent],
-) -> FailureClassification {
-    let failed = outputs.iter().any(|output| {
-        matches!(
-            output.processing_info.status,
-            obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }
-        )
-    }) || matches!(
-        ValidatedOrder::from_event(event).map(|order| order.phase),
-        Some(TrafficPhase::Outage)
-    );
-    if failed {
-        FailureClassification::TransientFailure
-    } else {
-        FailureClassification::Success
-    }
 }
 
 /// Deliberately no cancellation here: unavailability means no payment decision

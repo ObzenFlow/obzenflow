@@ -49,12 +49,13 @@ use super::domain::{
     PaymentAuthorized, PaymentDeclined, ValidatedOrder,
 };
 use super::fixtures;
-use super::gateway::{self, AuthorizePayment, GatewayTransform};
+use super::gateway::{AuthorizePayment, GatewayTransform};
 use super::validation;
 use obzenflow::typed::sources as typed_sources;
-use obzenflow_adapters::middleware::circuit_breaker::OpenPolicy;
 use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
-use obzenflow_adapters::middleware::{failure_rate, CircuitBreaker, RateLimiterBuilder, Retry};
+use obzenflow_adapters::middleware::{
+    CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder, Retry,
+};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
 use std::time::Duration;
@@ -123,25 +124,27 @@ pub fn assemble_flow(
     gateway_calls_per_second: f64,
     journal_root: std::path::PathBuf,
 ) -> obzenflow_dsl::FlowDefinition {
-    // The gateway breaker attaches inline to the effect it guards
-    // (FLOWIP-120c H7, `AuthorizePayment with [gateway_breaker]`): one
-    // policy instance per protected dependency. Hoisted to a named binding
-    // so the `effects:` entry reads as a declaration.
-    let gateway_breaker = CircuitBreaker::opens_when(
-        failure_rate(0.6)
-            .over_last_calls(5)
-            .or_slow_calls_over(Duration::from_millis(250), 0.5),
-    )
-    .cooldown(Duration::from_secs(5))
-    .when_open(OpenPolicy::FailFast)
-    .when_probe_rejected(OpenPolicy::FailFast)
-    .with_failure_classification(gateway::classify_simulated_gateway_unavailability);
-    let gateway_breaker = match gateway_retry {
-        Some(retry) => gateway_breaker.retry(retry),
-        None => gateway_breaker,
-    };
-    let gateway_breaker = gateway_breaker.build();
-    let gateway_limiter = RateLimiterBuilder::new(gateway_calls_per_second).build();
+    // One effect-only resilience attachment owns the gateway's health,
+    // optional recovery, and per-physical-attempt admission policy. Its fixed
+    // ordering keeps limiter wait outside the dependency clock and prevents a
+    // stale breaker decision from surviving the queue.
+    let gateway_breaker = CircuitBreaker::builder()
+        .count_window(5)
+        .minimum_calls(5)
+        .failure_rate_threshold(0.6)
+        .slow_call_duration(Duration::from_millis(250))
+        .slow_call_rate_threshold(0.5)
+        .open_for(Duration::from_secs(5))
+        .probes(1)
+        .build()
+        .expect("gateway circuit-breaker configuration must be valid");
+    let gateway_limiter = RateLimiter::per_second(gateway_calls_per_second)
+        .expect("gateway rate-limiter configuration must be valid");
+    let gateway_resilience = EffectResilience::with_breaker(gateway_breaker)
+        .retry(gateway_retry)
+        .rate_limit_each_attempt(gateway_limiter)
+        .build()
+        .expect("gateway resilience configuration must be valid");
 
     flow! {
         name: "payment_gateway_resilience_demo",
@@ -227,7 +230,7 @@ pub fn assemble_flow(
                     OrderCancelled,
                     PaymentAuthorizationUnavailable
                 } => gateway_transform,
-                effects: [AuthorizePayment with [gateway_breaker, gateway_limiter]],
+                effects: [AuthorizePayment with [gateway_resilience]],
                 // Record a per-execution service-level-indicator sample for the
                 // authorization operation: the raw wall-clock latency of the live
                 // gateway call. This is observe-only evidence; it never changes

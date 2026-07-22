@@ -7,6 +7,7 @@
 //! Under scope-before-source composition, source alone cannot explain a
 //! resolution, so every effective value carries both axes.
 
+use crate::event::EffectType;
 use crate::id::StageKey;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
@@ -95,6 +96,70 @@ pub enum ConfigScope {
     },
 }
 
+/// The protected subject qualified by a configuration candidate.
+///
+/// Scope and subject are orthogonal. An unqualified subject broadcasts
+/// within its enclosing scope; an effect subject refines one declared effect
+/// and is admitted only at stage scope by the runtime knob schema.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConfigSubject {
+    #[default]
+    Unqualified,
+    Effect {
+        effect_type: EffectType,
+    },
+}
+
+impl fmt::Display for ConfigSubject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unqualified => f.write_str("unqualified"),
+            Self::Effect { effect_type } => write!(f, "effect:{}", effect_type.as_str()),
+        }
+    }
+}
+
+/// One candidate address: topology scope plus protected subject.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConfigAddress {
+    pub scope: ConfigScope,
+    pub subject: ConfigSubject,
+}
+
+impl ConfigAddress {
+    pub fn unqualified(scope: ConfigScope) -> Self {
+        Self {
+            scope,
+            subject: ConfigSubject::Unqualified,
+        }
+    }
+
+    pub fn effect(stage: impl Into<StageKey>, effect_type: impl Into<EffectType>) -> Self {
+        Self {
+            scope: ConfigScope::stage(stage),
+            subject: ConfigSubject::Effect {
+                effect_type: effect_type.into(),
+            },
+        }
+    }
+}
+
+impl From<ConfigScope> for ConfigAddress {
+    fn from(scope: ConfigScope) -> Self {
+        Self::unqualified(scope)
+    }
+}
+
+impl fmt::Display for ConfigAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.subject {
+            ConfigSubject::Unqualified => self.scope.fmt(f),
+            subject => write!(f, "{} ({subject})", self.scope),
+        }
+    }
+}
+
 impl ConfigScope {
     pub fn stage(stage: impl Into<StageKey>) -> Self {
         Self::Stage {
@@ -129,6 +194,7 @@ impl fmt::Display for ConfigScope {
 pub struct ConfigValueMeta {
     pub source: ConfigSource,
     pub scope: ConfigScope,
+    pub subject: ConfigSubject,
     pub key_path: String,
 }
 
@@ -184,6 +250,22 @@ mod tests {
                 ConfigScope::stage("a"),
                 ConfigScope::edge("a", "b"),
             ]
+        );
+    }
+
+    #[test]
+    fn effect_address_keeps_scope_and_subject_orthogonal() {
+        let address = ConfigAddress::effect("authorize_payment", "payments.authorize");
+        assert_eq!(address.scope, ConfigScope::stage("authorize_payment"));
+        assert_eq!(
+            address.subject,
+            ConfigSubject::Effect {
+                effect_type: EffectType::new("payments.authorize")
+            }
+        );
+        assert_eq!(
+            address.to_string(),
+            "stage:authorize_payment (effect:payments.authorize)"
         );
     }
 }

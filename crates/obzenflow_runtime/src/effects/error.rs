@@ -4,7 +4,7 @@
 
 use super::*;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum EffectError {
     #[error("effect serialization failed: {0}")]
     Serialization(String),
@@ -39,15 +39,6 @@ pub enum EffectError {
         code: EffectFailureCode,
         message: String,
         retry: RetryDisposition,
-    },
-
-    #[error(
-        "typed-outcome coordination error on stage '{stage_key}' for effect '{effect_type}': {message}"
-    )]
-    TypedOutcomeCoordination {
-        stage_key: String,
-        effect_type: String,
-        message: String,
     },
 
     #[error("effect provenance mismatch: {0}")]
@@ -139,7 +130,7 @@ pub enum EffectError {
 }
 
 impl EffectError {
-    pub fn retryable(&self) -> bool {
+    fn recovery_eligible_by_default(&self) -> bool {
         match self {
             EffectError::RecordedFailure { retry, .. }
             | EffectError::BoundaryRejected { retry, .. } => retry.is_retryable(),
@@ -155,7 +146,6 @@ impl EffectError {
             | EffectError::CompletedWithoutOutput { .. }
             | EffectError::CompletedEmptyWithOutput { .. }
             | EffectError::MissingEffectPort { .. }
-            | EffectError::TypedOutcomeCoordination { .. }
             | EffectError::TransactionalCommitMissing { .. } => false,
             EffectError::Timeout(_)
             | EffectError::Transport(_)
@@ -171,7 +161,7 @@ impl EffectError {
     }
 
     pub(super) fn retry_disposition(&self) -> RetryDisposition {
-        RetryDisposition::from_bool(self.retryable())
+        RetryDisposition::from_bool(self.recovery_eligible_by_default())
     }
 
     pub(super) fn error_type(&self) -> EffectFailureKind {
@@ -192,7 +182,6 @@ impl EffectError {
             EffectError::CompletedWithoutOutput { .. } => "completed_without_output",
             EffectError::CompletedEmptyWithOutput { .. } => "completed_empty_with_output",
             EffectError::MissingEffectPort { .. } => "missing_effect_port",
-            EffectError::TypedOutcomeCoordination { .. } => "typed_outcome_coordination",
             EffectError::TransactionalCommitMissing { .. } => "transactional_commit_missing",
             EffectError::Execution(_) => "execution",
             EffectError::Timeout(_) => "timeout",
@@ -232,9 +221,6 @@ impl EffectError {
             }
             EffectError::RateLimited { message, .. } => std::borrow::Cow::Borrowed(message),
             EffectError::BoundaryRejected { message, .. } => std::borrow::Cow::Borrowed(message),
-            EffectError::TypedOutcomeCoordination { message, .. } => {
-                std::borrow::Cow::Borrowed(message)
-            }
             EffectError::MissingRecordedEffect { .. }
             | EffectError::DuplicateRecordedEffect { .. }
             | EffectError::DescriptorMismatch { .. }
@@ -263,7 +249,9 @@ impl EffectError {
 
     /// Structured cause carried into a recorded `Failed` outcome, present when
     /// execution was rejected by a named component such as boundary middleware.
-    pub(super) fn failure_cause(&self) -> Option<EffectFailureCause> {
+    /// Live `BoundaryRejected` errors and replayed `RecordedFailure` errors
+    /// return the same source/code pair.
+    pub fn failure_cause(&self) -> Option<EffectFailureCause> {
         match self {
             EffectError::BoundaryRejected {
                 rejected_by, code, ..

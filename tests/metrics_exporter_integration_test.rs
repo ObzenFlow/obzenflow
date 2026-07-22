@@ -11,9 +11,7 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{
-    circuit_breaker, failure_rate, rate_limit_with_burst, CircuitBreaker,
-};
+use obzenflow_adapters::middleware::{rate_limit_with_burst, CircuitBreaker};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::metrics::MetricsExporter;
@@ -382,7 +380,7 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
             src = source!(MetricEvent => BurstSource::new(50), [
                 // No summaries/threshold crossings required; utilization is derived from bucket state.
                 rate_limit_with_burst(10_000.0, 10_000.0),
-                circuit_breaker(10)
+                CircuitBreaker::builder().consecutive_failures(10).build().expect("source breaker")
             ]);
             trans = transform!(MetricEvent -> MetricEvent => DropTransform);
             snk = sink!(MetricEvent => CountingSink::new().0);
@@ -531,7 +529,7 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
             // 1000 events triggers a CircuitBreaker summary (>=1000 processed requests).
             // Use 1001 so the summary is not emitted on the final stage output.
             src = source!(MetricEvent => BurstSource::new(1001), [
-                circuit_breaker(10)
+                CircuitBreaker::builder().consecutive_failures(10).build().expect("source breaker")
             ]);
             // Drop downstream data outputs to keep journaling light; the circuit breaker
             // still observes successful source polling and emits a summary at 1000.
@@ -606,9 +604,11 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
             // 1001 events ensures the 1000-threshold summary is emitted before the run completes.
             // First poll succeeds, second poll fails (Timeout), opening the breaker.
             src = source!(MetricEvent => ErrorAfterFirstSource::new(), [
-                CircuitBreaker::opens_after(1)
-                    .cooldown(Duration::from_millis(0))
+                CircuitBreaker::builder()
+                    .consecutive_failures(1)
+                    .open_for(Duration::from_millis(1))
                     .build()
+                    .expect("source breaker")
             ]);
             trans = transform!(MetricEvent -> MetricEvent => DropTransform);
             snk = sink!(MetricEvent => CountingSink::new().0);
@@ -635,6 +635,7 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
         "obzenflow_circuit_breaker_opened_total".to_string(),
         "obzenflow_circuit_breaker_successes_total".to_string(),
         "obzenflow_circuit_breaker_failures_total".to_string(),
+        "obzenflow_circuit_breaker_slow_total".to_string(),
         "obzenflow_circuit_breaker_time_in_state_seconds_total".to_string(),
         "obzenflow_circuit_breaker_state_transitions_total".to_string(),
         flow_label.clone(),
@@ -645,6 +646,7 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
         text.contains("obzenflow_circuit_breaker_opened_total")
             && text.contains("obzenflow_circuit_breaker_successes_total")
             && text.contains("obzenflow_circuit_breaker_failures_total")
+            && text.contains("obzenflow_circuit_breaker_slow_total")
             && text.contains("obzenflow_circuit_breaker_time_in_state_seconds_total")
             && text.contains("obzenflow_circuit_breaker_state_transitions_total")
             && text.contains(&flow_label)
@@ -682,6 +684,17 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
     assert!(
         (failures_total - 1.0).abs() < f64::EPSILON,
         "expected circuit_breaker_failures_total=1, got {failures_total}"
+    );
+
+    let slow_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_circuit_breaker_slow_total{",
+        &[flow_label.clone(), cb_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing circuit_breaker_slow_total for {cb_stage_label}"))?;
+    assert!(
+        slow_total.abs() < f64::EPSILON,
+        "expected fast source calls to leave circuit_breaker_slow_total=0, got {slow_total}"
     );
 
     let transitions_total = metric_line_value(
@@ -732,9 +745,13 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
 
         stages: {
             src = source!(MetricEvent => ErrorAfterFirstSource::new(), [
-                CircuitBreaker::opens_when(failure_rate(0.5).over_last_calls(2))
-                    .cooldown(Duration::from_millis(0))
+                CircuitBreaker::builder()
+                    .count_window(2)
+                    .minimum_calls(2)
+                    .failure_rate_threshold(0.5)
+                    .open_for(Duration::from_millis(1))
                     .build()
+                    .expect("rate breaker")
             ]);
             trans = transform!(MetricEvent -> MetricEvent => DropTransform);
             snk = sink!(MetricEvent => CountingSink::new().0);
@@ -978,7 +995,7 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
 
         stages: {
             src = source!(MetricEvent => BurstSource::new(total_events), [
-                circuit_breaker(10)
+                CircuitBreaker::builder().consecutive_failures(10).build().expect("source breaker")
             ]);
             trans = transform!(MetricEvent -> MetricEvent => DropTransform);
             snk = sink!(MetricEvent => CountingSink::new().0);

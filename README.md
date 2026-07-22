@@ -80,7 +80,7 @@ The full catalog with grouped commands and code pointers is in `examples/README.
 # Framework overview: reference catalogs + joins + stateful summary
 cargo run -p obzenflow --example product_catalog_enrichment
 
-# Resilience: circuit breaker + typed fallback + contracts
+# Resilience: per-effect circuit breaker + retry + rate limiting
 cargo run -p obzenflow --example payment_gateway_resilience
 
 # Middleware inheritance/override (observe /metrics while it runs)

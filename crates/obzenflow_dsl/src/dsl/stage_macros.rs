@@ -2273,30 +2273,16 @@ macro_rules! __obzenflow_effect_entries {
             <$effect as ::obzenflow_runtime::effects::Effect>::EFFECT_TYPE;
         let mut __factories: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
             Vec::new();
-        let mut __synthesized: Vec<::obzenflow_runtime::effects::SynthesizedOutcomeRegistration> =
-            Vec::new();
-        let mut __config_errors: Vec<String> = Vec::new();
         $(
             {
-                let (__factory, __registration, __error) =
-                    ::obzenflow_adapters::middleware::IntoEffectPolicyParts::into_effect_policy_parts(
-                        $policy,
-                        __effect_type,
-                    );
+                let __factory: Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory> =
+                    $policy;
                 __factories.push(__factory);
-                if let Some(__registration) = __registration {
-                    __synthesized.push(__registration);
-                }
-                if let Some(__error) = __error {
-                    __config_errors.push(__error);
-                }
             }
         )*
         $atts.push($crate::dsl::stage_descriptor::EffectPolicyAttachment {
             effect_type: __effect_type,
             factories: __factories,
-            synthesized: __synthesized,
-            config_errors: __config_errors,
         });
     }};
 }
@@ -2459,8 +2445,6 @@ macro_rules! __obzenflow_effectful_transform_untyped {
             effects: __obzenflow_effects,
             middleware: __middleware,
             effect_policies: __obzenflow_attachments,
-            synthesized_outcomes: Vec::new(),
-            type_shaping_errors: Vec::new(),
             backpressure: {
                 #[allow(unused_mut)]
                 let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;

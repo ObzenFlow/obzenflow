@@ -333,9 +333,8 @@ where
 pub(super) enum EffectRecordMaterialization {
     DomainFacts {
         facts: Vec<TypedFact>,
-        /// Origin read back from the recorded provenance (FLOWIP-120m).
-        /// `None` on pre-120h journals, where replay falls back to
-        /// registration-based derivation.
+        /// Origin read back from recorded provenance. `None` on older
+        /// journals, where replay defaults to the effect itself.
         origin: Option<EffectFactOrigin>,
     },
     FrameworkRecords(Vec<EffectRecord>),

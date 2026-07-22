@@ -5,14 +5,13 @@
 //! FLOWIP-120c H1: policy middleware attaches to live I/O units only.
 //!
 //! A circuit breaker or rate limiter on a pure sync surface (sync transform,
-//! sync stateful, join) is a flow build error: a deterministic handler shell
-//! has no unreliable call to protect. The deprecated async-non-effectful
-//! surface still builds with a warning, because the canonical AI example
-//! rides it until FLOWIP-128b moves those legs onto effects and FLOWIP-120f
-//! deletes the surface.
+//! sync stateful, join, or async non-effect handler) is a flow build error: a
+//! handler shell has no typed live-I/O unit to protect. FLOWIP-115n seals the
+//! only remaining structural shell to the AI map-reduce factories assigned to
+//! FLOWIP-128g.
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::circuit_breaker;
+use obzenflow_adapters::middleware::CircuitBreaker;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::TypedPayload;
 use obzenflow_core::WriterId;
@@ -25,6 +24,13 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+fn breaker(failures: u32) -> CircuitBreaker {
+    CircuitBreaker::builder()
+        .consecutive_failures(failures)
+        .build()
+        .expect("test breaker configuration")
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GuardEvent {
@@ -110,7 +116,7 @@ async fn flow_level_policy_middleware_is_rejected_at_build() {
             "target/policy-guard-logs/flow-scope",
         )),
         middleware: [
-            circuit_breaker(3)
+            breaker(3)
         ],
 
         stages: {
@@ -155,7 +161,7 @@ async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
                 writer_id: WriterId::from(obzenflow_core::StageId::new()),
             });
             guarded = transform!(GuardEvent -> GuardEvent => SyncPassthrough, [
-                circuit_breaker(3)
+                breaker(3)
             ]);
             guard_sink = sink!(GuardEvent => NullSink);
         },
@@ -179,10 +185,8 @@ async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
 }
 
 #[tokio::test]
-async fn policy_middleware_on_async_surface_still_builds() {
-    // H1 keeps the deprecated async-non-effectful surface building (with a
-    // warning) so the canonical AI example survives until FLOWIP-128b/120f.
-    let flow_handle = flow! {
+async fn policy_middleware_on_async_non_effect_stage_is_rejected_at_build() {
+    let result = flow! {
         name: "policy_guard_async",
         journals: disk_journals(std::path::PathBuf::from(
             "target/policy-guard-logs/async-surface",
@@ -195,7 +199,7 @@ async fn policy_middleware_on_async_surface_still_builds() {
                 writer_id: WriterId::from(obzenflow_core::StageId::new()),
             });
             guarded = async_transform!(GuardEvent -> GuardEvent => AsyncPassthrough, [
-                circuit_breaker(3)
+                breaker(3)
             ]);
             guard_sink = sink!(GuardEvent => NullSink);
         },
@@ -206,11 +210,16 @@ async fn policy_middleware_on_async_surface_still_builds() {
         }
     }
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await
-    .expect("the deprecated async surface must keep building under H1");
+    .await;
 
-    flow_handle
-        .run_with_metrics()
-        .await
-        .expect("one-shot flow should run to completion");
+    let err = match result {
+        Ok(_) => panic!("policy middleware on an async non-effect stage must fail the build"),
+        Err(err) => format!("{err:?}"),
+    };
+    assert!(
+        err.contains("PolicyMiddlewareOnPureStage")
+            && err.contains("guarded")
+            && err.contains("circuit_breaker"),
+        "expected the FLOWIP-115n typed-surface rejection, got: {err}"
+    );
 }

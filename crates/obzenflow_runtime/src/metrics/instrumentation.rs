@@ -74,6 +74,8 @@ pub struct StageInstrumentation {
     pub events_accumulated_total: AtomicU64,
     /// Total output events emitted by the stage (data/delivery; excludes observability-only events).
     pub events_emitted_total: AtomicU64,
+    pub terminal_groups_committed_total: AtomicU64,
+    pub terminal_group_commit_failures_total: AtomicU64,
     pub errors_total: AtomicU64,
     pub failures_total: AtomicU64,              // Critical failures
     pub event_loops_total: AtomicU64,           // Total event loop iterations
@@ -169,6 +171,8 @@ impl StageInstrumentation {
             events_processed_total: AtomicU64::new(0),
             events_accumulated_total: AtomicU64::new(0),
             events_emitted_total: AtomicU64::new(0),
+            terminal_groups_committed_total: AtomicU64::new(0),
+            terminal_group_commit_failures_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
             failures_total: AtomicU64::new(0),
             event_loops_total: AtomicU64::new(0),
@@ -297,6 +301,12 @@ impl StageInstrumentation {
             events_processed_total: self.events_processed_total.load(Ordering::Relaxed),
             events_accumulated_total: self.events_accumulated_total.load(Ordering::Relaxed),
             events_emitted_total: self.events_emitted_total.load(Ordering::Relaxed),
+            terminal_groups_committed_total: self
+                .terminal_groups_committed_total
+                .load(Ordering::Relaxed),
+            terminal_group_commit_failures_total: self
+                .terminal_group_commit_failures_total
+                .load(Ordering::Relaxed),
             data_outputs_by_event_type: {
                 let mut counts: Vec<_> = self
                     .data_writer_seq_by_event_type
@@ -369,6 +379,7 @@ impl StageInstrumentation {
             cb_requests_total: 0,
             cb_successes_total: 0,
             cb_failures_total: 0,
+            cb_slow_total: 0,
             cb_rejections_total: 0,
             cb_opened_total: 0,
             cb_time_closed_seconds: 0.0,
@@ -399,6 +410,7 @@ impl StageInstrumentation {
             ctx.cb_requests_total = cb.requests_total;
             ctx.cb_successes_total = cb.successes_total;
             ctx.cb_failures_total = cb.failures_total;
+            ctx.cb_slow_total = cb.slow_total;
             ctx.cb_rejections_total = cb.rejections_total;
             ctx.cb_opened_total = cb.opened_total;
             ctx.cb_time_closed_seconds = cb.time_closed_seconds;
@@ -431,6 +443,7 @@ impl StageInstrumentation {
                     cb_requests_total: cb.requests_total,
                     cb_successes_total: cb.successes_total,
                     cb_failures_total: cb.failures_total,
+                    cb_slow_total: cb.slow_total,
                     cb_rejections_total: cb.rejections_total,
                     cb_opened_total: cb.opened_total,
                     cb_time_closed_seconds: cb.time_closed_seconds,

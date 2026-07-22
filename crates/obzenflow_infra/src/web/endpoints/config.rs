@@ -52,6 +52,7 @@ impl ConfigReadModel {
 
     fn base(&self) -> serde_json::Value {
         json!({
+            "schema_version": obzenflow_core::config::EVIDENCE_SCHEMA_VERSION,
             "flow": self.flow_name,
             "flow_id": self.flow_id,
             "values": self.snapshot.global_view(),
@@ -75,6 +76,7 @@ impl ConfigReadModel {
             })
             .collect();
         json!({
+            "schema_version": obzenflow_core::config::EVIDENCE_SCHEMA_VERSION,
             "flow": self.flow_name,
             "flow_id": self.flow_id,
             "values": values,
@@ -87,6 +89,7 @@ impl ConfigReadModel {
             None => self.snapshot.global_view(),
         };
         json!({
+            "schema_version": obzenflow_core::config::EVIDENCE_SCHEMA_VERSION,
             "flow": self.flow_name,
             "flow_id": self.flow_id,
             "values": values,
@@ -94,7 +97,10 @@ impl ConfigReadModel {
     }
 
     fn schema(&self) -> serde_json::Value {
-        json!({ "knobs": schema_view() })
+        json!({
+            "schema_version": obzenflow_core::config::EVIDENCE_SCHEMA_VERSION,
+            "knobs": schema_view()
+        })
     }
 
     fn diff(&self) -> serde_json::Value {
@@ -102,6 +108,7 @@ impl ConfigReadModel {
         // result is truthfully empty; computed, not assumed (gap 12).
         let base = self.snapshot.global_view();
         json!({
+            "schema_version": obzenflow_core::config::EVIDENCE_SCHEMA_VERSION,
             "flow": self.flow_name,
             "flow_id": self.flow_id,
             "entries": diff(&base, &base),
@@ -117,6 +124,7 @@ impl ConfigReadModel {
             ));
         };
         Ok(json!({
+            "schema_version": obzenflow_core::config::EVIDENCE_SCHEMA_VERSION,
             "flow": self.flow_name,
             "flow_id": self.flow_id,
             "values": effective.manifest_evidence().values,
@@ -144,11 +152,13 @@ impl ConfigReadModel {
         }
         let key = StageKey::from(stage_key);
         Ok(json!({
+            "schema_version": obzenflow_core::config::EVIDENCE_SCHEMA_VERSION,
             "flow": self.flow_name,
             "flow_id": self.flow_id,
             "stage": stage_key,
             "values": effective.stage_docs(&key),
             "edges": effective.edge_docs_for_upstream(&key),
+            "effects": effective.effect_docs_for_stage(&key),
         }))
     }
 
@@ -275,22 +285,24 @@ impl HttpEndpoint for ConfigHttpEndpoint {
 mod tests {
     use super::*;
     use obzenflow_core::config::{ConfigScope, ConfigSource};
+    use obzenflow_core::event::EffectType;
     use obzenflow_runtime::id_conversions::StageIdExt;
     use obzenflow_runtime::runtime_config::{
-        materialize_flow_config, CandidateSet, ConfigValue, FlowResolutionContext, ScopedCandidate,
+        materialize_flow_config, CandidateSet, ConfigValue, DslCandidates, FlowResolutionContext,
+        ScopedCandidate, RATE_LIMITER_EVENTS_PER_SECOND_KEY,
     };
     use obzenflow_topology::TopologyBuilder;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn model_with_file_value() -> ConfigReadModel {
         let mut candidates = CandidateSet::default();
         candidates
-            .admit(ScopedCandidate {
-                key_path: "runtime.max_lineage_depth".to_string(),
-                scope: ConfigScope::Global,
-                source: ConfigSource::File,
-                value: ConfigValue::U64(7),
-            })
+            .admit(ScopedCandidate::unqualified(
+                "runtime.max_lineage_depth",
+                ConfigScope::Global,
+                ConfigSource::File,
+                ConfigValue::U64(7),
+            ))
             .expect("candidate admits");
         let snapshot = Arc::new(ResolvedRuntimeConfig::new(candidates));
 
@@ -312,11 +324,28 @@ mod tests {
         builder.add_edge(src, snk);
         let topology = Arc::new(builder.build().expect("topology builds"));
 
+        let mut dsl = DslCandidates::default();
+        for effect_type in ["payments.authorize", "payments.refund"] {
+            dsl.declare_effect_consumption(RATE_LIMITER_EVENTS_PER_SECOND_KEY, "src", effect_type);
+            dsl.declare_for_effect(
+                RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+                "src",
+                effect_type,
+                ConfigValue::F64(8.0),
+            );
+        }
         let ctx = FlowResolutionContext {
             flow_name: "config_http".to_string(),
             stages: BTreeSet::from([StageKey::from("src"), StageKey::from("snk")]),
             edges: BTreeSet::from([(StageKey::from("src"), StageKey::from("snk"))]),
-            dsl: Default::default(),
+            declared_effects: BTreeMap::from([(
+                StageKey::from("src"),
+                BTreeSet::from([
+                    EffectType::from("payments.authorize"),
+                    EffectType::from("payments.refund"),
+                ]),
+            )]),
+            dsl,
         };
         let effective =
             Arc::new(materialize_flow_config(&snapshot, ctx).expect("flow config materializes"));
@@ -342,6 +371,21 @@ mod tests {
         assert_eq!(lineage["value"], json!(7));
         assert_eq!(lineage["source"], "file");
         assert_eq!(lineage["scope"], "global");
+    }
+
+    #[test]
+    fn every_successful_config_projection_declares_evidence_schema_v2() {
+        let model = model_with_file_value();
+        let bodies = [
+            model.base(),
+            model.overlay(),
+            model.effective(),
+            model.schema(),
+            model.diff(),
+            model.flow("flow-1").unwrap(),
+            model.stage("flow-1", "src").unwrap(),
+        ];
+        assert!(bodies.iter().all(|body| body["schema_version"] == json!(2)));
     }
 
     #[test]
@@ -375,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_route_serves_stage_docs_and_edges_object() {
+    fn stage_route_serves_stage_edge_and_effect_projections() {
         let model = model_with_file_value();
         let body = model.stage("flow-1", "src").expect("stage view");
         assert_eq!(body["stage"], "src");
@@ -386,6 +430,26 @@ mod tests {
         // The edges object exists (keyed `up|>down`); the backpressure knob
         // is OptionalAbsent so it is empty unless a source supplied a value.
         assert!(body["edges"].is_object());
+
+        let effects = body["effects"].as_object().expect("effects object");
+        assert_eq!(effects.len(), 2);
+        for effect_type in ["payments.authorize", "payments.refund"] {
+            let docs = effects[effect_type].as_array().expect("effect docs");
+            let limiter = docs
+                .iter()
+                .find(|doc| doc["key_path"] == RATE_LIMITER_EVENTS_PER_SECOND_KEY)
+                .expect("limiter row");
+            assert_eq!(limiter["value"], json!(8.0));
+            assert_eq!(
+                limiter["resolved_for"],
+                json!({
+                    "kind": "effect",
+                    "stage": "src",
+                    "effect_type": effect_type,
+                })
+            );
+            assert_eq!(limiter["winner_subject"]["kind"], "effect");
+        }
     }
 
     #[test]

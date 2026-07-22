@@ -144,16 +144,20 @@ fn export_journal_file<R: JournalEvent>(
             continue;
         }
         match dispose(classify_frame::<R>(&buf), termination, policy) {
-            Disposition::Yield(record) => {
-                serde_json::to_writer(&mut *out, &record).map_err(|e| JournalInspectError::Io {
-                    path: path.to_path_buf(),
-                    source: std::io::Error::other(e.to_string()),
-                })?;
-                out.write_all(b"\n")
-                    .map_err(|source| JournalInspectError::Io {
-                        path: path.to_path_buf(),
-                        source,
+            Disposition::Yield(frame) => {
+                for record in frame.into_records() {
+                    serde_json::to_writer(&mut *out, &record).map_err(|e| {
+                        JournalInspectError::Io {
+                            path: path.to_path_buf(),
+                            source: std::io::Error::other(e.to_string()),
+                        }
                     })?;
+                    out.write_all(b"\n")
+                        .map_err(|source| JournalInspectError::Io {
+                            path: path.to_path_buf(),
+                            source,
+                        })?;
+                }
             }
             Disposition::EndOfCommittedRecords | Disposition::Skip => break,
             Disposition::Corrupt(problem) => {
@@ -193,12 +197,14 @@ fn inspect_chain_journal(
             continue;
         }
         match dispose(classify_frame::<ChainEvent>(&buf), termination, policy) {
-            Disposition::Yield(record) => {
-                let ty = record.event.event_type();
-                if event_type.is_some_and(|filter| filter != ty.as_str()) {
-                    continue;
+            Disposition::Yield(frame) => {
+                for record in frame.into_records() {
+                    let ty = record.event.event_type();
+                    if event_type.is_some_and(|filter| filter != ty.as_str()) {
+                        continue;
+                    }
+                    println!("  {record_offset:>10}  {ty}");
                 }
-                println!("  {record_offset:>10}  {ty}");
             }
             Disposition::EndOfCommittedRecords | Disposition::Skip => break,
             Disposition::Corrupt(problem) => {

@@ -122,6 +122,13 @@ pub(crate) enum StageAppendIntent {
     ObserverDiagnostic,
 }
 
+/// One member of a policy-neutral atomic journal group.
+pub(crate) struct AtomicCommitEntry {
+    pub event: ChainEvent,
+    pub options: CommitOptions,
+    pub intent: StageAppendIntent,
+}
+
 impl StageAppendIntent {
     pub(crate) fn mirror_policy(self) -> MirrorPolicy {
         match self {
@@ -203,6 +210,135 @@ impl OutputCommitter<'_> {
         options: CommitOptions,
         intent: StageAppendIntent,
     ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
+        let event = self
+            .prepare_prebuilt_with_intent(event, parent, options, intent)
+            .await?;
+
+        // Direct facts are already past input admission, so this path must not
+        // wait. It nevertheless records every durable physical Data row. A
+        // failed append drops the reservation and releases it.
+        let backpressure_reservation = event
+            .is_data()
+            .then(|| {
+                self.backpressure_writer
+                    .map(|writer| writer.reserve_tracked(1))
+            })
+            .flatten();
+
+        let written = self
+            .data_journal
+            .append(event, parent)
+            .await
+            .map_err(|e| -> CommitError { e.to_string().into() })?;
+
+        if let Some(reservation) = backpressure_reservation {
+            reservation.commit(1);
+        }
+
+        self.finish_committed(&written, options, intent).await;
+        Ok(written)
+    }
+
+    /// Commit every member through one journal atomic-group primitive. Event
+    /// enrichment happens before the append; counters, heartbeat state, and
+    /// best-effort system mirrors advance only after the complete group is
+    /// visible.
+    pub(crate) async fn commit_atomic_group(
+        &self,
+        group_id: &str,
+        entries: Vec<AtomicCommitEntry>,
+        parent: Option<&EventEnvelope<ChainEvent>>,
+    ) -> Result<Vec<EventEnvelope<ChainEvent>>, CommitError> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.observers.is_some()
+            && entries
+                .iter()
+                .any(|entry| entry.intent.runs_output_commit_hooks())
+        {
+            return Err("atomic journal groups cannot run output-commit observers before their commit point".into());
+        }
+
+        let mut prepared = Vec::with_capacity(entries.len());
+        let mut metadata = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let event = self
+                .prepare_prebuilt_with_intent(entry.event, parent, entry.options, entry.intent)
+                .await?;
+            prepared.push(event);
+            metadata.push((entry.options, entry.intent));
+        }
+
+        let data_count = prepared.iter().filter(|event| event.is_data()).count() as u64;
+        let backpressure_reservation = (data_count > 0)
+            .then(|| {
+                self.backpressure_writer
+                    .map(|writer| writer.reserve_tracked(data_count))
+            })
+            .flatten();
+
+        let member_count = metadata.len();
+        let written = match self
+            .data_journal
+            .append_group(group_id, prepared, parent)
+            .await
+        {
+            Ok(written) => written,
+            Err(error) => {
+                if let Some(instrumentation) = self.instrumentation {
+                    instrumentation
+                        .terminal_group_commit_failures_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                tracing::error!(
+                    group_id,
+                    member_count,
+                    error = %error,
+                    "atomic terminal journal group commit failed"
+                );
+                return Err(error.to_string().into());
+            }
+        };
+
+        // A successful Journal call means every prepared member is visible.
+        // Account the physical rows before checking the returned-envelope
+        // cardinality so a broken Journal implementation cannot leak debt.
+        if let Some(reservation) = backpressure_reservation {
+            reservation.commit(data_count);
+        }
+        if let Some(instrumentation) = self.instrumentation {
+            instrumentation
+                .terminal_groups_committed_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if written.len() != metadata.len() {
+            tracing::error!(
+                group_id,
+                member_count,
+                returned_envelopes = written.len(),
+                "journal violated atomic-group envelope cardinality"
+            );
+            return Err(format!(
+                "atomic journal group '{group_id}' returned {} envelopes for {} members",
+                written.len(),
+                metadata.len()
+            )
+            .into());
+        }
+        for (envelope, (options, intent)) in written.iter().zip(metadata) {
+            self.finish_committed(envelope, options, intent).await;
+        }
+        Ok(written)
+    }
+
+    async fn prepare_prebuilt_with_intent(
+        &self,
+        event: ChainEvent,
+        parent: Option<&EventEnvelope<ChainEvent>>,
+        options: CommitOptions,
+        intent: StageAppendIntent,
+    ) -> Result<ChainEvent, CommitError> {
         self.validate_prebuilt(&event, options)?;
 
         let mut event = event;
@@ -266,27 +402,15 @@ impl OutputCommitter<'_> {
             }
         }
 
-        // Direct facts are already past input admission, so this path must not
-        // wait. It nevertheless records every durable physical Data row. A
-        // failed append drops the reservation and releases it.
-        let backpressure_reservation = event
-            .is_data()
-            .then(|| {
-                self.backpressure_writer
-                    .map(|writer| writer.reserve_tracked(1))
-            })
-            .flatten();
+        Ok(event)
+    }
 
-        let written = self
-            .data_journal
-            .append(event, parent)
-            .await
-            .map_err(|e| -> CommitError { e.to_string().into() })?;
-
-        if let Some(reservation) = backpressure_reservation {
-            reservation.commit(1);
-        }
-
+    async fn finish_committed(
+        &self,
+        written: &EventEnvelope<ChainEvent>,
+        options: CommitOptions,
+        intent: StageAppendIntent,
+    ) {
         if let Some(instrumentation) = self.instrumentation {
             if options.count_output && written.event.is_data() {
                 instrumentation.record_output_event(&written.event);
@@ -302,11 +426,9 @@ impl OutputCommitter<'_> {
             MirrorPolicy::FrameworkMiddlewareAllowlist
         ) {
             if let Some(system_journal) = self.system_journal {
-                mirror_middleware_event_to_system_journal(&written, system_journal).await;
+                mirror_middleware_event_to_system_journal(written, system_journal).await;
             }
         }
-
-        Ok(written)
     }
 
     async fn append_no_hook_prebuilt(

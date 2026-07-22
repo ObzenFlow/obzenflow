@@ -87,12 +87,12 @@ async fn file_configured_lineage_depth_caps_journalled_parent_ids() {
 
     let mut candidates = CandidateSet::default();
     candidates
-        .admit(ScopedCandidate {
-            key_path: "runtime.max_lineage_depth".to_string(),
-            scope: obzenflow_core::config::ConfigScope::Global,
-            source: obzenflow_core::config::ConfigSource::File,
-            value: ConfigValue::U64(3),
-        })
+        .admit(ScopedCandidate::unqualified(
+            "runtime.max_lineage_depth",
+            obzenflow_core::config::ConfigScope::Global,
+            obzenflow_core::config::ConfigSource::File,
+            ConfigValue::U64(3),
+        ))
         .expect("global candidate admits");
     let snapshot = Arc::new(ResolvedRuntimeConfig::new(candidates));
 

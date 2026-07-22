@@ -296,9 +296,6 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     /// Descriptor-owned effect declarations for replay-safe effect invocation.
     pub effect_declarations: Vec<EffectDeclaration>,
 
-    /// Typed-outcome middleware registrations (FLOWIP-120h `output_middleware:` lane).
-    pub synthesized_outcomes: Vec<crate::effects::SynthesizedOutcomeRegistration>,
-
     /// Error journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 

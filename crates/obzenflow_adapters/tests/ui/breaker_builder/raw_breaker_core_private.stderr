@@ -1,0 +1,11 @@
+error[E0603]: struct `CircuitBreakerMiddleware` is private
+ --> tests/ui/breaker_builder/raw_breaker_core_private.rs:5:63
+  |
+5 | use obzenflow_adapters::middleware::control::circuit_breaker::CircuitBreakerMiddleware;
+  |                                                               ^^^^^^^^^^^^^^^^^^^^^^^^ private struct
+  |
+note: the struct `CircuitBreakerMiddleware` is defined here
+ --> src/middleware/control/circuit_breaker/mod.rs
+  |
+  | pub(crate) struct CircuitBreakerMiddleware {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

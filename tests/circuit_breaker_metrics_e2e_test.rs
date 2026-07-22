@@ -9,19 +9,17 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::circuit_breaker;
+use obzenflow_adapters::middleware::CircuitBreaker;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     StageId, WriterId,
 };
-use obzenflow_dsl::{async_transform, flow, sink, source};
+use obzenflow_dsl::{flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
-};
+use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -41,61 +39,6 @@ impl TypedPayload for CircuitMetricEvent {
 }
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};
-
-/// Transform that tracks successes and fails after N successes
-#[derive(Clone, Debug)]
-struct ControlledFailureTransform {
-    success_count: Arc<Mutex<u32>>,
-    fail_after: u32,
-}
-
-impl ControlledFailureTransform {
-    fn new(fail_after: u32) -> Self {
-        Self {
-            success_count: Arc::new(Mutex::new(0)),
-            fail_after,
-        }
-    }
-}
-
-// FLOWIP-120c H1: a circuit breaker on a pure sync transform is now a build
-// error, so this test rides the async-non-effectful surface (deprecated,
-// warns) until FLOWIP-128b moves breaker-guarded work onto effects.
-#[async_trait]
-impl AsyncTransformHandler for ControlledFailureTransform {
-    async fn process(
-        &self,
-        mut event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let count = {
-            let mut c = self.success_count.lock().unwrap();
-            *c += 1;
-            *c
-        };
-
-        // Actually fail processing after threshold. We model failure as an
-        // explicit error status instead of relying on empty outputs so
-        // that circuit breaker semantics do not depend on container length.
-        if count > self.fail_after {
-            event.processing_info.status =
-                obzenflow_core::event::status::processing_status::ProcessingStatus::error(
-                    "controlled_failure",
-                );
-        } else {
-            // Normal processing
-            let mut payload = event.payload().clone();
-            payload["processed"] = json!(true);
-            payload["count"] = json!(count);
-            event = ChainEventFactory::data_event(event.writer_id, event.event_type(), payload);
-        }
-
-        Ok(vec![event])
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
-    }
-}
 
 /// Source that generates a stream of events with delays
 #[derive(Clone, Debug)]
@@ -152,7 +95,7 @@ impl FiniteSourceHandler for TimedEventSource {
             std::thread::sleep(*delay);
         }
 
-        let event = ChainEventFactory::data_event(
+        let mut event = ChainEventFactory::data_event(
             self.writer_id,
             <CircuitMetricEvent as TypedPayload>::EVENT_TYPE,
             json!({
@@ -160,6 +103,12 @@ impl FiniteSourceHandler for TimedEventSource {
                 "type": event_type
             }),
         );
+        if event_type == "failure" {
+            event.processing_info.status =
+                obzenflow_core::event::status::processing_status::ProcessingStatus::error(
+                    "controlled_failure",
+                );
+        }
 
         self.index += 1;
         Ok(Some(vec![event]))
@@ -212,7 +161,6 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
 
     // Create handlers
     let source = TimedEventSource::new();
-    let transform = ControlledFailureTransform::new(3); // Fail after 3 successes
     let (sink, collected_events) = MetricsSink::new();
 
     println!("Building flow with circuit breaker middleware...");
@@ -224,19 +172,19 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
         middleware: [],
 
         stages: {
-            cb_source = source!(CircuitMetricEvent => source);
-
-            // Transform with circuit breaker (3 consecutive failures opens circuit)
-            cb_transform = async_transform!(CircuitMetricEvent -> CircuitMetricEvent => transform, [
-                circuit_breaker(3)
+            // Typed source-poll binding: three error-marked batches open the breaker.
+            cb_source = source!(CircuitMetricEvent => source, [
+                CircuitBreaker::builder()
+                    .consecutive_failures(3)
+                    .open_for(Duration::from_millis(100))
+                    .build()
+                    .expect("source breaker configuration")
             ]);
-
             cb_sink = sink!(CircuitMetricEvent => sink);
         },
 
         topology: {
-            cb_source |> cb_transform;
-            cb_transform |> cb_sink;
+            cb_source |> cb_sink;
         }
     }
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
@@ -274,7 +222,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
     println!("\n=== Circuit Breaker Metrics ===");
     for line in metrics_text.lines() {
         if line.contains("circuit_breaker")
-            || line.contains("cb_transform")
+            || line.contains("cb_source")
             || line.contains("events_total")
             || line.contains("errors_total")
         {
@@ -329,12 +277,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
         let events_len = events.len();
         let success_count = events
             .iter()
-            .filter(|e| {
-                e.payload()
-                    .get("processed")
-                    .map(|v| v == &json!(true))
-                    .unwrap_or(false)
-            })
+            .filter(|e| e.payload().get("type") == Some(&json!("normal")))
             .count();
 
         (events_len, success_count)
@@ -398,24 +341,6 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
         }
     }
 
-    // Simple passthrough transform
-    #[derive(Clone, Debug)]
-    struct PassthroughTransform;
-
-    #[async_trait]
-    impl AsyncTransformHandler for PassthroughTransform {
-        async fn process(
-            &self,
-            event: ChainEvent,
-        ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-            Ok(vec![event])
-        }
-
-        async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-            Ok(())
-        }
-    }
-
     let flow_handle = flow! {
         name: "circuit_breaker_summary_test",
         journals: disk_journals(std::path::PathBuf::from(
@@ -424,16 +349,17 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
         middleware: [],
 
         stages: {
-            rapid_source = source!(CircuitMetricEvent => RapidSource { count: 0, writer_id: WriterId::from(StageId::new()) });
-            cb_summary_transform = async_transform!(CircuitMetricEvent -> CircuitMetricEvent => PassthroughTransform, [
-                circuit_breaker(10) // High threshold, won't trip
+            rapid_source = source!(CircuitMetricEvent => RapidSource { count: 0, writer_id: WriterId::from(StageId::new()) }, [
+                CircuitBreaker::builder()
+                    .consecutive_failures(10)
+                    .build()
+                    .expect("source breaker configuration")
             ]);
             null_sink = sink!(CircuitMetricEvent => MetricsSink::new().0);
         },
 
         topology: {
-            rapid_source |> cb_summary_transform;
-            cb_summary_transform |> null_sink;
+            rapid_source |> null_sink;
         }
     }
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())

@@ -11,14 +11,9 @@ use obzenflow_runtime::effects::EffectError;
 pub enum PolicyAdmission {
     /// Admit the invocation; the policy observes how the attempt ends.
     Admit,
-    /// Skip execution and synthesize fallback results in its place.
-    Synthesize {
-        results: Vec<ChainEvent>,
-        cause: Option<MiddlewareAbortCause>,
-    },
     /// Reject execution outright, recorded as a `Failed` outcome under the
     /// effect cursor so strict replay reproduces the rejection.
-    Reject(MiddlewareAbortCause),
+    Reject(Box<MiddlewareAbortCause>),
 }
 
 /// How a guarded attempt ended, shown to every policy that admitted it.
@@ -26,9 +21,6 @@ pub enum EffectAttemptOutcome<'a> {
     /// The effect executed; on success the events are observation-grade
     /// derived copies of the authored facts.
     Executed(&'a Result<Vec<ChainEvent>, EffectError>),
-    /// A later policy synthesized fallback results; the protected call never
-    /// went out.
-    SkippedBy(&'a str),
     /// A later policy rejected execution; the protected call never went out.
     RejectedBy(&'a MiddlewareAbortCause),
 }
@@ -47,8 +39,8 @@ pub trait EffectPolicy: Send + Sync {
     fn observe(&self, attempt: &EffectAttemptOutcome<'_>, ctx: &mut MiddlewareContext);
 }
 
-/// Event-aware effect policy for middleware that genuinely needs parent-event
-/// access to classify, synthesize, or derive output facts.
+/// Event-aware effect policy for controls that genuinely need parent-event
+/// access for admission or observation.
 #[async_trait]
 pub trait EventAwareEffectPolicy: Send + Sync {
     fn label(&self) -> &'static str;

@@ -17,6 +17,7 @@ pub struct CircuitBreakerMetrics {
     pub requests_total: u64,
     pub successes_total: u64,
     pub failures_total: u64,
+    pub slow_total: u64,
     pub rejections_total: u64,
     pub opened_total: u64,
     pub time_closed_seconds: f64,

@@ -9,13 +9,13 @@
 //! control-plane port so runtime services can consume read-only control state
 //! without depending on adapter middleware traits.
 
-use crate::middleware::{EffectTypeKey, SourcePolicy};
+use crate::middleware::EffectTypeKey;
 use obzenflow_core::id::StageId;
 use obzenflow_runtime::control_plane::{
     CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlPlaneProvider,
     RateLimiterSnapshotter,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 struct CircuitBreakerRegistration {
@@ -35,6 +35,37 @@ struct RateLimiterRegistration {
 /// bounded by the stage's declared `effects:` set.
 type ControlKey = (StageId, Option<EffectTypeKey>);
 
+pub(crate) enum PendingControlRegistration {
+    CircuitBreaker {
+        stage_id: StageId,
+        effect_type: Option<EffectTypeKey>,
+        metrics_fn: Arc<CircuitBreakerSnapshotter>,
+        state_view: Arc<dyn CircuitBreakerStateView>,
+    },
+    RateLimiter {
+        stage_id: StageId,
+        effect_type: Option<EffectTypeKey>,
+        metrics_fn: Arc<RateLimiterSnapshotter>,
+    },
+}
+
+impl PendingControlRegistration {
+    pub(crate) fn target(&self) -> (StageId, Option<&EffectTypeKey>) {
+        match self {
+            Self::CircuitBreaker {
+                stage_id,
+                effect_type,
+                ..
+            }
+            | Self::RateLimiter {
+                stage_id,
+                effect_type,
+                ..
+            } => (*stage_id, effect_type.as_ref()),
+        }
+    }
+}
+
 /// Aggregates control middleware from multiple stages.
 ///
 /// Created once per flow and shared with all middleware and consumers.
@@ -42,9 +73,6 @@ type ControlKey = (StageId, Option<EffectTypeKey>);
 pub struct ControlMiddlewareAggregator {
     circuit_breakers: RwLock<HashMap<ControlKey, CircuitBreakerRegistration>>,
     rate_limiters: RwLock<HashMap<ControlKey, RateLimiterRegistration>>,
-    // FLOWIP-115a: adapter-owned source policy chains. The descriptor turns
-    // these into one runtime-neutral source boundary.
-    source_policies: RwLock<HashMap<ControlKey, Vec<Arc<dyn SourcePolicy>>>>,
 }
 
 impl ControlMiddlewareAggregator {
@@ -52,103 +80,86 @@ impl ControlMiddlewareAggregator {
         Self::default()
     }
 
-    pub fn register_circuit_breaker(
+    /// Atomically commit one checked factory invocation's staged authority.
+    /// Both maps are locked in breaker-then-limiter order, every key is
+    /// preflighted (including duplicates within the batch), and insertion only
+    /// begins after the complete batch is known to be valid.
+    pub(crate) fn commit_batch(
         &self,
-        stage_id: StageId,
-        metrics_fn: Arc<CircuitBreakerSnapshotter>,
-        state_view: Arc<dyn CircuitBreakerStateView>,
+        pending: Vec<PendingControlRegistration>,
     ) -> Result<(), String> {
-        self.register_circuit_breaker_keyed(stage_id, None, metrics_fn, state_view)
-    }
-
-    /// Register a per-effect circuit breaker instance (FLOWIP-120c).
-    pub fn register_circuit_breaker_for_effect(
-        &self,
-        stage_id: StageId,
-        effect_type: EffectTypeKey,
-        metrics_fn: Arc<CircuitBreakerSnapshotter>,
-        state_view: Arc<dyn CircuitBreakerStateView>,
-    ) -> Result<(), String> {
-        self.register_circuit_breaker_keyed(stage_id, Some(effect_type), metrics_fn, state_view)
-    }
-
-    fn register_circuit_breaker_keyed(
-        &self,
-        stage_id: StageId,
-        effect_type: Option<EffectTypeKey>,
-        metrics_fn: Arc<CircuitBreakerSnapshotter>,
-        state_view: Arc<dyn CircuitBreakerStateView>,
-    ) -> Result<(), String> {
-        let registration = CircuitBreakerRegistration {
-            metrics_fn,
-            state_view,
-        };
-
-        let mut registrations = self
+        let mut circuit_breakers = self
             .circuit_breakers
             .write()
             .expect("ControlMiddlewareAggregator: circuit_breakers poisoned write lock");
-        let key = (stage_id, effect_type);
-        if registrations.contains_key(&key) {
-            return Err(format!(
-                "a circuit breaker is already registered for stage {stage_id} and effect {:?}",
-                key.1.as_ref().map(EffectTypeKey::as_str)
-            ));
+        let mut rate_limiters = self
+            .rate_limiters
+            .write()
+            .expect("ControlMiddlewareAggregator: rate_limiters poisoned write lock");
+
+        let mut pending_breakers = HashSet::new();
+        let mut pending_limiters = HashSet::new();
+        for registration in &pending {
+            let (kind, key, existing, duplicate) = match registration {
+                PendingControlRegistration::CircuitBreaker {
+                    stage_id,
+                    effect_type,
+                    ..
+                } => {
+                    let key = (*stage_id, effect_type.clone());
+                    let existing = circuit_breakers.contains_key(&key);
+                    let duplicate = !pending_breakers.insert(key.clone());
+                    ("circuit breaker", key, existing, duplicate)
+                }
+                PendingControlRegistration::RateLimiter {
+                    stage_id,
+                    effect_type,
+                    ..
+                } => {
+                    let key = (*stage_id, effect_type.clone());
+                    let existing = rate_limiters.contains_key(&key);
+                    let duplicate = !pending_limiters.insert(key.clone());
+                    ("rate limiter", key, existing, duplicate)
+                }
+            };
+            if existing || duplicate {
+                return Err(format!(
+                    "a {kind} is already registered for stage {} and effect {:?}",
+                    key.0,
+                    key.1.as_ref().map(EffectTypeKey::as_str)
+                ));
+            }
         }
-        registrations.insert(key, registration);
+
+        for registration in pending {
+            match registration {
+                PendingControlRegistration::CircuitBreaker {
+                    stage_id,
+                    effect_type,
+                    metrics_fn,
+                    state_view,
+                } => {
+                    circuit_breakers.insert(
+                        (stage_id, effect_type),
+                        CircuitBreakerRegistration {
+                            metrics_fn,
+                            state_view,
+                        },
+                    );
+                }
+                PendingControlRegistration::RateLimiter {
+                    stage_id,
+                    effect_type,
+                    metrics_fn,
+                } => {
+                    rate_limiters.insert(
+                        (stage_id, effect_type),
+                        RateLimiterRegistration { metrics_fn },
+                    );
+                }
+            }
+        }
         Ok(())
-    }
-
-    pub fn register_rate_limiter(
-        &self,
-        stage_id: StageId,
-        metrics_fn: Arc<RateLimiterSnapshotter>,
-    ) {
-        self.register_rate_limiter_keyed(stage_id, None, metrics_fn);
-    }
-
-    /// Register a per-effect rate limiter instance (FLOWIP-120c).
-    pub fn register_rate_limiter_for_effect(
-        &self,
-        stage_id: StageId,
-        effect_type: EffectTypeKey,
-        metrics_fn: Arc<RateLimiterSnapshotter>,
-    ) {
-        self.register_rate_limiter_keyed(stage_id, Some(effect_type), metrics_fn);
-    }
-
-    fn register_rate_limiter_keyed(
-        &self,
-        stage_id: StageId,
-        effect_type: Option<EffectTypeKey>,
-        metrics_fn: Arc<RateLimiterSnapshotter>,
-    ) {
-        let registration = RateLimiterRegistration { metrics_fn };
-        self.rate_limiters
-            .write()
-            .expect("ControlMiddlewareAggregator: rate_limiters poisoned write lock")
-            .insert((stage_id, effect_type), registration);
-    }
-
-    /// FLOWIP-115a: append a source policy for a stage, in declared order.
-    pub fn register_source_policy(&self, stage_id: StageId, policy: Arc<dyn SourcePolicy>) {
-        self.source_policies
-            .write()
-            .expect("ControlMiddlewareAggregator: source_policies poisoned write lock")
-            .entry((stage_id, None))
-            .or_default()
-            .push(policy);
-    }
-
-    /// FLOWIP-115a: the source policies registered for a stage, in declared
-    /// order.
-    pub fn source_policies(&self, stage_id: &StageId) -> Vec<Arc<dyn SourcePolicy>> {
-        self.source_policies
-            .read()
-            .expect("ControlMiddlewareAggregator: source_policies poisoned read lock")
-            .get(&(*stage_id, None))
-            .cloned()
-            .unwrap_or_default()
     }
 }
 

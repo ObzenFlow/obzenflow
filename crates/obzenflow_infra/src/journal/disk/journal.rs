@@ -6,7 +6,7 @@
 //!
 //! Provides optimal sequential writes and natural event ordering
 
-use super::log_record::LogRecord;
+use super::log_record::{serialize_atomic_group, serialize_record, LogRecord};
 use super::reader::DiskJournalReader;
 use super::scanner::{
     classify_frame, dispose, read_frame_async, read_frame_sync, Disposition, ParseOutcome,
@@ -43,6 +43,7 @@ use ulid::Ulid;
 static JOURNAL_LOCKS: OnceLock<
     std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Arc<RwLock<()>>>>,
 > = OnceLock::new();
+static RECOVERED_TORN_FRAMES_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 fn shared_lock_for_path(path: &Path) -> Arc<RwLock<()>> {
     // FLOWIP-120q: key by a normalized absolute path so the same file maps to one
@@ -198,7 +199,7 @@ impl<T: JournalEvent> DiskJournal<T> {
 
         // Build index and writer clocks from the framed log (FLOWIP-120q): one
         // shared rebuild helper, so `new` and `with_owner` cannot drift.
-        let (index, writer_clocks) = rebuild_index_from_path::<T>(&log_path)?;
+        let (index, writer_clocks, committed_end) = rebuild_index_from_path::<T>(&log_path)?;
 
         // Open a single shared file handle for appends
         let std_file = StdFile::options()
@@ -209,6 +210,7 @@ impl<T: JournalEvent> DiskJournal<T> {
                 message: format!("Failed to open log file for append: {}", log_path.display()),
                 source: Box::new(e),
             })?;
+        recover_torn_tail(&std_file, &log_path, committed_end)?;
         let write_file = std_file;
 
         Ok(Self {
@@ -238,7 +240,7 @@ impl<T: JournalEvent> DiskJournal<T> {
         // FLOWIP-120q P3 fix: rebuild via the framed parser through the same
         // shared helper as `new`, not raw `serde_json::from_str` (which fails on
         // framed records and used to leave the index and writer clocks empty).
-        let (index, writer_clocks) = rebuild_index_from_path::<T>(&log_path)?;
+        let (index, writer_clocks, committed_end) = rebuild_index_from_path::<T>(&log_path)?;
 
         // Open a single shared file handle for appends
         let std_file = StdFile::options()
@@ -249,6 +251,7 @@ impl<T: JournalEvent> DiskJournal<T> {
                 message: format!("Failed to open log file for append: {}", log_path.display()),
                 source: Box::new(e),
             })?;
+        recover_torn_tail(&std_file, &log_path, committed_end)?;
         let write_file = std_file;
 
         Ok(Self {
@@ -274,7 +277,37 @@ impl<T: JournalEvent> DiskJournal<T> {
 
 /// In-memory index (`event_id -> byte offset`) plus per-writer vector clocks
 /// rebuilt from a journal file.
-type RebuiltIndex = (HashMap<Ulid, u64>, HashMap<WriterId, VectorClock>);
+type RebuiltIndex = (HashMap<Ulid, u64>, HashMap<WriterId, VectorClock>, u64);
+
+fn recover_torn_tail(file: &StdFile, path: &Path, committed_end: u64) -> Result<(), JournalError> {
+    let physical_len = file
+        .metadata()
+        .map_err(|error| JournalError::Implementation {
+            message: format!("Failed to inspect journal tail: {}", path.display()),
+            source: Box::new(error),
+        })?
+        .len();
+    if physical_len <= committed_end {
+        return Ok(());
+    }
+    file.set_len(committed_end)
+        .map_err(|error| JournalError::Implementation {
+            message: format!(
+                "Failed to remove uncommitted journal tail at offset {committed_end}: {}",
+                path.display()
+            ),
+            source: Box::new(error),
+        })?;
+    RECOVERED_TORN_FRAMES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    tracing::warn!(
+        path = %path.display(),
+        committed_end,
+        removed_bytes = physical_len - committed_end,
+        recovered_torn_frames_total = RECOVERED_TORN_FRAMES_TOTAL.load(Ordering::Relaxed),
+        "removed an uncommitted torn journal frame during recovery"
+    );
+    Ok(())
+}
 
 /// Rebuild a disk journal's in-memory index and writer clocks from the framed
 /// log on disk (FLOWIP-120q). Shared by `DiskJournal::new` and
@@ -286,7 +319,7 @@ fn rebuild_index_from_path<T: JournalEvent>(log_path: &Path) -> Result<RebuiltIn
     let mut writer_clocks = HashMap::new();
 
     if !log_path.exists() {
-        return Ok((index, writer_clocks));
+        return Ok((index, writer_clocks, 0));
     }
 
     let file = StdFile::open(log_path).map_err(|e| JournalError::Implementation {
@@ -296,6 +329,7 @@ fn rebuild_index_from_path<T: JournalEvent>(log_path: &Path) -> Result<RebuiltIn
     let mut reader = BufReader::new(file);
     let mut buf = Vec::new();
     let mut offset = 0u64;
+    let mut committed_end = 0u64;
 
     while let Some((consumed, termination)) =
         read_frame_sync(&mut reader, &mut buf).map_err(|e| JournalError::Implementation {
@@ -306,6 +340,7 @@ fn rebuild_index_from_path<T: JournalEvent>(log_path: &Path) -> Result<RebuiltIn
         let record_offset = offset;
         offset += consumed as u64;
         if buf.iter().all(u8::is_ascii_whitespace) {
+            committed_end = offset;
             continue;
         }
         match dispose(
@@ -315,9 +350,12 @@ fn rebuild_index_from_path<T: JournalEvent>(log_path: &Path) -> Result<RebuiltIn
                 tolerate_torn_tail: true,
             },
         ) {
-            Disposition::Yield(record) => {
-                index.insert(record.event_id, record_offset);
-                writer_clocks.insert(record.writer_id, record.vector_clock);
+            Disposition::Yield(frame) => {
+                for record in frame.into_records() {
+                    index.insert(record.event_id, record_offset);
+                    writer_clocks.insert(record.writer_id, record.vector_clock);
+                }
+                committed_end = offset;
             }
             // A tolerated torn tail ends the committed records.
             Disposition::EndOfCommittedRecords | Disposition::Skip => break,
@@ -336,7 +374,7 @@ fn rebuild_index_from_path<T: JournalEvent>(log_path: &Path) -> Result<RebuiltIn
         }
     }
 
-    Ok((index, writer_clocks))
+    Ok((index, writer_clocks, committed_end))
 }
 
 impl<T: JournalEvent> Clone for DiskJournal<T> {
@@ -431,7 +469,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         };
 
         // Serialize with newline
-        let json_body = serde_json::to_vec(&record).map_err(|e| JournalError::Implementation {
+        let json_body = serialize_record(&record).map_err(|e| JournalError::Implementation {
             message: "Failed to serialize record".to_string(),
             source: Box::new(e),
         })?;
@@ -520,6 +558,142 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         Ok(envelope)
     }
 
+    async fn append_group(
+        &self,
+        group_id: &str,
+        mut events: Vec<T>,
+        parent: Option<&EventEnvelope<T>>,
+    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        crate::journal::ensure_owned(self.owner.as_ref())?;
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        if group_id.is_empty() {
+            return Err(JournalError::Implementation {
+                message: "Atomic journal group id cannot be empty".to_string(),
+                source: "empty atomic journal group id".into(),
+            });
+        }
+        if self.poisoned.load(Ordering::SeqCst) {
+            return Err(JournalError::Implementation {
+                message: format!(
+                    "Journal {} is poisoned after a failed append rollback; reopen to continue",
+                    self.path.display()
+                ),
+                source: "poisoned journal".into(),
+            });
+        }
+
+        // One write lock covers clock calculation, construction, the single
+        // physical frame append, and publication of every member.
+        let _lock = self.read_write_lock.write().await;
+        if let Some(sequencer) = &self.admission_sequencer {
+            for event in &mut events {
+                if event.admission_seq().is_none() {
+                    event.set_admission_seq(obzenflow_core::AdmissionSeq(
+                        sequencer.fetch_add(1, Ordering::Relaxed),
+                    ));
+                }
+            }
+        }
+
+        let mut next_writer_clocks = self.writer_clocks.read().await.clone();
+        let mut envelopes = Vec::with_capacity(events.len());
+        let mut records = Vec::with_capacity(events.len());
+        for event in events {
+            let writer_id = *event.writer_id();
+            let vector_clock = CausalOrderingService::advance_for_append(
+                next_writer_clocks.get(&writer_id),
+                &writer_id.to_string(),
+                parent.map(|p| &p.vector_clock),
+            );
+            next_writer_clocks.insert(writer_id, vector_clock.clone());
+            let timestamp = Utc::now();
+            envelopes.push(EventEnvelope {
+                journal_writer_id: JournalWriterId::from(self.journal_id),
+                vector_clock: vector_clock.clone(),
+                timestamp,
+                event: event.clone(),
+            });
+            records.push(LogRecord {
+                event_id: event.id().as_ulid(),
+                writer_id,
+                journal_id: self.journal_id,
+                vector_clock,
+                timestamp,
+                event,
+            });
+        }
+
+        let json_body = serialize_atomic_group(group_id, &records).map_err(|e| {
+            JournalError::Implementation {
+                message: format!("Failed to serialize atomic journal group '{group_id}'"),
+                source: Box::new(e),
+            }
+        })?;
+        let mut hasher = Hasher::new();
+        hasher.update(&json_body);
+        let crc = hasher.finalize();
+        let mut bytes = format!("{}:{}:", json_body.len(), crc).into_bytes();
+        bytes.extend_from_slice(&json_body);
+        bytes.push(b'\n');
+
+        let path = self.path.clone();
+        let write_file = self.write_file.clone();
+        let outcome =
+            tokio::task::spawn_blocking(move || -> Result<CommittedAppend, AppendFailure> {
+                let mut file = match write_file.lock() {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        return Err(AppendFailure::Poisoned(JournalError::Implementation {
+                            message: format!("Failed to lock journal file: {}", path.display()),
+                            source: Box::new(std::io::Error::other(format!("Mutex poisoned: {e}"))),
+                        }));
+                    }
+                };
+                append_frame(&mut *file, &bytes, &path)
+            })
+            .await;
+
+        let committed = match outcome {
+            Ok(Ok(committed)) => committed,
+            Ok(Err(AppendFailure::RolledBack(e))) => return Err(e),
+            Ok(Err(AppendFailure::Poisoned(e))) => {
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+            Err(join_error) => {
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(JournalError::Implementation {
+                    message: format!(
+                        "Background atomic-group writer task failed for journal {}",
+                        self.path.display()
+                    ),
+                    source: Box::new(join_error),
+                });
+            }
+        };
+
+        tracing::debug!(
+            path = %self.path.display(),
+            group_id,
+            members = records.len(),
+            offset = committed.offset,
+            bytes = committed.next_offset - committed.offset,
+            "DiskJournal appended atomic group frame"
+        );
+
+        {
+            let mut index = self.index.write().await;
+            for record in &records {
+                index.insert(record.event_id, committed.offset);
+            }
+        }
+        *self.writer_clocks.write().await = next_writer_clocks;
+
+        Ok(envelopes)
+    }
+
     async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         let mut events = Vec::new();
 
@@ -562,13 +736,18 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                     tolerate_torn_tail: false,
                 },
             ) {
-                Disposition::Yield(record) => {
-                    events.push(EventEnvelope {
-                        journal_writer_id: JournalWriterId::from(self.journal_id),
-                        vector_clock: record.vector_clock,
-                        timestamp: record.timestamp,
-                        event: record.event,
-                    });
+                Disposition::Yield(frame) => {
+                    events.extend(
+                        frame
+                            .into_records()
+                            .into_iter()
+                            .map(|record| EventEnvelope {
+                                journal_writer_id: JournalWriterId::from(self.journal_id),
+                                vector_clock: record.vector_clock,
+                                timestamp: record.timestamp,
+                                event: record.event,
+                            }),
+                    );
                 }
                 Disposition::EndOfCommittedRecords | Disposition::Skip => break,
                 Disposition::Corrupt(problem) => {
@@ -643,12 +822,16 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                     tolerate_torn_tail: false,
                 },
             ) {
-                Disposition::Yield(record) => Ok(Some(EventEnvelope {
-                    journal_writer_id: JournalWriterId::from(self.journal_id),
-                    vector_clock: record.vector_clock,
-                    timestamp: record.timestamp,
-                    event: record.event,
-                })),
+                Disposition::Yield(frame) => Ok(frame
+                    .into_records()
+                    .into_iter()
+                    .find(|record| record.event_id == ulid)
+                    .map(|record| EventEnvelope {
+                        journal_writer_id: JournalWriterId::from(self.journal_id),
+                        vector_clock: record.vector_clock,
+                        timestamp: record.timestamp,
+                        event: record.event,
+                    })),
                 Disposition::EndOfCommittedRecords | Disposition::Skip => Ok(None),
                 Disposition::Corrupt(problem) => Err(JournalError::Implementation {
                     message: format!(
@@ -750,14 +933,18 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                 // (FLOWIP-120q): classify per line and skip anything that is not a
                 // committed record. It is never a replay/verification contract.
                 match classify_frame::<T>(line.as_bytes()) {
-                    ParseOutcome::Complete(record) => {
-                        let envelope = EventEnvelope {
-                            journal_writer_id: JournalWriterId::from(self.journal_id),
-                            vector_clock: record.vector_clock,
-                            timestamp: record.timestamp,
-                            event: record.event,
-                        };
-                        results.push(envelope);
+                    ParseOutcome::Complete(frame) => {
+                        for record in frame.into_records().into_iter().rev() {
+                            if results.len() >= count {
+                                break;
+                            }
+                            results.push(EventEnvelope {
+                                journal_writer_id: JournalWriterId::from(self.journal_id),
+                                vector_clock: record.vector_clock,
+                                timestamp: record.timestamp,
+                                event: record.event,
+                            });
+                        }
                     }
                     ParseOutcome::Incomplete(_) => {
                         // Likely a chunk-boundary fragment; skip.
@@ -833,6 +1020,111 @@ mod tests {
         assert_eq!(event_by_id.unwrap().event.id, envelope.event.id);
 
         // Cleanup
+        std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn atomic_group_uses_one_frame_and_all_read_surfaces_expand_every_member() {
+        let test_id = Uuid::new_v4();
+        let test_dir = std::path::PathBuf::from(format!("target/test-logs/atomic_group_{test_id}"));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let log_path = test_dir.join("group.log");
+        let owner = obzenflow_core::JournalOwner::stage(StageId::new());
+        let log = DiskJournal::<ChainEvent>::with_owner(log_path.clone(), owner).unwrap();
+        let writer_id = WriterId::from(StageId::new());
+        let events: Vec<_> = (0..3)
+            .map(|index| {
+                ChainEventFactory::data_event(
+                    writer_id,
+                    "atomic.member",
+                    serde_json::json!({ "index": index }),
+                )
+            })
+            .collect();
+        let ids: Vec<_> = events.iter().map(|event| event.id).collect();
+
+        let written = log
+            .append_group("effect-outcome:test", events, None)
+            .await
+            .expect("atomic group append");
+        assert_eq!(written.len(), 3);
+        assert_eq!(
+            std::fs::read(&log_path)
+                .unwrap()
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count(),
+            1,
+            "the whole group must have one physical commit marker"
+        );
+
+        let all = log.read_all_unordered().await.unwrap();
+        assert_eq!(all.len(), 3);
+        for id in ids {
+            assert!(log.read_event(&id).await.unwrap().is_some());
+        }
+        let mut from_second = log.reader_from(1).await.unwrap();
+        assert_eq!(
+            from_second.next().await.unwrap().unwrap().event.payload()["index"],
+            1
+        );
+        assert_eq!(log.read_last_n(2).await.unwrap().len(), 2);
+
+        let reopened = DiskJournal::<ChainEvent>::with_owner(
+            log_path,
+            obzenflow_core::JournalOwner::stage(StageId::new()),
+        )
+        .unwrap();
+        assert_eq!(reopened.read_all_unordered().await.unwrap().len(), 3);
+        std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn atomic_group_torn_tail_is_invisible_at_every_byte_boundary() {
+        let test_id = Uuid::new_v4();
+        let test_dir = std::path::PathBuf::from(format!("target/test-logs/atomic_torn_{test_id}"));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let log_path = test_dir.join("group.log");
+        let journal_id = JournalId::new();
+        let writer_id = WriterId::from(StageId::new());
+        let records: Vec<_> = (0..3)
+            .map(|index| {
+                let event = ChainEventFactory::data_event(
+                    writer_id,
+                    "atomic.member",
+                    serde_json::json!({ "index": index }),
+                );
+                LogRecord {
+                    event_id: event.id.as_ulid(),
+                    writer_id,
+                    journal_id,
+                    vector_clock: VectorClock::new(),
+                    timestamp: Utc::now(),
+                    event,
+                }
+            })
+            .collect();
+        let body = serialize_atomic_group("effect-outcome:test", &records).unwrap();
+        let mut hasher = Hasher::new();
+        hasher.update(&body);
+        let mut frame = format!("{}:{}:", body.len(), hasher.finalize()).into_bytes();
+        frame.extend_from_slice(&body);
+        frame.push(b'\n');
+
+        for cut in 0..frame.len() {
+            std::fs::write(&log_path, &frame[..cut]).unwrap();
+            let reopened = DiskJournal::<ChainEvent>::with_owner(
+                log_path.clone(),
+                obzenflow_core::JournalOwner::stage(StageId::new()),
+            )
+            .unwrap_or_else(|error| panic!("torn group at byte {cut} should recover: {error}"));
+            assert!(
+                reopened.read_all_unordered().await.unwrap().is_empty(),
+                "no member may be visible after recovery from a tear at byte {cut}"
+            );
+            drop(reopened);
+        }
+
         std::fs::remove_dir_all(&test_dir).ok();
     }
 
@@ -1381,6 +1673,49 @@ mod tests {
             sink.buf, b"PRE",
             "partial bytes truncated back to pre-append EOF"
         );
+    }
+
+    #[test]
+    fn atomic_group_rolls_back_at_every_partial_write_boundary() {
+        let journal_id = JournalId::new();
+        let writer_id = WriterId::from(StageId::new());
+        let records: Vec<_> = (0..3)
+            .map(|index| {
+                let event = ChainEventFactory::data_event(
+                    writer_id,
+                    "atomic.member",
+                    serde_json::json!({ "index": index }),
+                );
+                LogRecord {
+                    event_id: event.id.as_ulid(),
+                    writer_id,
+                    journal_id,
+                    vector_clock: VectorClock::new(),
+                    timestamp: Utc::now(),
+                    event,
+                }
+            })
+            .collect();
+        let body = serialize_atomic_group("effect-outcome:test", &records).unwrap();
+        let mut hasher = Hasher::new();
+        hasher.update(&body);
+        let mut frame = format!("{}:{}:", body.len(), hasher.finalize()).into_bytes();
+        frame.extend_from_slice(&body);
+        frame.push(b'\n');
+
+        for fail_after in 0..=frame.len() {
+            let mut sink = MockSink {
+                buf: b"PRE".to_vec(),
+                mode: FailMode::PartialThenFail(fail_after),
+            };
+            let failure = append_frame(&mut sink, &frame, Path::new("group.log"))
+                .expect_err("every injected write failure must abort the group");
+            assert!(matches!(failure, AppendFailure::RolledBack(_)));
+            assert_eq!(
+                sink.buf, b"PRE",
+                "no group member may remain visible after failure at byte {fail_after}"
+            );
+        }
     }
 
     #[test]

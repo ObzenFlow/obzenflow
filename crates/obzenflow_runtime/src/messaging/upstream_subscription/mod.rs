@@ -187,7 +187,7 @@ where
     /// and each entry holds the policy stack for the corresponding edge.
     contract_policies: Vec<Option<ContractPolicyStack>>,
 
-    /// Flow-scoped control middleware provider (breaker-aware contract hints).
+    /// Flow-scoped typed control-state provider used by lifecycle policies.
     control_plane: Arc<dyn ControlPlaneProvider>,
 
     /// Last EOF accounting outcome (set when an EOF is observed)

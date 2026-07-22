@@ -176,11 +176,10 @@ mod tests {
     use super::*;
     use crate::middleware::control::ControlMiddlewareAggregator;
     use crate::middleware::{
-        ControlMiddlewareRole, Middleware, MiddlewareAttachmentRequest, MiddlewareDeclaration,
-        MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-        MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareOverrideKey,
-        MiddlewarePlanContribution, MiddlewareSurface, MiddlewareSurfaceAttachment,
-        MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId, TopologyMiddlewareConfigSlot,
+        MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory,
+        MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareMaterializationContext,
+        MiddlewareOrigin, MiddlewareOverrideKey, MiddlewareSurface, MiddlewareSurfaceAttachment,
+        MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
     };
     use obzenflow_core::StageId;
     use obzenflow_runtime::pipeline::config::StageConfig;
@@ -217,8 +216,8 @@ mod tests {
     struct ThirdPartyFamily;
 
     /// A minimal third-party `MiddlewareFactory` that is NOT the circuit breaker
-    /// (its `control_role` is `None`) yet attaches through the same carrier by
-    /// declaring a control surface and implementing `materialize`.
+    /// yet attaches through the same carrier by declaring a control surface and
+    /// implementing `materialize`.
     struct ThirdPartySinkFactory;
 
     impl MiddlewareFactory for ThirdPartySinkFactory {
@@ -226,30 +225,8 @@ mod tests {
             "third_party_sink"
         }
 
-        fn control_role(&self) -> ControlMiddlewareRole {
-            ControlMiddlewareRole::None
-        }
-
         fn override_key(&self) -> MiddlewareOverrideKey {
             MiddlewareOverrideKey::of::<ThirdPartyFamily>("third_party_sink")
-        }
-
-        fn plan_contribution(&self) -> MiddlewarePlanContribution {
-            MiddlewarePlanContribution::None
-        }
-
-        fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-            None
-        }
-
-        fn create(
-            &self,
-            _config: &StageConfig,
-            _control: Arc<ControlMiddlewareAggregator>,
-        ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
-            // Hook-bound only: it is placed via `materialize`, never the legacy
-            // handler-shell `create` path.
-            Err(MiddlewareFactoryError::not_hook_bound(self.label()))
         }
 
         fn declaration(&self) -> MiddlewareDeclaration {
@@ -263,7 +240,7 @@ mod tests {
         ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
             match request.surface {
                 MiddlewareSurface::SinkDelivery(_) => Ok(
-                    MiddlewareSurfaceAttachment::SinkDelivery(Arc::new(AlwaysRejectPolicy)),
+                    MiddlewareSurfaceAttachment::sink_delivery(Arc::new(AlwaysRejectPolicy)),
                 ),
                 other => Err(MiddlewareFactoryError::materialization_failed(
                     self.label(),
@@ -277,8 +254,8 @@ mod tests {
     #[tokio::test]
     async fn third_party_factory_uses_the_sink_carrier_and_rejects() {
         // FLOWIP-115b: the carrier is a general abstraction, not breaker-special.
-        // A non-breaker factory (control_role None) routes through the same
-        // `materialize` path purely by declaring a control surface, and its
+        // A non-breaker factory routes through the same `materialize` path
+        // purely by declaring a control surface, and its
         // policy composes in the same onion the breaker uses, short-circuiting
         // delivery on rejection.
         let factory = ThirdPartySinkFactory;
@@ -286,15 +263,15 @@ mod tests {
         assert!(factory
             .declaration()
             .supports(MiddlewareSurfaceKind::SinkDelivery));
-        assert_eq!(factory.control_role(), ControlMiddlewareRole::None);
-
         let config = StageConfig {
             stage_id: StageId::new(),
             name: "third_party".to_string(),
             flow_name: "test".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
-            resolved_policies: Default::default(),
+            effective_config: std::sync::Arc::new(
+                obzenflow_runtime::runtime_config::FlowEffectiveConfig::default(),
+            ),
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let surface = MiddlewareSurface::SinkDelivery(crate::middleware::SinkDeliverySurface {
@@ -314,18 +291,17 @@ mod tests {
             origin: &origin,
             declaration_index: crate::middleware::MiddlewareDeclarationIndex::resolved(0),
         };
-        let materialization = MiddlewareMaterializationContext {
-            config: &config,
-            control_middleware: &control,
-            stage_type: obzenflow_core::event::context::StageType::Sink,
-        };
-        let attachment = factory
-            .materialize(request, &materialization)
-            .expect("third-party factory should materialize a sink policy");
-        let policy = match attachment {
-            MiddlewareSurfaceAttachment::SinkDelivery(policy) => policy,
-            _ => panic!("expected a SinkDelivery attachment from the third-party factory"),
-        };
+        let policy = crate::middleware::materialize_factory_checked(
+            &factory,
+            request,
+            &config,
+            obzenflow_core::event::context::StageType::Sink,
+            &control,
+        )
+        .expect("third-party factory should materialize a sink policy");
+        let policy = policy
+            .into_sink_delivery()
+            .expect("expected a SinkDelivery attachment from the third-party factory");
 
         let boundary = PerSinkDeliveryPolicyBoundary::new(vec![policy]);
         let mut executor = PanicExecutor;

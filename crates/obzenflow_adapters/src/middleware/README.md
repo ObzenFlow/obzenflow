@@ -217,8 +217,8 @@ Runtime dispatch applies that gate, so observer authors do not need to inspect
 
 ## Hook-bound Control Middleware
 
-Control middleware that can pause, reject, synthesize, or otherwise affect live
-I/O must use the hook-bound carrier instead of the legacy handler shell. The
+Control middleware that admits, paces, or rejects live I/O must use the
+hook-bound carrier instead of the legacy handler shell. The
 factory declares its surfaces before runtime erasure, and the DSL materializes
 one attachment for one protected unit:
 
@@ -234,13 +234,11 @@ Minimal factory shape:
 
 ```rust
 use obzenflow_adapters::middleware::{
-    ControlMiddlewareRole, Middleware, MiddlewareDeclaration, MiddlewareFactory,
-    MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareKind,
-    MiddlewareMaterializationContext, MiddlewareOverrideKey,
-    MiddlewarePlanContribution, MiddlewareSurface, MiddlewareSurfaceAttachment,
-    MiddlewareSurfaceKind, PolicyAdmission, SourceAdmission, SinkAdmission,
+    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory,
+    MiddlewareFactoryError, MiddlewareFactoryResult,
+    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurface,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
 };
-use std::sync::Arc;
 
 struct MyControlFamily;
 
@@ -253,26 +251,6 @@ impl MiddlewareFactory for MyControlFactory {
 
     fn override_key(&self) -> MiddlewareOverrideKey {
         MiddlewareOverrideKey::of::<MyControlFamily>("my_control")
-    }
-
-    fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::None
-    }
-
-    fn kind(&self) -> MiddlewareKind {
-        MiddlewareKind::Policy
-    }
-
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
-    }
-
-    fn create(
-        &self,
-        _config: &obzenflow_runtime::pipeline::config::StageConfig,
-        _control: Arc<obzenflow_adapters::middleware::control::ControlMiddlewareAggregator>,
-    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
-        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
     }
 
     fn declaration(&self) -> MiddlewareDeclaration {
@@ -288,7 +266,7 @@ impl MiddlewareFactory for MyControlFactory {
 
     fn materialize(
         &self,
-        request: obzenflow_adapters::middleware::MiddlewareAttachmentRequest<'_>,
+        request: MiddlewareAttachmentRequest<'_>,
         _ctx: &MiddlewareMaterializationContext<'_>,
     ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
         match request.surface {
@@ -316,10 +294,11 @@ impl MiddlewareFactory for MyControlFactory {
 
 Control policies live under `middleware::control::policy`. They are the
 authoring contract for middleware that controls a live I/O boundary;
-legacy handler-shell compatibility middleware still implements the generic
-`Middleware` trait under `middleware::handler`. Observe-only middleware uses the
-adapter observer authoring surface and the bounded neutral ports described
-above. Built-in control middleware lives
+there is no public generic handler-shell factory fallback. Two AI map-reduce
+adapters remain on an internal, sealed FLOWIP-128g migration route, which is not
+available to third-party factories. Observe-only middleware uses the adapter
+observer authoring surface and the bounded neutral ports described above.
+Built-in control middleware lives
 beside the policy contract under `middleware::control`, so the namespace reads
 as one control subsystem rather than a loose set of root modules.
 
@@ -329,7 +308,7 @@ The policies returned from `materialize` are surface-specific:
   policies observe the raw `SourcePollOutcome`.
 - `EffectPolicy::admit` is event-neutral. Use `EventAwareEffectPolicy` only when
   the policy has a same-slice need to inspect the parent `ChainEvent`; both
-  variants return `PolicyAdmission::Admit`, `Synthesize`, or `Reject`. Rejected
+  variants return `PolicyAdmission::Admit` or `Reject`. Rejected
   effects are recorded under the effect cursor and strict replay returns the
   recorded outcome without invoking the live effect hook.
 - `SinkPolicy::admit` returns `SinkAdmission::Admit` or `Reject`; rejection is

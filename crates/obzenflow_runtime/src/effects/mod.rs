@@ -38,7 +38,9 @@ use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::replay::{ReplayArchive, ReplayError};
 use crate::stages::common::heartbeat::HeartbeatState;
-use crate::stages::common::supervision::output_committer::{CommitOptions, OutputCommitter};
+use crate::stages::common::supervision::output_committer::{
+    AtomicCommitEntry, CommitOptions, OutputCommitter, StageAppendIntent,
+};
 
 mod boundary;
 mod commit;
@@ -60,14 +62,13 @@ mod tests;
 pub(crate) use boundary::SingleUseEffectBoundaryOutcome;
 pub use boundary::{
     EffectAbortReason, EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectIdentity,
-    RepeatableEffectOperation, SingleUseEffectBoundaryReport, SingleUseEffectExecution,
-    SingleUseEffectOperation,
+    PhysicalCallObservation, PhysicalCallOutcome, PhysicalCallReceipt,
+    PreparedRepeatableEffectCall, PreparedSingleUseEffectCall, RepeatableEffectOperation,
+    SingleUseEffectBoundaryReport, SingleUseEffectExecution, SingleUseEffectOperation,
 };
 pub use commit::EffectCommitHandle;
 pub use completion::StageCompletion;
-pub use context::{
-    EffectContext, EffectInvocationContext, SynthesizedOutcomeKind, SynthesizedOutcomeRegistration,
-};
+pub use context::{EffectContext, EffectInvocationContext};
 // FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.
 #[cfg(test)]
 pub(crate) use context::EffectRuntimeMode;
@@ -97,8 +98,8 @@ pub use typed::Effects;
 pub use typed::{AllowedEffectsAllowEffect, EffectOutcomeFitsOutput, OutputAllowsFact};
 
 use commit::{
-    append_domain_effect_success_facts, append_effect_record, CommittedEffectOutcome,
-    EffectCommitHandleParams,
+    append_domain_effect_success_facts, append_effect_record, build_domain_effect_success_facts,
+    build_effect_record_event, EffectCommitHandleParams, PreparedEffectOutcome,
 };
 use identity::{descriptor_for_effect, descriptor_hash, hash_json_value};
 use replay::{

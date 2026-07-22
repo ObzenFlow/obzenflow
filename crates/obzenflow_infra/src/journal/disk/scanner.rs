@@ -19,7 +19,7 @@
 //! async readers differ. Both shims read one frame with `read_until(b'\n')`,
 //! strip the terminator from `buf`, and report whether it was present.
 
-use super::log_record::LogRecord;
+use super::log_record::{deserialize_frame, LogFrame};
 use crc32fast::Hasher;
 use obzenflow_core::event::JournalEvent;
 
@@ -34,7 +34,7 @@ pub(crate) enum LineTermination {
 /// Classification of a single framed line (I/O-free).
 pub(crate) enum ParseOutcome<R: JournalEvent> {
     /// A committed-shape record: full body, valid CRC, valid JSON.
-    Complete(LogRecord<R>),
+    Complete(LogFrame<R>),
     /// Plausibly a torn write: only `dispose` plus the terminator decides
     /// whether this is a tolerable tail or mid-file corruption.
     Incomplete(ParseProblem),
@@ -101,7 +101,7 @@ pub(crate) enum ReadPolicy {
 /// What a reader should do with a classified frame under its policy.
 pub(crate) enum Disposition<R: JournalEvent> {
     /// A committed record to hand to the caller.
-    Yield(LogRecord<R>),
+    Yield(LogFrame<R>),
     /// Nothing here yet; a `LiveTail` reader rewinds and retries. A sealed
     /// reader never receives this.
     Skip,
@@ -145,8 +145,8 @@ pub(crate) fn classify_frame<R: JournalEvent>(line: &[u8]) -> ParseOutcome<R> {
         });
     }
 
-    match serde_json::from_slice::<LogRecord<R>>(body) {
-        Ok(record) => ParseOutcome::Complete(record),
+    match deserialize_frame::<R>(body) {
+        Ok(frame) => ParseOutcome::Complete(frame),
         Err(error) => ParseOutcome::Corrupt(ParseProblem::Json(error.to_string())),
     }
 }
@@ -258,6 +258,7 @@ pub(crate) async fn read_frame_async<B: tokio::io::AsyncBufRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::disk::log_record::{serialize_record, LogRecord};
     use chrono::Utc;
     use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
     use obzenflow_core::event::vector_clock::VectorClock;
@@ -295,7 +296,7 @@ mod tests {
 
     #[test]
     fn complete_record_terminated_yields() {
-        let body = serde_json::to_vec(&record()).unwrap();
+        let body = serialize_record(&record()).unwrap();
         let line = framed(&body);
         assert!(matches!(classify(&line), ParseOutcome::Complete(_)));
         // Terminated complete yields under every policy.
@@ -316,8 +317,19 @@ mod tests {
     }
 
     #[test]
-    fn checksum_mismatch_is_corrupt_regardless_of_terminator() {
+    fn v1_record_body_is_not_silently_mixed_into_v2_journals() {
         let body = serde_json::to_vec(&record()).unwrap();
+        let line = framed(&body);
+        assert!(matches!(
+            classify(&line),
+            ParseOutcome::Corrupt(ParseProblem::Json(message))
+                if message.contains("frame_kind")
+        ));
+    }
+
+    #[test]
+    fn checksum_mismatch_is_corrupt_regardless_of_terminator() {
+        let body = serialize_record(&record()).unwrap();
         // Correct length, wrong CRC.
         let mut line = format!("{}:{}:", body.len(), 12345u32).into_bytes();
         line.extend_from_slice(&body);
@@ -335,7 +347,7 @@ mod tests {
 
     #[test]
     fn short_body_is_incomplete_and_policy_decides() {
-        let body = serde_json::to_vec(&record()).unwrap();
+        let body = serialize_record(&record()).unwrap();
         // Header claims more bytes than the body carries.
         let mut line = format!("{}:{}:", body.len() + 10, 0u32).into_bytes();
         line.extend_from_slice(&body);
@@ -416,7 +428,7 @@ mod tests {
 
     #[test]
     fn trailing_bytes_is_corrupt() {
-        let body = serde_json::to_vec(&record()).unwrap();
+        let body = serialize_record(&record()).unwrap();
         // Header claims fewer bytes than the body carries.
         let mut line = format!("{}:{}:", body.len() - 1, 0u32).into_bytes();
         line.extend_from_slice(&body);
@@ -428,7 +440,7 @@ mod tests {
 
     #[test]
     fn unterminated_complete_body_is_uncommitted_tail() {
-        let body = serde_json::to_vec(&record()).unwrap();
+        let body = serialize_record(&record()).unwrap();
         let line = framed(&body); // valid full record
         assert!(matches!(classify(&line), ParseOutcome::Complete(_)));
         // No terminator: treated as a torn tail, not yielded.
@@ -454,7 +466,7 @@ mod tests {
 
     #[test]
     fn read_frame_sync_reports_termination_and_strips_newline() {
-        let body = serde_json::to_vec(&record()).unwrap();
+        let body = serialize_record(&record()).unwrap();
         let mut bytes = framed(&body);
         bytes.push(b'\n');
         let unterminated = framed(&body); // second record, no newline
@@ -478,7 +490,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_frame_async_matches_sync() {
-        let body = serde_json::to_vec(&record()).unwrap();
+        let body = serialize_record(&record()).unwrap();
         let mut bytes = framed(&body);
         bytes.push(b'\n');
         let mut reader = tokio::io::BufReader::new(Cursor::new(bytes));

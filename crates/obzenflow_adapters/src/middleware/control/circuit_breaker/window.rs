@@ -2,20 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use std::time::{Duration, Instant};
-
 /// Sliding window shape for rate-based failure detection.
 #[derive(Debug, Clone)]
 pub(crate) enum FailureWindow {
     /// Sliding window over the last `size` calls.
     Count { size: u32 },
-    /// Time-based window over the last `duration`.
-    Time { duration: Duration },
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CallSample {
-    pub(super) timestamp: Instant,
     pub(super) is_failure: bool,
     pub(super) is_slow: bool,
 }

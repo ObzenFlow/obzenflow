@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::boundary::PhysicalCallOutcome;
 use super::*;
 
 /// Slot a guarded execution future fills with the real typed outcome, so
@@ -11,7 +12,7 @@ type ExecutedOutcomeSlot<O> = Arc<Mutex<Option<(O, Vec<TypedFact>)>>>;
 /// Slot the guarded transactional future fills for settlement: the port's
 /// result and the outcome committed through the handle, if any.
 type TransactionalSettleSlot<O> =
-    Arc<Mutex<Option<(Result<(), EffectError>, Option<CommittedEffectOutcome<O>>)>>>;
+    Arc<Mutex<Option<(Result<(), EffectError>, Option<PreparedEffectOutcome<O>>)>>>;
 
 /// The erased effectful authoring core: every runtime declaration, output
 /// contract, replay, and commit check lives here, unchanged by the typed
@@ -38,9 +39,9 @@ impl EffectsCore {
     }
 
     /// Evidence of every user fact committed by this invocation, in commit
-    /// order: direct emissions, effect-outcome facts, transactional commits,
-    /// and middleware-synthesized fallback facts. Captures never appear (no
-    /// `Data` fact). Read by `StageCompletion` construction (FLOWIP-120z).
+    /// order: direct emissions, effect-outcome facts, and transactional
+    /// commits. Captures never appear (no `Data` fact). Read by
+    /// `StageCompletion` construction (FLOWIP-120z).
     pub(crate) fn committed_fact_evidence(
         &self,
     ) -> (usize, Vec<obzenflow_core::event::types::EventType>) {
@@ -293,7 +294,6 @@ impl EffectsCore {
         E: Effect,
     {
         let declaration = self.ctx.effect_declaration(E::EFFECT_TYPE)?;
-        self.validate_typed_outcome_coordination::<E>()?;
         // FLOWIP-120c G10: the missing-key check is a deterministic
         // validation error, so it sits above the effect-history lookup and
         // the boundary consult. Live and replay recompute the same error,
@@ -434,7 +434,7 @@ impl EffectsCore {
             };
         };
 
-        // Guarded path (FLOWIP-115h): hand the boundary a policy-neutral
+        // Policy path: hand the boundary a policy-neutral
         // callable for one physical call. Each call clones the effect and a
         // pristine context, while the terminal successful outcome rides the
         // slot so only `perform` can record it after the boundary returns.
@@ -445,13 +445,29 @@ impl EffectsCore {
             let parent_event = self.ctx.parent.event.clone();
             let lineage = self.ctx.lineage;
             let base_context = self.live_effect_context();
-            RepeatableEffectOperation::new(move || {
+            RepeatableEffectOperation::new_with_lifecycle(move |lifecycle| {
                 let effect = effect.clone();
                 let mut effect_ctx = base_context.clone();
                 let slot = slot.clone();
                 let parent_event = parent_event.clone();
                 async move {
-                    let (output, facts) = Self::execute_into_facts(effect, &mut effect_ctx).await?;
+                    lifecycle.mark_started();
+                    let output = match effect.execute(&mut effect_ctx).await {
+                        Ok(output) => {
+                            lifecycle.mark_completed(PhysicalCallOutcome::Succeeded);
+                            output
+                        }
+                        Err(err) => {
+                            lifecycle.mark_completed(PhysicalCallOutcome::Failed);
+                            return Err(err);
+                        }
+                    };
+                    let facts = output.clone().into_facts().map_err(effect_fact_set_error)?;
+                    if facts.is_empty() {
+                        return Err(EffectError::Execution(
+                            "effect success output must author at least one fact".to_string(),
+                        ));
+                    }
                     let observation = facts
                         .iter()
                         .map(|fact| {
@@ -474,7 +490,7 @@ impl EffectsCore {
         let report = boundary
             .around_repeatable_effect(&identity, &self.ctx.parent.event, operation)
             .await;
-        self.ctx.push_boundary_control_events(report.control_events);
+        let control_events = report.control_events;
 
         match report.outcome {
             EffectBoundaryOutcome::Executed(Ok(_observation)) => {
@@ -488,12 +504,13 @@ impl EffectsCore {
                                 .to_string(),
                         )
                     })?;
-                self.append_success_facts(
+                self.append_success_facts_with_control_events(
                     cursor,
                     descriptor_hash,
                     descriptor,
                     facts,
                     Some(EffectFactOrigin::Effect),
+                    control_events,
                 )
                 .await?;
                 self.observe_effect_outcome(
@@ -504,8 +521,14 @@ impl EffectsCore {
                 Ok(output)
             }
             EffectBoundaryOutcome::Executed(Err(err)) => {
-                self.append_failed_record(cursor, descriptor_hash, descriptor, &err)
-                    .await?;
+                self.append_failed_record_with_control_events(
+                    cursor,
+                    descriptor_hash,
+                    descriptor,
+                    &err,
+                    control_events,
+                )
+                .await?;
                 self.observe_effect_outcome(
                     E::EFFECT_TYPE,
                     crate::stages::observer::EffectObserverOutcome::Failed {
@@ -515,33 +538,15 @@ impl EffectsCore {
                 .await?;
                 Err(err)
             }
-            EffectBoundaryOutcome::Skipped { results, source } => {
-                let result = self
-                    .record_boundary_skip::<E>(cursor, descriptor_hash, descriptor, results, source)
-                    .await;
-                match &result {
-                    Ok(_) => {
-                        self.observe_effect_outcome(
-                            E::EFFECT_TYPE,
-                            crate::stages::observer::EffectObserverOutcome::Succeeded,
-                        )
-                        .await?;
-                    }
-                    Err(err) => {
-                        self.observe_effect_outcome(
-                            E::EFFECT_TYPE,
-                            crate::stages::observer::EffectObserverOutcome::Failed {
-                                message: err.error_message(),
-                            },
-                        )
-                        .await?;
-                    }
-                }
-                result
-            }
             EffectBoundaryOutcome::Aborted(reason) => {
                 let result = self
-                    .record_boundary_abort(cursor, descriptor_hash, descriptor, reason)
+                    .record_boundary_abort_with_control_events(
+                        cursor,
+                        descriptor_hash,
+                        descriptor,
+                        reason,
+                        control_events,
+                    )
                     .await;
                 if let Err(err) = &result {
                     self.observe_effect_outcome(
@@ -601,57 +606,52 @@ impl EffectsCore {
         .await
     }
 
-    async fn record_boundary_skip<E>(
+    async fn append_failed_record_with_control_events(
         &mut self,
         cursor: EffectCursor,
         descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
-        results: Vec<ChainEvent>,
-        source: Option<String>,
-    ) -> Result<E::Outcome, EffectError>
-    where
-        E: Effect,
-    {
-        if results.is_empty() {
-            // An empty skip must still record an outcome under the
-            // effect cursor; otherwise strict replay of this input
-            // fails with MissingRecordedEffect, a false corruption
-            // signal for a rejection the live run made deliberately.
-            let err = EffectError::BoundaryRejected {
-                rejected_by: EffectFailureSource::new("effect_boundary"),
-                code: EffectFailureCode::new("skip_without_facts"),
-                message: "effect boundary skipped without fallback output facts".to_string(),
-                retry: RetryDisposition::NotRetryable,
-            };
-            self.append_failed_record(cursor, descriptor_hash, descriptor, &err)
-                .await?;
-            return Err(err);
-        }
-        let facts = results
-            .iter()
-            .map(|event| {
-                TypedFact::from_event(event).ok_or_else(|| {
-                    EffectError::Execution(
-                        "effect boundary fallback output must be Data facts".to_string(),
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let output = E::Outcome::try_from_facts(&facts).map_err(effect_fact_set_error)?;
-        let origin = Some(EffectFactOrigin::MiddlewareSynthesized {
-            label: source.unwrap_or_else(|| "effect_boundary".to_string()),
-        });
-        self.append_success_facts(cursor, descriptor_hash, descriptor, facts, origin)
-            .await?;
-        Ok(output)
+        err: &EffectError,
+        control_events: Vec<ChainEvent>,
+    ) -> Result<(), EffectError> {
+        let record = EffectRecord {
+            cursor: cursor.clone(),
+            descriptor_hash,
+            descriptor,
+            outcome: EffectOutcomePayload::Failed {
+                error_type: err.error_type(),
+                error_message: err.error_message(),
+                retry: err.retry_disposition(),
+                cause: err.failure_cause(),
+            },
+            origin: None,
+        };
+        let event = build_effect_record_event(
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            record,
+            self.ctx.lineage,
+        )?;
+        self.commit_terminal_group(
+            &cursor,
+            vec![AtomicCommitEntry {
+                event,
+                options: CommitOptions::default(),
+                intent: StageAppendIntent::NonDataStageFact,
+            }],
+            control_events,
+        )
+        .await?;
+        Ok(())
     }
 
-    async fn record_boundary_abort<T>(
+    async fn record_boundary_abort_with_control_events<T>(
         &mut self,
         cursor: EffectCursor,
         descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
         reason: EffectAbortReason,
+        control_events: Vec<ChainEvent>,
     ) -> Result<T, EffectError> {
         let err = EffectError::BoundaryRejected {
             rejected_by: reason.cause.source.clone(),
@@ -659,8 +659,8 @@ impl EffectsCore {
             message: reason.message.clone(),
             retry: reason.retry,
         };
-        self.append_record(EffectRecord {
-            cursor,
+        let record = EffectRecord {
+            cursor: cursor.clone(),
             descriptor_hash,
             descriptor,
             outcome: EffectOutcomePayload::Failed {
@@ -670,103 +670,24 @@ impl EffectsCore {
                 cause: Some(reason.cause),
             },
             origin: None,
-        })
+        };
+        let event = build_effect_record_event(
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            record,
+            self.ctx.lineage,
+        )?;
+        self.commit_terminal_group(
+            &cursor,
+            vec![AtomicCommitEntry {
+                event,
+                options: CommitOptions::default(),
+                intent: StageAppendIntent::NonDataStageFact,
+            }],
+            control_events,
+        )
         .await?;
         Err(err)
-    }
-
-    /// FLOWIP-120h/120m: validate wrapper coordination before any I/O.
-    ///
-    /// Branch-shaped registrations (FLOWIP-120h) require the `Guarded`
-    /// wrapper, so a breaker branch always has a carrier that can decode it.
-    /// Outcome-shaped registrations (FLOWIP-120m) require the inverse: the
-    /// middleware synthesizes the effect's own outcome facts, so the handler
-    /// performs the plain effect and a `Guarded` wrapper is rejected.
-    /// Transactional effects route through the boundary for admission and
-    /// observation only (FLOWIP-120c H5, rejection-only in v1), so neither
-    /// shape can protect a transactional effect.
-    fn validate_typed_outcome_coordination<E>(&self) -> Result<(), EffectError>
-    where
-        E: Effect,
-    {
-        let synthesized = E::Outcome::synthesized_fact_types();
-        let registration = self.ctx.synthesized_outcome_registration(E::EFFECT_TYPE);
-
-        match (synthesized.is_empty(), registration) {
-            (true, None) => Ok(()),
-            (true, Some(registration))
-                if registration.kind == SynthesizedOutcomeKind::OutcomeShaped =>
-            {
-                if matches!(E::SAFETY, EffectSafety::Transactional) {
-                    return Err(EffectError::TypedOutcomeCoordination {
-                        stage_key: self.ctx.stage_key.clone(),
-                        effect_type: E::EFFECT_TYPE.to_string(),
-                        message: "transactional effects cannot be protected by an \
-                                  outcome-shaped fallback; the transactional path runs \
-                                  before the effect boundary"
-                            .to_string(),
-                    });
-                }
-                Ok(())
-            }
-            (true, Some(registration)) => Err(EffectError::TypedOutcomeCoordination {
-                stage_key: self.ctx.stage_key.clone(),
-                effect_type: E::EFFECT_TYPE.to_string(),
-                message: format!(
-                    "stage registers typed-outcome middleware '{}'; perform the guarded \
-                     wrapper so its branch facts can decode",
-                    registration.source_label,
-                ),
-            }),
-            (false, None) => Err(EffectError::TypedOutcomeCoordination {
-                stage_key: self.ctx.stage_key.clone(),
-                effect_type: E::EFFECT_TYPE.to_string(),
-                message: "guarded effect performed on a stage with no typed-outcome \
-                          middleware registration; declare the breaker in the \
-                          output_middleware: lane or perform the inner effect directly"
-                    .to_string(),
-            }),
-            (false, Some(registration))
-                if registration.kind == SynthesizedOutcomeKind::OutcomeShaped =>
-            {
-                Err(EffectError::TypedOutcomeCoordination {
-                    stage_key: self.ctx.stage_key.clone(),
-                    effect_type: E::EFFECT_TYPE.to_string(),
-                    message: "outcome-shaped fallback uses the plain perform; drop the \
-                              Guarded wrapper, because every branch resumes the handler \
-                              with the effect's own outcome carrier"
-                        .to_string(),
-                })
-            }
-            (false, Some(registration)) => {
-                if matches!(E::SAFETY, EffectSafety::Transactional) {
-                    return Err(EffectError::TypedOutcomeCoordination {
-                        stage_key: self.ctx.stage_key.clone(),
-                        effect_type: E::EFFECT_TYPE.to_string(),
-                        message: "transactional effects cannot be guarded; the transactional \
-                                  path runs before the effect boundary"
-                            .to_string(),
-                    });
-                }
-                for fact_type in &registration.fact_types {
-                    if !synthesized
-                        .iter()
-                        .any(|member| member.event_type == fact_type.event_type)
-                    {
-                        return Err(EffectError::TypedOutcomeCoordination {
-                            stage_key: self.ctx.stage_key.clone(),
-                            effect_type: E::EFFECT_TYPE.to_string(),
-                            message: format!(
-                                "registered branch fact '{}' is not a member of the guarded \
-                                 carrier's synthesized fact set",
-                                fact_type.event_type,
-                            ),
-                        });
-                    }
-                }
-                Ok(())
-            }
-        }
     }
 
     pub(crate) async fn capture<T>(
@@ -910,6 +831,7 @@ impl EffectsCore {
             descriptor: descriptor.clone(),
             output_ordinal,
             lineage: self.ctx.lineage,
+            defer_persistence: self.ctx.effect_boundary.is_some(),
         });
         let commit_observer = commit.clone();
 
@@ -923,7 +845,7 @@ impl EffectsCore {
                 .execute_and_commit(effect, &mut effect_ctx, commit)
                 .await
                 .map(|_| ());
-            let outcome = commit_observer.committed_outcome();
+            let outcome = commit_observer.settled_outcome();
             let result =
                 self.settle_transactional::<E>(executor, output_ordinal, port_result, outcome);
             self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
@@ -932,35 +854,49 @@ impl EffectsCore {
 
         // FLOWIP-120c H5: transactional effects route through the boundary.
         // Admission runs before `execute_and_commit`, observation after
-        // `committed_outcome()`; rejection-only in v1, no fallback synthesis.
+        // `settled_outcome()`; rejection-only in v1, no fallback synthesis.
         let settle_slot: TransactionalSettleSlot<E::Outcome> = Arc::new(Mutex::new(None));
         let operation = {
             let slot = settle_slot.clone();
             let observer = commit_observer.clone();
             let executor_name = executor.to_string();
-            SingleUseEffectOperation::new(move || {
+            SingleUseEffectOperation::new_with_lifecycle(move |lifecycle| {
                 async move {
+                    lifecycle.mark_started();
                     let port_result = port
                         .execute_and_commit(effect, &mut effect_ctx, commit)
                         .await
                         .map(|_| ());
-                    let outcome = observer.committed_outcome();
+                    let outcome = observer.settled_outcome();
+                    // A committed failure is the dependency result even when the
+                    // transactional port returned `Ok`; conversely, a committed
+                    // success remains authoritative if the port later returned an
+                    // error. No-commit and append failures retain their typed
+                    // coordination/journal errors for health classification.
+                    lifecycle.mark_completed(match &outcome {
+                        Some(PreparedEffectOutcome::Success { .. }) => {
+                            PhysicalCallOutcome::Succeeded
+                        }
+                        Some(PreparedEffectOutcome::Failure { .. }) => PhysicalCallOutcome::Failed,
+                        None if port_result.is_err() => PhysicalCallOutcome::Failed,
+                        None => PhysicalCallOutcome::Succeeded,
+                    });
                     // The boundary observes a faithful classification of how the
                     // operation ended; the precise error the caller sees is settled
                     // from the slot, never from this observation result.
                     let observation = match (&port_result, &outcome) {
-                        (_, Some(CommittedEffectOutcome::Success { events, .. })) => {
+                        (_, Some(PreparedEffectOutcome::Success { events, .. })) => {
                             Ok(events.clone())
                         }
-                        (_, Some(CommittedEffectOutcome::Failure(payload))) => {
-                            Err(match recorded_failure_from_outcome::<E::Outcome>(payload) {
+                        (_, Some(PreparedEffectOutcome::Failure { outcome, .. })) => {
+                            Err(match recorded_failure_from_outcome::<E::Outcome>(outcome) {
                                 Err(err) => err,
                                 Ok(_) => EffectError::EffectProvenanceMismatch(
                                     "expected recorded effect failure".to_string(),
                                 ),
                             })
                         }
-                        (Err(err), None) => Err(EffectError::Execution(err.to_string())),
+                        (Err(err), None) => Err(err.clone()),
                         (Ok(()), None) => Err(EffectError::TransactionalCommitMissing {
                             effect_type: E::EFFECT_TYPE.to_string(),
                             executor: executor_name,
@@ -991,6 +927,10 @@ impl EffectsCore {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .take();
                 if let Some((port_result, outcome)) = settled {
+                    if let Some(prepared) = outcome.as_ref() {
+                        self.commit_deferred_transactional_outcome(&cursor, prepared, Vec::new())
+                            .await?;
+                    }
                     let result = self.settle_transactional::<E>(
                         executor,
                         output_ordinal,
@@ -1011,8 +951,6 @@ impl EffectsCore {
                 return result;
             }
         };
-        self.ctx.push_boundary_control_events(control_events);
-
         match outcome {
             SingleUseEffectBoundaryOutcome::Executed(_execution) => {
                 let (port_result, outcome) = settle_slot
@@ -1025,44 +963,107 @@ impl EffectsCore {
                                 .to_string(),
                         )
                     })?;
+                let Some(prepared) = outcome.as_ref() else {
+                    self.restore_output_ordinal(output_ordinal);
+                    let err = match port_result {
+                        Err(err) => err,
+                        Ok(()) => EffectError::TransactionalCommitMissing {
+                            effect_type: E::EFFECT_TYPE.to_string(),
+                            executor: executor.to_string(),
+                        },
+                    };
+                    self.append_failed_record_with_control_events(
+                        cursor,
+                        descriptor_hash,
+                        descriptor,
+                        &err,
+                        control_events,
+                    )
+                    .await?;
+                    let result: Result<E::Outcome, EffectError> = Err(err);
+                    self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
+                    return result;
+                };
+                self.commit_deferred_transactional_outcome(&cursor, prepared, control_events)
+                    .await?;
                 let result =
                     self.settle_transactional::<E>(executor, output_ordinal, port_result, outcome);
                 self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
                 result
             }
-            SingleUseEffectBoundaryOutcome::FallbackRejected { source } => {
-                // H5 v1: no fallback synthesis for transactional effects; the
-                // skip is recorded as a failed outcome so replay reproduces it.
-                self.restore_output_ordinal(output_ordinal);
-                let err = EffectError::BoundaryRejected {
-                    rejected_by: EffectFailureSource::new(
-                        source.as_deref().unwrap_or("effect_boundary"),
-                    ),
-                    code: EffectFailureCode::new("transactional_fallback_unsupported"),
-                    message: "transactional effects accept no boundary fallback synthesis"
-                        .to_string(),
-                    retry: RetryDisposition::NotRetryable,
-                };
-                self.append_failed_record(cursor, descriptor_hash, descriptor, &err)
-                    .await?;
-                self.observe_effect_outcome(
-                    E::EFFECT_TYPE,
-                    crate::stages::observer::EffectObserverOutcome::Failed {
-                        message: err.error_message(),
-                    },
-                )
-                .await?;
-                Err(err)
-            }
             SingleUseEffectBoundaryOutcome::Aborted(reason) => {
                 self.restore_output_ordinal(output_ordinal);
                 let result = self
-                    .record_boundary_abort(cursor, descriptor_hash, descriptor, reason)
+                    .record_boundary_abort_with_control_events(
+                        cursor,
+                        descriptor_hash,
+                        descriptor,
+                        reason,
+                        control_events,
+                    )
                     .await;
                 self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
                 result
             }
         }
+    }
+
+    async fn commit_deferred_transactional_outcome<T>(
+        &self,
+        cursor: &EffectCursor,
+        outcome: &PreparedEffectOutcome<T>,
+        control_events: Vec<ChainEvent>,
+    ) -> Result<(), EffectError>
+    where
+        T: TypedFactSet + Clone + Send + Sync + 'static,
+    {
+        let entries = match outcome {
+            PreparedEffectOutcome::Success {
+                events, persisted, ..
+            } => {
+                if *persisted {
+                    if control_events.is_empty() {
+                        return Ok(());
+                    }
+                    return Err(EffectError::Execution(
+                        "transactional outcome was persisted before terminal control evidence"
+                            .to_string(),
+                    ));
+                }
+                events
+                    .iter()
+                    .cloned()
+                    .map(|event| AtomicCommitEntry {
+                        event,
+                        options: CommitOptions {
+                            count_output: true,
+                            validate_output_contract: true,
+                        },
+                        intent: StageAppendIntent::NormalStageData,
+                    })
+                    .collect()
+            }
+            PreparedEffectOutcome::Failure {
+                event, persisted, ..
+            } => {
+                if *persisted {
+                    if control_events.is_empty() {
+                        return Ok(());
+                    }
+                    return Err(EffectError::Execution(
+                        "transactional failure was persisted before terminal control evidence"
+                            .to_string(),
+                    ));
+                }
+                vec![AtomicCommitEntry {
+                    event: event.as_ref().clone(),
+                    options: CommitOptions::default(),
+                    intent: StageAppendIntent::NonDataStageFact,
+                }]
+            }
+        };
+        self.commit_terminal_group(cursor, entries, control_events)
+            .await
     }
 
     /// Settle a transactional attempt from the committed record, the single
@@ -1072,7 +1073,7 @@ impl EffectsCore {
         executor: &'static str,
         output_ordinal: EffectOutputOrdinal,
         port_result: Result<(), EffectError>,
-        outcome: Option<CommittedEffectOutcome<E::Outcome>>,
+        outcome: Option<PreparedEffectOutcome<E::Outcome>>,
     ) -> Result<E::Outcome, EffectError>
     where
         E: Effect,
@@ -1091,16 +1092,17 @@ impl EffectsCore {
         };
 
         match outcome {
-            CommittedEffectOutcome::Success {
+            PreparedEffectOutcome::Success {
                 output,
                 fact_count,
                 events,
+                ..
             } => {
                 self.advance_output_ordinals_after_reserved_base(output_ordinal, fact_count)?;
                 self.committed_facts.extend(events);
                 Ok(output)
             }
-            CommittedEffectOutcome::Failure(outcome) => {
+            PreparedEffectOutcome::Failure { outcome, .. } => {
                 self.restore_output_ordinal(output_ordinal);
                 recorded_failure_from_outcome(&outcome)
             }
@@ -1235,6 +1237,86 @@ impl EffectsCore {
         Ok(())
     }
 
+    async fn append_success_facts_with_control_events(
+        &mut self,
+        cursor: EffectCursor,
+        descriptor_hash: EffectDescriptorHash,
+        descriptor: EffectDescriptor,
+        facts: Vec<TypedFact>,
+        origin: Option<EffectFactOrigin>,
+        control_events: Vec<ChainEvent>,
+    ) -> Result<(), EffectError> {
+        if facts.is_empty() {
+            return Err(EffectError::Execution(
+                "effect success output must author at least one fact".to_string(),
+            ));
+        }
+        let routed_fact_count = self.count_routed_facts(&facts);
+        self.ensure_routed_fanout_capacity(routed_fact_count)?;
+        let output_ordinal = self.reserve_output_ordinals(facts.len())?;
+        let committed_events = build_domain_effect_success_facts(
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            cursor.clone(),
+            descriptor_hash,
+            descriptor,
+            facts,
+            output_ordinal,
+            origin,
+            self.ctx.lineage,
+        )?;
+        let outcome_entries = committed_events
+            .iter()
+            .cloned()
+            .map(|event| AtomicCommitEntry {
+                event,
+                options: CommitOptions {
+                    count_output: true,
+                    validate_output_contract: true,
+                },
+                intent: StageAppendIntent::NormalStageData,
+            })
+            .collect();
+        self.commit_terminal_group(&cursor, outcome_entries, control_events)
+            .await?;
+        self.routed_output_fact_count = self
+            .routed_output_fact_count
+            .checked_add(routed_fact_count)
+            .ok_or_else(|| EffectError::Execution("routed output fanout overflow".to_string()))?;
+        self.committed_facts.extend(committed_events);
+        Ok(())
+    }
+
+    async fn commit_terminal_group(
+        &self,
+        cursor: &EffectCursor,
+        mut outcome_entries: Vec<AtomicCommitEntry>,
+        control_events: Vec<ChainEvent>,
+    ) -> Result<(), EffectError> {
+        outcome_entries.extend(control_events.into_iter().map(|event| AtomicCommitEntry {
+            event,
+            options: CommitOptions::default(),
+            intent: StageAppendIntent::FrameworkObservability,
+        }));
+        let group_id = effect_outcome_group_id(cursor);
+        let committer = OutputCommitter {
+            data_journal: &self.ctx.data_journal,
+            flow_context: self.ctx.flow_context.as_ref(),
+            system_journal: self.ctx.system_journal.as_ref(),
+            instrumentation: self.ctx.instrumentation.as_ref(),
+            heartbeat_state: self.ctx.heartbeat_state.as_ref(),
+            output_contract: Some(&self.ctx.output_contract),
+            backpressure_writer: Some(&self.ctx.backpressure_writer),
+            observers: None,
+            observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+        };
+        committer
+            .commit_atomic_group(group_id.as_str(), outcome_entries, Some(&self.ctx.parent))
+            .await
+            .map_err(|error| EffectError::Journal(error.to_string()))?;
+        Ok(())
+    }
+
     async fn append_replayed_records(
         &mut self,
         cursor: EffectCursor,
@@ -1247,13 +1329,9 @@ impl EffectsCore {
                 facts,
                 origin: recorded_origin,
             } => {
-                // The recorded origin wins (FLOWIP-120m): it rides the fact's
-                // provenance, so replay reconstructs the branch origin without
-                // consulting registrations, which is ambiguous once an
-                // outcome-shaped fallback synthesizes the effect's own facts.
-                // Registration-based derivation remains only as the fallback
-                // for pre-120h journals whose records carry no origin.
-                let origin = recorded_origin.or_else(|| self.derive_replayed_origin(&facts));
+                // The recorded provenance wins. Older records without an
+                // explicit origin came from the effect itself.
+                let origin = recorded_origin.or(Some(EffectFactOrigin::Effect));
                 self.append_success_facts(cursor, descriptor_hash, descriptor, facts, origin)
                     .await
             }
@@ -1264,22 +1342,5 @@ impl EffectsCore {
                 Ok(())
             }
         }
-    }
-
-    fn derive_replayed_origin(&self, facts: &[TypedFact]) -> Option<EffectFactOrigin> {
-        let synthesized = self.ctx.synthesized_outcomes.iter().find(|registration| {
-            facts.iter().all(|fact| {
-                registration
-                    .fact_types
-                    .iter()
-                    .any(|branch| branch.event_type == fact.event_type)
-            })
-        });
-        Some(match synthesized {
-            Some(registration) => EffectFactOrigin::MiddlewareSynthesized {
-                label: registration.source_label.clone(),
-            },
-            None => EffectFactOrigin::Effect,
-        })
     }
 }

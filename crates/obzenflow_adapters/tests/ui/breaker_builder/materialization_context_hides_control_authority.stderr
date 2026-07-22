@@ -1,0 +1,7 @@
+error[E0609]: no field `control_middleware` on type `&MiddlewareMaterializationContext<'_>`
+ --> tests/ui/breaker_builder/materialization_context_hides_control_authority.rs:8:32
+  |
+8 |     let _aggregator = &context.control_middleware;
+  |                                ^^^^^^^^^^^^^^^^^^ unknown field
+  |
+  = note: available fields are: `config`, `stage_type`

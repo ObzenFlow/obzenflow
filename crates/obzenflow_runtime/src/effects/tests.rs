@@ -692,80 +692,6 @@ impl TransactionalEffectPort<TransactionalCountingEffect> for CommittedFailureTr
     }
 }
 
-/// A carrier with a non-empty synthesized set, standing in for a `Guarded`
-/// lifted carrier without depending on the adapters crate (FLOWIP-120m
-/// coordination tests).
-#[derive(Clone, Debug)]
-struct LiftedProbeOutcome {
-    value: CountingOutput,
-}
-
-impl TypedFactSet for LiftedProbeOutcome {
-    fn fact_types() -> Vec<TypedFactType> {
-        vec![
-            TypedFactType::of::<CountingOutput>(),
-            TypedFactType::of::<FirstOutput>(),
-        ]
-    }
-
-    fn into_facts(self) -> Result<Vec<TypedFact>, TypedFactSetError> {
-        Ok(vec![TypedFact::from_payload(self.value)?])
-    }
-
-    fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
-        Ok(Self {
-            value: obzenflow_core::event::schema::decode_member_fact::<CountingOutput>(facts)?,
-        })
-    }
-
-    fn synthesized_fact_types() -> Vec<TypedFactType> {
-        vec![TypedFactType::of::<FirstOutput>()]
-    }
-}
-
-impl obzenflow_core::StageFactSet for LiftedProbeOutcome {
-    type Members = obzenflow_core::event::schema::WithMember<
-        CountingOutput,
-        obzenflow_core::event::schema::WithMember<
-            FirstOutput,
-            obzenflow_core::event::schema::EmptySet,
-        >,
-    >;
-
-    fn member_fact_types() -> Vec<TypedFactType> {
-        Self::fact_types()
-    }
-
-    const MEMBERS_DISTINCT: () =
-        <Self::Members as obzenflow_core::event::schema::FactList>::DISTINCT_EVENT_TYPES;
-}
-
-#[derive(Clone, Debug)]
-struct LiftedProbeEffect;
-
-#[async_trait]
-impl Effect for LiftedProbeEffect {
-    const EFFECT_TYPE: &'static str = "test.lifted_probe";
-    const SCHEMA_VERSION: u32 = 1;
-    const SAFETY: EffectSafety = EffectSafety::Idempotent;
-
-    type Outcome = LiftedProbeOutcome;
-
-    fn label(&self) -> &str {
-        "lifted_probe"
-    }
-
-    fn canonical_input(&self) -> Value {
-        json!({})
-    }
-
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        Ok(LiftedProbeOutcome {
-            value: CountingOutput { value: 0 },
-        })
-    }
-}
-
 fn parent_envelope(writer_id: WriterId) -> EventEnvelope<ChainEvent> {
     let event = ChainEventFactory::data_event(writer_id, "test.input", json!({"id": 1}));
     EventEnvelope::new(JournalWriterId::new(), event)
@@ -827,12 +753,10 @@ fn invocation_context_with_mode(
             EffectDeclaration::of::<KeyedEffect>(),
             EffectDeclaration::transactional_effect::<TransactionalCountingEffect>("tx"),
         ],
-        synthesized_outcomes: Vec::new(),
         output_contract: StageOutputContract::empty(),
         backpressure_writer: BackpressureWriter::disabled(),
         emit_enabled: false,
         effect_boundary: None,
-        boundary_control_events: Arc::new(Mutex::new(Vec::new())),
     }
 }
 
@@ -2728,89 +2652,6 @@ async fn effect_record_from_event_reads_back_provenance_origin() {
     // journaled event must carry it back.
     let records = effect_records(&journal);
     assert_eq!(records[0].origin, Some(EffectFactOrigin::Effect));
-
-    // A middleware-synthesized marker survives the same round trip.
-    let mut event = journal.events()[0].event.clone();
-    event
-        .effect_provenance
-        .as_mut()
-        .expect("effect event should carry provenance")
-        .origin = Some(EffectFactOrigin::MiddlewareSynthesized {
-        label: "test_breaker".to_string(),
-    });
-    let record = effect_record_from_event(&event)
-        .expect("provenance-stamped event should decode")
-        .expect("data event should produce a record");
-    assert_eq!(
-        record.origin,
-        Some(EffectFactOrigin::MiddlewareSynthesized {
-            label: "test_breaker".to_string(),
-        })
-    );
-}
-
-#[tokio::test]
-async fn replayed_group_prefers_recorded_origin_over_derivation() {
-    let stage_id = StageId::new();
-    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let mut live = EffectsCore::new(invocation_context(
-        journal.clone(),
-        parent_envelope(WriterId::from(stage_id)),
-        None,
-    ));
-    live.perform(CountingEffect {
-        value: 1,
-        label: "same",
-        calls: Arc::new(AtomicUsize::new(0)),
-    })
-    .await
-    .expect("live effect should succeed");
-
-    // Simulate a middleware-synthesized group: the replay context has no
-    // registrations, so derivation would say Effect; the recorded origin must
-    // win.
-    let records: Vec<EffectRecord> = effect_records(&journal)
-        .into_iter()
-        .map(|mut record| {
-            record.origin = Some(EffectFactOrigin::MiddlewareSynthesized {
-                label: "recorded_breaker".to_string(),
-            });
-            record
-        })
-        .collect();
-    let history = Arc::new(
-        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
-            .expect("history should index"),
-    );
-    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
-    let mut replay = EffectsCore::new(invocation_context(
-        replay_journal.clone(),
-        parent_envelope(WriterId::from(stage_id)),
-        Some(history),
-    ));
-    replay
-        .perform(CountingEffect {
-            value: 1,
-            label: "same",
-            calls: Arc::new(AtomicUsize::new(0)),
-        })
-        .await
-        .expect("replay should reconstruct the recorded outcome");
-
-    let replayed_origin = replay_journal.events()[0]
-        .event
-        .effect_provenance
-        .as_ref()
-        .expect("replayed fact should carry provenance")
-        .origin
-        .clone();
-    assert_eq!(
-        replayed_origin,
-        Some(EffectFactOrigin::MiddlewareSynthesized {
-            label: "recorded_breaker".to_string(),
-        }),
-        "the recorded origin must win over registration-based derivation"
-    );
 }
 
 #[tokio::test]
@@ -2867,7 +2708,7 @@ async fn replayed_group_without_recorded_origin_falls_back_to_derivation() {
     assert_eq!(
         replayed_origin,
         Some(EffectFactOrigin::Effect),
-        "a pre-120h record falls back to registration-based derivation"
+        "an older record defaults to the effect itself"
     );
 }
 
@@ -2888,9 +2729,7 @@ async fn mixed_origin_group_is_rejected_as_provenance_mismatch() {
 
     let mut records = effect_records(&journal);
     assert_eq!(records.len(), 2, "multi-fact outcome should record a group");
-    records[1].origin = Some(EffectFactOrigin::MiddlewareSynthesized {
-        label: "tampered".to_string(),
-    });
+    records[1].origin = None;
 
     let record_refs: Vec<&EffectRecord> = records.iter().collect();
     let err = effect_record_group_materialization(&record_refs)
@@ -3015,7 +2854,7 @@ impl EffectBoundary for AbortingBoundary {
             outcome: EffectBoundaryOutcome::Aborted(EffectAbortReason {
                 cause: EffectFailureCause {
                     source: "circuit_breaker".into(),
-                    code: "rejected_circuit_open".into(),
+                    code: "circuit_open".into(),
                 },
                 message: "circuit breaker rejected effect execution".to_string(),
                 retry: RetryDisposition::Retryable,
@@ -3034,42 +2873,13 @@ impl EffectBoundary for AbortingBoundary {
             EffectAbortReason {
                 cause: EffectFailureCause {
                     source: "circuit_breaker".into(),
-                    code: "rejected_circuit_open".into(),
+                    code: "circuit_open".into(),
                 },
                 message: "circuit breaker rejected effect execution".to_string(),
                 retry: RetryDisposition::Retryable,
             },
             Vec::new(),
         )
-    }
-}
-
-struct EmptySkipBoundary;
-
-#[async_trait]
-impl EffectBoundary for EmptySkipBoundary {
-    async fn around_repeatable_effect(
-        &self,
-        _identity: &EffectIdentity,
-        _event: &ChainEvent,
-        _operation: RepeatableEffectOperation,
-    ) -> EffectBoundaryReport {
-        EffectBoundaryReport {
-            outcome: EffectBoundaryOutcome::Skipped {
-                results: Vec::new(),
-                source: None,
-            },
-            control_events: Vec::new(),
-        }
-    }
-
-    async fn around_single_use_effect(
-        &self,
-        _identity: &EffectIdentity,
-        _event: &ChainEvent,
-        operation: SingleUseEffectOperation,
-    ) -> SingleUseEffectBoundaryReport {
-        operation.reject_fallback(None, Vec::new())
     }
 }
 
@@ -3100,7 +2910,7 @@ async fn boundary_abort_records_failure_with_cause_and_replays_deterministically
             rejected_by, code, ..
         } => {
             assert_eq!(rejected_by.as_str(), "circuit_breaker");
-            assert_eq!(code.as_str(), "rejected_circuit_open");
+            assert_eq!(code.as_str(), "circuit_open");
         }
         other => panic!("expected BoundaryRejected, got {other:?}"),
     }
@@ -3122,7 +2932,7 @@ async fn boundary_abort_records_failure_with_cause_and_replays_deterministically
                 .as_ref()
                 .expect("recorded failure must carry the cause");
             assert_eq!(cause.source, "circuit_breaker");
-            assert_eq!(cause.code, "rejected_circuit_open");
+            assert_eq!(cause.code, "circuit_open");
             assert!(retry.is_retryable());
         }
         other => panic!("expected Failed outcome, got {other:?}"),
@@ -3157,215 +2967,12 @@ async fn boundary_abort_records_failure_with_cause_and_replays_deterministically
                 .as_ref()
                 .expect("replayed failure must carry the cause");
             assert_eq!(cause.source, "circuit_breaker");
-            assert_eq!(cause.code, "rejected_circuit_open");
+            assert_eq!(cause.code, "circuit_open");
         }
         other => panic!("expected RecordedFailure on replay, got {other:?}"),
     }
     assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
     assert_eq!(effect_records(&replay_journal), live_records);
-}
-
-#[tokio::test]
-async fn perform_rejects_unguarded_effect_on_typed_outcome_stage() {
-    let stage_id = StageId::new();
-    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let calls = Arc::new(AtomicUsize::new(0));
-    let mut ctx = invocation_context(
-        journal.clone(),
-        parent_envelope(WriterId::from(stage_id)),
-        None,
-    );
-    ctx.synthesized_outcomes = vec![SynthesizedOutcomeRegistration {
-        effect_type: None,
-        fact_types: vec![TypedFactType::of::<CountingOutput>()],
-        source_label: "circuit_breaker".to_string(),
-        kind: SynthesizedOutcomeKind::BranchShaped,
-    }];
-    let mut effects = EffectsCore::new(ctx);
-
-    let err = effects
-        .perform(CountingEffect {
-            value: 1,
-            label: "unguarded",
-            calls: calls.clone(),
-        })
-        .await
-        .expect_err("plain perform on a typed-outcome stage must fail before any I/O");
-
-    assert!(
-        matches!(&err, EffectError::TypedOutcomeCoordination { .. }),
-        "expected TypedOutcomeCoordination, got {err:?}"
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 0, "no I/O before the check");
-    assert!(
-        journal.events().is_empty(),
-        "the coordination check runs before any record is appended"
-    );
-}
-
-#[tokio::test]
-async fn plain_perform_is_allowed_on_outcome_shaped_registration() {
-    let stage_id = StageId::new();
-    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let calls = Arc::new(AtomicUsize::new(0));
-    let mut ctx = invocation_context(
-        journal.clone(),
-        parent_envelope(WriterId::from(stage_id)),
-        None,
-    );
-    ctx.synthesized_outcomes = vec![SynthesizedOutcomeRegistration {
-        effect_type: Some(CountingEffect::EFFECT_TYPE.to_string()),
-        fact_types: vec![TypedFactType::of::<CountingOutput>()],
-        source_label: "circuit_breaker".to_string(),
-        kind: SynthesizedOutcomeKind::OutcomeShaped,
-    }];
-    let mut effects = EffectsCore::new(ctx);
-
-    let output = effects
-        .perform(CountingEffect {
-            value: 1,
-            label: "plain",
-            calls: calls.clone(),
-        })
-        .await
-        .expect("outcome-shaped registrations use the plain perform");
-
-    assert_eq!(output, CountingOutput { value: 2 });
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn guarded_perform_is_rejected_on_outcome_shaped_registration() {
-    let stage_id = StageId::new();
-    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let mut ctx = invocation_context(
-        journal.clone(),
-        parent_envelope(WriterId::from(stage_id)),
-        None,
-    );
-    ctx.effect_declarations
-        .push(EffectDeclaration::of::<LiftedProbeEffect>());
-    ctx.synthesized_outcomes = vec![SynthesizedOutcomeRegistration {
-        effect_type: Some(LiftedProbeEffect::EFFECT_TYPE.to_string()),
-        fact_types: vec![TypedFactType::of::<CountingOutput>()],
-        source_label: "circuit_breaker".to_string(),
-        kind: SynthesizedOutcomeKind::OutcomeShaped,
-    }];
-    let mut effects = EffectsCore::new(ctx);
-
-    let err = effects
-        .perform(LiftedProbeEffect)
-        .await
-        .expect_err("a lifted carrier on an outcome-shaped stage must fail before any I/O");
-
-    assert!(
-        matches!(&err, EffectError::TypedOutcomeCoordination { .. }),
-        "expected TypedOutcomeCoordination, got {err:?}"
-    );
-    assert!(journal.events().is_empty());
-}
-
-#[tokio::test]
-async fn transactional_perform_is_rejected_on_outcome_shaped_registration() {
-    let stage_id = StageId::new();
-    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let normal_calls = Arc::new(AtomicUsize::new(0));
-    let mut ctx = invocation_context(
-        journal.clone(),
-        parent_envelope(WriterId::from(stage_id)),
-        None,
-    );
-    ctx.synthesized_outcomes = vec![SynthesizedOutcomeRegistration {
-        effect_type: Some(TransactionalCountingEffect::EFFECT_TYPE.to_string()),
-        fact_types: vec![TypedFactType::of::<CountingOutput>()],
-        source_label: "circuit_breaker".to_string(),
-        kind: SynthesizedOutcomeKind::OutcomeShaped,
-    }];
-    let mut effects = EffectsCore::new(ctx);
-
-    let err = effects
-        .perform(TransactionalCountingEffect {
-            value: 1,
-            normal_calls: normal_calls.clone(),
-        })
-        .await
-        .expect_err("the transactional path runs before the boundary; it cannot be protected");
-
-    assert!(
-        matches!(&err, EffectError::TypedOutcomeCoordination { .. }),
-        "expected TypedOutcomeCoordination, got {err:?}"
-    );
-    assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
-    assert!(journal.events().is_empty());
-}
-
-#[tokio::test]
-async fn boundary_empty_skip_records_failure_instead_of_unrecorded_error() {
-    let stage_id = StageId::new();
-    let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let live_calls = Arc::new(AtomicUsize::new(0));
-    let mut live_ctx = invocation_context(
-        live_journal.clone(),
-        parent_envelope(WriterId::from(stage_id)),
-        None,
-    );
-    live_ctx.effect_boundary = Some(Arc::new(EmptySkipBoundary));
-    let mut live = EffectsCore::new(live_ctx);
-
-    let live_err = live
-        .perform(CountingEffect {
-            value: 1,
-            label: "guarded",
-            calls: live_calls.clone(),
-        })
-        .await
-        .expect_err("empty boundary skip should fail the perform");
-
-    assert!(matches!(
-        &live_err,
-        EffectError::BoundaryRejected { code, .. } if code.as_str() == "skip_without_facts"
-    ));
-    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
-
-    let live_records = effect_records(&live_journal);
-    assert_eq!(
-        live_records.len(),
-        1,
-        "empty skip must leave a recorded outcome, not an unrecorded error"
-    );
-    assert!(matches!(
-        &live_records[0].outcome,
-        EffectOutcomePayload::Failed { cause: Some(cause), .. }
-            if cause.source.as_str() == "effect_boundary"
-                && cause.code.as_str() == "skip_without_facts"
-    ));
-
-    // Strict replay must not fail with MissingRecordedEffect.
-    let replay_history = Arc::new(
-        EffectHistory::from_records("replay_archive_flow".to_string(), live_records)
-            .expect("history from live records"),
-    );
-    let replay_calls = Arc::new(AtomicUsize::new(0));
-    let mut replay = EffectsCore::new(invocation_context(
-        Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id))),
-        parent_envelope(WriterId::from(stage_id)),
-        Some(replay_history),
-    ));
-
-    let replay_err = replay
-        .perform(CountingEffect {
-            value: 1,
-            label: "guarded",
-            calls: replay_calls.clone(),
-        })
-        .await
-        .expect_err("strict replay should return the recorded rejection");
-
-    assert!(
-        matches!(&replay_err, EffectError::RecordedFailure { .. }),
-        "expected RecordedFailure, got {replay_err:?}"
-    );
-    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -3818,7 +3425,7 @@ impl EffectBoundary for TransactionalOnlyAbortBoundary {
             EffectAbortReason {
                 cause: EffectFailureCause {
                     source: "circuit_breaker".into(),
-                    code: "rejected_circuit_open".into(),
+                    code: "circuit_open".into(),
                 },
                 message: "circuit breaker rejected transactional effect".to_string(),
                 retry: RetryDisposition::Retryable,
@@ -3975,7 +3582,6 @@ async fn transactional_boundary_foreign_abort_cannot_reclassify_a_committed_oper
         ports,
     );
     ctx.effect_boundary = Some(Arc::new(ExecutedThenForeignAbortBoundary));
-    let boundary_control_events = ctx.boundary_control_events.clone();
     let mut effects = EffectsCore::new(ctx);
 
     let output = effects
@@ -3989,10 +3595,6 @@ async fn transactional_boundary_foreign_abort_cannot_reclassify_a_committed_oper
     assert_eq!(output, CountingOutput { value: 1_007 });
     assert_eq!(transactional_calls.load(Ordering::SeqCst), 1);
     assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
-    assert!(
-        EffectInvocationContext::drain_boundary_control_event_buffer(&boundary_control_events)
-            .is_empty()
-    );
     let records = effect_records(&journal);
     assert_eq!(records.len(), 1);
     assert!(matches!(
@@ -4026,7 +3628,6 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
     live_ctx.effect_boundary = Some(Arc::new(ForeignExecutionBoundary {
         foreign_calls: foreign_calls.clone(),
     }));
-    let boundary_control_events = live_ctx.boundary_control_events.clone();
     let mut live = EffectsCore::new(live_ctx);
 
     let live_err = live
@@ -4041,10 +3642,6 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
     assert_eq!(transactional_calls.load(Ordering::SeqCst), 0);
     assert_eq!(foreign_calls.load(Ordering::SeqCst), 1);
     assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
-    assert!(
-        EffectInvocationContext::drain_boundary_control_event_buffer(&boundary_control_events)
-            .is_empty()
-    );
     let records = effect_records(&live_journal);
     assert_eq!(records.len(), 1);
     assert!(matches!(
@@ -4215,12 +3812,10 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
             EffectDeclaration::of::<CountingEffect>(),
             EffectDeclaration::transactional_effect::<TransactionalCountingEffect>("tx"),
         ],
-        synthesized_outcomes: Vec::new(),
         output_contract: StageOutputContract::empty(),
         backpressure_writer: BackpressureWriter::disabled(),
         emit_enabled: false,
         effect_boundary: boundary,
-        boundary_control_events: Arc::new(Mutex::new(Vec::new())),
     };
 
     // Run A: aborted transactional effect, then a counting effect.

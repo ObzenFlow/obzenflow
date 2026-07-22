@@ -17,12 +17,13 @@
 //!   indicator samples) and structurally cannot steer control
 //!   flow: their return type only carries evidence. This is the tool for custom
 //!   observability and auditability aspects.
-//! - **Control** middleware (circuit breaker, rate limiter) admits, paces,
-//!   rejects, or synthesizes at a live-I/O boundary.
+//! - **Control** middleware (circuit breaker, rate limiter) admits, paces, or
+//!   rejects at a live-I/O boundary.
 //!
 //! Built-in observers are constructed with `indicator()` / `latency()` and
-//! `log()`; built-in control middleware with `circuit_breaker()` and
-//! `rate_limit()`. In the DSL, middleware is attached per stage as an array.
+//! `log()`; built-in control middleware with the checked
+//! `CircuitBreaker::builder()` and `rate_limit()`. In the DSL, middleware is
+//! attached per stage as an array.
 //!
 //! ## Monitoring
 //!
@@ -113,7 +114,6 @@ mod context;
 mod context_keys;
 mod function;
 mod hints;
-pub mod type_shaping;
 
 // Middleware categories
 pub mod ai;
@@ -133,9 +133,9 @@ pub use handler::{
     ErrorAction, Middleware, MiddlewareAbortCause, MiddlewareAction, SourceMiddlewarePhase,
 };
 pub use middleware_factory::{
-    ControlMiddlewareRole, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-    MiddlewareKind, MiddlewareOverrideKey, MiddlewarePlanContribution,
-    TopologyMiddlewareConfigSlot,
+    materialize_factory_checked, materialize_factory_checked_with_declaration,
+    MiddlewareBindingError, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
+    MiddlewareKind, MiddlewareOverrideKey, TopologyMiddlewareConfigSlot,
 };
 pub use middleware_safety::MiddlewareSafety;
 
@@ -154,9 +154,11 @@ pub use handler::{
 
 // Common utilities
 pub use carrier::{
-    validate_attachment_request, EffectSurface, EffectTypeKey, EffectUnitId,
-    HostedIngressTargetKey, IngressEndpointKind, IngressRouteScope, IngressSurface, IngressUnitId,
-    MiddlewareAttachmentId, MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError,
+    validate_attachment_request, validate_effect_control_composition,
+    CheckedMiddlewareSurfaceAttachment, EffectControlCompositionError, EffectSurface,
+    EffectTypeKey, EffectUnitId, Flowip128gLegacyShellAttachment, HostedIngressTargetKey,
+    IngressEndpointKind, IngressRouteScope, IngressSurface, IngressUnitId, MiddlewareAttachmentId,
+    MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError, MiddlewareAuthorityError,
     MiddlewareCapability, MiddlewareDeclaration, MiddlewareDeclarationIndex,
     MiddlewareDeclarationScope, MiddlewareMaterializationContext, MiddlewareOrigin,
     MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit,
@@ -164,25 +166,25 @@ pub use carrier::{
     SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface, SourcePollUnitId,
     SourceStageIngressOwner,
 };
+pub(crate) use carrier::{MaterializationClaim, MiddlewareSurfaceAttachmentKind};
 pub use context::MiddlewareContext;
 pub use control::policy::{
-    effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment,
-    EventAwareEffectPolicy, PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary,
-    PerSourcePolicyBoundary, PolicyAdmission, SinkAdmission, SinkAdmissionGuard,
-    SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard,
-    SourceAfterPoll, SourceBatchFacts, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+    EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy,
+    PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary,
+    PolicyAdmission, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome, SinkPolicy,
+    SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard, SourceAfterPoll, SourceBatchFacts,
+    SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::indicator::{indicator, latency, IndicatorKind, IndicatorMiddlewareFactory};
 pub use observer::StageObserverSet;
-pub use type_shaping::{IntoEffectPolicyParts, OutcomeShapingMiddleware, TypeShapingMiddleware};
 
 // Control middleware
 pub use control::{
-    circuit_breaker, failure_rate, rate_limit, rate_limit_with_burst, CircuitBreaker,
-    CircuitBreakerBuilder, CircuitBreakerMiddleware, RateLimiterBuilder, RateLimiterFactory,
-    RateLimiterMiddleware, Retry,
+    rate_limit, rate_limit_with_burst, CircuitBreaker, CircuitBreakerConfigError, EffectResilience,
+    EffectResilienceConfigError, FailureHealth, RateLimiter, RateLimiterBuilder,
+    RateLimiterFactory, RateLimiterMiddleware, Retry,
 };
 
 pub use observability::{log, LoggingMiddleware, LoggingMiddlewareFactory};

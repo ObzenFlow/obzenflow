@@ -2,25 +2,18 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Integration test for breaker-driven shutdown contracts (FLOWIP-051b)
+//! Regression for the FLOWIP-115n total factory facade.
 //!
-//! This test drives a small flow where a circuit breaker at a transform
-//! forces the flow to shut down early. We then assert that:
-//! - The flow completes successfully (no hangs).
-//! - A poison EOF (natural = false) is emitted at the source.
-//! - A corresponding consumption_final contract event is written with
-//!   coherent writer identifiers.
+//! The former test installed a breaker through the generic async-handler shell
+//! and then asserted handler-authored poison-EOF shutdown behaviour. That shell
+//! is no longer a supported breaker surface. The same declaration must now fail
+//! deterministically before a run or shutdown contract can be produced.
 
-use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::circuit_breaker;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
+use obzenflow_adapters::middleware::CircuitBreaker;
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::{TypedPayload, WriterId};
 use obzenflow_dsl::{async_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -31,9 +24,13 @@ use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// File-local payload for the circuit-breaker shutdown contracts test.
-/// The JSON shape matches what `FiniteTestSource` emits; the type
-/// fingerprints the stage contract per FLOWIP-114c.
+fn breaker(failures: u32) -> CircuitBreaker {
+    CircuitBreaker::builder()
+        .consecutive_failures(failures)
+        .build()
+        .expect("test breaker configuration")
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BreakerTestEvent {
     index: u64,
@@ -42,140 +39,54 @@ struct BreakerTestEvent {
 impl TypedPayload for BreakerTestEvent {
     const EVENT_TYPE: &'static str = "circuit_breaker_shutdown.event";
 }
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
-/// Source that emits a fixed number of events and then ends.
 #[derive(Clone, Debug)]
-struct FiniteTestSource {
-    total: usize,
-    emitted: usize,
+struct OneShotSource {
+    emitted: bool,
     writer_id: WriterId,
 }
 
-impl FiniteTestSource {
-    fn new(total: usize) -> Self {
-        Self {
-            total,
-            emitted: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-impl FiniteSourceHandler for FiniteTestSource {
+impl FiniteSourceHandler for OneShotSource {
     fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        if self.emitted >= self.total {
+        if self.emitted {
             return Ok(None);
         }
-
-        let index = self.emitted;
-        self.emitted += 1;
-
-        let event = ChainEventFactory::data_event(
+        self.emitted = true;
+        Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            <BreakerTestEvent as TypedPayload>::EVENT_TYPE,
-            json!({
-                "index": index,
-            }),
-        );
-
-        Ok(Some(vec![event]))
+            BreakerTestEvent::EVENT_TYPE,
+            json!({ "index": 0 }),
+        )]))
     }
 }
 
-/// Transform that starts failing after a configurable number of successes.
 #[derive(Clone, Debug)]
-struct FailingTransform {
-    max_successes: usize,
-    seen: Arc<AtomicUsize>,
-}
+struct AsyncPassthrough;
 
-impl FailingTransform {
-    fn new(max_successes: usize) -> Self {
-        Self {
-            max_successes,
-            seen: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-}
-
-// FLOWIP-120c H1: a circuit breaker on a pure sync transform is now a build
-// error, so this test rides the async-non-effectful surface (deprecated,
-// warns) until FLOWIP-128b moves breaker-guarded work onto effects.
 #[async_trait]
-impl AsyncTransformHandler for FailingTransform {
-    async fn process(
-        &self,
-        mut event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let current = self.seen.fetch_add(1, Ordering::Relaxed);
-
-        if current >= self.max_successes {
-            // Model a hard failure using explicit processing status, so the
-            // circuit breaker can observe failures without relying on
-            // container cardinality.
-            event.processing_info.status =
-                obzenflow_core::event::status::processing_status::ProcessingStatus::error(
-                    "forced_failure",
-                );
-            Ok(vec![event])
-        } else {
-            Ok(vec![event])
-        }
+impl AsyncTransformHandler for AsyncPassthrough {
+    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![event])
     }
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
+    async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
 }
 
-/// Sink that simply counts successfully delivered events.
 #[derive(Clone, Debug)]
-struct CountingSink {
-    count: Arc<AtomicUsize>,
-}
-
-impl CountingSink {
-    fn new() -> (Self, Arc<AtomicUsize>) {
-        let count = Arc::new(AtomicUsize::new(0));
-        (
-            Self {
-                count: count.clone(),
-            },
-            count,
-        )
-    }
-}
+struct NullSink;
 
 #[async_trait]
-impl SinkHandler for CountingSink {
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        if event.is_data() {
-            self.count.fetch_add(1, Ordering::Relaxed);
-        }
-
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Count".to_string()),
-            None,
-        ))
+impl SinkHandler for NullSink {
+    async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
     }
 }
 
 #[tokio::test]
-async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
-    // Build a flow where the transform is wrapped in circuit breaker middleware.
-    // After a few failures, the breaker should open and the flow should shut
-    // down before all source events are processed.
-
-    let source_handler = FiniteTestSource::new(20);
-    let transform = FailingTransform::new(3);
-    let (sink_handler, delivered_count) = CountingSink::new();
-
-    let flow_handle = flow! {
+async fn breaker_handler_shell_is_rejected_before_shutdown_contracts_exist() {
+    let result = flow! {
         name: "breaker_shutdown_contracts",
         journals: disk_journals(std::path::PathBuf::from(
             "target/breaker_shutdown_contracts",
@@ -183,13 +94,14 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(BreakerTestEvent => source_handler, [
-                circuit_breaker(2) // Open after 2 failures
+            source = source!(BreakerTestEvent => OneShotSource {
+                emitted: false,
+                writer_id: WriterId::from(obzenflow_core::StageId::new()),
+            });
+            failing_transform = async_transform!(BreakerTestEvent -> BreakerTestEvent => AsyncPassthrough, [
+                breaker(2)
             ]);
-            failing_transform = async_transform!(BreakerTestEvent -> BreakerTestEvent => transform, [
-                circuit_breaker(2)
-            ]);
-            sink = sink!(BreakerTestEvent => sink_handler);
+            sink = sink!(BreakerTestEvent => NullSink);
         },
 
         topology: {
@@ -198,112 +110,16 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
         }
     }
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
+    .await;
 
-    // Run with metrics so we know the flow completed cleanly.
-    let metrics_exporter = flow_handle
-        .run_with_metrics()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
-        .expect("Metrics should be enabled for breaker_shutdown_contracts");
-
-    let metrics_text = metrics_exporter
-        .render_metrics()
-        .map_err(|e| anyhow::anyhow!("Failed to render metrics: {e}"))?;
-
-    println!("\n=== Breaker Shutdown Metrics (filtered) ===");
-    for line in metrics_text.lines() {
-        if line.contains("breaker_shutdown_contracts") {
-            println!("{line}");
-        }
-    }
-
-    // The sink should see fewer events than the source emitted due to breaker shutdown.
-    let delivered = delivered_count.load(Ordering::Relaxed);
+    let error = match result {
+        Ok(_) => panic!("a breaker must not regain the retired async-handler shell"),
+        Err(error) => format!("{error:?}"),
+    };
     assert!(
-        delivered < 20,
-        "expected breaker-driven shutdown to stop before all events were delivered, got {delivered}"
+        error.contains("PolicyMiddlewareOnPureStage")
+            && error.contains("failing_transform")
+            && error.contains("circuit_breaker"),
+        "expected the deterministic typed-surface diagnostic, got: {error}"
     );
-
-    // Inspect the source data journal for FlowControl EOF events and contract evidence.
-    // Discover the source stage journal on disk. Journals created via
-    // `disk_journals("target/breaker_shutdown_contracts")` are stored under:
-    //   target/breaker_shutdown_contracts/flows/<flow_id>/FiniteSource_source_<id>.log
-    let base_path = std::path::PathBuf::from("target/breaker_shutdown_contracts").join("flows");
-
-    let mut source_journal_paths = Vec::new();
-    if base_path.exists() {
-        for entry in std::fs::read_dir(&base_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read flows dir: {e:?}"))?
-        {
-            let entry = entry.map_err(|e| anyhow::anyhow!("Dir entry error: {e:?}"))?;
-            let path = entry.path();
-            if path.is_dir() {
-                for file in std::fs::read_dir(&path)
-                    .map_err(|e| anyhow::anyhow!("Failed to read flow dir: {e:?}"))?
-                {
-                    let file = file.map_err(|e| anyhow::anyhow!("Dir entry error: {e:?}"))?;
-                    let file_path = file.path();
-                    if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with("FiniteSource_source_") && name.ends_with(".log") {
-                            source_journal_paths.push(file_path);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    assert!(
-        !source_journal_paths.is_empty(),
-        "expected at least one source journal file for breaker_shutdown_contracts"
-    );
-
-    // For this test there should be exactly one relevant source journal, but
-    // we defensively inspect all matches and OR the results.
-    let mut eof_natural_flags = Vec::new();
-    let mut contract_events: Vec<ChainEvent> = Vec::new();
-
-    for journal_path in source_journal_paths {
-        let journal: obzenflow_infra::journal::DiskJournal<ChainEvent> =
-            obzenflow_infra::journal::DiskJournal::with_owner(
-                journal_path.clone(),
-                JournalOwner::stage(StageId::new()),
-            )
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to open source journal {journal_path:?}: {e:?}")
-            })?;
-
-        let envelopes = journal
-            .read_causally_ordered()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to read source journal: {e:?}"))?;
-
-        for env in envelopes {
-            match env.event.content {
-                ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. }) => {
-                    eof_natural_flags.push(kind.is_natural());
-                }
-                ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. }) => {
-                    contract_events.push(env.event.clone());
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // We expect at least one EOF and at least one of them should be poison (natural = false).
-    assert!(
-        !eof_natural_flags.is_empty(),
-        "expected at least one EOF event from source"
-    );
-
-    // We also expect a consumption_final contract event for the source.
-    assert!(
-        !contract_events.is_empty(),
-        "expected at least one consumption_final contract event for the source"
-    );
-
-    Ok(())
 }

@@ -136,7 +136,6 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             runtime_execution: self.resources.runtime_execution.clone(),
             effect_ports: self.resources.effect_ports.clone(),
             effect_declarations: self.resources.effect_declarations.clone(),
-            synthesized_outcomes: self.resources.synthesized_outcomes.clone(),
             error_journal: self.resources.error_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             writer_id: None,

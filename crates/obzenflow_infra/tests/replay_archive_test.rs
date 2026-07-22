@@ -11,11 +11,12 @@ use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::id::{JournalId, SystemId};
 use obzenflow_core::journal::run_manifest::{
-    RunManifest, RunManifestStage, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+    RunManifest, RunManifestStage, JOURNAL_FORMAT_VERSION, RUN_MANIFEST_FILENAME,
+    RUN_MANIFEST_VERSION,
 };
 use obzenflow_core::journal::ArchiveStatus;
 use obzenflow_core::WriterId;
-use obzenflow_infra::journal::disk::log_record::LogRecord;
+use obzenflow_infra::journal::disk::log_record::{LogRecord, RECORD_FRAME_KIND};
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_runtime::replay::ReplayArchive;
 use obzenflow_runtime::replay::ReplayError;
@@ -44,7 +45,7 @@ fn write_manifest(dir: &Path) {
 
     let manifest = RunManifest {
         manifest_version: RUN_MANIFEST_VERSION.to_string(),
-        journal_format_version: 1,
+        journal_format_version: JOURNAL_FORMAT_VERSION,
         obzenflow_version: OBZENFLOW_VERSION.to_string(),
         flow_id: "flow_01H000000000000000000000000".to_string(),
         flow_name: "test_flow".to_string(),
@@ -87,7 +88,11 @@ fn write_system_log_completed(dir: &Path) {
 }
 
 fn write_framed_log_record(dir: &Path, record: &LogRecord<SystemEvent>) {
-    let json_body = serde_json::to_vec(record).unwrap();
+    let json_body = serde_json::to_vec(&serde_json::json!({
+        "frame_kind": RECORD_FRAME_KIND,
+        "record": record,
+    }))
+    .unwrap();
     let mut hasher = Hasher::new();
     hasher.update(&json_body);
     let crc = hasher.finalize();
@@ -181,7 +186,7 @@ fn write_manifest_with_version(dir: &Path, version: &str) {
 
     let manifest = RunManifest {
         manifest_version: RUN_MANIFEST_VERSION.to_string(),
-        journal_format_version: 1,
+        journal_format_version: JOURNAL_FORMAT_VERSION,
         obzenflow_version: version.to_string(),
         flow_id: "flow_01H000000000000000000000000".to_string(),
         flow_name: "test_flow".to_string(),
@@ -339,6 +344,37 @@ async fn open_rejects_previous_manifest_version_before_typed_parse() {
     assert!(
         err.to_string().contains("re-record"),
         "refusal must carry the re-record guidance, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn open_rejects_previous_journal_format_before_reading_records() {
+    let dir = tempdir().unwrap();
+    write_manifest(dir.path());
+    write_system_log_completed(dir.path());
+
+    let manifest_path = dir.path().join(RUN_MANIFEST_FILENAME);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["journal_format_version"] = serde_json::json!(JOURNAL_FORMAT_VERSION - 1);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, ReplayError::Parse { .. }),
+        "expected the raw manifest gate to reject the old journal format, got: {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("unsupported journal_format_version"),
+        "refusal must identify the incompatible record format, got: {err}"
     );
 }
 

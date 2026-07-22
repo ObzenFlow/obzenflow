@@ -16,8 +16,11 @@
 //! surface/capability compatibility and passes only typed runtime/infra ports
 //! across the architectural boundary.
 
-use super::control::policy::{EffectPolicyAttachment, SinkPolicy, SourcePolicy};
-use super::control::ControlMiddlewareAggregator;
+use super::control::policy::{
+    EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy, SinkPolicy, SourcePolicy,
+};
+use super::control::provider::PendingControlRegistration;
+use super::Middleware;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::{IngressBoundaryMiddleware, IngressKey};
 use obzenflow_core::{StageId, StageKey};
@@ -29,7 +32,7 @@ use obzenflow_runtime::stages::observer::{
 };
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use ring::digest::{Context, SHA256};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -587,30 +590,67 @@ fn push_protected_unit(context: &mut Context, protected_unit: &ProtectedUnitId) 
 // ---------------------------------------------------------------------------
 
 /// The static declaration a factory returns before any runtime middleware
-/// object is created. The binder reads this to validate `surface x capability`
-/// and to plan the attachment without constructing a `Box<dyn Middleware>`.
+/// object is created. The DSL reads this to plan the attachment, and the
+/// adapter-owned materialisation gateway validates `surface x capability`
+/// before invoking the factory.
 #[derive(Debug, Clone)]
 pub struct MiddlewareDeclaration {
     pub label: &'static str,
     pub family_label: &'static str,
     pub capability: MiddlewareCapability,
     /// The surfaces this factory can attach to. A control middleware may span
-    /// several (the circuit breaker declares source poll, effect, and sink
-    /// delivery); the binder picks the concrete surface per call site and
-    /// validates membership. An empty set marks legacy shell middleware with no
-    /// hook surface, created via `create()`.
+    /// several (the rate limiter declares source poll, effect, sink delivery,
+    /// and ingress); the binder picks the concrete surface per call site and
+    /// validates membership. A declaration always names at least one surface.
     pub surfaces: Vec<MiddlewareSurfaceKind>,
+    route: MiddlewareDeclarationRoute,
+    materialization_claim: MaterializationClaim,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MiddlewareDeclarationRoute {
+    Typed,
+    /// Sealed migration route for the two AI map-reduce shell adapters owned by
+    /// FLOWIP-128g. External factories cannot construct this declaration.
+    Flowip128gLegacyShell,
+}
+
+/// Sealed semantic identity shared by structural composition validation,
+/// materialisation authority, and returned-attachment validation. Public
+/// declaration and attachment constructors can create only `Ordinary`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MaterializationClaim {
+    Ordinary,
+    CircuitBreaker,
+    RateLimiter,
+    EffectResilience,
+    Flowip128gLegacyShell,
+}
+
+impl MaterializationClaim {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Ordinary => "ordinary",
+            Self::CircuitBreaker => "circuit_breaker",
+            Self::RateLimiter => "rate_limiter",
+            Self::EffectResilience => "effect_resilience",
+            Self::Flowip128gLegacyShell => "flowip_128g_legacy_shell",
+        }
+    }
 }
 
 impl MiddlewareDeclaration {
-    /// Declaration for legacy shell middleware: no hook surface, observer
-    /// capability (the safe default matching `MiddlewareKind::Observation`).
-    pub fn legacy_shell(label: &'static str, family_label: &'static str) -> Self {
+    pub(crate) fn flowip_128g_legacy_shell(
+        label: &'static str,
+        family_label: &'static str,
+    ) -> Self {
         Self {
             label,
             family_label,
-            capability: MiddlewareCapability::Observer,
-            surfaces: Vec::new(),
+            capability: MiddlewareCapability::Structural,
+            surfaces: vec![MiddlewareSurfaceKind::Handler],
+            route: MiddlewareDeclarationRoute::Flowip128gLegacyShell,
+            materialization_claim: MaterializationClaim::Flowip128gLegacyShell,
         }
     }
 
@@ -630,6 +670,49 @@ impl MiddlewareDeclaration {
             family_label,
             capability: MiddlewareCapability::Control,
             surfaces,
+            route: MiddlewareDeclarationRoute::Typed,
+            materialization_claim: MaterializationClaim::Ordinary,
+        }
+    }
+
+    pub(crate) fn circuit_breaker(
+        label: &'static str,
+        family_label: &'static str,
+        surfaces: Vec<MiddlewareSurfaceKind>,
+    ) -> Self {
+        Self {
+            label,
+            family_label,
+            capability: MiddlewareCapability::Control,
+            surfaces,
+            route: MiddlewareDeclarationRoute::Typed,
+            materialization_claim: MaterializationClaim::CircuitBreaker,
+        }
+    }
+
+    pub(crate) fn effect_resilience(label: &'static str, family_label: &'static str) -> Self {
+        Self {
+            label,
+            family_label,
+            capability: MiddlewareCapability::Control,
+            surfaces: vec![MiddlewareSurfaceKind::Effect],
+            route: MiddlewareDeclarationRoute::Typed,
+            materialization_claim: MaterializationClaim::EffectResilience,
+        }
+    }
+
+    pub(crate) fn rate_limiter(
+        label: &'static str,
+        family_label: &'static str,
+        surfaces: Vec<MiddlewareSurfaceKind>,
+    ) -> Self {
+        Self {
+            label,
+            family_label,
+            capability: MiddlewareCapability::Control,
+            surfaces,
+            route: MiddlewareDeclarationRoute::Typed,
+            materialization_claim: MaterializationClaim::RateLimiter,
         }
     }
 
@@ -649,11 +732,16 @@ impl MiddlewareDeclaration {
             family_label,
             capability: MiddlewareCapability::Observer,
             surfaces,
+            route: MiddlewareDeclarationRoute::Typed,
+            materialization_claim: MaterializationClaim::Ordinary,
         }
     }
 
-    pub fn is_legacy_shell(&self) -> bool {
-        self.surfaces.is_empty()
+    /// Whether this is one of the sealed AI map-reduce shell migrations owned
+    /// by FLOWIP-128g. This is binder plumbing, not a public authoring route.
+    #[doc(hidden)]
+    pub fn is_flowip_128g_legacy_shell(&self) -> bool {
+        self.route == MiddlewareDeclarationRoute::Flowip128gLegacyShell
     }
 
     /// Whether this factory declares it can attach to `surface`.
@@ -667,8 +755,115 @@ impl MiddlewareDeclaration {
     }
 
     pub fn is_observer(&self) -> bool {
-        matches!(self.capability, MiddlewareCapability::Observer) && !self.is_legacy_shell()
+        matches!(self.capability, MiddlewareCapability::Observer)
     }
+
+    pub(crate) fn materialization_claim(&self) -> MaterializationClaim {
+        self.materialization_claim
+    }
+
+    /// Validate the declaration independently of a concrete binding request.
+    /// Factories with no surfaces fail at flow build instead of being assigned
+    /// an implicit shell meaning.
+    pub fn validate_shape(&self) -> Result<(), MiddlewareAttachmentValidationError> {
+        if self.surfaces.is_empty() {
+            return Err(MiddlewareAttachmentValidationError::EmptyDeclaration {
+                label: self.label,
+            });
+        }
+        if matches!(self.capability, MiddlewareCapability::Structural)
+            && !self.is_flowip_128g_legacy_shell()
+        {
+            return Err(
+                MiddlewareAttachmentValidationError::UnsupportedStructuralDeclaration {
+                    label: self.label,
+                },
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum EffectControlCompositionError {
+    #[error(
+        "effect '{effect_type}' on stage '{stage}' combines EffectResilience with standalone effect control(s): {conflicts:?}"
+    )]
+    AggregateWithStandalone {
+        stage: String,
+        effect_type: String,
+        conflicts: Vec<&'static str>,
+    },
+    #[error(
+        "effect '{effect_type}' on stage '{stage}' declares EffectResilience more than once: {labels:?}"
+    )]
+    DuplicateAggregate {
+        stage: String,
+        effect_type: String,
+        labels: Vec<&'static str>,
+    },
+    #[error(
+        "effect '{effect_type}' on stage '{stage}' declares standalone {control} more than once: {labels:?}"
+    )]
+    DuplicateStandalone {
+        stage: String,
+        effect_type: String,
+        control: &'static str,
+        labels: Vec<&'static str>,
+    },
+}
+
+/// Validate one effect's complete structural control set before any factory is
+/// materialised or any breaker/limiter authority is registered.
+#[doc(hidden)]
+pub fn validate_effect_control_composition(
+    stage: &str,
+    effect_type: &str,
+    declarations: &[MiddlewareDeclaration],
+) -> Result<(), EffectControlCompositionError> {
+    let effect_controls = declarations.iter().filter(|declaration| {
+        declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::Effect)
+    });
+    let mut aggregates = Vec::new();
+    let mut standalone: std::collections::BTreeMap<&'static str, Vec<&'static str>> =
+        std::collections::BTreeMap::new();
+    for declaration in effect_controls {
+        match declaration.materialization_claim {
+            MaterializationClaim::EffectResilience => aggregates.push(declaration.label),
+            MaterializationClaim::CircuitBreaker => standalone
+                .entry("circuit_breaker")
+                .or_default()
+                .push(declaration.label),
+            MaterializationClaim::RateLimiter => standalone
+                .entry("rate_limiter")
+                .or_default()
+                .push(declaration.label),
+            MaterializationClaim::Ordinary | MaterializationClaim::Flowip128gLegacyShell => {}
+        }
+    }
+    if aggregates.len() > 1 {
+        return Err(EffectControlCompositionError::DuplicateAggregate {
+            stage: stage.to_string(),
+            effect_type: effect_type.to_string(),
+            labels: aggregates,
+        });
+    }
+    if !aggregates.is_empty() && !standalone.is_empty() {
+        return Err(EffectControlCompositionError::AggregateWithStandalone {
+            stage: stage.to_string(),
+            effect_type: effect_type.to_string(),
+            conflicts: standalone.keys().copied().collect(),
+        });
+    }
+    if let Some((control, labels)) = standalone.into_iter().find(|(_, labels)| labels.len() > 1) {
+        return Err(EffectControlCompositionError::DuplicateStandalone {
+            stage: stage.to_string(),
+            effect_type: effect_type.to_string(),
+            control,
+            labels,
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -678,11 +873,13 @@ impl MiddlewareDeclaration {
 /// A carrier-level validation failure before runtime erasure.
 #[derive(Debug, Error)]
 pub enum MiddlewareAttachmentValidationError {
+    #[error("middleware '{label}' declares no typed surfaces")]
+    EmptyDeclaration { label: &'static str },
+
     #[error(
-        "middleware '{label}' is legacy shell middleware with no hook surface; \
-         materialization requires a declared hook surface"
+        "middleware '{label}' declares structural capability outside the sealed FLOWIP-128g migration route"
     )]
-    LegacyShell { label: &'static str },
+    UnsupportedStructuralDeclaration { label: &'static str },
 
     #[error("middleware '{label}' does not declare support for surface {surface:?}")]
     UnsupportedSurface {
@@ -695,6 +892,26 @@ pub enum MiddlewareAttachmentValidationError {
         label: &'static str,
         capability: MiddlewareCapability,
         surface: MiddlewareSurfaceKind,
+    },
+
+    #[error(
+        "middleware '{label}' returned {returned_capability:?}/{returned_surface:?} for a {requested_capability:?}/{requested_surface:?} request"
+    )]
+    ReturnedAttachmentMismatch {
+        label: &'static str,
+        requested_capability: MiddlewareCapability,
+        requested_surface: MiddlewareSurfaceKind,
+        returned_capability: MiddlewareCapability,
+        returned_surface: MiddlewareSurfaceKind,
+    },
+
+    #[error(
+        "middleware '{label}' declared authority '{declared}', but returned attachment authority '{returned}'"
+    )]
+    ReturnedAuthorityMismatch {
+        label: &'static str,
+        declared: &'static str,
+        returned: &'static str,
     },
 
     #[error("surface {surface:?} is bound to stage {surface_stage}, but protected unit is bound to stage {unit_stage}")]
@@ -717,12 +934,7 @@ pub fn validate_attachment_request(
     declaration: &MiddlewareDeclaration,
     request: &MiddlewareAttachmentRequest<'_>,
 ) -> Result<MiddlewareAttachmentId, MiddlewareAttachmentValidationError> {
-    if declaration.is_legacy_shell() {
-        return Err(MiddlewareAttachmentValidationError::LegacyShell {
-            label: declaration.label,
-        });
-    }
-
+    declaration.validate_shape()?;
     let surface = request.surface.kind();
     if !declaration.supports(surface) {
         return Err(MiddlewareAttachmentValidationError::UnsupportedSurface {
@@ -740,7 +952,9 @@ pub fn validate_attachment_request(
         MiddlewareCapability::Observer => {
             crate::middleware::observer::OBSERVER_SURFACE_KINDS.contains(&surface)
         }
-        MiddlewareCapability::Structural => false,
+        MiddlewareCapability::Structural => {
+            declaration.is_flowip_128g_legacy_shell() && surface == MiddlewareSurfaceKind::Handler
+        }
     };
     if !allowed {
         return Err(MiddlewareAttachmentValidationError::UnsupportedCapability {
@@ -819,16 +1033,204 @@ pub struct MiddlewareAttachmentRequest<'a> {
     pub declaration_index: MiddlewareDeclarationIndex,
 }
 
-/// Runtime construction inputs the factory needs to materialize, mirroring the
-/// inputs of `create`: the stage config and the flow-scoped control aggregator.
+#[derive(Debug, Error)]
+pub enum MiddlewareAuthorityError {
+    #[error(
+        "middleware '{middleware}' declared authority '{declared}' for {surface:?}, but materialisation attempted privileged authority '{attempted}'"
+    )]
+    Escalation {
+        middleware: &'static str,
+        surface: MiddlewareSurfaceKind,
+        declared: &'static str,
+        attempted: &'static str,
+    },
+
+    #[error(
+        "middleware '{middleware}' attempted control registration for stage {attempted_stage} and effect {attempted_effect:?}, but the checked request is bound to stage {expected_stage} and effect {expected_effect:?}"
+    )]
+    RegistrationTargetMismatch {
+        middleware: &'static str,
+        expected_stage: StageId,
+        expected_effect: Option<String>,
+        attempted_stage: StageId,
+        attempted_effect: Option<String>,
+    },
+
+    #[error(
+        "middleware '{middleware}' attempted privileged materialisation for attachment {attempted_attachment}, but the checked invocation is bound to attachment {expected_attachment}"
+    )]
+    DelegatedRequestMismatch {
+        middleware: &'static str,
+        expected_attachment: obzenflow_core::Ulid,
+        attempted_attachment: obzenflow_core::Ulid,
+    },
+
+    #[error(
+        "middleware '{middleware}' returned an attachment from a different materialisation invocation"
+    )]
+    ReturnedInvocationMismatch { middleware: &'static str },
+}
+
+/// Invocation-local construction inputs for one checked materialisation.
+/// Shared control-plane mutations are staged here and remain invisible until
+/// the adapter-owned gateway validates the returned semantic claim and commits
+/// the complete batch.
 pub struct MiddlewareMaterializationContext<'a> {
     pub config: &'a StageConfig,
-    pub control_middleware: &'a Arc<ControlMiddlewareAggregator>,
     /// The type of the stage being attached to. Source-poll materialization uses
     /// this to choose the FLOWIP-114m charge position (infinite sources charge
     /// pre-poll, finite sources charge after a clean non-empty delivery); the
     /// effect and sink-delivery surfaces ignore it.
     pub stage_type: StageType,
+    middleware: &'static str,
+    surface: MiddlewareSurfaceKind,
+    bound_surface: MiddlewareSurface,
+    expected_claim: MaterializationClaim,
+    stage_id: StageId,
+    effect_type: Option<EffectTypeKey>,
+    attachment_id: MiddlewareAttachmentId,
+    invocation_token: Arc<()>,
+    pending: Mutex<Vec<PendingControlRegistration>>,
+}
+
+impl<'a> MiddlewareMaterializationContext<'a> {
+    pub(crate) fn new(
+        config: &'a StageConfig,
+        stage_type: StageType,
+        declaration: &MiddlewareDeclaration,
+        request: &MiddlewareAttachmentRequest<'_>,
+    ) -> Self {
+        let effect_type = match &request.protected_unit.unit {
+            ProtectedUnit::Effect(unit) => Some(unit.effect_type.clone()),
+            _ => None,
+        };
+        Self {
+            config,
+            stage_type,
+            middleware: declaration.label,
+            surface: request.surface.kind(),
+            bound_surface: request.surface.clone(),
+            expected_claim: declaration.materialization_claim(),
+            stage_id: request.protected_unit.stage_id,
+            effect_type,
+            attachment_id: MiddlewareAttachmentId::from_declaration_and_request(
+                declaration,
+                request,
+            ),
+            invocation_token: Arc::new(()),
+            pending: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn ensure_claim(&self, claimant: MaterializationClaim) -> Result<(), MiddlewareAuthorityError> {
+        if claimant == self.expected_claim {
+            return Ok(());
+        }
+        Err(MiddlewareAuthorityError::Escalation {
+            middleware: self.middleware,
+            surface: self.surface,
+            declared: self.expected_claim.label(),
+            attempted: claimant.label(),
+        })
+    }
+
+    pub(crate) fn authorize_materialization(
+        &self,
+        claimant: MaterializationClaim,
+        declaration: &MiddlewareDeclaration,
+        request: &MiddlewareAttachmentRequest<'_>,
+    ) -> Result<(), MiddlewareAuthorityError> {
+        self.ensure_claim(claimant)?;
+        let attempted = MiddlewareAttachmentId::from_declaration_and_request(declaration, request);
+        if request.surface != &self.bound_surface || attempted != self.attachment_id {
+            return Err(MiddlewareAuthorityError::DelegatedRequestMismatch {
+                middleware: self.middleware,
+                expected_attachment: self.attachment_id.as_ulid(),
+                attempted_attachment: attempted.as_ulid(),
+            });
+        }
+        Ok(())
+    }
+
+    fn issue_attachment_token(
+        &self,
+        claimant: MaterializationClaim,
+    ) -> Result<Arc<()>, MiddlewareAuthorityError> {
+        self.ensure_claim(claimant)?;
+        Ok(self.invocation_token.clone())
+    }
+
+    pub(crate) fn validate_returned_attachment(
+        &self,
+        attachment: &MiddlewareSurfaceAttachment,
+    ) -> Result<(), MiddlewareAuthorityError> {
+        let valid = match (&attachment.invocation_token, attachment.claim) {
+            (None, MaterializationClaim::Ordinary) => true,
+            (Some(token), claim) if claim != MaterializationClaim::Ordinary => {
+                Arc::ptr_eq(token, &self.invocation_token)
+            }
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(MiddlewareAuthorityError::ReturnedInvocationMismatch {
+                middleware: self.middleware,
+            })
+        }
+    }
+
+    pub(crate) fn stage_control_registration(
+        &self,
+        claimant: MaterializationClaim,
+        registration: PendingControlRegistration,
+    ) -> Result<(), MiddlewareAuthorityError> {
+        self.ensure_claim(claimant)?;
+        let (attempted_stage, attempted_effect) = registration.target();
+        if attempted_stage != self.stage_id || attempted_effect != self.effect_type.as_ref() {
+            return Err(MiddlewareAuthorityError::RegistrationTargetMismatch {
+                middleware: self.middleware,
+                expected_stage: self.stage_id,
+                expected_effect: self
+                    .effect_type
+                    .as_ref()
+                    .map(|effect| effect.as_str().to_string()),
+                attempted_stage,
+                attempted_effect: attempted_effect.map(|effect| effect.as_str().to_string()),
+            });
+        }
+        self.pending
+            .lock()
+            .expect("middleware pending-registration lock poisoned")
+            .push(registration);
+        Ok(())
+    }
+
+    pub(crate) fn take_pending(&self) -> Vec<PendingControlRegistration> {
+        std::mem::take(
+            &mut *self
+                .pending
+                .lock()
+                .expect("middleware pending-registration lock poisoned"),
+        )
+    }
+
+    /// Resolve the policy-neutral immutable config view for exactly the
+    /// protected unit being materialised. Configuration cannot create a unit;
+    /// callers can only request a view for an already validated attachment.
+    pub fn config_view(&self) -> obzenflow_runtime::runtime_config::ExactConfigView<'_> {
+        use obzenflow_core::event::EffectType;
+        use obzenflow_runtime::runtime_config::ResolutionPoint;
+
+        let point = match &self.effect_type {
+            Some(effect_type) => ResolutionPoint::Effect {
+                stage: StageKey::from(self.config.name.as_str()),
+                effect_type: EffectType::from(effect_type.as_str()),
+            },
+            None => ResolutionPoint::Stage(StageKey::from(self.config.name.as_str())),
+        };
+        self.config.effective_config.exact_view(point)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -852,6 +1254,24 @@ pub struct SourcePollAttachment {
     pub completion_gate: Option<Arc<dyn CompletionGate>>,
 }
 
+/// Sealed carrier for the two structural shell adapters awaiting FLOWIP-128g.
+///
+/// Its constructor is crate-private, so custom factories cannot use this as a
+/// generic handler-shell escape hatch. The DSL consumes it only after validating
+/// the sealed declaration above.
+pub struct Flowip128gLegacyShellAttachment(Box<dyn Middleware>);
+
+impl Flowip128gLegacyShellAttachment {
+    pub(crate) fn new(middleware: Box<dyn Middleware>) -> Self {
+        Self(middleware)
+    }
+
+    #[doc(hidden)]
+    pub fn into_middleware(self) -> Box<dyn Middleware> {
+        self.0
+    }
+}
+
 /// The single typed attachment a factory materializes for one surface.
 ///
 /// Adapter-owned: the DSL binder collects the per-surface policies, composes
@@ -859,8 +1279,7 @@ pub struct SourcePollAttachment {
 /// seam to runtime/infra. Non-exhaustive; this slice implements `SourcePoll`,
 /// `Effect`, and `SinkDelivery`, and FLOWIP-115d adds `Ingress`, whose neutral
 /// port is the core-owned `IngressBoundaryMiddleware` that infra calls.
-#[non_exhaustive]
-pub enum MiddlewareSurfaceAttachment {
+pub(crate) enum MiddlewareSurfaceAttachmentKind {
     SourcePoll(SourcePollAttachment),
     Effect(EffectPolicyAttachment),
     SinkDelivery(Arc<dyn SinkPolicy>),
@@ -873,11 +1292,272 @@ pub enum MiddlewareSurfaceAttachment {
     JoinObserver(Arc<dyn JoinObserver>),
     OutputCommitObserver(Arc<dyn OutputCommitObserver>),
     StageLifecycleObserver(Arc<dyn StageLifecycleObserver>),
+    /// Sealed migration carrier for the two AI map-reduce consumers assigned
+    /// to FLOWIP-128g. It is not constructible by external factories.
+    #[doc(hidden)]
+    Flowip128gLegacyShell(Flowip128gLegacyShellAttachment),
+}
+
+/// One typed attachment plus its sealed semantic claim. Public constructors
+/// create ordinary custom attachments; built-in claims can only be attached by
+/// adapter-owned constructors.
+pub struct MiddlewareSurfaceAttachment {
+    kind: MiddlewareSurfaceAttachmentKind,
+    claim: MaterializationClaim,
+    invocation_token: Option<Arc<()>>,
+}
+
+impl MiddlewareSurfaceAttachment {
+    fn ordinary(kind: MiddlewareSurfaceAttachmentKind) -> Self {
+        Self {
+            kind,
+            claim: MaterializationClaim::Ordinary,
+            invocation_token: None,
+        }
+    }
+
+    pub(crate) fn claimed(
+        kind: MiddlewareSurfaceAttachmentKind,
+        claim: MaterializationClaim,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> Result<Self, MiddlewareAuthorityError> {
+        Ok(Self {
+            kind,
+            claim,
+            invocation_token: Some(context.issue_attachment_token(claim)?),
+        })
+    }
+
+    pub fn source_poll(attachment: SourcePollAttachment) -> Self {
+        Self::ordinary(MiddlewareSurfaceAttachmentKind::SourcePoll(attachment))
+    }
+
+    pub fn effect(policy: Arc<dyn EffectPolicy>) -> Self {
+        Self::ordinary(MiddlewareSurfaceAttachmentKind::Effect(
+            EffectPolicyAttachment::neutral(policy),
+        ))
+    }
+
+    pub fn event_aware_effect(policy: Arc<dyn EventAwareEffectPolicy>) -> Self {
+        Self::ordinary(MiddlewareSurfaceAttachmentKind::Effect(
+            EffectPolicyAttachment::event_aware(policy),
+        ))
+    }
+
+    pub fn sink_delivery(policy: Arc<dyn SinkPolicy>) -> Self {
+        Self::ordinary(MiddlewareSurfaceAttachmentKind::SinkDelivery(policy))
+    }
+
+    pub fn ingress(boundary: Arc<dyn IngressBoundaryMiddleware>) -> Self {
+        Self::ordinary(MiddlewareSurfaceAttachmentKind::Ingress(boundary))
+    }
+
+    pub fn source_poll_observer(observer: Arc<dyn SourcePollObserver>) -> Self {
+        Self::ordinary(MiddlewareSurfaceAttachmentKind::SourcePollObserver(
+            observer,
+        ))
+    }
+
+    pub fn effect_observer(observer: Arc<dyn EffectObserver>) -> Self {
+        Self::ordinary(MiddlewareSurfaceAttachmentKind::EffectObserver(observer))
+    }
+
+    pub fn sink_delivery_observer(observer: Arc<dyn SinkDeliveryObserver>) -> Self {
+        Self::ordinary(MiddlewareSurfaceAttachmentKind::SinkDeliveryObserver(
+            observer,
+        ))
+    }
+
+    pub fn handler_observer(observer: Arc<dyn HandlerObserver>) -> Self {
+        Self::ordinary(MiddlewareSurfaceAttachmentKind::HandlerObserver(observer))
+    }
+
+    pub fn stateful_observer(observer: Arc<dyn StatefulObserver>) -> Self {
+        Self::ordinary(MiddlewareSurfaceAttachmentKind::StatefulObserver(observer))
+    }
+
+    pub fn join_observer(observer: Arc<dyn JoinObserver>) -> Self {
+        Self::ordinary(MiddlewareSurfaceAttachmentKind::JoinObserver(observer))
+    }
+
+    pub fn output_commit_observer(observer: Arc<dyn OutputCommitObserver>) -> Self {
+        Self::ordinary(MiddlewareSurfaceAttachmentKind::OutputCommitObserver(
+            observer,
+        ))
+    }
+
+    pub fn stage_lifecycle_observer(observer: Arc<dyn StageLifecycleObserver>) -> Self {
+        Self::ordinary(MiddlewareSurfaceAttachmentKind::StageLifecycleObserver(
+            observer,
+        ))
+    }
+
+    pub(crate) fn into_kind(self) -> MiddlewareSurfaceAttachmentKind {
+        self.kind
+    }
+
+    fn capability_and_surface(&self) -> (MiddlewareCapability, MiddlewareSurfaceKind) {
+        capability_and_surface(&self.kind)
+    }
+}
+
+/// A materialised attachment whose request, returned semantic claim, invocation
+/// token, and staged authority have passed the adapter-owned gateway. Only this
+/// checked carrier exposes payload extraction to the DSL.
+pub struct CheckedMiddlewareSurfaceAttachment {
+    kind: MiddlewareSurfaceAttachmentKind,
+}
+
+impl CheckedMiddlewareSurfaceAttachment {
+    pub(crate) fn from_validated(attachment: MiddlewareSurfaceAttachment) -> Self {
+        Self {
+            kind: attachment.into_kind(),
+        }
+    }
+
+    pub fn into_source_poll(self) -> Option<SourcePollAttachment> {
+        match self.kind {
+            MiddlewareSurfaceAttachmentKind::SourcePoll(attachment) => Some(attachment),
+            _ => None,
+        }
+    }
+
+    pub fn into_effect(self) -> Option<EffectPolicyAttachment> {
+        match self.kind {
+            MiddlewareSurfaceAttachmentKind::Effect(attachment) => Some(attachment),
+            _ => None,
+        }
+    }
+
+    pub fn into_sink_delivery(self) -> Option<Arc<dyn SinkPolicy>> {
+        match self.kind {
+            MiddlewareSurfaceAttachmentKind::SinkDelivery(policy) => Some(policy),
+            _ => None,
+        }
+    }
+
+    pub fn into_ingress(self) -> Option<Arc<dyn IngressBoundaryMiddleware>> {
+        match self.kind {
+            MiddlewareSurfaceAttachmentKind::Ingress(boundary) => Some(boundary),
+            _ => None,
+        }
+    }
+
+    pub fn into_flowip_128g_legacy_shell(self) -> Option<Flowip128gLegacyShellAttachment> {
+        match self.kind {
+            MiddlewareSurfaceAttachmentKind::Flowip128gLegacyShell(shell) => Some(shell),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn into_kind(self) -> MiddlewareSurfaceAttachmentKind {
+        self.kind
+    }
+}
+
+fn capability_and_surface(
+    kind: &MiddlewareSurfaceAttachmentKind,
+) -> (MiddlewareCapability, MiddlewareSurfaceKind) {
+    match kind {
+        MiddlewareSurfaceAttachmentKind::SourcePoll(_) => (
+            MiddlewareCapability::Control,
+            MiddlewareSurfaceKind::SourcePoll,
+        ),
+        MiddlewareSurfaceAttachmentKind::Effect(_) => {
+            (MiddlewareCapability::Control, MiddlewareSurfaceKind::Effect)
+        }
+        MiddlewareSurfaceAttachmentKind::SinkDelivery(_) => (
+            MiddlewareCapability::Control,
+            MiddlewareSurfaceKind::SinkDelivery,
+        ),
+        MiddlewareSurfaceAttachmentKind::Ingress(_) => (
+            MiddlewareCapability::Control,
+            MiddlewareSurfaceKind::Ingress,
+        ),
+        MiddlewareSurfaceAttachmentKind::SourcePollObserver(_) => (
+            MiddlewareCapability::Observer,
+            MiddlewareSurfaceKind::SourcePoll,
+        ),
+        MiddlewareSurfaceAttachmentKind::EffectObserver(_) => (
+            MiddlewareCapability::Observer,
+            MiddlewareSurfaceKind::Effect,
+        ),
+        MiddlewareSurfaceAttachmentKind::SinkDeliveryObserver(_) => (
+            MiddlewareCapability::Observer,
+            MiddlewareSurfaceKind::SinkDelivery,
+        ),
+        MiddlewareSurfaceAttachmentKind::HandlerObserver(_) => (
+            MiddlewareCapability::Observer,
+            MiddlewareSurfaceKind::Handler,
+        ),
+        MiddlewareSurfaceAttachmentKind::StatefulObserver(_) => (
+            MiddlewareCapability::Observer,
+            MiddlewareSurfaceKind::Stateful,
+        ),
+        MiddlewareSurfaceAttachmentKind::JoinObserver(_) => {
+            (MiddlewareCapability::Observer, MiddlewareSurfaceKind::Join)
+        }
+        MiddlewareSurfaceAttachmentKind::OutputCommitObserver(_) => (
+            MiddlewareCapability::Observer,
+            MiddlewareSurfaceKind::OutputCommit,
+        ),
+        MiddlewareSurfaceAttachmentKind::StageLifecycleObserver(_) => (
+            MiddlewareCapability::Observer,
+            MiddlewareSurfaceKind::StageLifecycle,
+        ),
+        MiddlewareSurfaceAttachmentKind::Flowip128gLegacyShell(_) => (
+            MiddlewareCapability::Structural,
+            MiddlewareSurfaceKind::Handler,
+        ),
+    }
+}
+
+/// Validate the value returned by a factory against the already-validated
+/// request. Declaration validation alone cannot stop a nominal observer from
+/// returning a control attachment or the wrong observer surface.
+pub(crate) fn validate_materialized_attachment(
+    declaration: &MiddlewareDeclaration,
+    request: &MiddlewareAttachmentRequest<'_>,
+    attachment: &MiddlewareSurfaceAttachment,
+) -> Result<(), MiddlewareAttachmentValidationError> {
+    validate_attachment_request(declaration, request)?;
+    let requested_surface = request.surface.kind();
+    let (returned_capability, returned_surface) = attachment.capability_and_surface();
+    if declaration.capability != returned_capability || requested_surface != returned_surface {
+        return Err(
+            MiddlewareAttachmentValidationError::ReturnedAttachmentMismatch {
+                label: declaration.label,
+                requested_capability: declaration.capability,
+                requested_surface,
+                returned_capability,
+                returned_surface,
+            },
+        );
+    }
+    if declaration.materialization_claim != attachment.claim {
+        return Err(
+            MiddlewareAttachmentValidationError::ReturnedAuthorityMismatch {
+                label: declaration.label,
+                declared: declaration.materialization_claim.label(),
+                returned: attachment.claim.label(),
+            },
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_declarations_reject_an_empty_surface_set() {
+        let declaration = MiddlewareDeclaration::observer("empty", Vec::new());
+        assert!(matches!(
+            declaration.validate_shape(),
+            Err(MiddlewareAttachmentValidationError::EmptyDeclaration { label: "empty" })
+        ));
+    }
 
     /// A source-owned ingress surface plus its matching protected unit
     /// (FLOWIP-115d), for the canonical piggy-bank `accounts` shape.
@@ -1129,5 +1809,50 @@ mod tests {
             err,
             MiddlewareAttachmentValidationError::ProtectedUnitMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn resilience_aggregate_rejects_standalone_effect_limiter_in_both_orders() {
+        use crate::middleware::{CircuitBreaker, EffectResilience, RateLimiterBuilder};
+
+        let breaker_only_aggregate = EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .consecutive_failures(2)
+                .build()
+                .expect("breaker-only aggregate configuration"),
+        )
+        .build()
+        .expect("breaker-only aggregate factory");
+        let standalone_limiter = RateLimiterBuilder::new(10.0).build();
+        let aggregate = breaker_only_aggregate.declaration();
+        let limiter = standalone_limiter.declaration();
+
+        for declarations in [
+            vec![aggregate.clone(), limiter.clone()],
+            vec![limiter.clone(), aggregate.clone()],
+        ] {
+            let error = validate_effect_control_composition(
+                "payments",
+                "payments.authorize",
+                &declarations,
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                EffectControlCompositionError::AggregateWithStandalone { conflicts, .. }
+                    if conflicts == vec!["rate_limiter"]
+            ));
+        }
+    }
+
+    #[test]
+    fn observers_and_ordinary_effect_controls_can_coexist_with_resilience() {
+        let declarations = vec![
+            MiddlewareDeclaration::effect_resilience("effect_resilience", "effect_resilience"),
+            MiddlewareDeclaration::observer("effect_observer", vec![MiddlewareSurfaceKind::Effect]),
+            MiddlewareDeclaration::control("custom_control", vec![MiddlewareSurfaceKind::Effect]),
+        ];
+        validate_effect_control_composition("payments", "payments.authorize", &declarations)
+            .expect("only standalone built-in effect controls conflict with the aggregate");
     }
 }

@@ -14,9 +14,11 @@ use crate::middleware::{
     context_keys::{
         AiMapReduceChunkContext, AiMapReduceChunkContextKey, CircuitBreakerShouldRetry,
     },
-    ControlMiddlewareRole, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
-    MiddlewareOverrideKey, MiddlewarePlanContribution, SourceMiddlewarePhase,
-    TopologyMiddlewareConfigSlot,
+    validate_attachment_request, Flowip128gLegacyShellAttachment, MaterializationClaim, Middleware,
+    MiddlewareAction, MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
+    MiddlewareOverrideKey, MiddlewareSurface, MiddlewareSurfaceAttachment,
+    MiddlewareSurfaceAttachmentKind, SourceMiddlewarePhase,
 };
 use obzenflow_core::ai::{
     AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
@@ -31,11 +33,9 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::{ChainEvent, EventId, TypedPayload};
-use obzenflow_runtime::pipeline::config::StageConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 const MAP_FAILURE_EVENT_TYPE: &str = "ai.map_reduce.map_failed.v1";
 const CHUNK_FAILED_EVENT_TYPE: &str = "ai.map_reduce.chunk_failed.v1";
@@ -323,32 +323,62 @@ where
         MiddlewareOverrideKey::of::<AiMapReduceChunkManifestFamily>("ai_map_reduce.chunk_manifest")
     }
 
-    fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::None
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::flowip_128g_legacy_shell(
+            self.label(),
+            self.override_key().family_label(),
+        )
     }
 
-    fn kind(&self) -> crate::middleware::MiddlewareKind {
-        // Structural-transitional (FLOWIP-120c H2): deleted when FLOWIP-128b
-        // moves the AI legs onto effects.
-        crate::middleware::MiddlewareKind::Structural
-    }
-
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
-    }
-
-    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-        None
-    }
-
-    fn create(
+    fn materialize(
         &self,
-        config: &StageConfig,
-        _control_middleware: Arc<crate::middleware::control::ControlMiddlewareAggregator>,
-    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        Ok(Box::new(
-            AiMapReduceChunkManifestMiddleware::<Chunk>::new().with_lineage(config.lineage),
-        ))
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        let declaration = self.declaration();
+        validate_attachment_request(&declaration, &request).map_err(|err| {
+            MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
+        })?;
+        context
+            .authorize_materialization(
+                MaterializationClaim::Flowip128gLegacyShell,
+                &declaration,
+                &request,
+            )
+            .map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            })?;
+        match request.surface {
+            MiddlewareSurface::Handler { .. } => MiddlewareSurfaceAttachment::claimed(
+                MiddlewareSurfaceAttachmentKind::Flowip128gLegacyShell(
+                    Flowip128gLegacyShellAttachment::new(Box::new(
+                        AiMapReduceChunkManifestMiddleware::<Chunk>::new()
+                            .with_lineage(context.config.lineage),
+                    )),
+                ),
+                MaterializationClaim::Flowip128gLegacyShell,
+                context,
+            )
+            .map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            }),
+            other => Err(MiddlewareFactoryError::materialization_failed(
+                self.label(),
+                &context.config.name,
+                std::io::Error::other(format!(
+                    "FLOWIP-128g migration shell cannot attach to {:?}",
+                    other.kind()
+                )),
+            )),
+        }
     }
 }
 
@@ -455,8 +485,8 @@ where
 
         let default_reason = "map produced no partial output";
 
-        // Pre-allocate the failure marker so it survives middleware short-circuit paths
-        // (e.g., circuit breaker OpenPolicy::Skip/EmitFallback without fallback).
+        // Pre-allocate the failure marker so it survives middleware
+        // short-circuit paths.
         let failure = AiMapReduceChunkFailed {
             job_key,
             chunk_index: header.chunk_index,
@@ -597,32 +627,62 @@ where
         MiddlewareOverrideKey::of::<AiMapReduceMapFamily>("ai_map_reduce.map_wrapper")
     }
 
-    fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::None
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::flowip_128g_legacy_shell(
+            self.label(),
+            self.override_key().family_label(),
+        )
     }
 
-    fn kind(&self) -> crate::middleware::MiddlewareKind {
-        // Structural-transitional (FLOWIP-120c H2): deleted when FLOWIP-128b
-        // moves the AI legs onto effects.
-        crate::middleware::MiddlewareKind::Structural
-    }
-
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
-    }
-
-    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-        None
-    }
-
-    fn create(
+    fn materialize(
         &self,
-        config: &StageConfig,
-        _control_middleware: Arc<crate::middleware::control::ControlMiddlewareAggregator>,
-    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        Ok(Box::new(
-            AiMapReduceMapMiddleware::<Chunk, Partial>::new().with_lineage(config.lineage),
-        ))
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        let declaration = self.declaration();
+        validate_attachment_request(&declaration, &request).map_err(|err| {
+            MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
+        })?;
+        context
+            .authorize_materialization(
+                MaterializationClaim::Flowip128gLegacyShell,
+                &declaration,
+                &request,
+            )
+            .map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            })?;
+        match request.surface {
+            MiddlewareSurface::Handler { .. } => MiddlewareSurfaceAttachment::claimed(
+                MiddlewareSurfaceAttachmentKind::Flowip128gLegacyShell(
+                    Flowip128gLegacyShellAttachment::new(Box::new(
+                        AiMapReduceMapMiddleware::<Chunk, Partial>::new()
+                            .with_lineage(context.config.lineage),
+                    )),
+                ),
+                MaterializationClaim::Flowip128gLegacyShell,
+                context,
+            )
+            .map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            }),
+            other => Err(MiddlewareFactoryError::materialization_failed(
+                self.label(),
+                &context.config.name,
+                std::io::Error::other(format!(
+                    "FLOWIP-128g migration shell cannot attach to {:?}",
+                    other.kind()
+                )),
+            )),
+        }
     }
 }
 
@@ -630,7 +690,10 @@ where
 mod tests {
     use super::*;
     use crate::middleware::control::ControlMiddlewareAggregator;
-    use crate::middleware::{MiddlewareAction, MiddlewareContext};
+    use crate::middleware::{
+        materialize_factory_checked, MiddlewareAction, MiddlewareContext,
+        MiddlewareDeclarationIndex, MiddlewareOrigin, ProtectedUnit, ProtectedUnitId,
+    };
     use obzenflow_core::ai::ChunkPlanningSummary;
     use obzenflow_core::event::chain_event::ChainEventFactory;
     use obzenflow_core::event::observability::AiChunkingSnapshot;
@@ -672,7 +735,9 @@ mod tests {
             flow_name: "flow".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
-            resolved_policies: Default::default(),
+            effective_config: std::sync::Arc::new(
+                obzenflow_runtime::runtime_config::FlowEffectiveConfig::default(),
+            ),
         }
     }
 
@@ -680,20 +745,46 @@ mod tests {
         Arc::new(ControlMiddlewareAggregator::new())
     }
 
+    fn materialize_migration_shell(factory: &dyn MiddlewareFactory) -> Box<dyn Middleware> {
+        let config = stage_config();
+        let control = control_aggregator();
+        let surface = MiddlewareSurface::Handler {
+            stage_id: config.stage_id,
+        };
+        let protected_unit = ProtectedUnitId {
+            stage_id: config.stage_id,
+            unit: ProtectedUnit::Handler,
+        };
+        let origin = MiddlewareOrigin::Stage;
+        let request = MiddlewareAttachmentRequest {
+            surface: &surface,
+            protected_unit: &protected_unit,
+            origin: &origin,
+            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+        };
+        materialize_factory_checked(
+            factory,
+            request,
+            &config,
+            obzenflow_core::event::context::StageType::Transform,
+            &control,
+        )
+        .expect("FLOWIP-128g migration shell should materialize")
+        .into_flowip_128g_legacy_shell()
+        .expect("expected the sealed FLOWIP-128g shell attachment")
+        .into_middleware()
+    }
+
     fn writer_id() -> WriterId {
         WriterId::from(StageId::new())
     }
 
     fn mk_chunk_manifest_middleware() -> Box<dyn Middleware> {
-        AiMapReduceChunkManifestFactory::<TestChunkEnvelope>::new()
-            .create(&stage_config(), control_aggregator())
-            .expect("chunk manifest middleware should materialize in tests")
+        materialize_migration_shell(&AiMapReduceChunkManifestFactory::<TestChunkEnvelope>::new())
     }
 
     fn mk_map_middleware() -> Box<dyn Middleware> {
-        AiMapReduceMapFactory::<TestChunkEnvelope, TestPartial>::new()
-            .create(&stage_config(), control_aggregator())
-            .expect("map wrapper middleware should materialize in tests")
+        materialize_migration_shell(&AiMapReduceMapFactory::<TestChunkEnvelope, TestPartial>::new())
     }
 
     #[test]
@@ -701,9 +792,7 @@ mod tests {
         let factory = AiMapReduceChunkManifestFactory::<TestChunkEnvelope>::new();
         assert_eq!(factory.label(), "ai_map_reduce.chunk_manifest");
 
-        let middleware = factory
-            .create(&stage_config(), control_aggregator())
-            .expect("chunk manifest factory should materialize middleware");
+        let middleware = materialize_migration_shell(&factory);
         assert_eq!(middleware.label(), "ai_map_reduce.chunk_manifest");
     }
 
@@ -854,9 +943,7 @@ mod tests {
         let factory = AiMapReduceMapFactory::<TestChunkEnvelope, TestPartial>::new();
         assert_eq!(factory.label(), "ai_map_reduce.map_wrapper");
 
-        let middleware = factory
-            .create(&stage_config(), control_aggregator())
-            .expect("map wrapper factory should materialize middleware");
+        let middleware = materialize_migration_shell(&factory);
         assert_eq!(middleware.label(), "ai_map_reduce.map_wrapper");
     }
 

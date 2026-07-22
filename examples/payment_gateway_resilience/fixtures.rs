@@ -28,14 +28,36 @@ pub fn scripted_store_orders() -> Vec<CustomerOrderPlaced> {
 }
 
 pub fn retry_proof_order() -> CustomerOrderPlaced {
-    CustomerOrderPlaced {
-        order_id: "retry-proof-order".to_string(),
-        customer_id: "retry-proof-customer".to_string(),
-        channel: OrderChannel::Web,
-        amount_cents: 10_00,
-        payment_method_state: PaymentMethodState::Valid,
-        phase: TrafficPhase::Warmup,
-    }
+    proof_orders("retry-proof", 1)
+        .into_iter()
+        .next()
+        .expect("one retry proof order")
+}
+
+pub fn healthy_proof_orders() -> Vec<CustomerOrderPlaced> {
+    proof_orders("healthy-proof", 5)
+}
+
+pub fn open_rejection_proof_orders() -> Vec<CustomerOrderPlaced> {
+    proof_orders("open-proof", 6)
+}
+
+#[cfg(test)]
+pub fn half_open_recovery_proof_orders() -> Vec<CustomerOrderPlaced> {
+    proof_orders("half-open-proof", 7)
+}
+
+fn proof_orders(prefix: &str, count: usize) -> Vec<CustomerOrderPlaced> {
+    (0..count)
+        .map(|index| CustomerOrderPlaced {
+            order_id: format!("{prefix}-order-{index}"),
+            customer_id: format!("{prefix}-customer-{index}"),
+            channel: OrderChannel::Web,
+            amount_cents: 10_00,
+            payment_method_state: PaymentMethodState::Valid,
+            phase: TrafficPhase::Warmup,
+        })
+        .collect()
 }
 
 fn split_channel(channel: OrderChannel) -> Vec<CustomerOrderPlaced> {

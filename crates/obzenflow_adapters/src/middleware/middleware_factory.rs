@@ -8,10 +8,10 @@
 //! with stage context, solving the problem of injecting stage-specific
 //! configuration into middleware at construction time.
 
-use super::{Middleware, MiddlewareHints, MiddlewareSafety};
+use super::{MiddlewareHints, MiddlewareSafety};
 use obzenflow_core::event::context::StageType;
 use obzenflow_runtime::pipeline::config::StageConfig;
-use obzenflow_runtime::stages::common::control_strategies::AdmissionPosition;
+use obzenflow_runtime::runtime_config::DslConfigDefault;
 use std::any::TypeId;
 use std::error::Error as StdError;
 use std::hash::{Hash, Hasher};
@@ -19,11 +19,12 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use super::carrier::{
-    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareMaterializationContext,
-    MiddlewareSurfaceAttachment,
+    validate_attachment_request, validate_materialized_attachment,
+    CheckedMiddlewareSurfaceAttachment, MiddlewareAttachmentRequest,
+    MiddlewareAttachmentValidationError, MiddlewareAuthorityError, MiddlewareDeclaration,
+    MiddlewareMaterializationContext, MiddlewareSurfaceAttachment,
 };
 use super::control::ControlMiddlewareAggregator;
-
 pub type MiddlewareFactorySource = Box<dyn StdError + Send + Sync + 'static>;
 
 #[derive(Debug, Error)]
@@ -52,15 +53,69 @@ pub enum MiddlewareFactoryError {
         #[source]
         source: MiddlewareFactorySource,
     },
-
-    #[error(
-        "Middleware '{middleware}' is legacy shell middleware with no hook surface; \
-         it must be created via `create()` rather than materialized (FLOWIP-115b)"
-    )]
-    NotHookBound { middleware: String },
 }
 
 pub type MiddlewareFactoryResult<T> = Result<T, MiddlewareFactoryError>;
+
+#[derive(Debug, Error)]
+pub enum MiddlewareBindingError {
+    #[error(transparent)]
+    Attachment(#[from] MiddlewareAttachmentValidationError),
+    #[error(transparent)]
+    Factory(#[from] MiddlewareFactoryError),
+    #[error(transparent)]
+    Authority(#[from] MiddlewareAuthorityError),
+    #[error("failed to commit middleware authority: {0}")]
+    AuthorityCommit(String),
+}
+
+/// Complete-mediation gateway for one factory invocation. The context is
+/// bound to the declaration's sealed semantic claim, registrations remain
+/// invocation-local until the returned attachment is fully validated, and the
+/// shared aggregator changes only through one atomic batch commit.
+#[doc(hidden)]
+pub fn materialize_factory_checked(
+    factory: &dyn MiddlewareFactory,
+    request: MiddlewareAttachmentRequest<'_>,
+    config: &StageConfig,
+    stage_type: StageType,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+) -> Result<CheckedMiddlewareSurfaceAttachment, MiddlewareBindingError> {
+    let declaration = factory.declaration();
+    materialize_factory_checked_with_declaration(
+        factory,
+        &declaration,
+        request,
+        config,
+        stage_type,
+        control_middleware,
+    )
+}
+
+/// Checked materialisation using a declaration already captured by the DSL's
+/// complete-set structural validation. This keeps the exact sealed claim that
+/// passed coherence validation bound to the later factory invocation.
+#[doc(hidden)]
+pub fn materialize_factory_checked_with_declaration(
+    factory: &dyn MiddlewareFactory,
+    declaration: &MiddlewareDeclaration,
+    request: MiddlewareAttachmentRequest<'_>,
+    config: &StageConfig,
+    stage_type: StageType,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+) -> Result<CheckedMiddlewareSurfaceAttachment, MiddlewareBindingError> {
+    validate_attachment_request(declaration, &request)?;
+    let context = MiddlewareMaterializationContext::new(config, stage_type, declaration, &request);
+    let attachment = factory.materialize(request, &context)?;
+    validate_materialized_attachment(declaration, &request, &attachment)?;
+    context.validate_returned_attachment(&attachment)?;
+    control_middleware
+        .commit_batch(context.take_pending())
+        .map_err(MiddlewareBindingError::AuthorityCommit)?;
+    Ok(CheckedMiddlewareSurfaceAttachment::from_validated(
+        attachment,
+    ))
+}
 
 impl MiddlewareFactoryError {
     pub fn invalid_configuration(
@@ -98,12 +153,6 @@ impl MiddlewareFactoryError {
             source: Box::new(source),
         }
     }
-
-    pub fn not_hook_bound(middleware: impl Into<String>) -> Self {
-        Self::NotHookBound {
-            middleware: middleware.into(),
-        }
-    }
 }
 
 /// Factory that creates middleware with stage context.
@@ -111,78 +160,11 @@ impl MiddlewareFactoryError {
 /// This trait solves the stage context injection problem by deferring middleware
 /// creation until the supervisor is built with full context available.
 ///
-/// Modern middleware is hook-bound: a factory's [`declaration`](MiddlewareFactory::declaration)
-/// names its observer or control surfaces and [`materialize`](MiddlewareFactory::materialize)
-/// returns a typed surface attachment. The built-in `indicator`, `logging`,
-/// circuit-breaker, and rate-limiter factories follow that shape, and observers
-/// authored this way structurally cannot steer control flow. The `create()`
-/// example below is the legacy shell path, retained only for migration; new
-/// custom middleware should implement an observer or control hook rather than the
-/// `Middleware` trait.
-///
-/// ## Example Implementation (legacy shell, migration only)
-///
-/// ```rust
-/// use obzenflow_adapters::middleware::{
-///     ControlMiddlewareRole, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
-///     MiddlewareFactoryResult, MiddlewareOverrideKey, MiddlewarePlanContribution,
-///     SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
-/// };
-/// use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
-/// use obzenflow_runtime::pipeline::config::StageConfig;
-/// use obzenflow_core::event::chain_event::ChainEvent;
-/// use std::sync::Arc;
-///
-/// struct LoggingFamily;
-///
-/// struct LoggingMiddleware;
-///
-/// impl Middleware for LoggingMiddleware {
-///     fn label(&self) -> &'static str {
-///         "logging"
-///     }
-///
-///     fn source_phase(&self) -> SourceMiddlewarePhase {
-///         SourceMiddlewarePhase::Ordinary
-///     }
-///
-///     fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
-///         MiddlewareAction::Continue
-///     }
-/// }
-///
-/// struct LoggingFactory;
-///
-/// impl MiddlewareFactory for LoggingFactory {
-///     fn label(&self) -> &'static str {
-///         "logging"
-///     }
-///
-///     fn override_key(&self) -> MiddlewareOverrideKey {
-///         MiddlewareOverrideKey::of::<LoggingFamily>("logging")
-///     }
-///
-///     fn control_role(&self) -> ControlMiddlewareRole {
-///         ControlMiddlewareRole::None
-///     }
-///
-///     fn plan_contribution(&self) -> MiddlewarePlanContribution {
-///         MiddlewarePlanContribution::None
-///     }
-///
-///     fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-///         None
-///     }
-///
-///     fn create(
-///         &self,
-///         _config: &StageConfig,
-///         _control_middleware: Arc<ControlMiddlewareAggregator>,
-///     ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
-///         Ok(Box::new(LoggingMiddleware))
-///     }
-/// }
-/// ```
+/// Every public factory is hook-bound. [`declaration`](Self::declaration) names
+/// its typed observer or control surfaces and [`materialize`](Self::materialize)
+/// returns exactly one typed attachment for the requested surface. There is no
+/// generic handler-shell fallback: custom observers implement observer ports,
+/// and custom controls implement control ports.
 pub trait MiddlewareFactory: Send + Sync {
     /// Display label for logs, topology output, metrics labels, and diagnostics.
     fn label(&self) -> &'static str;
@@ -190,67 +172,42 @@ pub trait MiddlewareFactory: Send + Sync {
     /// Typed override family key used by the resolver.
     fn override_key(&self) -> MiddlewareOverrideKey;
 
-    /// Typed control role used by the DSL for control binding.
-    fn control_role(&self) -> ControlMiddlewareRole;
+    /// Static, pre-erasure hook declaration. A declaration names at least one
+    /// typed surface and has no legacy default.
+    fn declaration(&self) -> MiddlewareDeclaration;
 
-    /// Typed middleware kind for the FLOWIP-120c placement split (H2).
-    ///
-    /// Defaults to observation, the safe kind: it runs in every scope and
-    /// may not short-circuit. Policy and structural factories override.
-    fn kind(&self) -> MiddlewareKind {
-        MiddlewareKind::Observation
+    /// Materialize one typed surface attachment for one concrete protected
+    /// unit. The adapter-owned checked gateway validates the declaration before
+    /// invoking this method and validates the returned claim before committing
+    /// staged shared authority.
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment>;
+
+    /// Scope-free DSL defaults. The DSL adds the surviving declaration's
+    /// topology scope and, for inline effect policies, its exact effect subject.
+    fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
+        Vec::new()
     }
 
-    /// Typed plan contribution used by the DSL for runtime planning.
-    fn plan_contribution(&self) -> MiddlewarePlanContribution;
+    /// Configuration keys this factory can consume at a surviving attachment.
+    ///
+    /// The common case is exactly the emitted DSL defaults. Factories with
+    /// optional values or mode-dependent branches override this independently,
+    /// so file configuration can refine an existing attachment without a fake
+    /// default and can never create an attachment that the DSL omitted.
+    fn consumed_config_keys(&self) -> Vec<&'static str> {
+        self.dsl_config_defaults()
+            .into_iter()
+            .map(|default| default.key_path)
+            .collect()
+    }
 
     /// Typed topology slot for config snapshot placement.
-    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot>;
-
-    /// Create middleware instance with full stage context
-    fn create(
-        &self,
-        config: &StageConfig,
-        control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> MiddlewareFactoryResult<Box<dyn Middleware>>;
-
-    /// Create a middleware instance guarding one declared effect
-    /// (FLOWIP-120c): one policy instance per protected dependency.
-    ///
-    /// Default delegates to `create`. Policy factories override so their
-    /// metrics register under the per-effect key and snapshot distinctly.
-    fn create_for_effect(
-        &self,
-        config: &StageConfig,
-        control_middleware: Arc<ControlMiddlewareAggregator>,
-        _effect_type: &str,
-    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
-        self.create(config, control_middleware)
-    }
-
-    /// Declare which runtime control points (FLOWIP-115c) this factory's policy
-    /// registers gates at. The dead `create_control_strategy` downcast lane is
-    /// retired; policies bind to typed control points in the source (115a),
-    /// effect (115b), sink (115d), and backpressure (115e) slices. Defaults to
-    /// none.
-    fn control_points(&self) -> ControlPointRegistration {
-        ControlPointRegistration::default()
-    }
-
-    /// FLOWIP-115a: register this factory's source control ports (admission
-    /// gate, attempt observer) for a source stage, sharing state with the
-    /// policy. Policy factories override; observation and structural factories
-    /// do nothing. `stage_type` selects the rate limiter charge position
-    /// (finite: post-admit delivery charging per FLOWIP-114m; infinite:
-    /// pre-poll). A policy registered here is driven through the runtime port
-    /// and is not added to the source middleware chain.
-    fn register_source_policy(
-        &self,
-        _config: &StageConfig,
-        _stage_type: obzenflow_core::event::context::StageType,
-        _control_middleware: &Arc<ControlMiddlewareAggregator>,
-    ) -> MiddlewareFactoryResult<()> {
-        Ok(())
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        None
     }
 
     /// Which stage types this middleware supports
@@ -294,52 +251,6 @@ pub trait MiddlewareFactory: Send + Sync {
     fn config_snapshot(&self) -> Option<serde_json::Value> {
         None
     }
-
-    /// FLOWIP-115b: static, pre-erasure hook declaration. The DSL binder reads
-    /// this to validate `surface x capability` and to plan the attachment
-    /// without first constructing a `Box<dyn Middleware>`. Defaults to a
-    /// legacy-shell declaration, so existing shell factories need no change.
-    fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::legacy_shell(self.label(), self.override_key().family_label())
-    }
-
-    /// FLOWIP-115b: materialize one typed surface attachment for one concrete
-    /// protected unit. Hook-bound factories (the circuit breaker, and later the
-    /// rate limiter and user control middleware) override this. The default is a
-    /// clear error: legacy shell middleware has no hook surface and must be
-    /// created via `create()`.
-    fn materialize(
-        &self,
-        request: MiddlewareAttachmentRequest<'_>,
-        context: &MiddlewareMaterializationContext<'_>,
-    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-        let _ = (request, context);
-        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
-    }
-}
-
-/// Typed declaration of which runtime control points a policy registers
-/// (FLOWIP-115c). Replaces the retired `create_control_strategy` downcast lane:
-/// a factory states the points it binds gates at, and the binding slices wire
-/// the concrete gates. Defaults to none, so structural middleware needs no
-/// override.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ControlPointRegistration {
-    /// Registers an inbound-signal gate.
-    pub signal: bool,
-    /// Registers admission gates at these named positions.
-    pub admission_positions: Vec<AdmissionPosition>,
-    /// Registers a completion gate (source terminal emission).
-    pub completion: bool,
-    /// Registers an attempt observer.
-    pub observation: bool,
-}
-
-impl ControlPointRegistration {
-    /// Whether this factory declares an admission gate at `position`.
-    pub fn admits_at(&self, position: AdmissionPosition) -> bool {
-        self.admission_positions.contains(&position)
-    }
 }
 
 // Implementation for Box<dyn MiddlewareFactory> to allow boxed factories
@@ -352,50 +263,16 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
         (**self).override_key()
     }
 
-    fn control_role(&self) -> ControlMiddlewareRole {
-        (**self).control_role()
+    fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
+        (**self).dsl_config_defaults()
     }
 
-    fn kind(&self) -> MiddlewareKind {
-        (**self).kind()
-    }
-
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        (**self).plan_contribution()
+    fn consumed_config_keys(&self) -> Vec<&'static str> {
+        (**self).consumed_config_keys()
     }
 
     fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
         (**self).topology_config_slot()
-    }
-
-    fn create(
-        &self,
-        config: &StageConfig,
-        control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
-        (**self).create(config, control_middleware)
-    }
-
-    fn create_for_effect(
-        &self,
-        config: &StageConfig,
-        control_middleware: Arc<ControlMiddlewareAggregator>,
-        effect_type: &str,
-    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
-        (**self).create_for_effect(config, control_middleware, effect_type)
-    }
-
-    fn control_points(&self) -> ControlPointRegistration {
-        (**self).control_points()
-    }
-
-    fn register_source_policy(
-        &self,
-        config: &StageConfig,
-        stage_type: obzenflow_core::event::context::StageType,
-        control_middleware: &Arc<ControlMiddlewareAggregator>,
-    ) -> MiddlewareFactoryResult<()> {
-        (**self).register_source_policy(config, stage_type, control_middleware)
     }
 
     fn supported_stage_types(&self) -> &[StageType] {
@@ -460,21 +337,12 @@ impl Hash for MiddlewareOverrideKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ControlMiddlewareRole {
-    None,
-    CircuitBreaker,
-    RateLimiter,
-}
-
-/// Typed middleware kind for the FLOWIP-120c placement split (H2).
+/// Runtime shell middleware kind.
 ///
-/// Policy kinds attach to live I/O units only (sources, the effect boundary
-/// per effect, sink delivery); observation kinds run at the handler shell in
-/// every execution scope. Unclassified middleware defaults to observation,
-/// and a `Skip` or `Abort` from an observation-classified middleware is an
-/// error in every scope: filters belong in handlers, where multi-type output
-/// contracts make filtering natural.
+/// Factory placement no longer reads this enum. Typed factory declarations are
+/// the sole build-time capability authority. The enum remains only on the two
+/// FLOWIP-128g runtime shells and the middleware-chain contract that contains
+/// them until that migration completes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MiddlewareKind {
     /// Reacts to an unreliable dependency by delaying, rejecting, or
@@ -486,22 +354,6 @@ pub enum MiddlewareKind {
     /// Framework machinery: build-time plan contributors and transitional
     /// structural middleware (backpressure, AI map-reduce, type shaping).
     Structural,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum MiddlewarePlanContribution {
-    None,
-    /// FLOWIP-010: DSL-declared breaker threshold, collected as a config
-    /// candidate at the declaration site's scope.
-    CircuitBreaker {
-        threshold: u64,
-    },
-    /// FLOWIP-010: DSL-declared limiter tunables, collected as config
-    /// candidates at the declaration site's scope.
-    RateLimiter {
-        events_per_second: f64,
-        burst_capacity: Option<f64>,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

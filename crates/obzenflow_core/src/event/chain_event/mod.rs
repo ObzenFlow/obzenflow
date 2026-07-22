@@ -33,6 +33,7 @@ mod params;
 pub use factory::ChainEventFactory;
 pub use model::{ChainEvent, ChainEventContent, CorrelationContext, ReplayDisposition};
 pub use params::{
+    CircuitBreakerAttemptSettledEventParams, CircuitBreakerRecoveryCompletedEventParams,
     CircuitBreakerSummaryEventParams, ConsumptionFinalEventParams, ConsumptionProgressEventParams,
     SourceContractEventParams,
 };

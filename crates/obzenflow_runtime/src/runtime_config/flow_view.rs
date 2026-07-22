@@ -7,11 +7,14 @@
 //! provenance, plus the manifest evidence projection (§6a).
 
 use super::candidates::{ConfigValue, DslCandidates};
-use super::model::{doc_for, Resolved};
+use super::model::{doc_for, doc_for_at, Resolved};
+use super::resolve::ResolutionPoint;
 use super::schema::knob;
 use obzenflow_core::config::{
-    ConfigScope, ConfigSource, EffectiveConfigEvidence, LineagePolicy, ResolvedValueDoc,
+    ConfigScope, ConfigSource, EffectiveConfigEvidence, LineagePolicy, ResolvedForDoc,
+    ResolvedValueDoc,
 };
+use obzenflow_core::event::EffectType;
 use obzenflow_core::StageKey;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -58,6 +61,9 @@ pub struct FlowResolutionContext {
     pub flow_name: String,
     pub stages: BTreeSet<StageKey>,
     pub edges: BTreeSet<(StageKey, StageKey)>,
+    /// Declared effect subjects, used only to validate exact file addresses.
+    /// Actual config consumers are carried separately from defaults in `dsl`.
+    pub declared_effects: BTreeMap<StageKey, BTreeSet<EffectType>>,
     pub dsl: DslCandidates,
 }
 
@@ -66,19 +72,39 @@ pub struct FlowResolutionContext {
 /// value's meta carries the WINNING scope (which may be coarser).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FlowEffectiveConfig {
-    values: BTreeMap<String, BTreeMap<ConfigScope, Resolved<ConfigValue>>>,
+    values: BTreeMap<String, BTreeMap<ResolutionPoint, Resolved<ConfigValue>>>,
     warnings: Vec<String>,
 }
 
 impl FlowEffectiveConfig {
     pub(super) fn new(
-        values: BTreeMap<String, BTreeMap<ConfigScope, Resolved<ConfigValue>>>,
+        values: BTreeMap<String, BTreeMap<ResolutionPoint, Resolved<ConfigValue>>>,
         warnings: Vec<String>,
     ) -> Self {
         Self { values, warnings }
     }
 
     pub fn get(&self, key_path: &str, point: &ConfigScope) -> Option<&Resolved<ConfigValue>> {
+        let point = match point {
+            ConfigScope::Global => ResolutionPoint::Global,
+            ConfigScope::Flow => ResolutionPoint::Flow,
+            ConfigScope::Stage { stage } => ResolutionPoint::Stage(stage.clone()),
+            ConfigScope::Edge {
+                upstream,
+                downstream,
+            } => ResolutionPoint::Edge {
+                upstream: upstream.clone(),
+                downstream: downstream.clone(),
+            },
+        };
+        self.get_at(key_path, &point)
+    }
+
+    pub fn get_at(
+        &self,
+        key_path: &str,
+        point: &ResolutionPoint,
+    ) -> Option<&Resolved<ConfigValue>> {
         self.values
             .get(key_path)
             .and_then(|points| points.get(point))
@@ -87,7 +113,7 @@ impl FlowEffectiveConfig {
     pub fn points(
         &self,
         key_path: &str,
-    ) -> impl Iterator<Item = (&ConfigScope, &Resolved<ConfigValue>)> {
+    ) -> impl Iterator<Item = (&ResolutionPoint, &Resolved<ConfigValue>)> {
         self.values
             .get(key_path)
             .into_iter()
@@ -209,53 +235,54 @@ impl FlowEffectiveConfig {
         )
     }
 
-    pub fn breaker_threshold_for(&self, stage: &StageKey) -> Option<&Resolved<ConfigValue>> {
-        self.get(
-            "effects.circuit_breaker.threshold",
-            &ConfigScope::Stage {
-                stage: stage.clone(),
-            },
-        )
-    }
-
-    pub fn limiter_events_per_second_for(
+    pub fn effect_value(
         &self,
+        key_path: &str,
         stage: &StageKey,
+        effect_type: &EffectType,
     ) -> Option<&Resolved<ConfigValue>> {
-        self.get(
-            "effects.rate_limiter.events_per_second",
-            &ConfigScope::Stage {
+        self.get_at(
+            key_path,
+            &ResolutionPoint::Effect {
                 stage: stage.clone(),
+                effect_type: effect_type.clone(),
             },
         )
     }
 
-    pub fn limiter_burst_capacity_for(&self, stage: &StageKey) -> Option<&Resolved<ConfigValue>> {
-        self.get(
-            "effects.rate_limiter.burst_capacity",
-            &ConfigScope::Stage {
-                stage: stage.clone(),
-            },
-        )
+    pub fn exact_view(&self, point: ResolutionPoint) -> ExactConfigView<'_> {
+        ExactConfigView {
+            effective: self,
+            point,
+        }
     }
 
-    /// The §6a manifest projection: one doc per distinct
-    /// `(key_path, winning scope, source, value)`. Identical per-point
-    /// resolutions collapse (a knob at its default does not emit one doc
-    /// per stage), and every override is preserved because its winning
-    /// scope names its coverage.
+    /// The §6a manifest projection. Identical non-effect resolutions collapse
+    /// (a defaulted knob does not emit one row per stage), while effect rows
+    /// retain their concrete `resolved_for` identity even when equal values
+    /// inherit the same broadcast winner.
     pub fn manifest_evidence(&self) -> EffectiveConfigEvidence {
         let mut docs: Vec<_> = self
             .values
             .iter()
             .flat_map(|(key_path, points)| {
                 let spec = knob(key_path).expect("only registered knobs are materialized");
-                points.values().map(move |resolved| doc_for(spec, resolved))
+                points.iter().map(move |(point, resolved)| match point {
+                    ResolutionPoint::Effect { stage, effect_type } => doc_for_at(
+                        spec,
+                        resolved,
+                        Some(ResolvedForDoc::Effect {
+                            stage: stage.as_str().to_string(),
+                            effect_type: effect_type.as_str().to_string(),
+                        }),
+                    ),
+                    _ => doc_for(spec, resolved),
+                })
             })
             .collect();
         docs.sort_by(|a, b| {
-            (&a.key_path, &a.scope, &a.source)
-                .cmp(&(&b.key_path, &b.scope, &b.source))
+            (&a.key_path, &a.resolved_for, &a.scope, &a.source)
+                .cmp(&(&b.key_path, &b.resolved_for, &b.scope, &b.source))
                 .then_with(|| a.value.to_string().cmp(&b.value.to_string()))
         });
         docs.dedup();
@@ -266,9 +293,7 @@ impl FlowEffectiveConfig {
     /// (the winning scope in the meta may be coarser). Serves the HTTP
     /// stage route and the CLI from one projection.
     pub fn stage_docs(&self, stage: &StageKey) -> Vec<ResolvedValueDoc> {
-        let point = ConfigScope::Stage {
-            stage: stage.clone(),
-        };
+        let point = ResolutionPoint::Stage(stage.clone());
         let mut docs: Vec<_> = self
             .values
             .iter()
@@ -291,7 +316,7 @@ impl FlowEffectiveConfig {
         for (key_path, points) in &self.values {
             let spec = knob(key_path).expect("only registered knobs are materialized");
             for (point, resolved) in points {
-                if let ConfigScope::Edge {
+                if let ResolutionPoint::Edge {
                     upstream,
                     downstream,
                 } = point
@@ -310,6 +335,58 @@ impl FlowEffectiveConfig {
         }
         edges
     }
+
+    /// Per-effect docs for one stage, keyed by stable effect type.
+    pub fn effect_docs_for_stage(
+        &self,
+        stage: &StageKey,
+    ) -> BTreeMap<String, Vec<ResolvedValueDoc>> {
+        let mut effects: BTreeMap<String, Vec<ResolvedValueDoc>> = BTreeMap::new();
+        for (key_path, points) in &self.values {
+            let spec = knob(key_path).expect("only registered knobs are materialized");
+            for (point, resolved) in points {
+                if let ResolutionPoint::Effect {
+                    stage: point_stage,
+                    effect_type,
+                } = point
+                {
+                    if point_stage == stage {
+                        effects
+                            .entry(effect_type.as_str().to_string())
+                            .or_default()
+                            .push(doc_for_at(
+                                spec,
+                                resolved,
+                                Some(ResolvedForDoc::Effect {
+                                    stage: stage.as_str().to_string(),
+                                    effect_type: effect_type.as_str().to_string(),
+                                }),
+                            ));
+                    }
+                }
+            }
+        }
+        for docs in effects.values_mut() {
+            docs.sort_by(|a, b| a.key_path.cmp(&b.key_path));
+        }
+        effects
+    }
+}
+
+/// Immutable policy-neutral view resolved for exactly one application point.
+pub struct ExactConfigView<'a> {
+    effective: &'a FlowEffectiveConfig,
+    point: ResolutionPoint,
+}
+
+impl<'a> ExactConfigView<'a> {
+    pub fn point(&self) -> &ResolutionPoint {
+        &self.point
+    }
+
+    pub fn get(&self, key_path: &str) -> Option<&'a Resolved<ConfigValue>> {
+        self.effective.get_at(key_path, &self.point)
+    }
 }
 
 #[cfg(test)]
@@ -325,6 +402,7 @@ mod tests {
             flow_name: "f".to_string(),
             stages: BTreeSet::from([StageKey::from("src"), StageKey::from("sink")]),
             edges: BTreeSet::from([(StageKey::from("src"), StageKey::from("sink"))]),
+            declared_effects: BTreeMap::new(),
             dsl: Default::default(),
         }
     }
@@ -350,7 +428,7 @@ mod tests {
         let mut set = CandidateSet::default();
         set.admit(ScopedCandidate {
             key_path: "runtime.max_lineage_depth".to_string(),
-            scope: ConfigScope::stage("sink"),
+            address: ConfigScope::stage("sink").into(),
             source: ConfigSource::File,
             value: ConfigValue::U64(7),
         })

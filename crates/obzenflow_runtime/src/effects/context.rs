@@ -75,39 +75,6 @@ impl EffectContext {
     }
 }
 
-/// The shape of a synthesized-outcome registration (FLOWIP-120m).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SynthesizedOutcomeKind {
-    /// FLOWIP-120h: the middleware authors branch facts disjoint from the
-    /// effect's own fact set, decoded through the `Guarded` wrapper's lifted
-    /// carrier.
-    BranchShaped,
-    /// FLOWIP-120m: the middleware may synthesize the protected effect's own
-    /// outcome facts (a cached decision, a stubbed authorization). The
-    /// handler performs the plain effect, with no `Guarded` wrapper.
-    OutcomeShaped,
-}
-
-/// Registration made by type-shaping middleware declared in the
-/// `output_middleware:` macro lane (FLOWIP-120h). It names the fact types
-/// the middleware may synthesize at the effect boundary, so `perform` can
-/// validate wrapper coordination before any I/O.
-#[derive(Debug, Clone)]
-pub struct SynthesizedOutcomeRegistration {
-    /// The protected effect's `EFFECT_TYPE`. `None` means the stage's single
-    /// declared effect (v1 rejects typed-outcome middleware on multi-effect
-    /// stages at build time); outcome-shaped registrations always name it.
-    pub effect_type: Option<String>,
-    /// Fact types the middleware may author: branch facts disjoint from the
-    /// effect's set for `BranchShaped`, the effect's own outcome facts for
-    /// `OutcomeShaped`.
-    pub fact_types: Vec<TypedFactType>,
-    /// Label of the registering middleware, for error messages.
-    pub source_label: String,
-    /// Which validation and coordination regime applies (FLOWIP-120m).
-    pub kind: SynthesizedOutcomeKind,
-}
-
 pub struct EffectInvocationContext {
     pub flow_id: FlowId,
     pub stage_id: StageId,
@@ -128,43 +95,16 @@ pub struct EffectInvocationContext {
     pub runtime_execution: crate::execution::RuntimeExecution,
     pub effect_ports: EffectPortRegistry,
     pub effect_declarations: Vec<EffectDeclaration>,
-    pub synthesized_outcomes: Vec<SynthesizedOutcomeRegistration>,
     pub output_contract: StageOutputContract,
     pub backpressure_writer: BackpressureWriter,
     pub emit_enabled: bool,
     pub effect_boundary: Option<Arc<dyn EffectBoundary>>,
-    pub boundary_control_events: Arc<Mutex<Vec<ChainEvent>>>,
     /// FLOWIP-010 §7: build-resolved lineage policy from stage resources,
     /// consumed as data when effect facts derive from the parent event.
     pub lineage: obzenflow_core::config::LineagePolicy,
 }
 
 impl EffectInvocationContext {
-    pub fn push_boundary_control_events(&self, mut events: Vec<ChainEvent>) {
-        if events.is_empty() {
-            return;
-        }
-
-        let mut buffer = self
-            .boundary_control_events
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        buffer.append(&mut events);
-    }
-
-    pub fn drain_boundary_control_events(&self) -> Vec<ChainEvent> {
-        Self::drain_boundary_control_event_buffer(&self.boundary_control_events)
-    }
-
-    pub fn drain_boundary_control_event_buffer(
-        buffer: &Arc<Mutex<Vec<ChainEvent>>>,
-    ) -> Vec<ChainEvent> {
-        let mut buffer = buffer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        std::mem::take(&mut *buffer)
-    }
-
     pub fn effect_declaration(
         &self,
         effect_type: &'static str,
@@ -177,19 +117,6 @@ impl EffectInvocationContext {
                 stage_key: self.stage_key.clone(),
                 effect_type: effect_type.to_string(),
             })
-    }
-
-    /// The typed-outcome registration covering the given effect, if any.
-    pub fn synthesized_outcome_registration(
-        &self,
-        effect_type: &str,
-    ) -> Option<&SynthesizedOutcomeRegistration> {
-        self.synthesized_outcomes.iter().find(|registration| {
-            registration
-                .effect_type
-                .as_deref()
-                .is_none_or(|guarded| guarded == effect_type)
-        })
     }
 }
 

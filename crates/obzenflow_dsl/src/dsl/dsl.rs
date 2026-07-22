@@ -735,21 +735,8 @@ macro_rules! build_typed_flow {
         // tooling sees a typed error rather than a tracing warning.
         $crate::dsl::typing::validate_stage_typing_metadata(&descriptors)?;
 
-        // FLOWIP-120h: truncating middleware (e.g. OpenPolicy::Skip breakers)
-        // is incoherent at the effect boundary; reject it on effectful stages.
-        $crate::dsl::typing::validate_effectful_middleware_compatibility(
-            &descriptors,
-            &create_flow_middleware(),
-        )?;
-
-        // FLOWIP-120h: output_middleware lane contributions must be arrow
-        // members, disjoint from effect fact sets, and single-effect scoped.
-        $crate::dsl::typing::validate_type_shaping_contributions(&descriptors)?;
-
-        // FLOWIP-120m: producer-side effect-fact containment is unconditional.
-        // An effectful stage without an output_middleware lane must still fail
-        // the build, not the first post-I/O commit, when an effect fact is
-        // missing from the arrow contract.
+        // Producer-side effect-fact containment is unconditional and fails
+        // the build before the first live I/O.
         $crate::dsl::typing::validate_effect_fact_containment(&descriptors)?;
 
         if let Err(edge_errors) = $crate::dsl::typing::validate_edge_typing(
@@ -979,16 +966,14 @@ macro_rules! build_typed_flow {
 
         let __flow_effective = {
             use obzenflow_core::config::ConfigScope;
-            use obzenflow_runtime::runtime_config::{ConfigValue, DslCandidates};
+            use obzenflow_runtime::runtime_config::DslCandidates;
             use $crate::middleware_resolution::MiddlewareSourceScope;
 
             let mut __dsl_candidates = DslCandidates::default();
-            let mut __flow_breaker_threshold: Option<u64> = None;
-            let mut __flow_limiter: Option<(f64, Option<f64>)> = None;
             for (name, descriptor) in descriptors.iter() {
                 let flow_middleware = create_flow_middleware();
                 for factory in &flow_middleware {
-                    if factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy {
+                    if factory.declaration().is_control() {
                         return Err(FlowBuildError::PolicyMiddlewareOnFlowScope {
                             middleware: factory.label().to_string(),
                         }
@@ -1013,7 +998,7 @@ macro_rules! build_typed_flow {
                     // until FLOWIP-120l installs its boundary, and the deprecated
                     // async-non-effectful surface warns until FLOWIP-120f deletes
                     // it (FLOWIP-128b migrates its AI legs to effects).
-                    if factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy {
+                    if factory.declaration().is_control() {
                         use $crate::dsl::stage_descriptor::PolicyGuardSurface;
                         match descriptor.policy_guard_surface() {
                             PolicyGuardSurface::PureSync => {
@@ -1033,58 +1018,82 @@ macro_rules! build_typed_flow {
                                 );
                             }
                             PolicyGuardSurface::AsyncNonEffectful => {
-                                tracing::warn!(
-                                    stage = %name,
-                                    middleware = factory.label(),
-                                    "policy middleware on the async non-effectful surface is \
-                                     deprecated: FLOWIP-128b moves these handlers onto effects and \
-                                     FLOWIP-120f removes this surface; the policy then attaches at \
-                                     the effect boundary (FLOWIP-120c H1)"
-                                );
+                                return Err(FlowBuildError::PolicyMiddlewareOnPureStage {
+                                    stage_name: name.clone(),
+                                    middleware: factory.label().to_string(),
+                                }
+                                .into());
                             }
                             PolicyGuardSurface::Effectful
                             | PolicyGuardSurface::Source
                             | PolicyGuardSurface::Sink => {}
                         }
                     }
-                    match factory.plan_contribution() {
-                        obzenflow_adapters::middleware::MiddlewarePlanContribution::CircuitBreaker {
-                            threshold,
-                        } => match scope {
-                            MiddlewareSourceScope::Flow => {
-                                __flow_breaker_threshold = Some(threshold);
-                            }
-                            MiddlewareSourceScope::Stage => {
-                                __dsl_candidates.declare(
-                                    "effects.circuit_breaker.threshold",
-                                    ConfigScope::stage(descriptor.name()),
-                                    ConfigValue::U64(threshold),
-                                );
-                            }
-                        },
-                        obzenflow_adapters::middleware::MiddlewarePlanContribution::RateLimiter {
-                            events_per_second,
-                            burst_capacity,
-                        } => match scope {
-                            MiddlewareSourceScope::Flow => {
-                                __flow_limiter = Some((events_per_second, burst_capacity));
-                            }
-                            MiddlewareSourceScope::Stage => {
-                                __dsl_candidates.declare(
-                                    "effects.rate_limiter.events_per_second",
-                                    ConfigScope::stage(descriptor.name()),
-                                    ConfigValue::F64(events_per_second),
-                                );
-                                if let Some(burst) = burst_capacity {
-                                    __dsl_candidates.declare(
-                                        "effects.rate_limiter.burst_capacity",
-                                        ConfigScope::stage(descriptor.name()),
-                                        ConfigValue::F64(burst),
-                                    );
+                    let exact_effect = if matches!(
+                        descriptor.policy_guard_surface(),
+                        $crate::dsl::stage_descriptor::PolicyGuardSurface::Effectful
+                    ) && factory.declaration().is_control()
+                    {
+                        let effects = descriptor.effect_declarations();
+                        (effects.len() == 1).then(|| effects[0].effect_type)
+                    } else {
+                        None
+                    };
+                    for key_path in factory.consumed_config_keys() {
+                        if let Some(effect_type) = exact_effect {
+                            __dsl_candidates.declare_effect_consumption(
+                                key_path,
+                                obzenflow_core::StageKey::from(descriptor.name()),
+                                obzenflow_core::event::EffectType::from(effect_type),
+                            );
+                        } else {
+                            __dsl_candidates.declare_stage_consumption(
+                                key_path,
+                                obzenflow_core::StageKey::from(descriptor.name()),
+                            );
+                        }
+                    }
+                    for default in factory.dsl_config_defaults() {
+                        if let Some(effect_type) = exact_effect {
+                            __dsl_candidates.declare_for_effect(
+                                default.key_path,
+                                obzenflow_core::StageKey::from(descriptor.name()),
+                                obzenflow_core::event::EffectType::from(effect_type),
+                                default.value,
+                            );
+                        } else {
+                            let candidate_scope = match scope {
+                                MiddlewareSourceScope::Flow => ConfigScope::Flow,
+                                MiddlewareSourceScope::Stage => {
+                                    ConfigScope::stage(descriptor.name())
                                 }
-                            }
-                        },
-                        obzenflow_adapters::middleware::MiddlewarePlanContribution::None => {}
+                            };
+                            __dsl_candidates.declare(
+                                default.key_path,
+                                candidate_scope,
+                                default.value,
+                            );
+                        }
+                    }
+                }
+
+                for attachment in descriptor.effect_policy_attachments() {
+                    for factory in &attachment.factories {
+                        for key_path in factory.consumed_config_keys() {
+                            __dsl_candidates.declare_effect_consumption(
+                                key_path,
+                                obzenflow_core::StageKey::from(descriptor.name()),
+                                obzenflow_core::event::EffectType::from(attachment.effect_type),
+                            );
+                        }
+                        for default in factory.dsl_config_defaults() {
+                            __dsl_candidates.declare_for_effect(
+                                default.key_path,
+                                obzenflow_core::StageKey::from(descriptor.name()),
+                                obzenflow_core::event::EffectType::from(attachment.effect_type),
+                                default.value,
+                            );
+                        }
                     }
                 }
 
@@ -1097,28 +1106,6 @@ macro_rules! build_typed_flow {
             if let Some(clause) = &__flow_backpressure_clause {
                 clause.declare(&mut __dsl_candidates, ConfigScope::Flow);
             }
-            if let Some(threshold) = __flow_breaker_threshold {
-                __dsl_candidates.declare(
-                    "effects.circuit_breaker.threshold",
-                    ConfigScope::Flow,
-                    ConfigValue::U64(threshold),
-                );
-            }
-            if let Some((events_per_second, burst_capacity)) = __flow_limiter {
-                __dsl_candidates.declare(
-                    "effects.rate_limiter.events_per_second",
-                    ConfigScope::Flow,
-                    ConfigValue::F64(events_per_second),
-                );
-                if let Some(burst) = burst_capacity {
-                    __dsl_candidates.declare(
-                        "effects.rate_limiter.burst_capacity",
-                        ConfigScope::Flow,
-                        ConfigValue::F64(burst),
-                    );
-                }
-            }
-
             let __resolution_ctx = obzenflow_runtime::runtime_config::FlowResolutionContext {
                 flow_name: $flow_name.to_string(),
                 stages: descriptors
@@ -1139,6 +1126,21 @@ macro_rules! build_typed_flow {
                         (
                             obzenflow_core::StageKey::from(from),
                             obzenflow_core::StageKey::from(to),
+                        )
+                    })
+                    .collect(),
+                declared_effects: descriptors
+                    .values()
+                    .map(|descriptor| {
+                        (
+                            obzenflow_core::StageKey::from(descriptor.name()),
+                            descriptor
+                                .effect_declarations()
+                                .into_iter()
+                                .map(|effect| {
+                                    obzenflow_core::event::EffectType::from(effect.effect_type)
+                                })
+                                .collect(),
                         )
                     })
                     .collect(),
@@ -1716,20 +1718,7 @@ macro_rules! build_typed_flow {
                     flow_name: $flow_name.to_string(),
                     lineage: __flow_effective
                         .lineage_policy_for(&obzenflow_core::StageKey(name.clone())),
-                    resolved_policies: {
-                        let __stage_key = obzenflow_core::StageKey(name.clone());
-                        obzenflow_runtime::pipeline::config::ResolvedStagePolicies {
-                            breaker_threshold: __flow_effective
-                                .breaker_threshold_for(&__stage_key)
-                                .and_then(|r| r.value.as_u64()),
-                            limiter_events_per_second: __flow_effective
-                                .limiter_events_per_second_for(&__stage_key)
-                                .and_then(|r| r.value.as_f64()),
-                            limiter_burst_capacity: __flow_effective
-                                .limiter_burst_capacity_for(&__stage_key)
-                                .and_then(|r| r.value.as_f64()),
-                        }
-                    },
+                    effective_config: __flow_effective.clone(),
                     cycle_guard: if is_in_cycle
                         && matches!(
                             descriptor.stage_type(),

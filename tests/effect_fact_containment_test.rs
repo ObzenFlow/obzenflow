@@ -2,11 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-120m: producer-side effect-fact containment is validated at build
-//! time for every effectful stage, with or without an `output_middleware:`
-//! lane. Before `validate_effect_fact_containment` the check was gated behind
-//! that lane's registrations, so an effectful stage without the lane surfaced
-//! an undeclared effect fact only at commit time, after live I/O.
+//! Producer-side effect-fact containment is validated at build time for every
+//! effectful stage, before live I/O.
 
 use async_trait::async_trait;
 use obzenflow_core::{
@@ -201,8 +198,6 @@ where
         effects,
         middleware: Vec::new(),
         effect_policies: Vec::new(),
-        synthesized_outcomes: Vec::new(),
-        type_shaping_errors: Vec::new(),
         backpressure: None,
     });
     let metadata = StageTypingMetadata::transform(
@@ -226,7 +221,7 @@ fn missing_effect_fact_descriptor() -> Box<dyn StageDescriptor> {
 }
 
 /// The effect's `ContainmentEffectValue` outcome fact is missing from the
-/// arrow, and no `output_middleware:` lane is configured.
+/// arrow.
 fn undeclared_effect_fact_flow(journal_base: PathBuf) -> FlowDefinition {
     flow! {
         name: "effect_fact_containment_missing",
@@ -271,7 +266,7 @@ fn empty_effects_flow(journal_base: PathBuf) -> FlowDefinition {
 }
 
 #[tokio::test]
-async fn undeclared_effect_fact_fails_build_without_output_middleware_lane() {
+async fn undeclared_effect_fact_fails_build_before_io() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 

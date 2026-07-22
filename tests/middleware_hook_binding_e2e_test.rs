@@ -9,24 +9,28 @@
 //! carrier, rejects one effect protected unit, and observes a live run plus
 //! strict replay of the same archive.
 
+#[path = "test_support/exported_jsonl.rs"]
+mod exported_jsonl;
+
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    validate_attachment_request, ControlMiddlewareRole, EffectPolicyAttachment, EffectSurface,
-    EffectTypeKey, EffectUnitId, EventAwareEffectPolicy, Middleware, MiddlewareAttachmentRequest,
-    MiddlewareContext, MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareFactory,
-    MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareKind,
-    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareOverrideKey,
-    MiddlewarePlanContribution, MiddlewareSurface, MiddlewareSurfaceAttachment,
-    MiddlewareSurfaceKind::Effect, MiddlewareSurfaceKind::SinkDelivery,
-    MiddlewareSurfaceKind::SourcePoll, PolicyAdmission, ProtectedUnit, ProtectedUnitId,
-    SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface, SinkDeliveryTarget,
-    SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourcePolicy, SourcePolicyCtx,
-    SourcePollAttachment, SourcePollOutcome, SourcePollSurface, SourcePollUnitId,
-    TopologyMiddlewareConfigSlot,
+    validate_attachment_request, EffectSurface, EffectTypeKey, EffectUnitId,
+    EventAwareEffectPolicy, MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration,
+    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
+    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareOverrideKey, MiddlewareSurface,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind::Effect,
+    MiddlewareSurfaceKind::SinkDelivery, MiddlewareSurfaceKind::SourcePoll, PolicyAdmission,
+    ProtectedUnit, ProtectedUnitId, SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface,
+    SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission,
+    SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome, SourcePollSurface,
+    SourcePollUnitId,
 };
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
+use obzenflow_core::event::payloads::effect_payload::EFFECT_RECORD_EVENT_TYPE;
+use obzenflow_core::event::{
+    EffectFailureCause, EffectFailureCode, EffectFailureSource, EffectOutcomePayload, EffectRecord,
+    RetryDisposition,
+};
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -96,30 +100,6 @@ impl MiddlewareFactory for HookProofFactory {
         MiddlewareOverrideKey::of::<HookProofFamily>("hook_proof_control")
     }
 
-    fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::None
-    }
-
-    fn kind(&self) -> MiddlewareKind {
-        MiddlewareKind::Policy
-    }
-
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
-    }
-
-    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-        None
-    }
-
-    fn create(
-        &self,
-        _config: &StageConfig,
-        _control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
-        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
-    }
-
     fn declaration(&self) -> MiddlewareDeclaration {
         MiddlewareDeclaration::control(self.label(), vec![SourcePoll, Effect, SinkDelivery])
     }
@@ -139,7 +119,7 @@ impl MiddlewareFactory for HookProofFactory {
                 self.counters
                     .source_materialized
                     .fetch_add(1, Ordering::SeqCst);
-                Ok(MiddlewareSurfaceAttachment::SourcePoll(
+                Ok(MiddlewareSurfaceAttachment::source_poll(
                     SourcePollAttachment {
                         policy: Arc::new(HookProofSourcePolicy {
                             counters: self.counters.clone(),
@@ -152,18 +132,18 @@ impl MiddlewareFactory for HookProofFactory {
                 self.counters
                     .effect_materialized
                     .fetch_add(1, Ordering::SeqCst);
-                Ok(MiddlewareSurfaceAttachment::Effect(
-                    EffectPolicyAttachment::event_aware(Arc::new(HookProofEffectPolicy {
+                Ok(MiddlewareSurfaceAttachment::event_aware_effect(Arc::new(
+                    HookProofEffectPolicy {
                         counters: self.counters.clone(),
                         reject_value: self.reject_effect_value,
-                    })),
-                ))
+                    },
+                )))
             }
             MiddlewareSurface::SinkDelivery(_) => {
                 self.counters
                     .sink_materialized
                     .fetch_add(1, Ordering::SeqCst);
-                Ok(MiddlewareSurfaceAttachment::SinkDelivery(Arc::new(
+                Ok(MiddlewareSurfaceAttachment::sink_delivery(Arc::new(
                     HookProofSinkPolicy {
                         counters: self.counters.clone(),
                     },
@@ -218,13 +198,15 @@ impl EventAwareEffectPolicy for HookProofEffectPolicy {
             self.counters
                 .effect_rejections
                 .fetch_add(1, Ordering::SeqCst);
-            return PolicyAdmission::Reject(obzenflow_adapters::middleware::MiddlewareAbortCause {
-                source: EffectFailureSource::new("hook_proof_control"),
-                code: EffectFailureCode::new("rejected_by_hook_proof"),
-                message: "hook proof effect rejected".to_string(),
-                retry: RetryDisposition::NotRetryable,
-                event: None,
-            });
+            return PolicyAdmission::Reject(Box::new(
+                obzenflow_adapters::middleware::MiddlewareAbortCause {
+                    source: EffectFailureSource::new("hook_proof_control"),
+                    code: EffectFailureCode::new("rejected_by_hook_proof"),
+                    message: "hook proof effect rejected".to_string(),
+                    retry: RetryDisposition::NotRetryable,
+                    event: None,
+                },
+            ));
         }
         self.counters.effect_admits.fetch_add(1, Ordering::SeqCst);
         PolicyAdmission::Admit
@@ -242,6 +224,76 @@ impl EventAwareEffectPolicy for HookProofEffectPolicy {
 
 struct HookProofSinkPolicy {
     counters: Arc<HookCounters>,
+}
+
+struct BreakerCauseProofFamily;
+struct BreakerCauseProofFactory;
+struct BreakerCauseProofPolicy;
+
+impl MiddlewareFactory for BreakerCauseProofFactory {
+    fn label(&self) -> &'static str {
+        "breaker_cause_proof"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<BreakerCauseProofFamily>(self.label())
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::control(self.label(), vec![Effect])
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        validate_attachment_request(&self.declaration(), &request).map_err(|error| {
+            MiddlewareFactoryError::materialization_failed(
+                self.label(),
+                &context.config.name,
+                error,
+            )
+        })?;
+        Ok(MiddlewareSurfaceAttachment::event_aware_effect(Arc::new(
+            BreakerCauseProofPolicy,
+        )))
+    }
+}
+
+#[async_trait]
+impl EventAwareEffectPolicy for BreakerCauseProofPolicy {
+    fn label(&self) -> &'static str {
+        "breaker_cause_proof"
+    }
+
+    async fn admit(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> PolicyAdmission {
+        let value = HookInput::from_event(event)
+            .map(|input| input.value)
+            .unwrap_or_default();
+        let code = if value == 1 {
+            "circuit_open"
+        } else {
+            "probe_in_progress"
+        };
+        PolicyAdmission::Reject(Box::new(
+            obzenflow_adapters::middleware::MiddlewareAbortCause {
+                source: EffectFailureSource::new("circuit_breaker"),
+                code: EffectFailureCode::new(code),
+                message: format!("circuit breaker rejected effect execution: {code}"),
+                retry: RetryDisposition::NotRetryable,
+                event: None,
+            },
+        ))
+    }
+
+    fn observe(
+        &self,
+        _event: &ChainEvent,
+        _attempt: &obzenflow_adapters::middleware::EffectAttemptOutcome<'_>,
+        _ctx: &mut MiddlewareContext,
+    ) {
+    }
 }
 
 #[async_trait]
@@ -377,7 +429,10 @@ impl EffectfulTransformHandler for HookTransform {
 
         let path = match result {
             Ok(value) => format!("effect:{}", value.value),
-            Err(err) => err.semantic_reason().into_owned(),
+            Err(err) => err.failure_cause().map_or_else(
+                || err.semantic_reason().into_owned(),
+                |cause| format!("{}:{}", cause.source.as_str(), cause.code.as_str()),
+            ),
         };
 
         fx.emit(HookOutput {
@@ -444,6 +499,33 @@ fn build_flow(
     }
 }
 
+fn build_failure_cause_flow(
+    journal_base: PathBuf,
+    effect_calls: Arc<AtomicUsize>,
+    delivered: &Delivered,
+) -> FlowDefinition {
+    let probe = sink_probe(delivered);
+    flow! {
+        name: "middleware_failure_cause_api",
+        journals: disk_journals(journal_base),
+        middleware: [],
+
+        stages: {
+            input = source!(HookInput => HookSource::new());
+            transform = effectful_transform!(
+                HookInput -> { HookOutput, HookEffectValue } => HookTransform { effect_calls },
+                effects: [HookEffect with [Box::new(BreakerCauseProofFactory)]],
+                middleware: []);
+            output = sink!(HookOutput => SinkTyped::with_delivery(probe).idempotent());
+        },
+
+        topology: {
+            input |> transform;
+            transform |> output;
+        }
+    }
+}
+
 fn delivered_payloads(delivered: &Delivered, provenance: DeliveryProvenance) -> Vec<HookOutput> {
     let values = delivered
         .lock()
@@ -468,6 +550,66 @@ fn latest_run_dir(base: &Path) -> PathBuf {
         .collect();
     entries.sort();
     entries.pop().expect("run should have produced an archive")
+}
+
+fn exported_run(run: &Path, output: &Path) -> String {
+    obzenflow_infra::journal::disk::inspect::export_jsonl(run, Some(output))
+        .expect("failure-cause proof journal should export");
+    std::fs::read_to_string(output).expect("exported failure-cause journal should be readable")
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RecordedBreakerFailure {
+    cursor: obzenflow_runtime::effects::EffectCursor,
+    cause: EffectFailureCause,
+}
+
+fn recorded_breaker_failures(jsonl: &str) -> Vec<RecordedBreakerFailure> {
+    let mut failures: Vec<_> = exported_jsonl::chain_events(jsonl)
+        .into_iter()
+        .filter_map(|event| {
+            let ChainEventContent::Data {
+                event_type,
+                payload,
+            } = event.content
+            else {
+                return None;
+            };
+            if event_type != EFFECT_RECORD_EVENT_TYPE {
+                return None;
+            }
+            let record: EffectRecord =
+                serde_json::from_value(payload).expect("effect record should decode");
+            if record.descriptor.effect_type.as_str() != HookEffect::EFFECT_TYPE {
+                return None;
+            }
+            let EffectOutcomePayload::Failed {
+                cause: Some(cause), ..
+            } = record.outcome
+            else {
+                return None;
+            };
+            assert_eq!(
+                event
+                    .effect_provenance
+                    .as_ref()
+                    .map(|provenance| &provenance.cursor),
+                Some(&record.cursor),
+                "recorded failure and provenance must share one cursor"
+            );
+            Some(RecordedBreakerFailure {
+                cursor: record.cursor,
+                cause,
+            })
+        })
+        .collect();
+    failures.sort_by_key(|failure| {
+        (
+            failure.cursor.input_seq.get(),
+            failure.cursor.effect_ordinal.get(),
+        )
+    });
+    failures
 }
 
 #[tokio::test]
@@ -507,7 +649,7 @@ async fn third_party_control_middleware_binds_all_surfaces_and_replays() {
         vec![
             HookOutput {
                 value: 1,
-                path: "hook proof effect rejected".to_string(),
+                path: "hook_proof_control:rejected_by_hook_proof".to_string(),
             },
             HookOutput {
                 value: 2,
@@ -581,6 +723,81 @@ async fn third_party_control_middleware_binds_all_surfaces_and_replays() {
     assert_eq!(replay_outputs, live_outputs);
 }
 
+#[tokio::test]
+async fn public_failure_cause_is_identical_for_both_breaker_codes_live_and_replay() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let live_delivered = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_failure_cause_flow(
+            journal_base.clone(),
+            live_calls.clone(),
+            &live_delivered,
+        ))
+        .await
+        .expect("live cause flow should complete");
+    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+    let live_outputs = delivered_payloads(&live_delivered, DeliveryProvenance::Live);
+    assert_eq!(
+        live_outputs,
+        vec![
+            HookOutput {
+                value: 1,
+                path: "circuit_breaker:circuit_open".to_string(),
+            },
+            HookOutput {
+                value: 2,
+                path: "circuit_breaker:probe_in_progress".to_string(),
+            },
+        ]
+    );
+
+    let live_run = latest_run_dir(&journal_base);
+    let live_jsonl = exported_run(&live_run, &temp.path().join("failure-cause-live.jsonl"));
+    let live_failures = recorded_breaker_failures(&live_jsonl);
+    assert_eq!(live_failures.len(), 2);
+    assert_eq!(
+        live_failures
+            .iter()
+            .map(|failure| (failure.cause.source.as_str(), failure.cause.code.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("circuit_breaker", "circuit_open"),
+            ("circuit_breaker", "probe_in_progress"),
+        ]
+    );
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_delivered = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            live_run.as_os_str().to_os_string(),
+        ])
+        .run_async(build_failure_cause_flow(
+            journal_base.clone(),
+            replay_calls.clone(),
+            &replay_delivered,
+        ))
+        .await
+        .expect("strict replay cause flow should complete");
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        delivered_payloads(&replay_delivered, DeliveryProvenance::Replayed),
+        live_outputs
+    );
+    let replay_run = latest_run_dir(&journal_base);
+    let replay_jsonl = exported_run(&replay_run, &temp.path().join("failure-cause-replay.jsonl"));
+    assert_eq!(
+        recorded_breaker_failures(&replay_jsonl),
+        live_failures,
+        "strict replay must preserve both structured causes under their recorded cursors"
+    );
+}
+
 #[test]
 fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
     let counters = Arc::new(HookCounters::default());
@@ -591,7 +808,9 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
         flow_name: "middleware_hook_binding_e2e".to_string(),
         cycle_guard: None,
         lineage: obzenflow_core::config::LineagePolicy::default(),
-        resolved_policies: Default::default(),
+        effective_config: std::sync::Arc::new(
+            obzenflow_runtime::runtime_config::FlowEffectiveConfig::default(),
+        ),
     };
     let surface = MiddlewareSurface::Effect(EffectSurface {
         stage_id: config.stage_id,

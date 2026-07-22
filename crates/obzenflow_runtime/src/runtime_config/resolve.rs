@@ -11,18 +11,25 @@ use super::error::ConfigResolveError;
 use super::flow_view::{BackpressureMode, FlowEffectiveConfig, FlowResolutionContext};
 use super::model::{Resolved, ResolvedRuntimeConfig};
 use super::schema::{knob_registry, EdgeEndpoint, KnobDefault, KnobSpec, KnobTarget};
-use obzenflow_core::config::{ConfigScope, ConfigSource, ConfigValueMeta};
+use obzenflow_core::config::{
+    ConfigAddress, ConfigScope, ConfigSource, ConfigSubject, ConfigValueMeta,
+};
+use obzenflow_core::event::EffectType;
 use obzenflow_core::StageKey;
 use std::collections::BTreeMap;
 
 /// Where a knob is being resolved. Points are generated from the knob's
 /// target: Global-target knobs resolve at `Global`, Stage-target knobs once
 /// per stage, Edge-target knobs once per directed edge.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ResolutionPoint {
     Global,
     Flow,
     Stage(StageKey),
+    Effect {
+        stage: StageKey,
+        effect_type: EffectType,
+    },
     Edge {
         upstream: StageKey,
         downstream: StageKey,
@@ -31,11 +38,14 @@ pub enum ResolutionPoint {
 
 impl ResolutionPoint {
     /// The address this point's resolution is stored under.
-    pub fn address(&self) -> ConfigScope {
+    pub fn scope(&self) -> ConfigScope {
         match self {
             Self::Global => ConfigScope::Global,
             Self::Flow => ConfigScope::Flow,
             Self::Stage(stage) => ConfigScope::Stage {
+                stage: stage.clone(),
+            },
+            Self::Effect { stage, .. } => ConfigScope::Stage {
                 stage: stage.clone(),
             },
             Self::Edge {
@@ -53,6 +63,11 @@ impl ResolutionPoint {
             Self::Global => "the runtime".to_string(),
             Self::Flow => "the flow".to_string(),
             Self::Stage(stage) => format!("stage '{}'", stage.as_str()),
+            Self::Effect { stage, effect_type } => format!(
+                "effect '{}' on stage '{}'",
+                effect_type.as_str(),
+                stage.as_str()
+            ),
             Self::Edge {
                 upstream,
                 downstream,
@@ -101,13 +116,22 @@ fn ladder(spec: &KnobSpec, point: &ResolutionPoint) -> Vec<ConfigScope> {
                 ConfigScope::Global,
             ]
         }
-        (KnobTarget::Stage, ResolutionPoint::Stage(stage)) => vec![
+        (KnobTarget::Stage | KnobTarget::StageOrEffect, ResolutionPoint::Stage(stage)) => vec![
             ConfigScope::Stage {
                 stage: stage.clone(),
             },
             ConfigScope::Flow,
             ConfigScope::Global,
         ],
+        (KnobTarget::Effect | KnobTarget::StageOrEffect, ResolutionPoint::Effect { stage, .. }) => {
+            vec![
+                ConfigScope::Stage {
+                    stage: stage.clone(),
+                },
+                ConfigScope::Flow,
+                ConfigScope::Global,
+            ]
+        }
         (KnobTarget::Flow, ResolutionPoint::Flow) => {
             vec![ConfigScope::Flow, ConfigScope::Global]
         }
@@ -120,16 +144,17 @@ fn ladder(spec: &KnobSpec, point: &ResolutionPoint) -> Vec<ConfigScope> {
     }
 }
 
-/// Source precedence within one scope: CLI > file > env > DSL (§2).
-fn source_order(
-    slots: &super::candidates::SourceSlots,
-) -> [(ConfigSource, &Option<ConfigValue>); 4] {
-    [
-        (ConfigSource::Cli, &slots.cli),
-        (ConfigSource::File, &slots.file),
-        (ConfigSource::Env, &slots.env),
-        (ConfigSource::Dsl, &slots.dsl),
-    ]
+fn value_for_source<'a>(
+    slots: &'a super::candidates::SourceSlots,
+    source: &ConfigSource,
+) -> Option<&'a ConfigValue> {
+    match source {
+        ConfigSource::Cli => slots.cli.as_ref(),
+        ConfigSource::File => slots.file.as_ref(),
+        ConfigSource::Env => slots.env.as_ref(),
+        ConfigSource::Dsl => slots.dsl.as_ref(),
+        _ => None,
+    }
 }
 
 /// Resolve one knob at one point. `Ok(None)` is a legal outcome only for
@@ -140,14 +165,38 @@ pub fn resolve_at(
     set: &CandidateSet,
 ) -> Result<Option<Resolved<ConfigValue>>, ConfigResolveError> {
     for scope in ladder(spec, point) {
-        if let Some(slots) = set.get(spec.key_path, &scope) {
-            for (source, slot) in source_order(slots) {
-                if let Some(value) = slot {
+        let broadcast = ConfigAddress::unqualified(scope.clone());
+        let exact = match (point, &scope) {
+            (ResolutionPoint::Effect { effect_type, .. }, ConfigScope::Stage { .. }) => {
+                Some(ConfigAddress {
+                    scope: scope.clone(),
+                    subject: ConfigSubject::Effect {
+                        effect_type: effect_type.clone(),
+                    },
+                })
+            }
+            _ => None,
+        };
+
+        // Operator supremacy is explicit: source precedence is evaluated
+        // before subject specificity. Within one source, exact beats broadcast.
+        for source in [
+            ConfigSource::Cli,
+            ConfigSource::File,
+            ConfigSource::Env,
+            ConfigSource::Dsl,
+        ] {
+            for address in exact.iter().chain(std::iter::once(&broadcast)) {
+                if let Some(value) = set
+                    .get_at(spec.key_path, address)
+                    .and_then(|slots| value_for_source(slots, &source))
+                {
                     return Ok(Some(Resolved {
                         value: value.clone(),
                         meta: ConfigValueMeta {
-                            source,
-                            scope,
+                            source: source.clone(),
+                            scope: scope.clone(),
+                            subject: address.subject.clone(),
                             key_path: spec.key_path.to_string(),
                         },
                     }));
@@ -161,6 +210,7 @@ pub fn resolve_at(
             meta: ConfigValueMeta {
                 source: ConfigSource::Default,
                 scope: ConfigScope::Global,
+                subject: ConfigSubject::Unqualified,
                 key_path: spec.key_path.to_string(),
             },
         })),
@@ -178,10 +228,23 @@ pub fn resolve_at(
 fn supply_help(spec: &KnobSpec, point: &ResolutionPoint) -> String {
     let mut parts = Vec::new();
     for scope in ladder(spec, point) {
-        let file = file_address(spec, &scope);
+        let broadcast = ConfigAddress::unqualified(scope.clone());
+        let file = spec.file_address(&broadcast);
         let part = match &scope {
             ConfigScope::Edge { .. } => {
                 format!("edge scope (file {file}, DSL edge declaration)")
+            }
+            ConfigScope::Stage { stage } if matches!(point, ResolutionPoint::Effect { .. }) => {
+                let ResolutionPoint::Effect { effect_type, .. } = point else {
+                    unreachable!("guarded by the effect-point match")
+                };
+                let exact =
+                    spec.file_address(&ConfigAddress::effect(stage.clone(), effect_type.clone()));
+                format!(
+                    "stage scope for '{}' (exact-effect file {exact}, broadcast file {file}, \
+                     DSL effect or stage declaration)",
+                    stage.as_str()
+                )
             }
             ConfigScope::Stage { stage } => format!(
                 "stage scope for '{}' (file {file}, DSL stage declaration)",
@@ -198,30 +261,6 @@ fn supply_help(spec: &KnobSpec, point: &ResolutionPoint) -> String {
     format!("supply it at one of: {}", parts.join(", "))
 }
 
-/// `[table]` address for a knob at a scope, derived from the key path and
-/// the §4c nested layout: `[table]`, `[table.flow]`, `[table.stages.<s>]`,
-/// `[table.stages.<up>.edges.<down>]`.
-fn file_address(spec: &KnobSpec, scope: &ConfigScope) -> String {
-    let path = spec.file_path.unwrap_or(spec.key_path);
-    let table = match path.rsplit_once('.') {
-        Some((table, _field)) => table,
-        None => path,
-    };
-    match scope {
-        ConfigScope::Global => format!("[{table}]"),
-        ConfigScope::Flow => format!("[{table}.flow]"),
-        ConfigScope::Stage { stage } => format!("[{table}.stages.{}]", stage.as_str()),
-        ConfigScope::Edge {
-            upstream,
-            downstream,
-        } => format!(
-            "[{table}.stages.{}.edges.{}]",
-            upstream.as_str(),
-            downstream.as_str()
-        ),
-    }
-}
-
 /// Phase B: merge DSL candidates, validate scoped entries against the
 /// topology (010f-shaped diagnostics), and resolve every registered knob at
 /// every applicable point (§4c). Returns the immutable per-flow view.
@@ -229,6 +268,13 @@ pub fn materialize_flow_config(
     snapshot: &ResolvedRuntimeConfig,
     ctx: FlowResolutionContext,
 ) -> Result<FlowEffectiveConfig, ConfigResolveError> {
+    // Applicability comes from the surviving factories' explicit consumption
+    // declarations, never from which defaults happened to be emitted for the
+    // selected mode. The index is consumed during this build and is not a
+    // runtime policy registry or state authority.
+    let effect_consumers = ctx.dsl.effect_consumers();
+    let stage_consumers = ctx.dsl.stage_consumers();
+
     let mut working = snapshot.candidates().clone();
     for candidate in ctx.dsl.entries() {
         working.admit(candidate.clone())?;
@@ -236,8 +282,8 @@ pub fn materialize_flow_config(
 
     let mut warnings = Vec::new();
     for spec in knob_registry() {
-        for scope in working.scopes_for(spec.key_path) {
-            match scope {
+        for address in working.addresses_for(spec.key_path) {
+            match &address.scope {
                 ConfigScope::Stage { stage } => {
                     if !ctx.stages.contains(stage) {
                         return Err(ConfigResolveError::UnknownStage {
@@ -281,13 +327,48 @@ pub fn materialize_flow_config(
                 }
                 ConfigScope::Global | ConfigScope::Flow => {}
             }
+
+            if let ConfigSubject::Effect { effect_type } = &address.subject {
+                let ConfigScope::Stage { stage } = &address.scope else {
+                    unreachable!("candidate admission restricts exact effect subjects to stages")
+                };
+                let known: Vec<String> = ctx
+                    .declared_effects
+                    .get(stage)
+                    .into_iter()
+                    .flat_map(|effects| effects.iter())
+                    .map(|effect| effect.as_str().to_string())
+                    .collect();
+                if !ctx
+                    .declared_effects
+                    .get(stage)
+                    .is_some_and(|effects| effects.contains(effect_type))
+                {
+                    return Err(ConfigResolveError::UnknownEffect {
+                        key_path: spec.key_path.to_string(),
+                        stage: stage.as_str().to_string(),
+                        effect_type: effect_type.as_str().to_string(),
+                        known,
+                    });
+                }
+                if !effect_consumers
+                    .get(spec.key_path)
+                    .is_some_and(|points| points.contains(&(stage.clone(), effect_type.clone())))
+                {
+                    return Err(ConfigResolveError::UnattachedEffectSubject {
+                        key_path: spec.key_path.to_string(),
+                        stage: stage.as_str().to_string(),
+                        effect_type: effect_type.as_str().to_string(),
+                    });
+                }
+            }
         }
     }
     for warning in &warnings {
         tracing::warn!("{warning}");
     }
 
-    let mut values: BTreeMap<String, BTreeMap<ConfigScope, Resolved<ConfigValue>>> =
+    let mut values: BTreeMap<String, BTreeMap<ResolutionPoint, Resolved<ConfigValue>>> =
         BTreeMap::new();
     for spec in knob_registry() {
         let points: Vec<ResolutionPoint> = match spec.target {
@@ -298,6 +379,34 @@ pub fn materialize_flow_config(
                 .iter()
                 .map(|stage| ResolutionPoint::Stage(stage.clone()))
                 .collect(),
+            KnobTarget::Effect => effect_consumers
+                .get(spec.key_path)
+                .into_iter()
+                .flat_map(|points| points.iter())
+                .map(|(stage, effect_type)| ResolutionPoint::Effect {
+                    stage: stage.clone(),
+                    effect_type: effect_type.clone(),
+                })
+                .collect(),
+            KnobTarget::StageOrEffect => {
+                let mut points: Vec<_> = stage_consumers
+                    .get(spec.key_path)
+                    .into_iter()
+                    .flat_map(|points| points.iter())
+                    .map(|stage| ResolutionPoint::Stage(stage.clone()))
+                    .collect();
+                points.extend(
+                    effect_consumers
+                        .get(spec.key_path)
+                        .into_iter()
+                        .flat_map(|effect_points| effect_points.iter())
+                        .map(|(stage, effect_type)| ResolutionPoint::Effect {
+                            stage: stage.clone(),
+                            effect_type: effect_type.clone(),
+                        }),
+                );
+                points
+            }
             KnobTarget::Edge { .. } => ctx
                 .edges
                 .iter()
@@ -312,7 +421,7 @@ pub fn materialize_flow_config(
                 values
                     .entry(spec.key_path.to_string())
                     .or_default()
-                    .insert(point.address(), resolved);
+                    .insert(point, resolved);
             }
         }
     }
@@ -323,7 +432,7 @@ pub fn materialize_flow_config(
     // resolved where the mode stays off or track governs nothing and draws
     // a diagnostic.
     for (upstream, downstream) in &ctx.edges {
-        let address = ConfigScope::Edge {
+        let address = ResolutionPoint::Edge {
             upstream: upstream.clone(),
             downstream: downstream.clone(),
         };
@@ -400,13 +509,8 @@ mod tests {
         source: ConfigSource,
         value: ConfigValue,
     ) {
-        set.admit(ScopedCandidate {
-            key_path: key.to_string(),
-            scope,
-            source,
-            value,
-        })
-        .unwrap();
+        set.admit(ScopedCandidate::unqualified(key, scope, source, value))
+            .unwrap();
     }
 
     fn window_spec() -> &'static KnobSpec {
@@ -675,6 +779,7 @@ mod tests {
             flow_name: "f".to_string(),
             stages: BTreeSet::from([StageKey::from("src"), StageKey::from("sink")]),
             edges: BTreeSet::from([(StageKey::from("src"), StageKey::from("sink"))]),
+            declared_effects: Default::default(),
             dsl: Default::default(),
         };
         let effective = materialize_flow_config(&snapshot, ctx).unwrap();
@@ -695,6 +800,7 @@ mod tests {
             flow_name: "f".to_string(),
             stages: BTreeSet::from([StageKey::from("src")]),
             edges: BTreeSet::new(),
+            declared_effects: Default::default(),
             dsl: Default::default(),
         };
         let err = materialize_flow_config(&snapshot, ctx).unwrap_err();
@@ -708,6 +814,7 @@ mod tests {
             flow_name: "f".to_string(),
             stages: BTreeSet::from([StageKey::from("src"), StageKey::from("sink")]),
             edges: BTreeSet::from([(StageKey::from("src"), StageKey::from("sink"))]),
+            declared_effects: Default::default(),
             dsl: Default::default(),
         }
     }
@@ -956,5 +1063,467 @@ mod tests {
             .warnings()
             .iter()
             .any(|warning| warning.contains("has no effect")));
+    }
+
+    fn effect_context(
+        stage_effects: &[(&str, &[&str])],
+        mut dsl: crate::runtime_config::DslCandidates,
+    ) -> FlowResolutionContext {
+        // Most resolver fixtures model a default-producing effect factory. Its
+        // consumed key is the same key as the fixture candidate; the optional
+        // key test below adds its independent consumption declaration itself.
+        let default_consumers: Vec<_> = dsl
+            .entries()
+            .iter()
+            .filter_map(
+                |candidate| match (&candidate.address.scope, &candidate.address.subject) {
+                    (ConfigScope::Stage { stage }, ConfigSubject::Effect { effect_type }) => {
+                        Some((
+                            candidate.key_path.clone(),
+                            stage.clone(),
+                            effect_type.clone(),
+                        ))
+                    }
+                    _ => None,
+                },
+            )
+            .collect();
+        for (key_path, stage, effect_type) in default_consumers {
+            dsl.declare_effect_consumption(key_path, stage, effect_type);
+        }
+        let declared_effects = stage_effects
+            .iter()
+            .map(|(stage, effects)| {
+                (
+                    StageKey::from(*stage),
+                    effects
+                        .iter()
+                        .map(|effect| EffectType::from(*effect))
+                        .collect(),
+                )
+            })
+            .collect();
+        FlowResolutionContext {
+            flow_name: "effect_config_test".to_string(),
+            stages: stage_effects
+                .iter()
+                .map(|(stage, _)| StageKey::from(*stage))
+                .collect(),
+            edges: BTreeSet::new(),
+            declared_effects,
+            dsl,
+        }
+    }
+
+    #[test]
+    fn source_precedes_subject_within_one_scope_by_explicit_operator_supremacy() {
+        let key = crate::runtime_config::RATE_LIMITER_EVENTS_PER_SECOND_KEY;
+        let stage = StageKey::from("authorize_payment");
+        let authorize = EffectType::from("payments.authorize");
+        let refund = EffectType::from("payments.refund");
+
+        let mut dsl = crate::runtime_config::DslCandidates::default();
+        dsl.declare_for_effect(key, stage.clone(), authorize.clone(), ConfigValue::F64(2.0));
+        dsl.declare_for_effect(key, stage.clone(), refund.clone(), ConfigValue::F64(3.0));
+
+        let mut file = CandidateSet::default();
+        file.admit(ScopedCandidate::unqualified(
+            key,
+            ConfigScope::stage(stage.clone()),
+            ConfigSource::File,
+            ConfigValue::F64(8.0),
+        ))
+        .unwrap();
+        file.admit(ScopedCandidate {
+            key_path: key.to_string(),
+            address: ConfigAddress::effect(stage.clone(), authorize.clone()),
+            source: ConfigSource::File,
+            value: ConfigValue::F64(5.0),
+        })
+        .unwrap();
+
+        let effective = materialize_flow_config(
+            &ResolvedRuntimeConfig::new(file),
+            effect_context(
+                &[(
+                    "authorize_payment",
+                    &["payments.authorize", "payments.refund"],
+                )],
+                dsl,
+            ),
+        )
+        .unwrap();
+
+        let authorize_value = effective.effect_value(key, &stage, &authorize).unwrap();
+        assert_eq!(authorize_value.value.as_f64(), Some(5.0));
+        assert_eq!(authorize_value.meta.source, ConfigSource::File);
+        assert_eq!(
+            authorize_value.meta.subject,
+            ConfigSubject::Effect {
+                effect_type: authorize.clone()
+            }
+        );
+
+        let refund_value = effective.effect_value(key, &stage, &refund).unwrap();
+        assert_eq!(refund_value.value.as_f64(), Some(8.0));
+        assert_eq!(refund_value.meta.source, ConfigSource::File);
+        assert_eq!(refund_value.meta.subject, ConfigSubject::Unqualified);
+
+        let rows: Vec<_> = effective
+            .manifest_evidence()
+            .values
+            .into_iter()
+            .filter(|row| row.key_path == key)
+            .collect();
+        assert_eq!(
+            rows.len(),
+            2,
+            "equal or inherited values remain per-effect rows"
+        );
+        assert!(rows.iter().all(|row| row.resolved_for.is_some()));
+    }
+
+    #[test]
+    fn a_more_specific_scope_still_beats_a_broader_operator_source() {
+        let key = crate::runtime_config::RATE_LIMITER_EVENTS_PER_SECOND_KEY;
+        let stage = StageKey::from("authorize_payment");
+        let effect_type = EffectType::from("payments.authorize");
+        let mut dsl = crate::runtime_config::DslCandidates::default();
+        dsl.declare_for_effect(
+            key,
+            stage.clone(),
+            effect_type.clone(),
+            ConfigValue::F64(4.0),
+        );
+        let mut file = CandidateSet::default();
+        file.admit(ScopedCandidate::unqualified(
+            key,
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::F64(50.0),
+        ))
+        .unwrap();
+
+        let effective = materialize_flow_config(
+            &ResolvedRuntimeConfig::new(file),
+            effect_context(&[("authorize_payment", &["payments.authorize"])], dsl),
+        )
+        .unwrap();
+        let resolved = effective.effect_value(key, &stage, &effect_type).unwrap();
+        assert_eq!(resolved.value.as_f64(), Some(4.0));
+        assert_eq!(resolved.meta.scope, ConfigScope::stage(stage));
+        assert_eq!(resolved.meta.source, ConfigSource::Dsl);
+    }
+
+    #[test]
+    fn equal_broadcast_values_keep_distinct_resolved_for_rows() {
+        let key = crate::runtime_config::RATE_LIMITER_EVENTS_PER_SECOND_KEY;
+        let stage = StageKey::from("authorize_payment");
+        let mut dsl = crate::runtime_config::DslCandidates::default();
+        for effect in ["payments.authorize", "payments.refund"] {
+            dsl.declare_for_effect(
+                key,
+                stage.clone(),
+                EffectType::from(effect),
+                ConfigValue::F64(1.0),
+            );
+        }
+        let mut file = CandidateSet::default();
+        file.admit(ScopedCandidate::unqualified(
+            key,
+            ConfigScope::stage(stage),
+            ConfigSource::File,
+            ConfigValue::F64(8.0),
+        ))
+        .unwrap();
+        let effective = materialize_flow_config(
+            &ResolvedRuntimeConfig::new(file),
+            effect_context(
+                &[(
+                    "authorize_payment",
+                    &["payments.refund", "payments.authorize"],
+                )],
+                dsl,
+            ),
+        )
+        .unwrap();
+        let rows: Vec<_> = effective
+            .manifest_evidence()
+            .values
+            .into_iter()
+            .filter(|row| row.key_path == key)
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].value, rows[1].value);
+        assert_ne!(rows[0].resolved_for, rows[1].resolved_for);
+        assert!(rows
+            .iter()
+            .all(|row| row.winner_subject == Some(ConfigSubject::Unqualified)));
+    }
+
+    #[test]
+    fn same_effect_type_on_two_stages_has_independent_addresses() {
+        let key = crate::runtime_config::RATE_LIMITER_EVENTS_PER_SECOND_KEY;
+        let effect_type = EffectType::from("payments.authorize");
+        let mut dsl = crate::runtime_config::DslCandidates::default();
+        dsl.declare_for_effect(key, "primary", effect_type.clone(), ConfigValue::F64(3.0));
+        dsl.declare_for_effect(key, "fallback", effect_type.clone(), ConfigValue::F64(7.0));
+        let effective = materialize_flow_config(
+            &ResolvedRuntimeConfig::builtin_defaults(),
+            effect_context(
+                &[
+                    ("fallback", &["payments.authorize"]),
+                    ("primary", &["payments.authorize"]),
+                ],
+                dsl,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            effective
+                .effect_value(key, &StageKey::from("primary"), &effect_type)
+                .and_then(|value| value.value.as_f64()),
+            Some(3.0)
+        );
+        assert_eq!(
+            effective
+                .effect_value(key, &StageKey::from("fallback"), &effect_type)
+                .and_then(|value| value.value.as_f64()),
+            Some(7.0)
+        );
+    }
+
+    #[test]
+    fn optional_limiter_burst_is_applicable_without_an_invented_dsl_value() {
+        let rate_key = crate::runtime_config::RATE_LIMITER_EVENTS_PER_SECOND_KEY;
+        let burst_key = crate::runtime_config::RATE_LIMITER_BURST_CAPACITY_KEY;
+        let stage = StageKey::from("payments");
+        let effect_type = EffectType::from("payments.authorize");
+        let mut dsl = crate::runtime_config::DslCandidates::default();
+        dsl.declare_for_effect(
+            rate_key,
+            stage.clone(),
+            effect_type.clone(),
+            ConfigValue::F64(10.0),
+        );
+        dsl.declare_effect_consumption(burst_key, stage.clone(), effect_type.clone());
+
+        let without_burst = materialize_flow_config(
+            &ResolvedRuntimeConfig::builtin_defaults(),
+            effect_context(&[("payments", &["payments.authorize"])], dsl.clone()),
+        )
+        .unwrap();
+        assert!(without_burst
+            .effect_value(burst_key, &stage, &effect_type)
+            .is_none());
+        assert!(without_burst
+            .manifest_evidence()
+            .values
+            .iter()
+            .all(|row| row.key_path != burst_key));
+
+        let mut file = CandidateSet::default();
+        file.admit(ScopedCandidate {
+            key_path: burst_key.to_string(),
+            address: ConfigAddress::effect(stage.clone(), effect_type.clone()),
+            source: ConfigSource::File,
+            value: ConfigValue::F64(25.0),
+        })
+        .unwrap();
+        let with_file_burst = materialize_flow_config(
+            &ResolvedRuntimeConfig::new(file),
+            effect_context(&[("payments", &["payments.authorize"])], dsl.clone()),
+        )
+        .unwrap();
+        let burst = with_file_burst
+            .effect_value(burst_key, &stage, &effect_type)
+            .expect("the surviving limiter consumes the optional burst key");
+        assert_eq!(burst.value.as_f64(), Some(25.0));
+        assert_eq!(burst.meta.source, ConfigSource::File);
+        let exact_row = with_file_burst
+            .manifest_evidence()
+            .values
+            .into_iter()
+            .find(|row| row.key_path == burst_key)
+            .expect("the supplied optional value should use the normal evidence projection");
+        assert_eq!(exact_row.source, "file");
+        assert_eq!(
+            exact_row.winner_subject,
+            Some(ConfigSubject::Effect {
+                effect_type: effect_type.clone(),
+            })
+        );
+        assert_eq!(
+            exact_row.resolved_for,
+            Some(obzenflow_core::config::ResolvedForDoc::Effect {
+                stage: stage.as_str().to_string(),
+                effect_type: effect_type.as_str().to_string(),
+            })
+        );
+
+        let mut broadcast_file = CandidateSet::default();
+        broadcast_file
+            .admit(ScopedCandidate::unqualified(
+                burst_key,
+                ConfigScope::stage(stage.clone()),
+                ConfigSource::File,
+                ConfigValue::F64(30.0),
+            ))
+            .unwrap();
+        let with_broadcast_burst = materialize_flow_config(
+            &ResolvedRuntimeConfig::new(broadcast_file),
+            effect_context(&[("payments", &["payments.authorize"])], dsl),
+        )
+        .unwrap();
+        assert_eq!(
+            with_broadcast_burst
+                .effect_value(burst_key, &stage, &effect_type)
+                .and_then(|resolved| resolved.value.as_f64()),
+            Some(30.0)
+        );
+        let broadcast_row = with_broadcast_burst
+            .manifest_evidence()
+            .values
+            .into_iter()
+            .find(|row| row.key_path == burst_key)
+            .expect("the inherited optional value should retain exact attribution");
+        assert_eq!(broadcast_row.source, "file");
+        assert_eq!(
+            broadcast_row.winner_subject,
+            Some(ConfigSubject::Unqualified)
+        );
+        assert_eq!(
+            broadcast_row.resolved_for,
+            Some(obzenflow_core::config::ResolvedForDoc::Effect {
+                stage: stage.as_str().to_string(),
+                effect_type: effect_type.as_str().to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn attached_and_unattached_effects_remain_distinct_for_broadcast_and_exact_addresses() {
+        let key = crate::runtime_config::RATE_LIMITER_BURST_CAPACITY_KEY;
+        let stage = StageKey::from("payments");
+        let attached = EffectType::from("payments.authorize");
+        let unattached = EffectType::from("payments.refund");
+        let mut dsl = crate::runtime_config::DslCandidates::default();
+        dsl.declare_effect_consumption(key, stage.clone(), attached.clone());
+
+        let mut broadcast = CandidateSet::default();
+        broadcast
+            .admit(ScopedCandidate::unqualified(
+                key,
+                ConfigScope::stage(stage.clone()),
+                ConfigSource::File,
+                ConfigValue::F64(20.0),
+            ))
+            .unwrap();
+        let broadcast_effective = materialize_flow_config(
+            &ResolvedRuntimeConfig::new(broadcast),
+            effect_context(
+                &[("payments", &["payments.authorize", "payments.refund"])],
+                dsl.clone(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            broadcast_effective
+                .effect_value(key, &stage, &attached)
+                .and_then(|resolved| resolved.value.as_f64()),
+            Some(20.0)
+        );
+        assert!(broadcast_effective
+            .effect_value(key, &stage, &unattached)
+            .is_none());
+        assert_eq!(
+            broadcast_effective
+                .manifest_evidence()
+                .values
+                .into_iter()
+                .filter(|row| row.key_path == key)
+                .count(),
+            1
+        );
+
+        let exact_snapshot = |effect_type: EffectType| {
+            let mut candidates = CandidateSet::default();
+            candidates
+                .admit(ScopedCandidate {
+                    key_path: key.to_string(),
+                    address: ConfigAddress::effect(stage.clone(), effect_type),
+                    source: ConfigSource::File,
+                    value: ConfigValue::F64(25.0),
+                })
+                .unwrap();
+            ResolvedRuntimeConfig::new(candidates)
+        };
+        let exact_attached = materialize_flow_config(
+            &exact_snapshot(attached.clone()),
+            effect_context(
+                &[("payments", &["payments.authorize", "payments.refund"])],
+                dsl.clone(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            exact_attached
+                .effect_value(key, &stage, &attached)
+                .and_then(|resolved| resolved.value.as_f64()),
+            Some(25.0)
+        );
+
+        let error = materialize_flow_config(
+            &exact_snapshot(unattached.clone()),
+            effect_context(
+                &[("payments", &["payments.authorize", "payments.refund"])],
+                dsl,
+            ),
+        )
+        .expect_err("a declared but unattached exact subject must remain rejected");
+        assert!(matches!(
+            error,
+            ConfigResolveError::UnattachedEffectSubject { effect_type, .. }
+                if effect_type == unattached.as_str()
+        ));
+    }
+
+    #[test]
+    fn unknown_and_declared_but_unattached_effects_have_distinct_errors() {
+        let key = crate::runtime_config::RATE_LIMITER_EVENTS_PER_SECOND_KEY;
+        let exact_file = |effect_type: &str| {
+            let mut set = CandidateSet::default();
+            set.admit(ScopedCandidate {
+                key_path: key.to_string(),
+                address: ConfigAddress::effect("payments", effect_type),
+                source: ConfigSource::File,
+                value: ConfigValue::F64(5.0),
+            })
+            .unwrap();
+            ResolvedRuntimeConfig::new(set)
+        };
+
+        let unknown = materialize_flow_config(
+            &exact_file("payments.old_authorize"),
+            effect_context(&[("payments", &["payments.authorize"])], Default::default()),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            unknown,
+            ConfigResolveError::UnknownEffect { effect_type, known, .. }
+                if effect_type == "payments.old_authorize"
+                    && known == vec!["payments.authorize".to_string()]
+        ));
+
+        let unattached = materialize_flow_config(
+            &exact_file("payments.authorize"),
+            effect_context(&[("payments", &["payments.authorize"])], Default::default()),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            unattached,
+            ConfigResolveError::UnattachedEffectSubject { effect_type, .. }
+                if effect_type == "payments.authorize"
+        ));
     }
 }

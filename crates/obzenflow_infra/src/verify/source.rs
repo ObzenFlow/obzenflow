@@ -161,6 +161,7 @@ impl RunSource for DiskRunSource {
         Ok(Box::new(JournalRows {
             reader: BufReader::new(file),
             buf: Vec::new(),
+            pending: std::collections::VecDeque::new(),
             journal: journal_file.to_string(),
             path,
             line_no: 0,
@@ -179,6 +180,7 @@ impl RunSource for DiskRunSource {
 struct JournalRows {
     reader: BufReader<File>,
     buf: Vec<u8>,
+    pending: std::collections::VecDeque<ChainEvent>,
     journal: String,
     path: PathBuf,
     line_no: u64,
@@ -191,6 +193,9 @@ impl Iterator for JournalRows {
     type Item = Result<ChainEvent, VerifyError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some(event) = self.pending.pop_front() {
+            return Some(Ok(event));
+        }
         if self.done {
             return None;
         }
@@ -220,7 +225,11 @@ impl Iterator for JournalRows {
                 termination,
                 self.policy,
             ) {
-                Disposition::Yield(record) => return Some(Ok(record.event)),
+                Disposition::Yield(frame) => {
+                    self.pending
+                        .extend(frame.into_records().into_iter().map(|record| record.event));
+                    return self.pending.pop_front().map(Ok);
+                }
                 // A tolerated final torn tail ends the sealed history cleanly.
                 Disposition::EndOfCommittedRecords | Disposition::Skip => {
                     self.done = true;

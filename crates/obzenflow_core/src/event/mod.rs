@@ -26,7 +26,8 @@ pub mod utils;
 
 // Re-export main types at root level for convenience
 pub use chain_event::{
-    ChainEvent, ChainEventContent, ChainEventFactory, CircuitBreakerSummaryEventParams,
+    ChainEvent, ChainEventContent, ChainEventFactory, CircuitBreakerAttemptSettledEventParams,
+    CircuitBreakerRecoveryCompletedEventParams, CircuitBreakerSummaryEventParams,
     ConsumptionFinalEventParams, ConsumptionProgressEventParams, CorrelationContext,
     SourceContractEventParams,
 };

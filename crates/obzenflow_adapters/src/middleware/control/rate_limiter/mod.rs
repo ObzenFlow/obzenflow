@@ -60,11 +60,17 @@ mod factory;
 mod hook_adapters;
 mod telemetry;
 
-use admission_core::{acquire_admission, AdmissionDecision, RateLimitDelayEvent, RateLimiterCore};
+pub(in crate::middleware::control) use admission_core::RateLimitReservation;
+use admission_core::{
+    acquire_admission, acquire_reservation, AdmissionDecision, RateLimitDelayEvent, RateLimiterCore,
+};
 use config::ValidatedRateLimiterConfig;
 use telemetry::{delayed_event, rate_limiter_event};
 
-use crate::middleware::{EffectTypeKey, MiddlewareContext};
+use crate::middleware::control::provider::PendingControlRegistration;
+use crate::middleware::{
+    EffectTypeKey, MaterializationClaim, MiddlewareContext, MiddlewareMaterializationContext,
+};
 use obzenflow_core::event::payloads::observability_payload::RateLimiterEvent;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::control_plane::{RateLimiterMetrics, RateLimiterSnapshotter};
@@ -76,7 +82,10 @@ use std::sync::Arc;
 use tokio::time::Instant;
 use tracing::info;
 
-pub use factory::{rate_limit, rate_limit_with_burst, RateLimiterBuilder, RateLimiterFactory};
+pub use config::RateLimiterConfigError;
+pub use factory::{
+    rate_limit, rate_limit_with_burst, RateLimiter, RateLimiterBuilder, RateLimiterFactory,
+};
 
 /// Marker type for the rate-limiter override-key family. Kept in the module root
 /// so its type path (and the derived family label) is stable across the
@@ -106,19 +115,21 @@ impl RateLimiterMiddleware {
     fn new(
         stage_id: StageId,
         config: ValidatedRateLimiterConfig,
-        control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
-    ) -> Self {
-        Self::new_keyed(stage_id, config, control_middleware, None)
+        context: &MiddlewareMaterializationContext<'_>,
+        claimant: MaterializationClaim,
+    ) -> Result<Self, String> {
+        Self::new_keyed(stage_id, config, context, claimant, None)
     }
 
     /// Construct a limiter registered under a per-effect key (FLOWIP-120c):
     /// one policy instance per protected dependency.
-    fn new_keyed(
+    pub(in crate::middleware::control) fn new_keyed(
         stage_id: StageId,
         config: ValidatedRateLimiterConfig,
-        control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
+        context: &MiddlewareMaterializationContext<'_>,
+        claimant: MaterializationClaim,
         effect_type: Option<EffectTypeKey>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         // FLOWIP-120i: under strict replay the limiter is constructed because
         // topology and contracts must match the recorded run, but it consumes
         // no live tokens and moves no admission state. The setup log must not
@@ -139,9 +150,27 @@ impl RateLimiterMiddleware {
             }
         );
 
-        let core = Arc::new(RateLimiterCore::new(config));
+        let (middleware, snapshotter) = Self::build_unregistered(stage_id, config);
+        context
+            .stage_control_registration(
+                claimant,
+                PendingControlRegistration::RateLimiter {
+                    stage_id,
+                    effect_type,
+                    metrics_fn: snapshotter,
+                },
+            )
+            .map_err(|error| error.to_string())?;
 
-        let snapshotter: std::sync::Arc<RateLimiterSnapshotter> = Arc::new({
+        Ok(middleware)
+    }
+
+    fn build_unregistered(
+        stage_id: StageId,
+        config: ValidatedRateLimiterConfig,
+    ) -> (Self, Arc<RateLimiterSnapshotter>) {
+        let core = Arc::new(RateLimiterCore::new(config));
+        let snapshotter: Arc<RateLimiterSnapshotter> = Arc::new({
             let core = core.clone();
             move || {
                 let snap = core.snapshot();
@@ -155,19 +184,13 @@ impl RateLimiterMiddleware {
                 }
             }
         });
-        match effect_type {
-            Some(effect_type) => control_middleware.register_rate_limiter_for_effect(
-                stage_id,
-                effect_type,
-                snapshotter,
-            ),
-            None => control_middleware.register_rate_limiter(stage_id, snapshotter),
-        }
-
-        Self {
-            core,
-            writer_id: WriterId::from(stage_id),
-        }
+        (
+            Self {
+                core,
+                writer_id: WriterId::from(stage_id),
+            },
+            snapshotter,
+        )
     }
 
     fn limit_rate(&self) -> f64 {
@@ -227,6 +250,25 @@ impl RateLimiterMiddleware {
         .await;
     }
 
+    pub(in crate::middleware::control) async fn reserve_permit_async(
+        &self,
+        ctx: &mut MiddlewareContext,
+    ) -> RateLimitReservation {
+        let writer_id = self.writer_id;
+        acquire_reservation(&self.core, |info: RateLimitDelayEvent| {
+            ctx.write_control_event(delayed_event(writer_id, info));
+        })
+        .await
+    }
+
+    pub(in crate::middleware::control) fn observe_resilience_attempt(
+        &self,
+        ctx: &mut MiddlewareContext,
+    ) {
+        self.maybe_emit_activity_pulse(ctx);
+        self.maybe_emit_summary(ctx);
+    }
+
     /// FLOWIP-115d: fail-fast ingress admission. Non-blocking: it never waits for
     /// a token while a listener request is held. Charges one token per
     /// validation-accepted event on accept. Returns `None` when admitted (token
@@ -256,11 +298,7 @@ fn test_middleware(
     let validated =
         config::validated_rate_limiter_config(events_per_second, burst_capacity, cost_per_event)
             .expect("test middleware configuration should be valid");
-    RateLimiterMiddleware::new(
-        stage_id,
-        validated,
-        Arc::new(super::ControlMiddlewareAggregator::new()),
-    )
+    RateLimiterMiddleware::build_unregistered(stage_id, validated).0
 }
 
 #[cfg(test)]
@@ -268,14 +306,12 @@ mod tests {
     use super::admission_core::RateLimiterMode;
     use super::config::validated_rate_limiter_config;
     use super::*;
-    use crate::middleware::control::ControlMiddlewareAggregator;
     use std::time::Duration;
 
     use obzenflow_core::event::chain_event::ChainEventContent;
     use obzenflow_core::event::payloads::observability_payload::{
         MiddlewareLifecycle, ObservabilityPayload,
     };
-    use obzenflow_runtime::control_plane::ControlPlaneProvider;
 
     #[test]
     fn test_rate_limiter_default_effective_capacity_is_at_least_one_weighted_event() {
@@ -295,17 +331,12 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_snapshotter_does_not_hold_stats_while_waiting_on_bucket() {
-        let control = Arc::new(ControlMiddlewareAggregator::new());
         let stage_id = StageId::new();
-        let middleware = RateLimiterMiddleware::new(
+        let (middleware, snapshotter) = RateLimiterMiddleware::build_unregistered(
             stage_id,
             validated_rate_limiter_config(10.0, Some(10.0), 1.0)
                 .expect("snapshotter test configuration should be valid"),
-            control.clone(),
         );
-        let snapshotter = control
-            .rate_limiter_snapshotter(&stage_id)
-            .expect("rate limiter snapshotter should be registered");
         let bucket_guard = middleware.core.bucket_for_test().lock().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
 

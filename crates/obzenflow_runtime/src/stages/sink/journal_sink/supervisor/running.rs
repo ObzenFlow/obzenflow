@@ -606,12 +606,10 @@ async fn dispatch_data_event<
             runtime_execution: ctx.runtime_execution.clone(),
             effect_ports: ctx.effect_ports.clone(),
             effect_declarations: ctx.effect_declarations.clone(),
-            synthesized_outcomes: Vec::new(),
             output_contract: StageOutputContract::empty(),
             backpressure_writer: BackpressureWriter::disabled(),
             emit_enabled: false,
             effect_boundary: None,
-            boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     });
 

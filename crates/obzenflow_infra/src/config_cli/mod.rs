@@ -101,21 +101,30 @@ pub fn offline_docs(
 
 /// The registry schema as JSON (shared projection with `/api/config/schema`).
 pub fn schema_json() -> serde_json::Value {
-    serde_json::json!({ "knobs": obzenflow_runtime::runtime_config::schema_view() })
+    serde_json::json!({
+        "schema_version": obzenflow_core::config::EVIDENCE_SCHEMA_VERSION,
+        "knobs": obzenflow_runtime::runtime_config::schema_view()
+    })
 }
 
-/// A parsed live response: the value docs plus the stage route's edges
-/// object (empty for every other route).
+/// A parsed live response: value docs plus the stage route's edge and effect
+/// objects (empty for every other route).
 #[derive(Debug, Default)]
 pub struct LiveValues {
+    pub schema_version: u32,
     pub values: Vec<ResolvedValueDoc>,
     pub edges: BTreeMap<String, Vec<ResolvedValueDoc>>,
+    pub effects: BTreeMap<String, Vec<ResolvedValueDoc>>,
 }
 
 /// Parse a live `/api/config*` response body into the shared doc shapes.
 pub fn parse_live_values(body: &str) -> Result<LiveValues, String> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|err| format!("response is not JSON: {err}"))?;
+    let schema_version = parsed
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1) as u32;
     let values = parsed
         .get("values")
         .cloned()
@@ -130,13 +139,25 @@ pub fn parse_live_values(body: &str) -> Result<LiveValues, String> {
         .transpose()
         .map_err(|err| format!("response edges do not match the doc shape: {err}"))?
         .unwrap_or_default();
-    Ok(LiveValues { values, edges })
+    let effects = parsed
+        .get("effects")
+        .cloned()
+        .map(serde_json::from_value::<BTreeMap<String, Vec<ResolvedValueDoc>>>)
+        .transpose()
+        .map_err(|err| format!("response effects do not match the doc shape: {err}"))?
+        .unwrap_or_default();
+    Ok(LiveValues {
+        schema_version,
+        values,
+        edges,
+        effects,
+    })
 }
 
-/// Render docs as an aligned `KEY  VALUE  SOURCE  SCOPE` table.
+/// Render docs with provenance and an unambiguous protected-unit point.
 pub fn render_table(docs: &[ResolvedValueDoc]) -> String {
-    let headers = ["KEY", "VALUE", "SOURCE", "SCOPE"];
-    let rows: Vec<[String; 4]> = docs
+    let headers = ["KEY", "VALUE", "SOURCE", "SCOPE", "SUBJECT", "RESOLVED FOR"];
+    let rows: Vec<[String; 6]> = docs
         .iter()
         .map(|doc| {
             [
@@ -144,6 +165,20 @@ pub fn render_table(docs: &[ResolvedValueDoc]) -> String {
                 doc.value.to_string(),
                 doc.source.clone(),
                 doc.scope.clone(),
+                match doc.winning_subject() {
+                    obzenflow_core::config::ConfigSubject::Unqualified => "unqualified".to_string(),
+                    obzenflow_core::config::ConfigSubject::Effect { effect_type } => {
+                        format!("effect:{}", effect_type.as_str())
+                    }
+                },
+                doc.resolved_for
+                    .as_ref()
+                    .map(|point| match point {
+                        obzenflow_core::config::ResolvedForDoc::Effect { stage, effect_type } => {
+                            format!("effect:{stage}/{effect_type}")
+                        }
+                    })
+                    .unwrap_or_else(|| "-".to_string()),
             ]
         })
         .collect();
@@ -156,7 +191,7 @@ pub fn render_table(docs: &[ResolvedValueDoc]) -> String {
     }
 
     let mut out = String::new();
-    let render_row = |cells: [&str; 4]| -> String {
+    let render_row = |cells: [&str; 6]| -> String {
         let mut line = String::new();
         for (i, (cell, width)) in cells.iter().zip(widths.iter()).enumerate() {
             if i > 0 {
@@ -174,18 +209,26 @@ pub fn render_table(docs: &[ResolvedValueDoc]) -> String {
             row[1].as_str(),
             row[2].as_str(),
             row[3].as_str(),
+            row[4].as_str(),
+            row[5].as_str(),
         ]));
         out.push('\n');
     }
     out
 }
 
-/// Render a live response: the values table plus one table per edge group.
+/// Render a live response: the values table plus one table per edge and
+/// protected-effect group.
 pub fn render_live(live: &LiveValues) -> String {
     let mut out = render_table(&live.values);
     for (edge, docs) in &live.edges {
         out.push('\n');
         out.push_str(&format!("edge {edge}\n"));
+        out.push_str(&render_table(docs));
+    }
+    for (effect, docs) in &live.effects {
+        out.push('\n');
+        out.push_str(&format!("effect {effect}\n"));
         out.push_str(&render_table(docs));
     }
     out
@@ -275,6 +318,8 @@ mod tests {
             source: "default".to_string(),
             value: serde_json::json!(100),
             redacted: false,
+            resolved_for: None,
+            winner_subject: None,
         }];
         let table = render_table(&docs);
         let mut lines = table.lines();
@@ -282,7 +327,82 @@ mod tests {
         let row: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
         assert_eq!(
             row,
-            vec!["runtime.max_lineage_depth", "100", "default", "global"]
+            vec![
+                "runtime.max_lineage_depth",
+                "100",
+                "default",
+                "global",
+                "unqualified",
+                "-"
+            ]
         );
+    }
+
+    #[test]
+    fn version_two_effect_rows_parse_and_render_without_losing_identity() {
+        let body = serde_json::json!({
+            "schema_version": 2,
+            "stage": "authorize_payment",
+            "values": [],
+            "effects": {
+                "payments.authorize": [{
+                    "key_path": "effects.rate_limiter.events_per_second",
+                    "resolved_for": {
+                        "kind": "effect",
+                        "stage": "authorize_payment",
+                        "effect_type": "payments.authorize"
+                    },
+                    "scope": "stage:authorize_payment",
+                    "source": "file",
+                    "winner_subject": {
+                        "kind": "unqualified"
+                    },
+                    "value": 8.0
+                }],
+                "payments.refund": [{
+                    "key_path": "effects.rate_limiter.events_per_second",
+                    "resolved_for": {
+                        "kind": "effect",
+                        "stage": "authorize_payment",
+                        "effect_type": "payments.refund"
+                    },
+                    "scope": "stage:authorize_payment",
+                    "source": "file",
+                    "winner_subject": {
+                        "kind": "unqualified"
+                    },
+                    "value": 8.0
+                }]
+            }
+        })
+        .to_string();
+
+        let live = parse_live_values(&body).expect("schema-v2 response parses");
+        assert_eq!(live.schema_version, 2);
+        assert_eq!(live.effects.len(), 2);
+        let rendered = render_live(&live);
+        assert!(rendered.contains("effect payments.authorize"));
+        assert!(rendered.contains("effect payments.refund"));
+        assert!(rendered.contains("effect:authorize_payment/payments.authorize"));
+        assert!(rendered.contains("effect:authorize_payment/payments.refund"));
+    }
+
+    #[test]
+    fn version_one_live_rows_default_to_unqualified_subjects() {
+        let body = r#"{
+            "values": [{
+                "key_path": "runtime.max_lineage_depth",
+                "scope": "global",
+                "source": "file",
+                "value": 7
+            }]
+        }"#;
+        let live = parse_live_values(body).expect("version-one response parses");
+        assert_eq!(live.schema_version, 1);
+        assert_eq!(
+            live.values[0].winning_subject(),
+            obzenflow_core::config::ConfigSubject::Unqualified
+        );
+        assert!(render_live(&live).contains("unqualified"));
     }
 }

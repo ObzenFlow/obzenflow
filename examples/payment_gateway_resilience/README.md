@@ -18,16 +18,18 @@ ideas, in order.
    gateway inline, the stage returns `AuthorizePayment` as data. The runtime
    records one terminal result for the logical invocation and, on replay,
    returns that result without calling the gateway again. The normal tutorial
-   configuration makes one physical call; the optional retry proof below shows
-   a circuit breaker making bounded additional calls inside that invocation.
+   configuration makes one physical call; the optional acceptance profiles
+   below show `EffectResilience` making bounded additional calls inside that
+   invocation.
 3. **Fan-in is deterministic where effects demand it.** Two order channels
    merge at `validate_order`, and because the effectful `authorize_payment`
    sits below that fan-in, the runtime orders the merge deterministically
    (FLOWIP-095d). Live runs with different arrival timing and replays all
    consume orders in the same merged order.
 4. **Resilience is a second layer.** A circuit breaker watches the live gateway
-   and, once it looks unhealthy, short-circuits to a typed unavailable outcome
-   instead of hammering it.
+   and, once it looks unhealthy, rejects new calls with a replay-stable
+   framework error instead of hammering it. The handler maps that terminal
+   failure to the domain's authorization-unavailable fact.
 
 The gateway here is simulated so the behaviour is deterministic, but the shape is
 the real one: a real implementation would issue an HTTP request inside the
@@ -294,27 +296,44 @@ On replay, none of this resilience machinery runs: replay performs no live
 effect, so the breaker and the rate limiter stay quiet and only the recorded
 outcomes drive the result.
 
-### Circuit-breaker retry proof
+### Resilience developer profiles
 
-The same binary contains a small, opt-in control/treatment fixture. Each
-profile admits one valid order. Its gateway returns typed timeouts on the first
-two physical calls and succeeds on the third.
+The same binary contains four small opt-in profiles for quick local checks.
+They are supplementary and do not discharge FLOWIP-115n release acceptance:
+control, treatment, and open rejection intentionally use an accelerated
+1,000-call-per-second limiter. Control and treatment
+each admit one valid order against a gateway that returns typed timeouts on the
+first two physical calls and succeeds on the third. Healthy proves real
+one-call-per-second pacing for five fast calls. Open rejection proves that five
+failures open the breaker and the sixth invocation reaches neither the limiter
+nor the gateway.
 
 ```sh
 # Retry disabled: one physical call, terminal authorization-unavailable fact.
 PAYMENT_DEMO_RETRY_PROOF=control \
   cargo run -p obzenflow --example payment_gateway_resilience
 
-# Retry enabled on the circuit breaker: three physical calls, terminal
+# Retry enabled in EffectResilience: three physical calls, terminal
 # authorized fact, two retry_scheduled rows, and one retry_succeeded row.
 PAYMENT_DEMO_RETRY_PROOF=treatment \
+  cargo run -p obzenflow --example payment_gateway_resilience
+
+# Five fast successful calls at one per second: limiter delay is non-zero and
+# circuit-breaker slow_total remains zero.
+PAYMENT_DEMO_RETRY_PROOF=healthy \
+  cargo run -p obzenflow --example payment_gateway_resilience
+
+# Five physical failures open the circuit; the sixth logical invocation is a
+# recorded circuit_open rejection with no physical-attempt row or permit.
+PAYMENT_DEMO_RETRY_PROOF=open-rejection \
   cargo run -p obzenflow --example payment_gateway_resilience
 ```
 
 Export either printed run directory with `obzenflow journal export-jsonl` to
 inspect the durable proof. Intermediate timeouts are not terminal effect
-records. The treatment's effect-rate-limiter snapshot reports three
-admissions, while its breaker reports one logical request and one success.
+records. The treatment's effect-rate-limiter snapshot reports three committed
+permits, while its breaker reports three admitted physical requests, two
+failures, and one success.
 
 Strict replay deliberately installs a gateway that panics if live I/O is
 attempted, so this command is also a zero-call assertion:
@@ -326,9 +345,27 @@ PAYMENT_DEMO_RETRY_PROOF=treatment \
   --replay-from "$RUN" --verify
 ```
 
-`PAYMENT_DEMO_RETRY_PROOF` is absent during the normal tutorial. Its only valid
-values are `control` and `treatment`; any other value fails before flow
-construction.
+`PAYMENT_DEMO_RETRY_PROOF` is absent during the normal tutorial. Its valid
+values are `control`, `treatment`, `healthy`, and `open-rejection`; any other
+value fails before flow construction.
+
+Release acceptance instead selects one of two policies directly in the payment
+example support, without trusting an environment selector:
+
+- `BreakerOnly`: the canonical breaker and one-call-per-second limiter, with no
+  retry section.
+- `BreakerRecovery`: the same breaker and limiter, plus fixed 250 ms retry,
+  three total attempts, and a 30-second attempt-start window.
+
+The canonical journal gate runs healthy pacing, failure-failure-success,
+opening and rejection, real five-second half-open recovery, and strict replay
+through those locked policies. Every witness reads schema-v2 effective
+configuration from its run manifest and compares the complete resolved
+limiter, breaker, and retry map with the selected policy. Run it with:
+
+```sh
+cargo test -p obzenflow --test payment_gateway_retry_journal_test
+```
 
 ## What This Example Deliberately Leaves Out
 

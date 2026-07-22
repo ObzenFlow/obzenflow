@@ -153,6 +153,14 @@ pub enum CircuitBreakerEvent {
     HalfOpen {
         test_request_count: u32,
     },
+    AttemptSettled {
+        cursor: EffectCursor,
+        attempt: u32,
+        health_classification: CircuitBreakerHealthClassification,
+        slow: bool,
+        dependency_elapsed_ms: u64,
+        admission_wait_ms: u64,
+    },
     RetryScheduled {
         cursor: EffectCursor,
         next_attempt: u32,
@@ -171,6 +179,12 @@ pub enum CircuitBreakerEvent {
     RetryStoppedNonRetryable {
         cursor: EffectCursor,
         total_attempts: u32,
+    },
+    RecoveryCompleted {
+        cursor: EffectCursor,
+        total_attempts: u32,
+        backoff_elapsed_ms: u64,
+        recovery_elapsed_ms: u64,
     },
     Summary {
         window_duration_s: u64,
@@ -206,7 +220,8 @@ pub enum CircuitBreakerHealthClassification {
     TransientFailure,
     PermanentFailure,
     RateLimited,
-    PartialSuccess,
+    Ignored,
+    NoObservation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

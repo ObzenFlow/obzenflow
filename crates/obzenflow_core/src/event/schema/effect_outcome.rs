@@ -19,7 +19,7 @@ use super::typed_fact_set::TypedFactSet;
 ///
 /// This is a supertrait alias over [`TypedFactSet`] and [`StageFactSet`]: every
 /// fact set is an outcome carrier, its conversion methods (`fact_types`,
-/// `into_facts`, `try_from_facts`, `synthesized_fact_types`) live on
+/// `into_facts`, `try_from_facts`) live on
 /// [`TypedFactSet`], and its declared member contract lives on
 /// [`StageFactSet`].
 /// The `Effect::Outcome` bound and user-facing docs name this trait;
@@ -243,13 +243,5 @@ mod tests {
             HatchOutcome::try_from_facts(&facts).expect("variant reconstructs"),
             carrier
         );
-    }
-
-    #[test]
-    fn effect_outcome_carriers_report_empty_synthesized_fact_types() {
-        // Load-bearing for guarded coordination (FLOWIP-120h): plain carriers
-        // must keep the default empty synthesized set.
-        assert!(DecisionOutcome::synthesized_fact_types().is_empty());
-        assert!(DecisionWithAudit::synthesized_fact_types().is_empty());
     }
 }
