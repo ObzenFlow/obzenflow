@@ -403,15 +403,20 @@ impl CircuitBreakerMiddleware {
                         }
 
                         if (observed as u32) >= minimum_calls.get() {
-                            let denom = (observed as f32).max(1.0);
-                            let failure_rate = failures as f32 / denom;
-                            let slow_rate = slow_calls as f32 / denom;
+                            // The count window is bounded by `u32`, so every
+                            // integer in these ratios is represented exactly as
+                            // `f64`. `minimum_calls` is non-zero, making the
+                            // denominator positive here.
+                            let denom = observed as f64;
+                            let failure_rate = failures as f64 / denom;
+                            let slow_rate = slow_calls as f64 / denom;
 
-                            let open_on_failures = failure_rate >= *failure_rate_threshold;
-                            let open_on_slow = match slow_call_rate_threshold {
-                                Some(threshold) if *threshold > 0.0 => slow_rate >= *threshold,
-                                _ => false,
-                            };
+                            let open_on_failures = failure_rate_threshold
+                                .as_ref()
+                                .is_some_and(|threshold| failure_rate >= threshold.get());
+                            let open_on_slow = slow_call_rate_threshold
+                                .as_ref()
+                                .is_some_and(|threshold| slow_rate >= threshold.get());
 
                             if open_on_failures || open_on_slow {
                                 let event = self.transition_to_inner(CircuitState::Open).1;
@@ -1032,6 +1037,7 @@ impl CircuitBreakerMiddleware {
 
 #[cfg(test)]
 mod tests {
+    use super::config::RateThreshold;
     use super::*;
     use crate::middleware::{Middleware, MiddlewareAction};
     use obzenflow_core::event::ChainEventFactory;
@@ -1061,12 +1067,60 @@ mod tests {
         let mut breaker = CircuitBreakerMiddleware::new(5);
         breaker.failure_mode = CircuitBreakerFailureMode::RateBased {
             window: FailureWindow::Count { size: 5 },
-            failure_rate_threshold: 2.0,
-            slow_call_rate_threshold: Some(1.0),
+            failure_rate_threshold: None,
+            slow_call_rate_threshold: Some(
+                RateThreshold::checked(1.0, "slow_call_rate_threshold").unwrap(),
+            ),
             slow_call_duration_threshold: Some(Duration::from_millis(10)),
             minimum_calls: NonZeroU32::new(1).unwrap(),
         };
         breaker.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(5))));
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        ctx.insert::<crate::middleware::context_keys::EffectCallDurationNanos>(
+            Duration::from_millis(10).as_nanos() as u64,
+        );
+
+        breaker.settle_classified_call(&FailureClassification::Success, &mut ctx);
+
+        assert_eq!(breaker.slow_total.load(Ordering::Relaxed), 1);
+        assert_eq!(breaker.current_state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn tiny_failure_rate_threshold_does_not_open_on_success_then_opens_on_failure() {
+        let mut breaker = CircuitBreakerMiddleware::new(2);
+        breaker.failure_mode = CircuitBreakerFailureMode::RateBased {
+            window: FailureWindow::Count { size: 2 },
+            failure_rate_threshold: Some(
+                RateThreshold::checked(f64::MIN_POSITIVE, "failure_rate_threshold").unwrap(),
+            ),
+            slow_call_rate_threshold: None,
+            slow_call_duration_threshold: None,
+            minimum_calls: NonZeroU32::new(1).unwrap(),
+        };
+        breaker.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(2))));
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+
+        breaker.settle_classified_call(&FailureClassification::Success, &mut ctx);
+        assert_eq!(breaker.current_state(), CircuitState::Closed);
+
+        breaker.settle_classified_call(&FailureClassification::TransientFailure, &mut ctx);
+        assert_eq!(breaker.current_state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn tiny_slow_call_rate_threshold_remains_an_active_trigger() {
+        let mut breaker = CircuitBreakerMiddleware::new(1);
+        breaker.failure_mode = CircuitBreakerFailureMode::RateBased {
+            window: FailureWindow::Count { size: 1 },
+            failure_rate_threshold: None,
+            slow_call_rate_threshold: Some(
+                RateThreshold::checked(f64::MIN_POSITIVE, "slow_call_rate_threshold").unwrap(),
+            ),
+            slow_call_duration_threshold: Some(Duration::from_millis(10)),
+            minimum_calls: NonZeroU32::new(1).unwrap(),
+        };
+        breaker.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(1))));
         let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
         ctx.insert::<crate::middleware::context_keys::EffectCallDurationNanos>(
             Duration::from_millis(10).as_nanos() as u64,

@@ -164,10 +164,10 @@ impl EffectResilienceFactory {
                     RESILIENCE_BREAKER_MINIMUM_CALLS_KEY,
                     minimum_calls.get() as u64,
                 ));
-                if *failure_rate_threshold <= 1.0 {
+                if let Some(threshold) = failure_rate_threshold {
                     defaults.push(default_f64(
                         RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
-                        *failure_rate_threshold as f64,
+                        threshold.get(),
                     ));
                 }
                 if let Some(duration) = slow_call_duration_threshold {
@@ -179,7 +179,7 @@ impl EffectResilienceFactory {
                 if let Some(threshold) = slow_call_rate_threshold {
                     defaults.push(default_f64(
                         RESILIENCE_BREAKER_SLOW_CALL_RATE_THRESHOLD_KEY,
-                        *threshold as f64,
+                        threshold.get(),
                     ));
                 }
             }

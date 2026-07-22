@@ -42,6 +42,11 @@ pub fn open_rejection_proof_orders() -> Vec<CustomerOrderPlaced> {
     proof_orders("open-proof", 6)
 }
 
+#[cfg(test)]
+pub fn half_open_recovery_proof_orders() -> Vec<CustomerOrderPlaced> {
+    proof_orders("half-open-proof", 7)
+}
+
 fn proof_orders(prefix: &str, count: usize) -> Vec<CustomerOrderPlaced> {
     (0..count)
         .map(|index| CustomerOrderPlaced {

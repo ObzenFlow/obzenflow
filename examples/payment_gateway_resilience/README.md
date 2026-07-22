@@ -296,9 +296,12 @@ On replay, none of this resilience machinery runs: replay performs no live
 effect, so the breaker and the rate limiter stay quiet and only the recorded
 outcomes drive the result.
 
-### Resilience acceptance profiles
+### Resilience developer profiles
 
-The same binary contains four small opt-in profiles. Control and treatment
+The same binary contains four small opt-in profiles for quick local checks.
+They are supplementary and do not discharge FLOWIP-115n release acceptance:
+control, treatment, and open rejection intentionally use an accelerated
+1,000-call-per-second limiter. Control and treatment
 each admit one valid order against a gateway that returns typed timeouts on the
 first two physical calls and succeeds on the third. Healthy proves real
 one-call-per-second pacing for five fast calls. Open rejection proves that five
@@ -345,6 +348,24 @@ PAYMENT_DEMO_RETRY_PROOF=treatment \
 `PAYMENT_DEMO_RETRY_PROOF` is absent during the normal tutorial. Its valid
 values are `control`, `treatment`, `healthy`, and `open-rejection`; any other
 value fails before flow construction.
+
+Release acceptance instead selects one of two policies directly in the payment
+example support, without trusting an environment selector:
+
+- `BreakerOnly`: the canonical breaker and one-call-per-second limiter, with no
+  retry section.
+- `BreakerRecovery`: the same breaker and limiter, plus fixed 250 ms retry,
+  three total attempts, and a 30-second attempt-start window.
+
+The canonical journal gate runs healthy pacing, failure-failure-success,
+opening and rejection, real five-second half-open recovery, and strict replay
+through those locked policies. Every witness reads schema-v2 effective
+configuration from its run manifest and compares the complete resolved
+limiter, breaker, and retry map with the selected policy. Run it with:
+
+```sh
+cargo test -p obzenflow --test payment_gateway_retry_journal_test
+```
 
 ## What This Example Deliberately Leaves Out
 

@@ -356,6 +356,72 @@ async fn file_configuration_can_switch_consecutive_breaker_to_rate_based() {
 }
 
 #[tokio::test]
+async fn exact_file_configuration_preserves_a_tiny_positive_failure_rate() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(1)
+            .build()
+            .expect("consecutive builder"),
+    )
+    .build()
+    .expect("switchable aggregate");
+    let snapshot = file_effect_snapshot(&[
+        (
+            RESILIENCE_BREAKER_MODE_KEY,
+            ConfigValue::Text("rate_based".to_string()),
+        ),
+        (RESILIENCE_BREAKER_COUNT_WINDOW_KEY, ConfigValue::U64(2)),
+        (RESILIENCE_BREAKER_MINIMUM_CALLS_KEY, ConfigValue::U64(1)),
+        (
+            RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY,
+            ConfigValue::F64(f64::MIN_POSITIVE),
+        ),
+    ]);
+    let (attachment, _, _) = materialized_resilience_with_snapshot(factory, &snapshot);
+    let boundary = boundary_with_chain(vec![attachment]);
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let success = boundary
+        .around_repeatable_effect(
+            &identity_at(107),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| Ok(Vec::new())),
+        )
+        .await;
+    assert!(matches!(
+        success.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+
+    let failure = boundary
+        .around_repeatable_effect(
+            &identity_at(108),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| {
+                Err(EffectError::Timeout("tiny threshold failure".to_string()))
+            }),
+        )
+        .await;
+    assert!(matches!(
+        failure.outcome,
+        EffectBoundaryOutcome::Executed(Err(EffectError::Timeout(_)))
+    ));
+
+    let rejected = boundary
+        .around_repeatable_effect(
+            &identity_at(109),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| Ok(Vec::new())),
+        )
+        .await;
+    assert!(matches!(
+        rejected.outcome,
+        EffectBoundaryOutcome::Aborted(_)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn file_configuration_can_switch_rate_based_breaker_to_consecutive() {
     let factory = EffectResilience::with_breaker(
         CircuitBreaker::builder()

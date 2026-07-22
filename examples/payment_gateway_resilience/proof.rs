@@ -2,15 +2,17 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Circuit-breaker acceptance profiles.
+//! Circuit-breaker proof support.
 //!
-//! Control and treatment compare one scripted order against a gateway that
-//! fails twice and then succeeds. Healthy proves ordinary one-call-per-second
-//! pacing and zero slow classifications. Open rejection proves five physical
-//! failures open the breaker and the sixth logical effect fails fast. Everything
-//! profile-shaped lives here so `flow.rs` stays the tutorial; both entry points
+//! Release witnesses select one of two configuration-faithful policies directly:
+//! breaker-only or canonical breaker recovery. Both retain the tutorial's
+//! one-call-per-second limiter. The opt-in environment profiles remain useful
+//! accelerated developer checks, but they are not release evidence. Everything
+//! proof-shaped lives here so `flow.rs` stays the tutorial; all entry points
 //! share `flow::assemble_flow`.
 
+#[cfg(test)]
+use super::domain::CustomerOrderPlaced;
 use super::fixtures;
 use super::flow;
 use super::gateway::{GatewayRetryProof, GatewayTransform};
@@ -26,8 +28,30 @@ pub enum RetryProofProfile {
     OpenRejection,
 }
 
+/// Configuration-faithful policies admitted as FLOWIP-115n release evidence.
+///
+/// Scenario inputs and dependency outcomes may vary, but these policy values
+/// may not. In particular, both policies retain the shipped one-call-per-second
+/// limiter; [`ReleasePolicy::BreakerRecovery`] adds the canonical retry section.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleasePolicy {
+    BreakerOnly,
+    BreakerRecovery,
+}
+
+#[cfg(test)]
+const RELEASE_GATEWAY_CALLS_PER_SECOND: f64 = 1.0;
+
+#[cfg(test)]
+fn canonical_recovery() -> Retry {
+    Retry::fixed(Duration::from_millis(250))
+        .max_attempts(3)
+        .attempt_start_window(Duration::from_secs(30))
+}
+
 fn retry_proof_profile() -> Option<RetryProofProfile> {
-    let profile = std::env::var("PAYMENT_DEMO_RETRY_PROOF"); // allow-replay-ambient: build-time acceptance-test profile only
+    let profile = std::env::var("PAYMENT_DEMO_RETRY_PROOF"); // allow-replay-ambient: build-time developer-proof profile only
     match profile {
         Err(std::env::VarError::NotPresent) => None,
         Err(error) => panic!("PAYMENT_DEMO_RETRY_PROOF could not be read: {error}"),
@@ -66,8 +90,8 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
     }
 }
 
-/// Build the proof flow for one profile. The acceptance test calls this
-/// directly with its own journal root and call-counting proof handle.
+/// Build one supplementary developer profile. The control regression calls
+/// this directly with its own journal root and call-counting proof handle.
 pub fn build_flow_for_profile(
     profile: RetryProofProfile,
     retry_proof: Option<Arc<GatewayRetryProof>>,
@@ -108,4 +132,55 @@ pub fn build_flow_for_profile(
         calls_per_second,
         journal_root,
     )
+}
+
+/// Build a configuration-faithful release witness.
+///
+/// The caller supplies only the scenario's orders and deterministic dependency
+/// outcomes. The policy-sensitive limiter, breaker, and retry values stay locked
+/// here and are asserted again from the resulting run manifest by the release
+/// journal gate.
+#[cfg(test)]
+pub fn build_flow_for_release_policy(
+    policy: ReleasePolicy,
+    orders: Vec<CustomerOrderPlaced>,
+    retry_proof: Arc<GatewayRetryProof>,
+    journal_root: std::path::PathBuf,
+) -> obzenflow_dsl::FlowDefinition {
+    let gateway_retry = match policy {
+        ReleasePolicy::BreakerOnly => None,
+        ReleasePolicy::BreakerRecovery => Some(canonical_recovery()),
+    };
+    flow::assemble_flow(
+        orders,
+        Vec::new(),
+        GatewayTransform::with_retry_proof(retry_proof),
+        gateway_retry,
+        RELEASE_GATEWAY_CALLS_PER_SECOND,
+        journal_root,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_release_policies_build_from_locked_example_support() {
+        let _breaker_only = build_flow_for_release_policy(
+            ReleasePolicy::BreakerOnly,
+            fixtures::half_open_recovery_proof_orders(),
+            Arc::new(
+                GatewayRetryProof::fail_first(5, false)
+                    .pause_before_invocation(7, Duration::from_millis(5_250)),
+            ),
+            std::path::PathBuf::from("target/payment-release-breaker-only"),
+        );
+        let _breaker_recovery = build_flow_for_release_policy(
+            ReleasePolicy::BreakerRecovery,
+            vec![fixtures::retry_proof_order()],
+            Arc::new(GatewayRetryProof::new(false)),
+            std::path::PathBuf::from("target/payment-release-breaker-recovery"),
+        );
+    }
 }

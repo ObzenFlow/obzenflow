@@ -4,7 +4,7 @@
 
 use super::config::{
     CircuitBreakerConfigError, CircuitBreakerFailureMode, EffectCircuitBreakerConfig,
-    HalfOpenPolicy,
+    HalfOpenPolicy, RateThreshold,
 };
 use super::hook_adapters::{
     CircuitBreakerCompletionGate, CircuitBreakerSinkPolicy, CircuitBreakerSourcePolicy,
@@ -210,13 +210,6 @@ impl CheckedCircuitBreakerBuilder {
             NonZeroU32::new(value).ok_or(CircuitBreakerConfigError::Zero { field })
         }
 
-        fn rate(value: f64, field: &'static str) -> Result<f32, CircuitBreakerConfigError> {
-            if !(value.is_finite() && 0.0 < value && value <= 1.0) {
-                return Err(CircuitBreakerConfigError::InvalidRate { field, value });
-            }
-            Ok(value as f32)
-        }
-
         if self.open_for.is_zero() {
             return Err(CircuitBreakerConfigError::Zero { field: "open_for" });
         }
@@ -254,7 +247,10 @@ impl CheckedCircuitBreakerBuilder {
                                 field: "slow_call_duration",
                             });
                         }
-                        Some((duration, rate(threshold, "slow_call_rate_threshold")?))
+                        Some((
+                            duration,
+                            RateThreshold::checked(threshold, "slow_call_rate_threshold")?,
+                        ))
                     }
                     _ => return Err(CircuitBreakerConfigError::IncompleteSlowCallTrigger),
                 };
@@ -265,13 +261,10 @@ impl CheckedCircuitBreakerBuilder {
                     window: FailureWindow::Count {
                         size: count_window.get(),
                     },
-                    // A value outside the admitted domain disables the failure
-                    // trigger for a slow-call-only rate breaker.
                     failure_rate_threshold: self
                         .failure_rate_threshold
-                        .map(|value| rate(value, "failure_rate_threshold"))
-                        .transpose()?
-                        .unwrap_or(2.0),
+                        .map(|value| RateThreshold::checked(value, "failure_rate_threshold"))
+                        .transpose()?,
                     slow_call_rate_threshold: slow_pair.map(|(_, threshold)| threshold),
                     slow_call_duration_threshold: slow_pair.map(|(duration, _)| duration),
                     minimum_calls,
@@ -551,8 +544,8 @@ impl MiddlewareFactory for CircuitBreaker {
                 "kind": "rate_based",
                 "count_window": size,
                 "minimum_calls": minimum_calls.get(),
-                "failure_rate_threshold": failure_rate_threshold,
-                "slow_call_rate_threshold": slow_call_rate_threshold,
+                "failure_rate_threshold": failure_rate_threshold.as_ref().map(RateThreshold::get),
+                "slow_call_rate_threshold": slow_call_rate_threshold.as_ref().map(RateThreshold::get),
                 "slow_call_duration_ms": slow_call_duration_threshold.map(|d| d.as_millis() as u64),
             }),
         };
@@ -761,6 +754,46 @@ mod tests {
                 field: "slow_call_duration"
             })
         ));
+    }
+
+    #[test]
+    fn checked_builder_preserves_every_admitted_positive_rate() {
+        for threshold in [f64::MIN_POSITIVE, f64::from_bits(1)] {
+            let breaker = CircuitBreaker::builder()
+                .count_window(5)
+                .minimum_calls(1)
+                .failure_rate_threshold(threshold)
+                .slow_call_duration(Duration::from_millis(1))
+                .slow_call_rate_threshold(threshold)
+                .build()
+                .expect("every finite positive threshold in the public range is valid");
+            let CircuitBreakerFailureMode::RateBased {
+                failure_rate_threshold: Some(failure),
+                slow_call_rate_threshold: Some(slow),
+                ..
+            } = &breaker.config.failure_mode
+            else {
+                panic!("rate-based builder should retain both configured triggers");
+            };
+
+            assert_eq!(failure.get(), threshold);
+            assert_eq!(slow.get(), threshold);
+        }
+    }
+
+    #[test]
+    fn slow_only_snapshot_has_no_failure_threshold_sentinel() {
+        let breaker = CircuitBreaker::builder()
+            .count_window(5)
+            .minimum_calls(1)
+            .slow_call_duration(Duration::from_millis(10))
+            .slow_call_rate_threshold(0.5)
+            .build()
+            .expect("slow-only rate breaker should be valid");
+
+        let snapshot = breaker.config_snapshot().expect("breaker config snapshot");
+        assert!(snapshot["mode"]["failure_rate_threshold"].is_null());
+        assert_eq!(snapshot["mode"]["slow_call_rate_threshold"], json!(0.5));
     }
 
     #[test]

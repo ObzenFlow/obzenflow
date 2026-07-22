@@ -8,6 +8,31 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 use thiserror::Error;
 
+/// A validated circuit-breaker rate threshold in the public `(0.0, 1.0]`
+/// ratio domain.
+///
+/// Keeping the authored `f64` representation prevents a valid positive value
+/// from narrowing to zero before the breaker evaluates it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in crate::middleware::control) struct RateThreshold(f64);
+
+impl RateThreshold {
+    pub(in crate::middleware::control) fn checked(
+        value: f64,
+        field: &'static str,
+    ) -> Result<Self, CircuitBreakerConfigError> {
+        if value.is_finite() && 0.0 < value && value <= 1.0 {
+            Ok(Self(value))
+        } else {
+            Err(CircuitBreakerConfigError::InvalidRate { field, value })
+        }
+    }
+
+    pub(in crate::middleware::control) fn get(&self) -> f64 {
+        self.0
+    }
+}
+
 /// How the circuit breaker decides when to open while in the Closed state.
 #[derive(Debug, Clone)]
 pub(in crate::middleware::control) enum CircuitBreakerFailureMode {
@@ -16,8 +41,8 @@ pub(in crate::middleware::control) enum CircuitBreakerFailureMode {
     /// Rate-based mode over a sliding window of recent calls.
     RateBased {
         window: FailureWindow,
-        failure_rate_threshold: f32,
-        slow_call_rate_threshold: Option<f32>,
+        failure_rate_threshold: Option<RateThreshold>,
+        slow_call_rate_threshold: Option<RateThreshold>,
         slow_call_duration_threshold: Option<Duration>,
         minimum_calls: NonZeroU32,
     },
