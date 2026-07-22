@@ -7,10 +7,14 @@ pub mod support;
 
 use support::{gateway, proof};
 
+use obzenflow_core::event::payloads::effect_payload::EFFECT_RECORD_EVENT_TYPE;
 use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
+    CircuitBreakerEvent, CircuitBreakerHealthClassification, MiddlewareLifecycle,
+    ObservabilityPayload,
 };
-use obzenflow_core::event::{ChainEvent, ChainEventContent};
+use obzenflow_core::event::{
+    ChainEvent, ChainEventContent, EffectFailureCause, EffectOutcomePayload, EffectRecord,
+};
 use obzenflow_runtime::effects::EffectCursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,10 +37,6 @@ fn exported_run(run: &Path, output: &Path) -> String {
     obzenflow_infra::journal::disk::inspect::export_jsonl(run, Some(output))
         .expect("proof journal should export");
     std::fs::read_to_string(output).expect("exported proof journal should be readable")
-}
-
-fn occurrences(haystack: &str, needle: &str) -> usize {
-    haystack.match_indices(needle).count()
 }
 
 fn exported_events(jsonl: &str) -> impl Iterator<Item = serde_json::Value> + '_ {
@@ -108,6 +108,145 @@ fn payment_terminal_group_counters(jsonl: &str) -> (u64, u64) {
 
 fn exported_chain_events(jsonl: &str) -> impl Iterator<Item = ChainEvent> + '_ {
     exported_events(jsonl).filter_map(|row| serde_json::from_value(row["event"].clone()).ok())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttemptSettlement {
+    cursor: EffectCursor,
+    attempt: u32,
+    health: CircuitBreakerHealthClassification,
+}
+
+fn attempt_settlements(jsonl: &str) -> Vec<AttemptSettlement> {
+    exported_chain_events(jsonl)
+        .filter_map(|event| match event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::AttemptSettled {
+                    cursor,
+                    attempt,
+                    health_classification,
+                    ..
+                }),
+            )) => Some(AttemptSettlement {
+                cursor,
+                attempt,
+                health: health_classification,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RetrySchedule {
+    cursor: EffectCursor,
+    next_attempt: u32,
+}
+
+fn retry_schedules(jsonl: &str) -> Vec<RetrySchedule> {
+    exported_chain_events(jsonl)
+        .filter_map(|event| match event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RetryScheduled {
+                    cursor,
+                    next_attempt,
+                    ..
+                }),
+            )) => Some(RetrySchedule {
+                cursor,
+                next_attempt,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RetrySuccess {
+    cursor: EffectCursor,
+    total_attempts: u32,
+    terminal_classification: CircuitBreakerHealthClassification,
+}
+
+fn retry_successes(jsonl: &str) -> Vec<RetrySuccess> {
+    exported_chain_events(jsonl)
+        .filter_map(|event| match event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RetrySucceeded {
+                    cursor,
+                    total_attempts,
+                    terminal_classification,
+                }),
+            )) => Some(RetrySuccess {
+                cursor,
+                total_attempts,
+                terminal_classification,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn retry_terminal_failure_count(jsonl: &str) -> usize {
+    exported_chain_events(jsonl)
+        .filter(|event| {
+            matches!(
+                event.content,
+                ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    MiddlewareLifecycle::CircuitBreaker(
+                        CircuitBreakerEvent::RetryExhausted { .. }
+                            | CircuitBreakerEvent::RetryStoppedNonRetryable { .. }
+                    )
+                ))
+            )
+        })
+        .count()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TerminalFailure {
+    cursor: EffectCursor,
+    cause: Option<EffectFailureCause>,
+}
+
+fn payment_terminal_failures(jsonl: &str) -> Vec<TerminalFailure> {
+    let mut failures: Vec<_> = exported_chain_events(jsonl)
+        .filter_map(|event| match event.content {
+            ChainEventContent::Data {
+                event_type,
+                payload,
+            } if event_type == EFFECT_RECORD_EVENT_TYPE => {
+                let record: EffectRecord = serde_json::from_value(payload)
+                    .expect("framework effect-record payload should decode");
+                assert_eq!(
+                    event
+                        .effect_provenance
+                        .as_ref()
+                        .map(|provenance| &provenance.cursor),
+                    Some(&record.cursor),
+                    "effect record and provenance must identify the same cursor"
+                );
+                if record.descriptor.effect_type.as_str() != "payment.authorize" {
+                    return None;
+                }
+                match record.outcome {
+                    EffectOutcomePayload::Failed { cause, .. } => Some(TerminalFailure {
+                        cursor: record.cursor,
+                        cause,
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect();
+    failures.sort_by_key(|failure| {
+        (
+            failure.cursor.input_seq.get(),
+            failure.cursor.effect_ordinal.get(),
+        )
+    });
+    failures
 }
 
 #[derive(Debug)]
@@ -299,7 +438,11 @@ fn payment_gateway_retry_journal_test() {
         healthy_limiter.delay_seconds > 0.0,
         "healthy profile must prove non-zero limiter delay: {healthy_limiter:?}"
     );
-    assert_eq!(occurrences(&healthy, "\"action\":\"attempt_settled\""), 5);
+    let healthy_attempts = attempt_settlements(&healthy);
+    assert_eq!(healthy_attempts.len(), 5);
+    assert!(healthy_attempts.iter().all(|attempt| {
+        attempt.attempt == 1 && attempt.health == CircuitBreakerHealthClassification::Success
+    }));
     let healthy_completions = assert_one_recovery_completion_per_payment_cursor(&healthy);
     assert_eq!(healthy_completions.len(), 5);
     assert!(healthy_completions.iter().all(|completion| {
@@ -344,10 +487,16 @@ fn payment_gateway_retry_journal_test() {
     );
     assert_eq!(last_payment_limiter_counts(&control).events, 1);
     assert_eq!(last_payment_limiter_counts(&control).tokens, 1.0);
-    assert_eq!(occurrences(&control, "\"action\":\"attempt_settled\""), 1);
-    assert!(!control.contains("\"action\":\"retry_scheduled\""));
-    assert!(!control.contains("\"action\":\"retry_succeeded\""));
-    assert!(!control.contains("\"action\":\"retry_exhausted\""));
+    let control_attempts = attempt_settlements(&control);
+    assert_eq!(control_attempts.len(), 1);
+    assert_eq!(control_attempts[0].attempt, 1);
+    assert_eq!(
+        control_attempts[0].health,
+        CircuitBreakerHealthClassification::TransientFailure
+    );
+    assert!(retry_schedules(&control).is_empty());
+    assert!(retry_successes(&control).is_empty());
+    assert_eq!(retry_terminal_failure_count(&control), 0);
     let control_completions = assert_one_recovery_completion_per_payment_cursor(&control);
     assert_eq!(control_completions.len(), 1);
     assert_eq!(control_completions[0].total_attempts, 1);
@@ -390,23 +539,56 @@ fn payment_gateway_retry_journal_test() {
     );
     assert_eq!(last_payment_limiter_counts(&treatment).events, 3);
     assert_eq!(last_payment_limiter_counts(&treatment).tokens, 3.0);
-    assert_eq!(occurrences(&treatment, "\"action\":\"attempt_settled\""), 3);
-    assert_eq!(occurrences(&treatment, "\"attempt\":1"), 1);
-    assert_eq!(occurrences(&treatment, "\"attempt\":2"), 1);
-    assert_eq!(occurrences(&treatment, "\"attempt\":3"), 1);
-    assert_eq!(occurrences(&treatment, "\"action\":\"retry_scheduled\""), 2);
-    assert_eq!(occurrences(&treatment, "\"action\":\"retry_succeeded\""), 1);
-    assert!(!treatment.contains("\"action\":\"retry_exhausted\""));
-    assert_eq!(occurrences(&treatment, "\"next_attempt\":2"), 1);
-    assert_eq!(occurrences(&treatment, "\"next_attempt\":3"), 1);
-    assert!(treatment.contains("\"total_attempts\":3"));
-    assert!(treatment.contains("\"terminal_classification\":\"success\""));
+    let treatment_attempts = attempt_settlements(&treatment);
+    assert_eq!(treatment_attempts.len(), 3);
+    let treatment_cursor = treatment_attempts[0].cursor.clone();
+    assert!(
+        treatment_attempts
+            .iter()
+            .all(|attempt| attempt.cursor == treatment_cursor),
+        "all physical attempts must remain correlated to one logical effect cursor"
+    );
+    assert_eq!(
+        treatment_attempts
+            .iter()
+            .map(|attempt| (attempt.attempt, attempt.health))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, CircuitBreakerHealthClassification::TransientFailure),
+            (2, CircuitBreakerHealthClassification::TransientFailure),
+            (3, CircuitBreakerHealthClassification::Success),
+        ],
+        "breaker health must record failure, failure, success in physical-call order"
+    );
+    assert_eq!(
+        retry_schedules(&treatment),
+        vec![
+            RetrySchedule {
+                cursor: treatment_cursor.clone(),
+                next_attempt: 2,
+            },
+            RetrySchedule {
+                cursor: treatment_cursor.clone(),
+                next_attempt: 3,
+            },
+        ]
+    );
+    assert_eq!(
+        retry_successes(&treatment),
+        vec![RetrySuccess {
+            cursor: treatment_cursor.clone(),
+            total_attempts: 3,
+            terminal_classification: CircuitBreakerHealthClassification::Success,
+        }]
+    );
+    assert_eq!(retry_terminal_failure_count(&treatment), 0);
     assert!(
         !treatment.contains("gateway_timeout_simulated"),
         "intermediate failures must not become terminal journal records"
     );
     let treatment_completions = assert_one_recovery_completion_per_payment_cursor(&treatment);
     assert_eq!(treatment_completions.len(), 1);
+    assert_eq!(treatment_completions[0].cursor, treatment_cursor);
     assert_eq!(treatment_completions[0].total_attempts, 3);
     assert!(treatment_completions[0].backoff_elapsed_ms > 0);
     assert!(
@@ -442,12 +624,11 @@ fn payment_gateway_retry_journal_test() {
     );
     assert_eq!(payment_effect_outcome_group_count(&replay), 1);
     assert_eq!(payment_terminal_group_counters(&replay), (0, 0));
+    assert!(retry_schedules(&replay).is_empty());
+    assert!(retry_successes(&replay).is_empty());
+    assert_eq!(retry_terminal_failure_count(&replay), 0);
     assert!(
-        !replay.contains("\"action\":\"retry_"),
-        "strict replay must not emit fresh circuit-breaker retry evidence"
-    );
-    assert!(
-        !replay.contains("\"action\":\"attempt_settled\""),
+        attempt_settlements(&replay).is_empty(),
         "strict replay must not emit fresh physical-attempt evidence"
     );
     assert!(recovery_completions(&replay).is_empty());
@@ -487,21 +668,53 @@ fn payment_gateway_retry_journal_test() {
     );
     assert_eq!(last_payment_limiter_counts(&open).events, 5);
     assert_eq!(last_payment_limiter_counts(&open).tokens, 5.0);
-    assert_eq!(occurrences(&open, "\"action\":\"attempt_settled\""), 5);
-    assert!(
-        open.contains("\"code\":\"circuit_open\""),
-        "open rejection must carry the stable machine-readable cause code"
+    let open_attempts = attempt_settlements(&open);
+    assert_eq!(open_attempts.len(), 5);
+    assert!(open_attempts.iter().all(|attempt| {
+        attempt.attempt == 1
+            && attempt.health == CircuitBreakerHealthClassification::TransientFailure
+    }));
+    assert!(retry_schedules(&open).is_empty());
+    assert!(retry_successes(&open).is_empty());
+    assert_eq!(retry_terminal_failure_count(&open), 0);
+    let open_failures = payment_terminal_failures(&open);
+    assert_eq!(open_failures.len(), 6);
+    let rejected_failure = open_failures
+        .iter()
+        .find(|failure| {
+            failure
+                .cause
+                .as_ref()
+                .is_some_and(|cause| cause.code.as_str() == "circuit_open")
+        })
+        .expect("one failed effect record must carry the circuit_open cause");
+    assert_eq!(
+        rejected_failure
+            .cause
+            .as_ref()
+            .expect("rejection cause")
+            .source
+            .as_str(),
+        "circuit_breaker"
     );
-    assert!(!open.contains("\"action\":\"retry_"));
+    assert!(
+        open_attempts
+            .iter()
+            .all(|attempt| attempt.cursor != rejected_failure.cursor),
+        "the rejected cursor must have no physical-attempt row"
+    );
     let open_completions = assert_one_recovery_completion_per_payment_cursor(&open);
     assert_eq!(open_completions.len(), 6);
+    let rejected_completion = open_completions
+        .iter()
+        .find(|completion| completion.cursor == rejected_failure.cursor)
+        .expect("the rejected effect record must share its cursor with recovery completion");
+    assert_eq!(rejected_completion.total_attempts, 0);
+    assert_eq!(rejected_completion.backoff_elapsed_ms, 0);
     assert_eq!(
-        open_completions
-            .iter()
-            .filter(|completion| completion.total_attempts == 0)
-            .count(),
-        1,
-        "the open rejection must have one cursor-correlated zero-attempt completion"
+        last_payment_limiter_counts(&open).tokens,
+        open_attempts.len() as f64,
+        "the cursor rejected by the open breaker must not commit a limiter permit"
     );
 
     let open_replay_root = tempfile::tempdir().expect("open-rejection replay root");
@@ -530,10 +743,17 @@ fn payment_gateway_retry_journal_test() {
         data_event_count(&open_replay, "payment.authorization_unavailable.v1"),
         6
     );
-    assert!(!open_replay.contains("\"action\":\"retry_"));
+    assert!(retry_schedules(&open_replay).is_empty());
+    assert!(retry_successes(&open_replay).is_empty());
+    assert_eq!(retry_terminal_failure_count(&open_replay), 0);
     assert!(
-        !open_replay.contains("\"action\":\"attempt_settled\""),
+        attempt_settlements(&open_replay).is_empty(),
         "open-rejection replay must not emit fresh physical-attempt evidence"
     );
     assert!(recovery_completions(&open_replay).is_empty());
+    assert_eq!(
+        payment_terminal_failures(&open_replay),
+        open_failures,
+        "strict replay must preserve every terminal failure cause under its recorded cursor"
+    );
 }

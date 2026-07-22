@@ -1,0 +1,78 @@
+{
+  "manifest_version": "2.0",
+  "journal_format_version": 2,
+  "obzenflow_version": "0.1.0",
+  "flow_id": "flow_01J00000000000000000000000",
+  "flow_name": "effective_config_manifest_two_effects",
+  "created_at": "2026-07-21T12:00:00Z",
+  "stages": {
+    "orders": {
+      "dsl_var": "orders",
+      "stage_type": "FiniteSource",
+      "stage_id": "stage_01J00000000000000000000001",
+      "stage_logic_version": "1",
+      "data_journal_file": "FiniteSource_orders.log",
+      "error_journal_file": "FiniteSource_orders_error.log",
+      "inbound": [],
+      "ordered_delivery": true
+    },
+    "authorize_payment": {
+      "dsl_var": "authorize_payment",
+      "stage_type": "Transform",
+      "stage_id": "stage_01J00000000000000000000002",
+      "stage_logic_version": "1",
+      "data_journal_file": "Transform_authorize_payment.log",
+      "error_journal_file": "Transform_authorize_payment_error.log",
+      "inbound": [
+        "orders"
+      ],
+      "ordered_delivery": true
+    },
+    "output": {
+      "dsl_var": "output",
+      "stage_type": "Sink",
+      "stage_id": "stage_01J00000000000000000000003",
+      "stage_logic_version": "1",
+      "data_journal_file": "Sink_output.log",
+      "error_journal_file": "Sink_output_error.log",
+      "inbound": [
+        "authorize_payment"
+      ],
+      "ordered_delivery": true
+    }
+  },
+  "system_journal_file": "system.log",
+  "effective_config": {
+    "schema_version": 2,
+    "values": [
+      {
+        "key_path": "effects.resilience.breaker.minimum_calls",
+        "resolved_for": {
+          "kind": "effect",
+          "stage": "authorize_payment",
+          "effect_type": "payments.authorize"
+        },
+        "scope": "stage:authorize_payment",
+        "source": "file",
+        "winner_subject": {
+          "kind": "unqualified"
+        },
+        "value": 8
+      },
+      {
+        "key_path": "effects.resilience.breaker.minimum_calls",
+        "resolved_for": {
+          "kind": "effect",
+          "stage": "authorize_payment",
+          "effect_type": "payments.refund"
+        },
+        "scope": "stage:authorize_payment",
+        "source": "file",
+        "winner_subject": {
+          "kind": "unqualified"
+        },
+        "value": 8
+      }
+    ]
+  }
+}

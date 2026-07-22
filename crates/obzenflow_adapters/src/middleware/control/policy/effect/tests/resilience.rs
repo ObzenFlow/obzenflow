@@ -1363,6 +1363,117 @@ async fn open_half_open_recovery_and_chronic_failure_share_one_authority() {
     ));
 }
 
+#[tokio::test]
+async fn probe_busy_rejection_has_no_attempt_or_committed_permit() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(1)
+            .open_for(Duration::from_secs(30))
+            .probes(1)
+            .build()
+            .expect("probe-busy test breaker"),
+    )
+    .rate_limit_each_attempt(
+        RateLimiter::per_second(1_000.0)
+            .expect("probe-busy test limiter")
+            .with_burst(3.0)
+            .expect("enough reservations to reach final breaker admission"),
+    )
+    .build()
+    .expect("probe-busy resilience aggregate");
+    let (attachment, control, stage_id) = materialized_resilience(factory);
+    let resilience = attachment
+        .effect_resilience_policy()
+        .expect("aggregate attachment")
+        .clone();
+    let boundary = Arc::new(boundary_with_chain(vec![attachment]));
+
+    let opening = boundary
+        .around_repeatable_effect(
+            &identity_at(1),
+            &data_event(),
+            RepeatableEffectOperation::new(|| async {
+                Err(EffectError::Timeout(
+                    "open for probe-busy proof".to_string(),
+                ))
+            }),
+        )
+        .await;
+    assert!(matches!(
+        opening.outcome,
+        EffectBoundaryOutcome::Executed(Err(EffectError::Timeout(_)))
+    ));
+    resilience.expire_breaker_cooldown_for_test();
+
+    let probe_started = Arc::new(tokio::sync::Notify::new());
+    let release_probe = Arc::new(tokio::sync::Notify::new());
+    let probe = {
+        let boundary = boundary.clone();
+        let probe_started = probe_started.clone();
+        let release_probe = release_probe.clone();
+        tokio::spawn(async move {
+            boundary
+                .around_repeatable_effect(
+                    &identity_at(2),
+                    &data_event(),
+                    RepeatableEffectOperation::new(move || {
+                        let probe_started = probe_started.clone();
+                        let release_probe = release_probe.clone();
+                        async move {
+                            probe_started.notify_one();
+                            release_probe.notified().await;
+                            Ok(Vec::new())
+                        }
+                    }),
+                )
+                .await
+        })
+    };
+    probe_started.notified().await;
+
+    let rejected_calls = Arc::new(AtomicUsize::new(0));
+    let rejected = boundary
+        .around_repeatable_effect(
+            &identity_at(3),
+            &data_event(),
+            scripted_operation(rejected_calls.clone(), |_| Ok(Vec::new())),
+        )
+        .await;
+    assert!(matches!(
+        rejected.outcome,
+        EffectBoundaryOutcome::Aborted(ref reason)
+            if reason.cause.source.as_str() == "circuit_breaker"
+                && reason.cause.code.as_str() == "probe_in_progress"
+    ));
+    assert_eq!(rejected_calls.load(Ordering::SeqCst), 0);
+    assert!(settled_attempts(&rejected).is_empty());
+    let rejected_completions = recovery_completions(&rejected);
+    let [completion] = rejected_completions.as_slice() else {
+        panic!("probe-busy rejection must emit one completion row");
+    };
+    assert_eq!(completion.0, 0);
+    assert_eq!(completion.1, 0);
+    assert_eq!(
+        effect_limiter_events(control.as_ref(), stage_id),
+        2,
+        "only the opening call and active probe may commit permits"
+    );
+
+    release_probe.notify_one();
+    let probe = probe.await.expect("active probe task should complete");
+    assert!(matches!(
+        probe.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+
+    let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
+    let metrics = breaker[0].1();
+    assert_eq!(metrics.requests_total, 2);
+    assert_eq!(metrics.failures_total, 1);
+    assert_eq!(metrics.successes_total, 1);
+    assert_eq!(metrics.rejections_total, 1);
+}
+
 #[tokio::test(start_paused = true)]
 async fn limiter_wait_is_not_a_slow_dependency_sample() {
     let factory = EffectResilience::with_breaker(

@@ -424,16 +424,54 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
             )
         })?;
 
-        let record: obzenflow_infra::journal::disk::log_record::LogRecord<ChainEvent> =
-            serde_json::from_str(json).map_err(|e| {
-                anyhow!(
-                    "failed to parse journal json in {}: {e}",
-                    stage_log.display()
-                )
-            })?;
+        let frame: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+            anyhow!(
+                "failed to parse journal frame in {}: {e}",
+                stage_log.display()
+            )
+        })?;
+        let record_values: Vec<serde_json::Value> =
+            match frame.get("frame_kind").and_then(serde_json::Value::as_str) {
+                Some("record_v2") => frame.get("record").cloned().into_iter().collect(),
+                Some("atomic_group_v2") => frame
+                    .get("records")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "atomic journal frame has no records in {}",
+                            stage_log.display()
+                        )
+                    })?,
+                Some(kind) => {
+                    return Err(anyhow!(
+                        "unknown journal frame kind '{kind}' in {}",
+                        stage_log.display()
+                    ));
+                }
+                None => {
+                    return Err(anyhow!(
+                        "journal frame has no frame_kind in {}",
+                        stage_log.display()
+                    ));
+                }
+            };
 
-        if record.event.id == event.id {
-            aggregate_record = Some(record);
+        for record_value in record_values {
+            let record: obzenflow_infra::journal::disk::log_record::LogRecord<ChainEvent> =
+                serde_json::from_value(record_value).map_err(|e| {
+                    anyhow!(
+                        "failed to parse journal record in {}: {e}",
+                        stage_log.display()
+                    )
+                })?;
+
+            if record.event.id == event.id {
+                aggregate_record = Some(record);
+                break;
+            }
+        }
+        if aggregate_record.is_some() {
             break;
         }
     }

@@ -81,6 +81,24 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
         Ok(EventEnvelope::new(JournalWriterId::from(self.id), event))
     }
 
+    async fn append_group(
+        &self,
+        _group_id: &str,
+        events: Vec<ChainEvent>,
+        _parent: Option<&EventEnvelope<ChainEvent>>,
+    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        if self.fail_append {
+            return Err(JournalError::Implementation {
+                message: "injected transactional terminal-group failure".to_string(),
+                source: "test journal rejected atomic group".into(),
+            });
+        }
+        Ok(events
+            .into_iter()
+            .map(|event| EventEnvelope::new(JournalWriterId::from(self.id), event))
+            .collect())
+    }
+
     async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
         Ok(Vec::new())
     }
@@ -499,7 +517,7 @@ async fn transactional_missing_commit_consumes_attempt_without_health_sample() {
 }
 
 #[tokio::test]
-async fn transactional_append_failure_consumes_attempt_without_health_sample() {
+async fn transactional_terminal_group_failure_preserves_physical_success_sample() {
     let factory = EffectResilience::with_breaker(
         CircuitBreaker::builder()
             .consecutive_failures(1)
@@ -537,7 +555,10 @@ async fn transactional_append_failure_consumes_attempt_without_health_sample() {
     let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
     let breaker = breaker[0].1();
     assert_eq!(breaker.requests_total, 1);
-    assert_eq!(breaker.successes_total, 0);
+    assert_eq!(
+        breaker.successes_total, 1,
+        "terminal persistence is outside the protected transactional call and cannot reclassify its prepared success"
+    );
     assert_eq!(breaker.failures_total, 0);
     assert!(matches!(
         breaker.state,

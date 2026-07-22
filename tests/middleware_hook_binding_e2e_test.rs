@@ -22,8 +22,12 @@ use obzenflow_adapters::middleware::{
     SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome, SourcePollSurface,
     SourcePollUnitId,
 };
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
+use obzenflow_core::event::payloads::effect_payload::EFFECT_RECORD_EVENT_TYPE;
+use obzenflow_core::event::{
+    EffectFailureCause, EffectFailureCode, EffectFailureSource, EffectOutcomePayload, EffectRecord,
+    RetryDisposition,
+};
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -545,6 +549,69 @@ fn latest_run_dir(base: &Path) -> PathBuf {
     entries.pop().expect("run should have produced an archive")
 }
 
+fn exported_run(run: &Path, output: &Path) -> String {
+    obzenflow_infra::journal::disk::inspect::export_jsonl(run, Some(output))
+        .expect("failure-cause proof journal should export");
+    std::fs::read_to_string(output).expect("exported failure-cause journal should be readable")
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RecordedBreakerFailure {
+    cursor: obzenflow_runtime::effects::EffectCursor,
+    cause: EffectFailureCause,
+}
+
+fn recorded_breaker_failures(jsonl: &str) -> Vec<RecordedBreakerFailure> {
+    let mut failures: Vec<_> = jsonl
+        .lines()
+        .filter_map(|line| {
+            let row: serde_json::Value =
+                serde_json::from_str(line).expect("exported row should be valid JSON");
+            let event: ChainEvent = serde_json::from_value(row["event"].clone()).ok()?;
+            let ChainEventContent::Data {
+                event_type,
+                payload,
+            } = event.content
+            else {
+                return None;
+            };
+            if event_type != EFFECT_RECORD_EVENT_TYPE {
+                return None;
+            }
+            let record: EffectRecord =
+                serde_json::from_value(payload).expect("effect record should decode");
+            if record.descriptor.effect_type.as_str() != HookEffect::EFFECT_TYPE {
+                return None;
+            }
+            let EffectOutcomePayload::Failed {
+                cause: Some(cause), ..
+            } = record.outcome
+            else {
+                return None;
+            };
+            assert_eq!(
+                event
+                    .effect_provenance
+                    .as_ref()
+                    .map(|provenance| &provenance.cursor),
+                Some(&record.cursor),
+                "recorded failure and provenance must share one cursor"
+            );
+            Some(RecordedBreakerFailure {
+                cursor: record.cursor,
+                cause,
+            })
+        })
+        .collect();
+    failures.sort_by_key(|failure| {
+        (
+            failure.cursor.input_seq.get(),
+            failure.cursor.effect_ordinal.get(),
+        )
+    });
+    failures
+}
+
 #[tokio::test]
 async fn third_party_control_middleware_binds_all_surfaces_and_replays() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -689,6 +756,19 @@ async fn public_failure_cause_is_identical_for_both_breaker_codes_live_and_repla
     );
 
     let live_run = latest_run_dir(&journal_base);
+    let live_jsonl = exported_run(&live_run, &temp.path().join("failure-cause-live.jsonl"));
+    let live_failures = recorded_breaker_failures(&live_jsonl);
+    assert_eq!(live_failures.len(), 2);
+    assert_eq!(
+        live_failures
+            .iter()
+            .map(|failure| (failure.cause.source.as_str(), failure.cause.code.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("circuit_breaker", "circuit_open"),
+            ("circuit_breaker", "probe_in_progress"),
+        ]
+    );
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_delivered = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
@@ -698,7 +778,7 @@ async fn public_failure_cause_is_identical_for_both_breaker_codes_live_and_repla
             live_run.as_os_str().to_os_string(),
         ])
         .run_async(build_failure_cause_flow(
-            journal_base,
+            journal_base.clone(),
             replay_calls.clone(),
             &replay_delivered,
         ))
@@ -708,6 +788,13 @@ async fn public_failure_cause_is_identical_for_both_breaker_codes_live_and_repla
     assert_eq!(
         delivered_payloads(&replay_delivered, DeliveryProvenance::Replayed),
         live_outputs
+    );
+    let replay_run = latest_run_dir(&journal_base);
+    let replay_jsonl = exported_run(&replay_run, &temp.path().join("failure-cause-replay.jsonl"));
+    assert_eq!(
+        recorded_breaker_failures(&replay_jsonl),
+        live_failures,
+        "strict replay must preserve both structured causes under their recorded cursors"
     );
 }
 

@@ -308,7 +308,7 @@ The policies returned from `materialize` are surface-specific:
   policies observe the raw `SourcePollOutcome`.
 - `EffectPolicy::admit` is event-neutral. Use `EventAwareEffectPolicy` only when
   the policy has a same-slice need to inspect the parent `ChainEvent`; both
-  variants return `PolicyAdmission::Admit`, `Synthesize`, or `Reject`. Rejected
+  variants return `PolicyAdmission::Admit` or `Reject`. Rejected
   effects are recorded under the effect cursor and strict replay returns the
   recorded outcome without invoking the live effect hook.
 - `SinkPolicy::admit` returns `SinkAdmission::Admit` or `Reject`; rejection is
