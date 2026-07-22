@@ -86,8 +86,8 @@ pub(super) enum SourceOutcome {
     /// The poll produced no data (drain, shutdown) before an outcome; the
     /// probe slot is released but breaker state is unchanged.
     Inconclusive,
-    /// The breaker admitted the protected unit, but a later policy rejected or
-    /// synthesized before the protected call executed.
+    /// The breaker admitted the protected unit, but a later policy rejected
+    /// before the protected call executed.
     NotExecuted,
 }
 

@@ -595,9 +595,9 @@ pub struct EffectProvenance {
         skip_serializing_if = "EffectFactOwner::is_user"
     )]
     pub fact_owner: EffectFactOwner,
-    /// Branch origin marker (FLOWIP-120h): set when a middleware synthesized
-    /// the outcome group. Excluded from descriptor identity by construction;
-    /// `None` on pre-120h events and ordinary effect outcomes.
+    /// Origin marker for an effect-authored outcome group. Excluded from
+    /// descriptor identity by construction; `None` on older journals and
+    /// reserved framework rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<EffectFactOrigin>,
 }

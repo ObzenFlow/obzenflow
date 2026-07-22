@@ -217,8 +217,8 @@ Runtime dispatch applies that gate, so observer authors do not need to inspect
 
 ## Hook-bound Control Middleware
 
-Control middleware that can pause, reject, synthesize, or otherwise affect live
-I/O must use the hook-bound carrier instead of the legacy handler shell. The
+Control middleware that admits, paces, or rejects live I/O must use the
+hook-bound carrier instead of the legacy handler shell. The
 factory declares its surfaces before runtime erasure, and the DSL materializes
 one attachment for one protected unit:
 

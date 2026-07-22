@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+#[path = "test_support/exported_jsonl.rs"]
+mod exported_jsonl;
 #[path = "../examples/payment_gateway_resilience/support.rs"]
 pub mod support;
 
@@ -107,7 +109,13 @@ fn payment_terminal_group_counters(jsonl: &str) -> (u64, u64) {
 }
 
 fn exported_chain_events(jsonl: &str) -> impl Iterator<Item = ChainEvent> + '_ {
-    exported_events(jsonl).filter_map(|row| serde_json::from_value(row["event"].clone()).ok())
+    exported_jsonl::chain_events(jsonl).into_iter()
+}
+
+#[test]
+#[should_panic(expected = "is neither a ChainEvent nor a SystemEvent")]
+fn exported_record_decoder_fails_loud_on_an_unknown_row() {
+    let _ = exported_jsonl::chain_events(r#"{"event":{"unknown":"shape"}}"#);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,37 +363,56 @@ struct LimiterCounts {
     delay_seconds: f64,
 }
 
+fn payment_limiter_counts(event: &ChainEvent) -> Option<LimiterCounts> {
+    event
+        .runtime_context
+        .as_ref()?
+        .effect_rate_limiters
+        .iter()
+        .find(|limiter| limiter.effect_type == "payment.authorize")
+        .map(|limiter| LimiterCounts {
+            events: limiter.rl_events_total,
+            delayed: limiter.rl_delayed_total,
+            tokens: limiter.rl_tokens_consumed_total,
+            delay_seconds: limiter.rl_delay_seconds_total,
+        })
+}
+
 fn last_payment_limiter_counts(jsonl: &str) -> LimiterCounts {
     let mut last = None;
-    for row in exported_events(jsonl) {
-        let Some(limiters) = row
-            .pointer("/event/runtime_context/effect_rate_limiters")
-            .and_then(|value| value.as_array())
-        else {
-            continue;
-        };
-        for limiter in limiters {
-            if limiter.get("effect_type").and_then(|value| value.as_str())
-                == Some("payment.authorize")
-            {
-                last = Some(LimiterCounts {
-                    events: limiter["rl_events_total"]
-                        .as_u64()
-                        .expect("admitted attempt count"),
-                    delayed: limiter["rl_delayed_total"]
-                        .as_u64()
-                        .expect("delayed attempt count"),
-                    tokens: limiter["rl_tokens_consumed_total"]
-                        .as_f64()
-                        .expect("committed permit count"),
-                    delay_seconds: limiter["rl_delay_seconds_total"]
-                        .as_f64()
-                        .expect("cumulative delay"),
-                });
-            }
+    for event in exported_chain_events(jsonl) {
+        if let Some(snapshot) = payment_limiter_counts(&event) {
+            last = Some(snapshot);
         }
     }
     last.expect("payment limiter metrics should appear in the exported journal")
+}
+
+fn payment_failure_limiter_snapshots(jsonl: &str) -> Vec<(EffectCursor, LimiterCounts)> {
+    exported_chain_events(jsonl)
+        .filter_map(|event| {
+            let ChainEventContent::Data {
+                ref event_type,
+                ref payload,
+            } = event.content
+            else {
+                return None;
+            };
+            if event_type != EFFECT_RECORD_EVENT_TYPE {
+                return None;
+            }
+            let record: EffectRecord = serde_json::from_value(payload.clone())
+                .expect("framework effect-record payload should decode");
+            if record.descriptor.effect_type.as_str() != "payment.authorize"
+                || !matches!(record.outcome, EffectOutcomePayload::Failed { .. })
+            {
+                return None;
+            }
+            let snapshot = payment_limiter_counts(&event)
+                .expect("live payment failure record should carry its limiter snapshot");
+            Some((record.cursor, snapshot))
+        })
+        .collect()
 }
 
 #[test]
@@ -711,6 +738,23 @@ fn payment_gateway_retry_journal_test() {
         .expect("the rejected effect record must share its cursor with recovery completion");
     assert_eq!(rejected_completion.total_attempts, 0);
     assert_eq!(rejected_completion.backoff_elapsed_ms, 0);
+    let failure_limiter_snapshots = payment_failure_limiter_snapshots(&open);
+    let rejected_snapshot_index = failure_limiter_snapshots
+        .iter()
+        .position(|(cursor, _)| cursor == &rejected_failure.cursor)
+        .expect("the rejected cursor must carry a limiter snapshot");
+    let (_, preceding_snapshot) = failure_limiter_snapshots
+        .get(
+            rejected_snapshot_index
+                .checked_sub(1)
+                .expect("open rejection must follow the physical failures that opened it"),
+        )
+        .expect("preceding physical failure snapshot");
+    let (_, rejected_snapshot) = &failure_limiter_snapshots[rejected_snapshot_index];
+    assert_eq!(
+        rejected_snapshot, preceding_snapshot,
+        "an open rejection must not mutate any per-effect limiter counter"
+    );
     assert_eq!(
         last_payment_limiter_counts(&open).tokens,
         open_attempts.len() as f64,

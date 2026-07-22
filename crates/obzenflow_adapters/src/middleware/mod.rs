@@ -17,8 +17,8 @@
 //!   indicator samples) and structurally cannot steer control
 //!   flow: their return type only carries evidence. This is the tool for custom
 //!   observability and auditability aspects.
-//! - **Control** middleware (circuit breaker, rate limiter) admits, paces,
-//!   rejects, or synthesizes at a live-I/O boundary.
+//! - **Control** middleware (circuit breaker, rate limiter) admits, paces, or
+//!   rejects at a live-I/O boundary.
 //!
 //! Built-in observers are constructed with `indicator()` / `latency()` and
 //! `log()`; built-in control middleware with the checked

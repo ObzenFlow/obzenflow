@@ -638,6 +638,24 @@ fn recovery_completions(
         .collect()
 }
 
+fn recovery_completion_cursors(
+    report: &obzenflow_runtime::effects::EffectBoundaryReport,
+) -> Vec<EffectCursor> {
+    report
+        .control_events
+        .iter()
+        .filter_map(|event| match &event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RecoveryCompleted {
+                    cursor,
+                    ..
+                }),
+            )) => Some(cursor.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn identity_at(input_seq: u64) -> EffectIdentity {
     let mut identity = identity_for("effect.retry");
     identity.cursor = EffectCursor::new("test_flow", "test_stage", input_seq, 0);
@@ -1453,6 +1471,11 @@ async fn probe_busy_rejection_has_no_attempt_or_committed_permit() {
     };
     assert_eq!(completion.0, 0);
     assert_eq!(completion.1, 0);
+    assert_eq!(
+        recovery_completion_cursors(&rejected),
+        [identity_at(3).cursor],
+        "the zero-attempt completion must remain keyed to the rejected invocation"
+    );
     assert_eq!(
         effect_limiter_events(control.as_ref(), stage_id),
         2,

@@ -39,9 +39,9 @@ impl EffectsCore {
     }
 
     /// Evidence of every user fact committed by this invocation, in commit
-    /// order: direct emissions, effect-outcome facts, transactional commits,
-    /// and middleware-synthesized fallback facts. Captures never appear (no
-    /// `Data` fact). Read by `StageCompletion` construction (FLOWIP-120z).
+    /// order: direct emissions, effect-outcome facts, and transactional
+    /// commits. Captures never appear (no `Data` fact). Read by
+    /// `StageCompletion` construction (FLOWIP-120z).
     pub(crate) fn committed_fact_evidence(
         &self,
     ) -> (usize, Vec<obzenflow_core::event::types::EventType>) {

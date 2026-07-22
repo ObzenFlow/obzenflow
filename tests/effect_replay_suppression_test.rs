@@ -2,6 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+#[path = "test_support/exported_jsonl.rs"]
+mod exported_jsonl;
+
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, RateLimiterBuilder, Retry};
 use obzenflow_core::{
@@ -1566,7 +1569,10 @@ fn framework_effect_record(event: &ChainEvent) -> Option<EffectRecord> {
             .is_some_and(|provenance| provenance.fact_owner.is_framework())
             && event_type == EFFECT_RECORD_EVENT_TYPE =>
         {
-            serde_json::from_value(payload.clone()).ok()
+            Some(
+                serde_json::from_value(payload.clone())
+                    .expect("framework-owned effect record should decode"),
+            )
         }
         _ => None,
     }
@@ -1652,14 +1658,9 @@ async fn circuit_breaker_recovery_completions_in_stage(
 fn exported_chain_events(run_dir: &Path, output: &Path) -> Vec<ChainEvent> {
     obzenflow_infra::journal::disk::inspect::export_jsonl(run_dir, Some(output))
         .expect("run should export through the supported JSONL projection");
-    std::fs::read_to_string(output)
-        .expect("JSONL projection should be readable")
-        .lines()
-        .filter_map(|line| {
-            let row: serde_json::Value = serde_json::from_str(line).ok()?;
-            serde_json::from_value(row.get("event")?.clone()).ok()
-        })
-        .collect()
+    exported_jsonl::chain_events(
+        &std::fs::read_to_string(output).expect("JSONL projection should be readable"),
+    )
 }
 
 /// Count rate-limiter observability events of any variant in a stage journal.

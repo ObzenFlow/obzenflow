@@ -9,6 +9,9 @@
 //! carrier, rejects one effect protected unit, and observes a live run plus
 //! strict replay of the same archive.
 
+#[path = "test_support/exported_jsonl.rs"]
+mod exported_jsonl;
+
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
     validate_attachment_request, EffectSurface, EffectTypeKey, EffectUnitId,
@@ -562,12 +565,9 @@ struct RecordedBreakerFailure {
 }
 
 fn recorded_breaker_failures(jsonl: &str) -> Vec<RecordedBreakerFailure> {
-    let mut failures: Vec<_> = jsonl
-        .lines()
-        .filter_map(|line| {
-            let row: serde_json::Value =
-                serde_json::from_str(line).expect("exported row should be valid JSON");
-            let event: ChainEvent = serde_json::from_value(row["event"].clone()).ok()?;
+    let mut failures: Vec<_> = exported_jsonl::chain_events(jsonl)
+        .into_iter()
+        .filter_map(|event| {
             let ChainEventContent::Data {
                 event_type,
                 payload,

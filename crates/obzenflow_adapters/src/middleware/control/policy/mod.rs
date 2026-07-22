@@ -4,8 +4,8 @@
 
 //! Control-policy authoring contracts for live I/O boundaries.
 //!
-//! These traits are for middleware that can admit, wait, reject, shed, or
-//! synthesize around a protected runtime unit. They are intentionally separate
+//! These traits are for middleware that can admit, wait, reject, or shed work
+//! around a protected runtime unit. They are intentionally separate
 //! from the generic [`Middleware`](crate::middleware::Middleware) trait, which
 //! remains the handler-chain observation/structural authoring surface. This
 //! module lives under [`control`](crate::middleware::control) because policy is
