@@ -31,7 +31,8 @@ struct EffectCommitHandleInner<T> {
     descriptor: EffectDescriptor,
     output_ordinal: EffectOutputOrdinal,
     lineage: obzenflow_core::config::LineagePolicy,
-    committed: Mutex<Option<CommittedEffectOutcome<T>>>,
+    defer_persistence: bool,
+    state: Mutex<EffectCommitState<T>>,
     _marker: PhantomData<T>,
 }
 
@@ -50,16 +51,28 @@ pub(super) struct EffectCommitHandleParams {
     pub(super) descriptor: EffectDescriptor,
     pub(super) output_ordinal: EffectOutputOrdinal,
     pub(super) lineage: obzenflow_core::config::LineagePolicy,
+    pub(super) defer_persistence: bool,
 }
 
 #[derive(Clone)]
-pub(super) enum CommittedEffectOutcome<T> {
+pub(super) enum PreparedEffectOutcome<T> {
     Success {
         output: T,
         fact_count: usize,
         events: Vec<ChainEvent>,
+        persisted: bool,
     },
-    Failure(EffectOutcomePayload),
+    Failure {
+        outcome: EffectOutcomePayload,
+        event: Box<ChainEvent>,
+        persisted: bool,
+    },
+}
+
+enum EffectCommitState<T> {
+    Available,
+    InProgress,
+    Settled(Box<PreparedEffectOutcome<T>>),
 }
 
 impl<T> EffectCommitHandle<T>
@@ -83,25 +96,15 @@ where
                 descriptor: params.descriptor,
                 output_ordinal: params.output_ordinal,
                 lineage: params.lineage,
-                committed: Mutex::new(None),
+                defer_persistence: params.defer_persistence,
+                state: Mutex::new(EffectCommitState::Available),
                 _marker: PhantomData,
             }),
         }
     }
 
     pub async fn commit_success(&self, output: &T) -> Result<(), EffectError> {
-        {
-            let committed = self
-                .inner
-                .committed
-                .lock()
-                .expect("effect commit handle lock poisoned");
-            if committed.is_some() {
-                return Err(EffectError::Execution(
-                    "transactional effect commit handle used more than once".to_string(),
-                ));
-            }
-        }
+        self.ensure_available()?;
 
         let facts = output.clone().into_facts().map_err(effect_fact_set_error)?;
         if facts.is_empty() {
@@ -110,14 +113,7 @@ where
             ));
         }
         let fact_count = facts.len();
-        let committed_events = append_domain_effect_success_facts(
-            &self.inner.data_journal,
-            self.inner.flow_context.as_ref(),
-            self.inner.system_journal.as_ref(),
-            self.inner.instrumentation.as_ref(),
-            self.inner.heartbeat_state.as_ref(),
-            Some(&self.inner.output_contract),
-            &self.inner.backpressure_writer,
+        let events = build_domain_effect_success_facts(
             self.inner.writer_id,
             &self.inner.parent,
             self.inner.cursor.clone(),
@@ -127,24 +123,52 @@ where
             self.inner.output_ordinal,
             Some(EffectFactOrigin::Effect),
             self.inner.lineage,
-        )
-        .await?;
-
-        let mut committed = self
-            .inner
-            .committed
-            .lock()
-            .expect("effect commit handle lock poisoned");
-        if committed.is_some() {
-            return Err(EffectError::Execution(
-                "transactional effect commit handle used more than once".to_string(),
-            ));
+        )?;
+        self.begin_commit()?;
+        let persisted = !self.inner.defer_persistence;
+        if persisted {
+            let committer = OutputCommitter {
+                data_journal: &self.inner.data_journal,
+                flow_context: self.inner.flow_context.as_ref(),
+                system_journal: self.inner.system_journal.as_ref(),
+                instrumentation: self.inner.instrumentation.as_ref(),
+                heartbeat_state: self.inner.heartbeat_state.as_ref(),
+                output_contract: Some(&self.inner.output_contract),
+                backpressure_writer: Some(&self.inner.backpressure_writer),
+                observers: None,
+                observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+            };
+            let entries = events
+                .iter()
+                .cloned()
+                .map(|event| AtomicCommitEntry {
+                    event,
+                    options: CommitOptions {
+                        count_output: true,
+                        validate_output_contract: true,
+                    },
+                    intent: StageAppendIntent::NormalStageData,
+                })
+                .collect();
+            if let Err(error) = committer
+                .commit_atomic_group(
+                    effect_outcome_group_id(&self.inner.cursor).as_str(),
+                    entries,
+                    Some(&self.inner.parent),
+                )
+                .await
+            {
+                self.reset_failed_commit();
+                return Err(EffectError::Journal(error.to_string()));
+            }
         }
-        *committed = Some(CommittedEffectOutcome::Success {
+
+        self.finish_commit(PreparedEffectOutcome::Success {
             output: output.clone(),
             fact_count,
-            events: committed_events,
-        });
+            events,
+            persisted,
+        })?;
         Ok(())
     }
 
@@ -166,20 +190,12 @@ where
         outcome: EffectOutcomePayload,
         source_error: Option<&EffectError>,
     ) -> Result<(), EffectError> {
-        {
-            let mut committed = self
-                .inner
-                .committed
-                .lock()
-                .expect("effect commit handle lock poisoned");
-            if committed.is_some() {
-                return Err(EffectError::Execution(
-                    "transactional effect commit handle used more than once".to_string(),
-                ));
-            }
-            *committed = Some(CommittedEffectOutcome::Failure(outcome.clone()));
+        self.ensure_available()?;
+        if source_error.is_none() {
+            return Err(EffectError::Execution(
+                "domain success outcomes must be committed through commit_success".to_string(),
+            ));
         }
-
         let record = EffectRecord {
             cursor: self.inner.cursor.clone(),
             descriptor_hash: self.inner.descriptor_hash.clone(),
@@ -188,55 +204,122 @@ where
             origin: None,
         };
 
-        if source_error.is_none() {
-            return Err(EffectError::Execution(
-                "domain success outcomes must be committed through commit_success".to_string(),
-            ));
-        }
-        let append_result = append_effect_record(
-            &self.inner.data_journal,
+        let event = build_effect_record_event(
             self.inner.writer_id,
             &self.inner.parent,
             record,
             self.inner.lineage,
-            &self.inner.backpressure_writer,
-        )
-        .await;
-
-        if let Err(err) = append_result {
-            let mut committed = self
-                .inner
-                .committed
-                .lock()
-                .expect("effect commit handle lock poisoned");
-            *committed = None;
-            return Err(err);
+        )?;
+        self.begin_commit()?;
+        let persisted = !self.inner.defer_persistence;
+        if persisted {
+            let committer = OutputCommitter {
+                data_journal: &self.inner.data_journal,
+                flow_context: None,
+                system_journal: None,
+                instrumentation: None,
+                heartbeat_state: None,
+                output_contract: None,
+                backpressure_writer: Some(&self.inner.backpressure_writer),
+                observers: None,
+                observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+            };
+            if let Err(error) = committer
+                .commit_prebuilt(
+                    event.clone(),
+                    Some(&self.inner.parent),
+                    CommitOptions::default(),
+                )
+                .await
+            {
+                self.reset_failed_commit();
+                return Err(EffectError::Journal(error.to_string()));
+            }
         }
+
+        self.finish_commit(PreparedEffectOutcome::Failure {
+            outcome,
+            event: Box::new(event),
+            persisted,
+        })?;
 
         Ok(())
     }
 
-    /// The outcome committed through this handle, or `None` if the port never
-    /// committed. This is the source of truth for the live transactional return
-    /// value, so a live run decodes the same outcome a replay would.
-    pub(super) fn committed_outcome(&self) -> Option<CommittedEffectOutcome<T>> {
-        self.inner
-            .committed
+    fn ensure_available(&self) -> Result<(), EffectError> {
+        if matches!(
+            &*self
+                .inner
+                .state
+                .lock()
+                .expect("effect commit handle lock poisoned"),
+            EffectCommitState::Available
+        ) {
+            Ok(())
+        } else {
+            Err(commit_handle_reuse_error())
+        }
+    }
+
+    fn begin_commit(&self) -> Result<(), EffectError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("effect commit handle lock poisoned");
+        if !matches!(&*state, EffectCommitState::Available) {
+            return Err(commit_handle_reuse_error());
+        }
+        *state = EffectCommitState::InProgress;
+        Ok(())
+    }
+
+    fn reset_failed_commit(&self) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("effect commit handle lock poisoned");
+        if matches!(&*state, EffectCommitState::InProgress) {
+            *state = EffectCommitState::Available;
+        }
+    }
+
+    fn finish_commit(&self, outcome: PreparedEffectOutcome<T>) -> Result<(), EffectError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("effect commit handle lock poisoned");
+        if !matches!(&*state, EffectCommitState::InProgress) {
+            return Err(commit_handle_reuse_error());
+        }
+        *state = EffectCommitState::Settled(Box::new(outcome));
+        Ok(())
+    }
+
+    /// The outcome settled through this affine handle. With an effect boundary,
+    /// the events are prepared but intentionally remain unpersisted until the
+    /// controller supplies its terminal evidence for the atomic journal group.
+    pub(super) fn settled_outcome(&self) -> Option<PreparedEffectOutcome<T>> {
+        match &*self
+            .inner
+            .state
             .lock()
             .expect("effect commit handle lock poisoned")
-            .clone()
+        {
+            EffectCommitState::Settled(outcome) => Some((**outcome).clone()),
+            EffectCommitState::Available | EffectCommitState::InProgress => None,
+        }
     }
 }
 
+fn commit_handle_reuse_error() -> EffectError {
+    EffectError::Execution("transactional effect commit handle used more than once".to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn append_domain_effect_success_facts(
-    data_journal: &Arc<dyn Journal<ChainEvent>>,
-    flow_context: Option<&FlowContext>,
-    system_journal: Option<&Arc<dyn Journal<SystemEvent>>>,
-    instrumentation: Option<&Arc<StageInstrumentation>>,
-    heartbeat_state: Option<&Arc<HeartbeatState>>,
-    output_contract: Option<&StageOutputContract>,
-    backpressure_writer: &BackpressureWriter,
+pub(super) fn build_domain_effect_success_facts(
     writer_id: WriterId,
     parent: &EventEnvelope<ChainEvent>,
     cursor: EffectCursor,
@@ -259,19 +342,7 @@ pub(super) async fn append_domain_effect_success_facts(
         EffectError::Execution("effect outcome fact count exceeds u32 range".to_string())
     })?);
 
-    let committer = OutputCommitter {
-        data_journal,
-        flow_context,
-        system_journal,
-        instrumentation,
-        heartbeat_state,
-        output_contract,
-        backpressure_writer: Some(backpressure_writer),
-        observers: None,
-        observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
-    };
-
-    let mut committed_events = Vec::new();
+    let mut events = Vec::with_capacity(facts.len());
     for (index, fact) in facts.into_iter().enumerate() {
         let ordinal = OutcomeFactOrdinal::try_from(index).map_err(|_| {
             EffectError::Execution("effect outcome fact ordinal exceeds u32 range".to_string())
@@ -316,10 +387,57 @@ pub(super) async fn append_domain_effect_success_facts(
         provenance.outcome_fact_count = Some(outcome_fact_count);
         event = event.with_effect_provenance(provenance);
 
-        let committed_event = event.clone();
+        events.push(event);
+    }
+    Ok(events)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn append_domain_effect_success_facts(
+    data_journal: &Arc<dyn Journal<ChainEvent>>,
+    flow_context: Option<&FlowContext>,
+    system_journal: Option<&Arc<dyn Journal<SystemEvent>>>,
+    instrumentation: Option<&Arc<StageInstrumentation>>,
+    heartbeat_state: Option<&Arc<HeartbeatState>>,
+    output_contract: Option<&StageOutputContract>,
+    backpressure_writer: &BackpressureWriter,
+    writer_id: WriterId,
+    parent: &EventEnvelope<ChainEvent>,
+    cursor: EffectCursor,
+    descriptor_hash: EffectDescriptorHash,
+    descriptor: EffectDescriptor,
+    facts: Vec<TypedFact>,
+    base_output_ordinal: EffectOutputOrdinal,
+    origin: Option<EffectFactOrigin>,
+    lineage: obzenflow_core::config::LineagePolicy,
+) -> Result<Vec<ChainEvent>, EffectError> {
+    let events = build_domain_effect_success_facts(
+        writer_id,
+        parent,
+        cursor,
+        descriptor_hash,
+        descriptor,
+        facts,
+        base_output_ordinal,
+        origin,
+        lineage,
+    )?;
+    let committer = OutputCommitter {
+        data_journal,
+        flow_context,
+        system_journal,
+        instrumentation,
+        heartbeat_state,
+        output_contract,
+        backpressure_writer: Some(backpressure_writer),
+        observers: None,
+        observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+    };
+
+    for event in &events {
         committer
             .commit_prebuilt(
-                event,
+                event.clone(),
                 Some(parent),
                 CommitOptions {
                     count_output: true,
@@ -328,9 +446,8 @@ pub(super) async fn append_domain_effect_success_facts(
             )
             .await
             .map_err(|e| EffectError::Journal(e.to_string()))?;
-        committed_events.push(committed_event);
     }
-    Ok(committed_events)
+    Ok(events)
 }
 
 // FLOWIP-120a: this append is intentionally write-time-unchecked for duplicate
@@ -355,6 +472,35 @@ pub(super) async fn append_effect_record(
     lineage: obzenflow_core::config::LineagePolicy,
     backpressure_writer: &BackpressureWriter,
 ) -> Result<(), EffectError> {
+    let event = build_effect_record_event(writer_id, parent, record, lineage)?;
+
+    // Framework effect/capture records are physical Data rows even though the
+    // transport filter hides them from handlers. Track them around the durable
+    // append so downstream filtering can complete the same physical credit.
+    let committer = OutputCommitter {
+        data_journal,
+        flow_context: None,
+        system_journal: None,
+        instrumentation: None,
+        heartbeat_state: None,
+        output_contract: None,
+        backpressure_writer: Some(backpressure_writer),
+        observers: None,
+        observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+    };
+    committer
+        .commit_prebuilt(event, Some(parent), CommitOptions::default())
+        .await
+        .map_err(|e| EffectError::Journal(e.to_string()))?;
+    Ok(())
+}
+
+pub(super) fn build_effect_record_event(
+    writer_id: WriterId,
+    parent: &EventEnvelope<ChainEvent>,
+    record: EffectRecord,
+    lineage: obzenflow_core::config::LineagePolicy,
+) -> Result<ChainEvent, EffectError> {
     let event_type = framework_effect_event_type(&record.descriptor.effect_type);
     let provenance = EffectProvenance::from_record(&record, EffectFactOwner::Framework);
     let payload =
@@ -377,23 +523,5 @@ pub(super) async fn append_effect_record(
             );
     }
 
-    // Framework effect/capture records are physical Data rows even though the
-    // transport filter hides them from handlers. Track them around the durable
-    // append so downstream filtering can complete the same physical credit.
-    let committer = OutputCommitter {
-        data_journal,
-        flow_context: None,
-        system_journal: None,
-        instrumentation: None,
-        heartbeat_state: None,
-        output_contract: None,
-        backpressure_writer: Some(backpressure_writer),
-        observers: None,
-        observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
-    };
-    committer
-        .commit_prebuilt(event, Some(parent), CommitOptions::default())
-        .await
-        .map_err(|e| EffectError::Journal(e.to_string()))?;
-    Ok(())
+    Ok(event)
 }

@@ -207,12 +207,8 @@ async fn dispatch_draining_inner<
                     backpressure_writer: ctx.backpressure_writer.clone(),
                     emit_enabled: true,
                     effect_boundary: None,
-                    boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 })
             });
-            let boundary_control_events = effect_context
-                .as_ref()
-                .map(|context| context.boundary_control_events.clone());
 
             // FLOWIP-120c H3: per-event scope, same as the running path.
             // Generation None: drain follows the stage frontier (FLOWIP-120n).
@@ -283,26 +279,6 @@ async fn dispatch_draining_inner<
                 &envelope,
             )
             .await?;
-            if let Some(buffer) = boundary_control_events {
-                commit_framework_observability_events(
-                    EffectInvocationContext::drain_boundary_control_event_buffer(&buffer),
-                    FrameworkObservabilityCommit {
-                        flow_context,
-                        data_journal: &ctx.data_journal,
-                        system_journal: Some(&ctx.system_journal),
-                        instrumentation: Some(&ctx.instrumentation),
-                        heartbeat_state: ctx.heartbeat.as_ref().map(|heartbeat| &heartbeat.state),
-                        backpressure_writer: &ctx.backpressure_writer,
-                        parent: Some(&envelope),
-                        observer_scope: scope,
-                    },
-                )
-                .await
-                .map_err(|e| {
-                    format!("Failed to commit effect boundary observability events: {e}")
-                })?;
-            }
-
             // Error-journal events are written immediately; stage-journal outputs are gated by backpressure.
             let mut stage_outputs = std::collections::VecDeque::<
                 crate::stages::common::supervision::backpressure_drain::PendingOutput,

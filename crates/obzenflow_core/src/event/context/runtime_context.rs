@@ -40,6 +40,14 @@ pub struct RuntimeContext {
     #[serde(default)]
     pub events_emitted_total: u64,
 
+    /// Atomic terminal outcome/evidence groups durably committed by this stage.
+    #[serde(default)]
+    pub terminal_groups_committed_total: u64,
+
+    /// Atomic terminal-group commits that failed before becoming visible.
+    #[serde(default)]
+    pub terminal_group_commit_failures_total: u64,
+
     /// Cumulative committed Data outputs, keyed by exact event type. This is
     /// the tail-seed for named composite output-port counters (FLOWIP-128a B3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

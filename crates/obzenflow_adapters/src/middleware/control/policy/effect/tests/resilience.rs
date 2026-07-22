@@ -742,6 +742,70 @@ async fn fixed_backoff_delays_each_physical_continuation() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn recovery_clock_measures_backoff_overshoot_not_the_planned_delay_sum() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(3)
+            .build()
+            .expect("overshoot breaker"),
+    )
+    .retry(
+        Retry::fixed(Duration::from_millis(7))
+            .max_attempts(2)
+            .attempt_start_window(Duration::from_secs(1)),
+    )
+    .build()
+    .expect("overshoot resilience aggregate");
+    let (attachment, _, _) = materialized_resilience(factory);
+    let boundary = boundary_with_chain(vec![attachment]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let first_call = Arc::new(tokio::sync::Notify::new());
+    let release_failure = Arc::new(tokio::sync::Notify::new());
+    let operation = {
+        let calls = calls.clone();
+        let first_call = first_call.clone();
+        let release_failure = release_failure.clone();
+        RepeatableEffectOperation::new(move || {
+            let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let first_call = first_call.clone();
+            let release_failure = release_failure.clone();
+            async move {
+                if call == 1 {
+                    first_call.notify_one();
+                    release_failure.notified().await;
+                    Err(EffectError::Timeout("retry after overshoot".to_string()))
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+        })
+    };
+    let task = tokio::spawn(async move {
+        boundary
+            .around_repeatable_effect(&identity_for("effect.retry"), &data_event(), operation)
+            .await
+    });
+
+    first_call.notified().await;
+    release_failure.notify_one();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(25)).await;
+    let report = task.await.expect("overshoot boundary task");
+
+    assert_eq!(retry_delays(&report), [7]);
+    let completions = recovery_completions(&report);
+    let [completion] = completions.as_slice() else {
+        panic!("one recovery completion expected");
+    };
+    assert_eq!(completion.0, 2);
+    assert!(
+        completion.1 >= 25,
+        "actual backoff must retain scheduler overshoot: {completion:?}"
+    );
+    assert!(completion.2 >= completion.1);
+}
+
+#[tokio::test(start_paused = true)]
 async fn initial_limiter_wait_does_not_consume_attempt_start_window() {
     let factory = EffectResilience::with_breaker(
         CircuitBreaker::builder()

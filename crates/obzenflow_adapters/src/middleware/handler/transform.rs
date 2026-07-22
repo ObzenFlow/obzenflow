@@ -554,7 +554,6 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
         scope: MiddlewareExecutionScope,
     ) -> Result<Vec<ChainEvent>, HandlerError> {
         if let Some(mut effect_context) = effect_context {
-            let boundary_control_events = effect_context.boundary_control_events.clone();
             effect_context.effect_boundary = self.effect_boundary.clone();
 
             // FLOWIP-120c placement split: the handler shell chain carries
@@ -624,19 +623,6 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
                 }
             }
             results.extend(control_events);
-
-            let mut boundary_events = {
-                let mut buffer = boundary_control_events
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                std::mem::take(&mut *buffer)
-            };
-            for boundary_event in &mut boundary_events {
-                for middleware in self.middleware_chain.iter() {
-                    middleware.pre_write(boundary_event, &ctx);
-                }
-            }
-            results.append(&mut boundary_events);
 
             return Ok(results);
         }

@@ -12,7 +12,7 @@ type ExecutedOutcomeSlot<O> = Arc<Mutex<Option<(O, Vec<TypedFact>)>>>;
 /// Slot the guarded transactional future fills for settlement: the port's
 /// result and the outcome committed through the handle, if any.
 type TransactionalSettleSlot<O> =
-    Arc<Mutex<Option<(Result<(), EffectError>, Option<CommittedEffectOutcome<O>>)>>>;
+    Arc<Mutex<Option<(Result<(), EffectError>, Option<PreparedEffectOutcome<O>>)>>>;
 
 /// The erased effectful authoring core: every runtime declaration, output
 /// contract, replay, and commit check lives here, unchanged by the typed
@@ -490,7 +490,7 @@ impl EffectsCore {
         let report = boundary
             .around_repeatable_effect(&identity, &self.ctx.parent.event, operation)
             .await;
-        self.ctx.push_boundary_control_events(report.control_events);
+        let control_events = report.control_events;
 
         match report.outcome {
             EffectBoundaryOutcome::Executed(Ok(_observation)) => {
@@ -504,12 +504,13 @@ impl EffectsCore {
                                 .to_string(),
                         )
                     })?;
-                self.append_success_facts(
+                self.append_success_facts_with_control_events(
                     cursor,
                     descriptor_hash,
                     descriptor,
                     facts,
                     Some(EffectFactOrigin::Effect),
+                    control_events,
                 )
                 .await?;
                 self.observe_effect_outcome(
@@ -520,8 +521,14 @@ impl EffectsCore {
                 Ok(output)
             }
             EffectBoundaryOutcome::Executed(Err(err)) => {
-                self.append_failed_record(cursor, descriptor_hash, descriptor, &err)
-                    .await?;
+                self.append_failed_record_with_control_events(
+                    cursor,
+                    descriptor_hash,
+                    descriptor,
+                    &err,
+                    control_events,
+                )
+                .await?;
                 self.observe_effect_outcome(
                     E::EFFECT_TYPE,
                     crate::stages::observer::EffectObserverOutcome::Failed {
@@ -533,7 +540,13 @@ impl EffectsCore {
             }
             EffectBoundaryOutcome::Aborted(reason) => {
                 let result = self
-                    .record_boundary_abort(cursor, descriptor_hash, descriptor, reason)
+                    .record_boundary_abort_with_control_events(
+                        cursor,
+                        descriptor_hash,
+                        descriptor,
+                        reason,
+                        control_events,
+                    )
                     .await;
                 if let Err(err) = &result {
                     self.observe_effect_outcome(
@@ -593,12 +606,52 @@ impl EffectsCore {
         .await
     }
 
-    async fn record_boundary_abort<T>(
+    async fn append_failed_record_with_control_events(
+        &mut self,
+        cursor: EffectCursor,
+        descriptor_hash: EffectDescriptorHash,
+        descriptor: EffectDescriptor,
+        err: &EffectError,
+        control_events: Vec<ChainEvent>,
+    ) -> Result<(), EffectError> {
+        let record = EffectRecord {
+            cursor: cursor.clone(),
+            descriptor_hash,
+            descriptor,
+            outcome: EffectOutcomePayload::Failed {
+                error_type: err.error_type(),
+                error_message: err.error_message(),
+                retry: err.retry_disposition(),
+                cause: err.failure_cause(),
+            },
+            origin: None,
+        };
+        let event = build_effect_record_event(
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            record,
+            self.ctx.lineage,
+        )?;
+        self.commit_terminal_group(
+            &cursor,
+            vec![AtomicCommitEntry {
+                event,
+                options: CommitOptions::default(),
+                intent: StageAppendIntent::NonDataStageFact,
+            }],
+            control_events,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn record_boundary_abort_with_control_events<T>(
         &mut self,
         cursor: EffectCursor,
         descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
         reason: EffectAbortReason,
+        control_events: Vec<ChainEvent>,
     ) -> Result<T, EffectError> {
         let err = EffectError::BoundaryRejected {
             rejected_by: reason.cause.source.clone(),
@@ -606,8 +659,8 @@ impl EffectsCore {
             message: reason.message.clone(),
             retry: reason.retry,
         };
-        self.append_record(EffectRecord {
-            cursor,
+        let record = EffectRecord {
+            cursor: cursor.clone(),
             descriptor_hash,
             descriptor,
             outcome: EffectOutcomePayload::Failed {
@@ -617,7 +670,22 @@ impl EffectsCore {
                 cause: Some(reason.cause),
             },
             origin: None,
-        })
+        };
+        let event = build_effect_record_event(
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            record,
+            self.ctx.lineage,
+        )?;
+        self.commit_terminal_group(
+            &cursor,
+            vec![AtomicCommitEntry {
+                event,
+                options: CommitOptions::default(),
+                intent: StageAppendIntent::NonDataStageFact,
+            }],
+            control_events,
+        )
         .await?;
         Err(err)
     }
@@ -763,6 +831,7 @@ impl EffectsCore {
             descriptor: descriptor.clone(),
             output_ordinal,
             lineage: self.ctx.lineage,
+            defer_persistence: self.ctx.effect_boundary.is_some(),
         });
         let commit_observer = commit.clone();
 
@@ -776,7 +845,7 @@ impl EffectsCore {
                 .execute_and_commit(effect, &mut effect_ctx, commit)
                 .await
                 .map(|_| ());
-            let outcome = commit_observer.committed_outcome();
+            let outcome = commit_observer.settled_outcome();
             let result =
                 self.settle_transactional::<E>(executor, output_ordinal, port_result, outcome);
             self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
@@ -785,7 +854,7 @@ impl EffectsCore {
 
         // FLOWIP-120c H5: transactional effects route through the boundary.
         // Admission runs before `execute_and_commit`, observation after
-        // `committed_outcome()`; rejection-only in v1, no fallback synthesis.
+        // `settled_outcome()`; rejection-only in v1, no fallback synthesis.
         let settle_slot: TransactionalSettleSlot<E::Outcome> = Arc::new(Mutex::new(None));
         let operation = {
             let slot = settle_slot.clone();
@@ -798,17 +867,17 @@ impl EffectsCore {
                         .execute_and_commit(effect, &mut effect_ctx, commit)
                         .await
                         .map(|_| ());
-                    let outcome = observer.committed_outcome();
+                    let outcome = observer.settled_outcome();
                     // A committed failure is the dependency result even when the
                     // transactional port returned `Ok`; conversely, a committed
                     // success remains authoritative if the port later returned an
                     // error. No-commit and append failures retain their typed
                     // coordination/journal errors for health classification.
                     lifecycle.mark_completed(match &outcome {
-                        Some(CommittedEffectOutcome::Success { .. }) => {
+                        Some(PreparedEffectOutcome::Success { .. }) => {
                             PhysicalCallOutcome::Succeeded
                         }
-                        Some(CommittedEffectOutcome::Failure(_)) => PhysicalCallOutcome::Failed,
+                        Some(PreparedEffectOutcome::Failure { .. }) => PhysicalCallOutcome::Failed,
                         None if port_result.is_err() => PhysicalCallOutcome::Failed,
                         None => PhysicalCallOutcome::Succeeded,
                     });
@@ -816,11 +885,11 @@ impl EffectsCore {
                     // operation ended; the precise error the caller sees is settled
                     // from the slot, never from this observation result.
                     let observation = match (&port_result, &outcome) {
-                        (_, Some(CommittedEffectOutcome::Success { events, .. })) => {
+                        (_, Some(PreparedEffectOutcome::Success { events, .. })) => {
                             Ok(events.clone())
                         }
-                        (_, Some(CommittedEffectOutcome::Failure(payload))) => {
-                            Err(match recorded_failure_from_outcome::<E::Outcome>(payload) {
+                        (_, Some(PreparedEffectOutcome::Failure { outcome, .. })) => {
+                            Err(match recorded_failure_from_outcome::<E::Outcome>(outcome) {
                                 Err(err) => err,
                                 Ok(_) => EffectError::EffectProvenanceMismatch(
                                     "expected recorded effect failure".to_string(),
@@ -858,6 +927,10 @@ impl EffectsCore {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .take();
                 if let Some((port_result, outcome)) = settled {
+                    if let Some(prepared) = outcome.as_ref() {
+                        self.commit_deferred_transactional_outcome(&cursor, prepared, Vec::new())
+                            .await?;
+                    }
                     let result = self.settle_transactional::<E>(
                         executor,
                         output_ordinal,
@@ -878,8 +951,6 @@ impl EffectsCore {
                 return result;
             }
         };
-        self.ctx.push_boundary_control_events(control_events);
-
         match outcome {
             SingleUseEffectBoundaryOutcome::Executed(_execution) => {
                 let (port_result, outcome) = settle_slot
@@ -892,6 +963,29 @@ impl EffectsCore {
                                 .to_string(),
                         )
                     })?;
+                let Some(prepared) = outcome.as_ref() else {
+                    self.restore_output_ordinal(output_ordinal);
+                    let err = match port_result {
+                        Err(err) => err,
+                        Ok(()) => EffectError::TransactionalCommitMissing {
+                            effect_type: E::EFFECT_TYPE.to_string(),
+                            executor: executor.to_string(),
+                        },
+                    };
+                    self.append_failed_record_with_control_events(
+                        cursor,
+                        descriptor_hash,
+                        descriptor,
+                        &err,
+                        control_events,
+                    )
+                    .await?;
+                    let result: Result<E::Outcome, EffectError> = Err(err);
+                    self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
+                    return result;
+                };
+                self.commit_deferred_transactional_outcome(&cursor, prepared, control_events)
+                    .await?;
                 let result =
                     self.settle_transactional::<E>(executor, output_ordinal, port_result, outcome);
                 self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
@@ -900,12 +994,76 @@ impl EffectsCore {
             SingleUseEffectBoundaryOutcome::Aborted(reason) => {
                 self.restore_output_ordinal(output_ordinal);
                 let result = self
-                    .record_boundary_abort(cursor, descriptor_hash, descriptor, reason)
+                    .record_boundary_abort_with_control_events(
+                        cursor,
+                        descriptor_hash,
+                        descriptor,
+                        reason,
+                        control_events,
+                    )
                     .await;
                 self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
                 result
             }
         }
+    }
+
+    async fn commit_deferred_transactional_outcome<T>(
+        &self,
+        cursor: &EffectCursor,
+        outcome: &PreparedEffectOutcome<T>,
+        control_events: Vec<ChainEvent>,
+    ) -> Result<(), EffectError>
+    where
+        T: TypedFactSet + Clone + Send + Sync + 'static,
+    {
+        let entries = match outcome {
+            PreparedEffectOutcome::Success {
+                events, persisted, ..
+            } => {
+                if *persisted {
+                    if control_events.is_empty() {
+                        return Ok(());
+                    }
+                    return Err(EffectError::Execution(
+                        "transactional outcome was persisted before terminal control evidence"
+                            .to_string(),
+                    ));
+                }
+                events
+                    .iter()
+                    .cloned()
+                    .map(|event| AtomicCommitEntry {
+                        event,
+                        options: CommitOptions {
+                            count_output: true,
+                            validate_output_contract: true,
+                        },
+                        intent: StageAppendIntent::NormalStageData,
+                    })
+                    .collect()
+            }
+            PreparedEffectOutcome::Failure {
+                event, persisted, ..
+            } => {
+                if *persisted {
+                    if control_events.is_empty() {
+                        return Ok(());
+                    }
+                    return Err(EffectError::Execution(
+                        "transactional failure was persisted before terminal control evidence"
+                            .to_string(),
+                    ));
+                }
+                vec![AtomicCommitEntry {
+                    event: event.as_ref().clone(),
+                    options: CommitOptions::default(),
+                    intent: StageAppendIntent::NonDataStageFact,
+                }]
+            }
+        };
+        self.commit_terminal_group(cursor, entries, control_events)
+            .await
     }
 
     /// Settle a transactional attempt from the committed record, the single
@@ -915,7 +1073,7 @@ impl EffectsCore {
         executor: &'static str,
         output_ordinal: EffectOutputOrdinal,
         port_result: Result<(), EffectError>,
-        outcome: Option<CommittedEffectOutcome<E::Outcome>>,
+        outcome: Option<PreparedEffectOutcome<E::Outcome>>,
     ) -> Result<E::Outcome, EffectError>
     where
         E: Effect,
@@ -934,16 +1092,17 @@ impl EffectsCore {
         };
 
         match outcome {
-            CommittedEffectOutcome::Success {
+            PreparedEffectOutcome::Success {
                 output,
                 fact_count,
                 events,
+                ..
             } => {
                 self.advance_output_ordinals_after_reserved_base(output_ordinal, fact_count)?;
                 self.committed_facts.extend(events);
                 Ok(output)
             }
-            CommittedEffectOutcome::Failure(outcome) => {
+            PreparedEffectOutcome::Failure { outcome, .. } => {
                 self.restore_output_ordinal(output_ordinal);
                 recorded_failure_from_outcome(&outcome)
             }
@@ -1075,6 +1234,86 @@ impl EffectsCore {
             .checked_add(routed_fact_count)
             .ok_or_else(|| EffectError::Execution("routed output fanout overflow".to_string()))?;
         self.committed_facts.extend(committed_events);
+        Ok(())
+    }
+
+    async fn append_success_facts_with_control_events(
+        &mut self,
+        cursor: EffectCursor,
+        descriptor_hash: EffectDescriptorHash,
+        descriptor: EffectDescriptor,
+        facts: Vec<TypedFact>,
+        origin: Option<EffectFactOrigin>,
+        control_events: Vec<ChainEvent>,
+    ) -> Result<(), EffectError> {
+        if facts.is_empty() {
+            return Err(EffectError::Execution(
+                "effect success output must author at least one fact".to_string(),
+            ));
+        }
+        let routed_fact_count = self.count_routed_facts(&facts);
+        self.ensure_routed_fanout_capacity(routed_fact_count)?;
+        let output_ordinal = self.reserve_output_ordinals(facts.len())?;
+        let committed_events = build_domain_effect_success_facts(
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            cursor.clone(),
+            descriptor_hash,
+            descriptor,
+            facts,
+            output_ordinal,
+            origin,
+            self.ctx.lineage,
+        )?;
+        let outcome_entries = committed_events
+            .iter()
+            .cloned()
+            .map(|event| AtomicCommitEntry {
+                event,
+                options: CommitOptions {
+                    count_output: true,
+                    validate_output_contract: true,
+                },
+                intent: StageAppendIntent::NormalStageData,
+            })
+            .collect();
+        self.commit_terminal_group(&cursor, outcome_entries, control_events)
+            .await?;
+        self.routed_output_fact_count = self
+            .routed_output_fact_count
+            .checked_add(routed_fact_count)
+            .ok_or_else(|| EffectError::Execution("routed output fanout overflow".to_string()))?;
+        self.committed_facts.extend(committed_events);
+        Ok(())
+    }
+
+    async fn commit_terminal_group(
+        &self,
+        cursor: &EffectCursor,
+        mut outcome_entries: Vec<AtomicCommitEntry>,
+        control_events: Vec<ChainEvent>,
+    ) -> Result<(), EffectError> {
+        outcome_entries.extend(control_events.into_iter().map(|event| AtomicCommitEntry {
+            event,
+            options: CommitOptions::default(),
+            intent: StageAppendIntent::FrameworkObservability,
+        }));
+        let group_id = effect_outcome_group_id(cursor);
+        let committer = OutputCommitter {
+            data_journal: &self.ctx.data_journal,
+            flow_context: self.ctx.flow_context.as_ref(),
+            system_journal: self.ctx.system_journal.as_ref(),
+            instrumentation: self.ctx.instrumentation.as_ref(),
+            heartbeat_state: self.ctx.heartbeat_state.as_ref(),
+            output_contract: Some(&self.ctx.output_contract),
+            backpressure_writer: Some(&self.ctx.backpressure_writer),
+            observers: None,
+            observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+        };
+        committer
+            .commit_atomic_group(group_id.as_str(), outcome_entries, Some(&self.ctx.parent))
+            .await
+            .map_err(|error| EffectError::Journal(error.to_string()))?;
         Ok(())
     }
 

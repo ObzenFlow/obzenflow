@@ -757,7 +757,6 @@ fn invocation_context_with_mode(
         backpressure_writer: BackpressureWriter::disabled(),
         emit_enabled: false,
         effect_boundary: None,
-        boundary_control_events: Arc::new(Mutex::new(Vec::new())),
     }
 }
 
@@ -3583,7 +3582,6 @@ async fn transactional_boundary_foreign_abort_cannot_reclassify_a_committed_oper
         ports,
     );
     ctx.effect_boundary = Some(Arc::new(ExecutedThenForeignAbortBoundary));
-    let boundary_control_events = ctx.boundary_control_events.clone();
     let mut effects = EffectsCore::new(ctx);
 
     let output = effects
@@ -3597,10 +3595,6 @@ async fn transactional_boundary_foreign_abort_cannot_reclassify_a_committed_oper
     assert_eq!(output, CountingOutput { value: 1_007 });
     assert_eq!(transactional_calls.load(Ordering::SeqCst), 1);
     assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
-    assert!(
-        EffectInvocationContext::drain_boundary_control_event_buffer(&boundary_control_events)
-            .is_empty()
-    );
     let records = effect_records(&journal);
     assert_eq!(records.len(), 1);
     assert!(matches!(
@@ -3634,7 +3628,6 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
     live_ctx.effect_boundary = Some(Arc::new(ForeignExecutionBoundary {
         foreign_calls: foreign_calls.clone(),
     }));
-    let boundary_control_events = live_ctx.boundary_control_events.clone();
     let mut live = EffectsCore::new(live_ctx);
 
     let live_err = live
@@ -3649,10 +3642,6 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
     assert_eq!(transactional_calls.load(Ordering::SeqCst), 0);
     assert_eq!(foreign_calls.load(Ordering::SeqCst), 1);
     assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
-    assert!(
-        EffectInvocationContext::drain_boundary_control_event_buffer(&boundary_control_events)
-            .is_empty()
-    );
     let records = effect_records(&live_journal);
     assert_eq!(records.len(), 1);
     assert!(matches!(
@@ -3827,7 +3816,6 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
         backpressure_writer: BackpressureWriter::disabled(),
         emit_enabled: false,
         effect_boundary: boundary,
-        boundary_control_events: Arc::new(Mutex::new(Vec::new())),
     };
 
     // Run A: aborted transactional effect, then a counting effect.

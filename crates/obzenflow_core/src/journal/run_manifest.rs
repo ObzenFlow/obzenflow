@@ -21,7 +21,10 @@ pub const RUN_MANIFEST_VERSION: &str = "2.0";
 /// check that gates `manifest_version`, so an archive written by an incompatible
 /// format is refused before any record is parsed. There is no mixed-format file:
 /// append and resume across a changed format refuse or start a new segment.
-pub const JOURNAL_FORMAT_VERSION: u32 = 1;
+/// Format 2 wraps every framed JSON body in one uniform record/group envelope,
+/// allowing a terminal outcome and its opaque evidence to share one physical
+/// commit marker without mixing storage formats inside a journal file.
+pub const JOURNAL_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {

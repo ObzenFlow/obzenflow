@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde_json::json;
 
@@ -113,7 +113,6 @@ impl EffectInvocationContextBuilder {
             emit_enabled: self.emit_enabled,
             effect_boundary: None,
             observers: None,
-            boundary_control_events: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }

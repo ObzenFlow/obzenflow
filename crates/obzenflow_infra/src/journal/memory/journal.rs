@@ -136,6 +136,58 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         Ok(envelope)
     }
 
+    async fn append_group(
+        &self,
+        group_id: &str,
+        mut events: Vec<T>,
+        parent: Option<&EventEnvelope<T>>,
+    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        crate::journal::ensure_owned(self.owner.as_ref())?;
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        if group_id.is_empty() {
+            return Err(JournalError::Implementation {
+                message: "Atomic journal group id cannot be empty".to_string(),
+                source: "empty atomic journal group id".into(),
+            });
+        }
+
+        let mut state = self.state.lock().unwrap();
+        if let Some(sequencer) = &self.admission_sequencer {
+            for event in &mut events {
+                if event.admission_seq().is_none() {
+                    event.set_admission_seq(obzenflow_core::AdmissionSeq(
+                        sequencer.fetch_add(1, Ordering::Relaxed),
+                    ));
+                }
+            }
+        }
+
+        // Build against a private clock snapshot, then publish clocks and
+        // events together while holding the single state mutex.
+        let mut next_writer_clocks = state.writer_clocks.clone();
+        let mut envelopes = Vec::with_capacity(events.len());
+        for event in events {
+            let writer_id = *event.writer_id();
+            let vector_clock = CausalOrderingService::advance_for_append(
+                next_writer_clocks.get(&writer_id),
+                &writer_id.to_string(),
+                parent.map(|p| &p.vector_clock),
+            );
+            next_writer_clocks.insert(writer_id, vector_clock.clone());
+            envelopes.push(EventEnvelope {
+                journal_writer_id: JournalWriterId::from(self.journal_id),
+                vector_clock,
+                timestamp: Utc::now(),
+                event,
+            });
+        }
+        state.writer_clocks = next_writer_clocks;
+        state.events.extend(envelopes.iter().cloned());
+        Ok(envelopes)
+    }
+
     async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         let state = self.state.lock().unwrap();
         Ok(state.events.clone())

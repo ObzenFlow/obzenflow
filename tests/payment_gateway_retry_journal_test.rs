@@ -7,6 +7,11 @@ pub mod support;
 
 use support::{gateway, proof};
 
+use obzenflow_core::event::payloads::observability_payload::{
+    CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
+};
+use obzenflow_core::event::{ChainEvent, ChainEventContent};
+use obzenflow_runtime::effects::EffectCursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -69,6 +74,91 @@ fn payment_effect_outcome_group_count(jsonl: &str) -> usize {
         })
         .collect::<std::collections::BTreeSet<_>>()
         .len()
+}
+
+fn payment_terminal_group_counters(jsonl: &str) -> (u64, u64) {
+    exported_events(jsonl)
+        .filter(|row| {
+            row.pointer("/event/runtime_context/effect_circuit_breakers")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|breakers| {
+                    breakers.iter().any(|breaker| {
+                        breaker
+                            .get("effect_type")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("payment.authorize")
+                    })
+                })
+        })
+        .fold((0, 0), |(committed, failed), row| {
+            (
+                committed.max(
+                    row.pointer("/event/runtime_context/terminal_groups_committed_total")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                ),
+                failed.max(
+                    row.pointer("/event/runtime_context/terminal_group_commit_failures_total")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                ),
+            )
+        })
+}
+
+fn exported_chain_events(jsonl: &str) -> impl Iterator<Item = ChainEvent> + '_ {
+    exported_events(jsonl).filter_map(|row| serde_json::from_value(row["event"].clone()).ok())
+}
+
+#[derive(Debug)]
+struct RecoveryCompletion {
+    cursor: EffectCursor,
+    total_attempts: u32,
+    backoff_elapsed_ms: u64,
+    recovery_elapsed_ms: u64,
+}
+
+fn recovery_completions(jsonl: &str) -> Vec<RecoveryCompletion> {
+    exported_chain_events(jsonl)
+        .filter_map(|event| match event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RecoveryCompleted {
+                    cursor,
+                    total_attempts,
+                    backoff_elapsed_ms,
+                    recovery_elapsed_ms,
+                }),
+            )) => Some(RecoveryCompletion {
+                cursor,
+                total_attempts,
+                backoff_elapsed_ms,
+                recovery_elapsed_ms,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn payment_outcome_cursors(jsonl: &str) -> std::collections::HashSet<EffectCursor> {
+    exported_chain_events(jsonl)
+        .filter_map(|event| {
+            event
+                .effect_provenance
+                .filter(|provenance| provenance.descriptor.effect_type == "payment.authorize")
+                .map(|provenance| provenance.cursor)
+        })
+        .collect()
+}
+
+fn assert_one_recovery_completion_per_payment_cursor(jsonl: &str) -> Vec<RecoveryCompletion> {
+    let completions = recovery_completions(jsonl);
+    let completion_cursors: std::collections::HashSet<_> = completions
+        .iter()
+        .map(|completion| completion.cursor.clone())
+        .collect();
+    assert_eq!(completion_cursors.len(), completions.len());
+    assert_eq!(completion_cursors, payment_outcome_cursors(jsonl));
+    completions
 }
 
 #[derive(Debug, PartialEq)]
@@ -185,6 +275,7 @@ fn payment_gateway_retry_journal_test() {
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&healthy), 5);
+    assert_eq!(payment_terminal_group_counters(&healthy), (5, 0));
     assert_eq!(
         last_payment_breaker_counts(&healthy),
         BreakerCounts {
@@ -209,6 +300,13 @@ fn payment_gateway_retry_journal_test() {
         "healthy profile must prove non-zero limiter delay: {healthy_limiter:?}"
     );
     assert_eq!(occurrences(&healthy, "\"action\":\"attempt_settled\""), 5);
+    let healthy_completions = assert_one_recovery_completion_per_payment_cursor(&healthy);
+    assert_eq!(healthy_completions.len(), 5);
+    assert!(healthy_completions.iter().all(|completion| {
+        completion.total_attempts == 1
+            && completion.backoff_elapsed_ms == 0
+            && completion.recovery_elapsed_ms >= completion.backoff_elapsed_ms
+    }));
 
     let control_root = tempfile::tempdir().expect("control journal root");
     let control_proof = Arc::new(gateway::GatewayRetryProof::new(false));
@@ -231,6 +329,7 @@ fn payment_gateway_retry_journal_test() {
     );
     assert_eq!(data_event_count(&control, "payment.authorized.v1"), 0);
     assert_eq!(payment_effect_outcome_group_count(&control), 1);
+    assert_eq!(payment_terminal_group_counters(&control), (1, 0));
     assert_eq!(
         last_payment_breaker_counts(&control),
         BreakerCounts {
@@ -249,6 +348,10 @@ fn payment_gateway_retry_journal_test() {
     assert!(!control.contains("\"action\":\"retry_scheduled\""));
     assert!(!control.contains("\"action\":\"retry_succeeded\""));
     assert!(!control.contains("\"action\":\"retry_exhausted\""));
+    let control_completions = assert_one_recovery_completion_per_payment_cursor(&control);
+    assert_eq!(control_completions.len(), 1);
+    assert_eq!(control_completions[0].total_attempts, 1);
+    assert_eq!(control_completions[0].backoff_elapsed_ms, 0);
 
     let treatment_root = tempfile::tempdir().expect("treatment journal root");
     let treatment_proof = Arc::new(gateway::GatewayRetryProof::new(false));
@@ -272,6 +375,7 @@ fn payment_gateway_retry_journal_test() {
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&treatment), 1);
+    assert_eq!(payment_terminal_group_counters(&treatment), (1, 0));
     assert_eq!(
         last_payment_breaker_counts(&treatment),
         BreakerCounts {
@@ -300,6 +404,13 @@ fn payment_gateway_retry_journal_test() {
     assert!(
         !treatment.contains("gateway_timeout_simulated"),
         "intermediate failures must not become terminal journal records"
+    );
+    let treatment_completions = assert_one_recovery_completion_per_payment_cursor(&treatment);
+    assert_eq!(treatment_completions.len(), 1);
+    assert_eq!(treatment_completions[0].total_attempts, 3);
+    assert!(treatment_completions[0].backoff_elapsed_ms > 0);
+    assert!(
+        treatment_completions[0].recovery_elapsed_ms >= treatment_completions[0].backoff_elapsed_ms
     );
 
     let replay_root = tempfile::tempdir().expect("replay journal root");
@@ -330,6 +441,7 @@ fn payment_gateway_retry_journal_test() {
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&replay), 1);
+    assert_eq!(payment_terminal_group_counters(&replay), (0, 0));
     assert!(
         !replay.contains("\"action\":\"retry_"),
         "strict replay must not emit fresh circuit-breaker retry evidence"
@@ -338,6 +450,7 @@ fn payment_gateway_retry_journal_test() {
         !replay.contains("\"action\":\"attempt_settled\""),
         "strict replay must not emit fresh physical-attempt evidence"
     );
+    assert!(recovery_completions(&replay).is_empty());
 
     // Five failures satisfy the tutorial breaker's count window; the sixth
     // logical effect is rejected without a dependency call or limiter permit.
@@ -359,6 +472,7 @@ fn payment_gateway_retry_journal_test() {
         6
     );
     assert_eq!(data_event_count(&open, "payment.authorized.v1"), 0);
+    assert_eq!(payment_terminal_group_counters(&open), (6, 0));
     assert_eq!(
         last_payment_breaker_counts(&open),
         BreakerCounts {
@@ -379,6 +493,16 @@ fn payment_gateway_retry_journal_test() {
         "open rejection must carry the stable machine-readable cause code"
     );
     assert!(!open.contains("\"action\":\"retry_"));
+    let open_completions = assert_one_recovery_completion_per_payment_cursor(&open);
+    assert_eq!(open_completions.len(), 6);
+    assert_eq!(
+        open_completions
+            .iter()
+            .filter(|completion| completion.total_attempts == 0)
+            .count(),
+        1,
+        "the open rejection must have one cursor-correlated zero-attempt completion"
+    );
 
     let open_replay_root = tempfile::tempdir().expect("open-rejection replay root");
     let open_replay_proof = Arc::new(gateway::GatewayRetryProof::always_fail(true));
@@ -411,4 +535,5 @@ fn payment_gateway_retry_journal_test() {
         !open_replay.contains("\"action\":\"attempt_settled\""),
         "open-rejection replay must not emit fresh physical-attempt evidence"
     );
+    assert!(recovery_completions(&open_replay).is_empty());
 }

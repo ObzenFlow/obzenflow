@@ -20,6 +20,14 @@ pub enum JournalError {
     #[error("Subscription closed")]
     SubscriptionClosed,
 
+    #[error(
+        "Journal does not support atomic append group '{group_id}' with {member_count} members"
+    )]
+    AtomicAppendUnsupported {
+        group_id: String,
+        member_count: usize,
+    },
+
     /// Generic implementation error with source
     #[error("Implementation error: {message}")]
     Implementation {

@@ -40,6 +40,35 @@ where
         parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError>;
 
+    /// Atomically append a logical group of events.
+    ///
+    /// Implementations must make the complete group visible together or leave
+    /// every member invisible, including after recovery from an interrupted
+    /// physical write. `group_id` is a deterministic, policy-neutral identity
+    /// used by durable implementations for framing and recovery diagnostics.
+    ///
+    /// The default is deliberately fail-closed for multi-event groups. This
+    /// preserves source compatibility for lightweight journals without
+    /// pretending that a sequence of ordinary appends is atomic.
+    async fn append_group(
+        &self,
+        group_id: &str,
+        events: Vec<T>,
+        parent: Option<&EventEnvelope<T>>,
+    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        match events.len() {
+            0 => Ok(Vec::new()),
+            1 => Ok(vec![
+                self.append(events.into_iter().next().expect("one event"), parent)
+                    .await?,
+            ]),
+            count => Err(JournalError::AtomicAppendUnsupported {
+                group_id: group_id.to_string(),
+                member_count: count,
+            }),
+        }
+    }
+
     /// Read every event in raw append/storage order, without causal sorting.
     ///
     /// The single raw-enumeration primitive the causal reads derive from. Disk

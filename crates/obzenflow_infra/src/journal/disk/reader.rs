@@ -16,6 +16,7 @@ use obzenflow_core::event::JournalEvent;
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
+use std::collections::VecDeque;
 use std::fs::File as StdFile;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
@@ -82,6 +83,10 @@ pub struct DiskJournalReader<T: JournalEvent> {
     policy: ReadPolicy,
     /// Reusable byte buffer for the framed-line reader.
     buf: Vec<u8>,
+    /// Remaining logical records from an already committed atomic-group frame.
+    /// `read_offset` advances past the physical frame as soon as it is parsed;
+    /// these members are then yielded one-by-one without another disk read.
+    pending: VecDeque<super::log_record::LogRecord<T>>,
     /// Path to the journal file (for error messages)
     path: PathBuf,
     /// Journal ID for creating JournalWriterId
@@ -112,6 +117,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 stall_polls: 0,
                 policy: ReadPolicy::LiveTail,
                 buf: Vec::new(),
+                pending: VecDeque::new(),
                 path,
                 journal_id,
                 at_end: true,
@@ -141,6 +147,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             stall_polls: 0,
             policy: ReadPolicy::LiveTail,
             buf: Vec::new(),
+            pending: VecDeque::new(),
             path,
             journal_id,
             at_end: false,
@@ -177,6 +184,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             stall_polls: 0,
             policy,
             buf: Vec::new(),
+            pending: VecDeque::new(),
             path,
             journal_id,
             at_end: false,
@@ -256,6 +264,14 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         &mut self,
         reader: &mut B,
     ) -> Result<(Disposition<T>, u64), JournalError> {
+        if let Some(record) = self.pending.pop_front() {
+            self.position += 1;
+            return Ok((
+                Disposition::Yield(super::log_record::LogFrame::Record(record)),
+                self.read_offset,
+            ));
+        }
+
         loop {
             let frame_start = self.read_offset;
             let Some((consumed, termination)) = read_frame_async(reader, &mut self.buf)
@@ -274,10 +290,21 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             }
 
             match dispose(classify_frame::<T>(&self.buf), termination, self.policy) {
-                Disposition::Yield(record) => {
+                Disposition::Yield(frame) => {
                     self.read_offset += consumed as u64;
+                    self.pending.extend(frame.into_records());
+                    let record =
+                        self.pending
+                            .pop_front()
+                            .ok_or_else(|| JournalError::Implementation {
+                                message: "Committed journal frame contained no records".to_string(),
+                                source: "empty committed journal frame".into(),
+                            })?;
                     self.position += 1;
-                    return Ok((Disposition::Yield(record), frame_start));
+                    return Ok((
+                        Disposition::Yield(super::log_record::LogFrame::Record(record)),
+                        frame_start,
+                    ));
                 }
                 Disposition::Corrupt(problem) => {
                     self.read_offset += consumed as u64;
@@ -320,7 +347,11 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
 
         let (disposition, frame_start) = self.advance_one(&mut reader).await?;
         match disposition {
-            Disposition::Yield(record) => {
+            Disposition::Yield(frame) => {
+                let mut records = frame.into_records();
+                let record = records
+                    .pop()
+                    .expect("reader yields exactly one logical record");
                 self.at_end = false;
                 self.stall_polls = 0;
                 Ok(Some(EventEnvelope {
@@ -402,7 +433,7 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::disk::log_record::LogRecord;
+    use crate::journal::disk::log_record::{serialize_record, LogRecord};
     use chrono::Utc;
     use crc32fast::Hasher;
     use obzenflow_core::event::chain_event::ChainEventFactory;
@@ -414,7 +445,7 @@ mod tests {
     use ulid::Ulid;
 
     fn write_framed_record<T: JournalEvent>(file: &mut NamedTempFile, record: &LogRecord<T>) {
-        let json_body = serde_json::to_vec(record).unwrap();
+        let json_body = serialize_record(record).unwrap();
         let mut hasher = Hasher::new();
         hasher.update(&json_body);
         let crc = hasher.finalize();

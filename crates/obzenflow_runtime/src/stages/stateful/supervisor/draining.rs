@@ -182,14 +182,8 @@ pub(super) async fn dispatch_draining<
                             backpressure_writer: ctx.backpressure_writer.clone(),
                             emit_enabled: true,
                             effect_boundary: None,
-                            boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(
-                                Vec::new(),
-                            )),
                         })
                     });
-                    let boundary_control_events = effect_context
-                        .as_ref()
-                        .map(|context| context.boundary_control_events.clone());
 
                     if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
                         if event.is_data() {
@@ -242,29 +236,6 @@ pub(super) async fn dispatch_draining<
                         Some(&envelope),
                     )
                     .await?;
-                    if let Some(buffer) = boundary_control_events {
-                        commit_framework_observability_events(
-                            EffectInvocationContext::drain_boundary_control_event_buffer(&buffer),
-                            FrameworkObservabilityCommit {
-                                flow_context: &flow_context,
-                                data_journal: &ctx.data_journal,
-                                system_journal: Some(&ctx.system_journal),
-                                instrumentation: Some(&ctx.instrumentation),
-                                heartbeat_state: ctx
-                                    .heartbeat
-                                    .as_ref()
-                                    .map(|heartbeat| &heartbeat.state),
-                                backpressure_writer: &ctx.backpressure_writer,
-                                parent: Some(&envelope),
-                                observer_scope: scope,
-                            },
-                        )
-                        .await
-                        .map_err(|e| {
-                            format!("Failed to commit effect boundary observability events: {e}")
-                        })?;
-                    }
-
                     if let Err(err) = &accumulate_result {
                         if let Some(directive) = super::contract_violation_directive::<H>(
                             err,

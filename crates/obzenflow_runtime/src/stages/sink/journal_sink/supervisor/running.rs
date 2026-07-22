@@ -610,7 +610,6 @@ async fn dispatch_data_event<
             backpressure_writer: BackpressureWriter::disabled(),
             emit_enabled: false,
             effect_boundary: None,
-            boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     });
 

@@ -236,7 +236,6 @@ fn effect_context_with_boundary(
         backpressure_writer: BackpressureWriter::disabled(),
         emit_enabled: false,
         effect_boundary: Some(Arc::new(boundary)),
-        boundary_control_events: Arc::new(Mutex::new(Vec::new())),
     }
 }
 

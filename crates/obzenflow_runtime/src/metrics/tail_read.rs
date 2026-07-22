@@ -401,6 +401,8 @@ mod tests {
             events_processed_total,
             events_accumulated_total: 0,
             events_emitted_total: 0,
+            terminal_groups_committed_total: 0,
+            terminal_group_commit_failures_total: 0,
             data_outputs_by_event_type: Vec::new(),
             data_inputs_by_upstream_event_type: Vec::new(),
             join_reference_since_last_stream: 0,

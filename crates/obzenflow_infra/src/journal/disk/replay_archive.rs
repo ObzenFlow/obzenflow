@@ -439,16 +439,17 @@ fn scan_recorded_maxima(
                 continue;
             }
             match dispose(classify_frame::<ChainEvent>(&buf), termination, policy) {
-                Disposition::Yield(record) => {
-                    if let ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
-                        generation,
-                        ..
-                    }) = &record.event.content
-                    {
-                        max_generation = max_generation.max(generation.0);
-                    }
-                    if let Some(seq) = record.event.admission_seq {
-                        max_admission_seq = max_admission_seq.max(seq.0);
+                Disposition::Yield(frame) => {
+                    for record in frame.into_records() {
+                        if let ChainEventContent::FlowControl(
+                            FlowControlPayload::CatchUpComplete { generation, .. },
+                        ) = &record.event.content
+                        {
+                            max_generation = max_generation.max(generation.0);
+                        }
+                        if let Some(seq) = record.event.admission_seq {
+                            max_admission_seq = max_admission_seq.max(seq.0);
+                        }
                     }
                 }
                 Disposition::EndOfCommittedRecords | Disposition::Skip => break,
@@ -515,24 +516,26 @@ pub(crate) fn derive_status_derivation_from_system_log(
                 tolerate_torn_tail: true,
             },
         ) {
-            Disposition::Yield(record) => {
-                if let obzenflow_core::event::SystemEventType::PipelineLifecycle(event) =
-                    &record.event.event
-                {
-                    match event {
-                        obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
-                            terminal_events_found = terminal_events_found.saturating_add(1);
-                            chosen = ArchiveStatus::Completed;
+            Disposition::Yield(frame) => {
+                for record in frame.into_records() {
+                    if let obzenflow_core::event::SystemEventType::PipelineLifecycle(event) =
+                        &record.event.event
+                    {
+                        match event {
+                            obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
+                                terminal_events_found = terminal_events_found.saturating_add(1);
+                                chosen = ArchiveStatus::Completed;
+                            }
+                            obzenflow_core::event::PipelineLifecycleEvent::Failed { .. } => {
+                                terminal_events_found = terminal_events_found.saturating_add(1);
+                                chosen = ArchiveStatus::Failed;
+                            }
+                            obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {
+                                terminal_events_found = terminal_events_found.saturating_add(1);
+                                chosen = ArchiveStatus::Cancelled;
+                            }
+                            _ => {}
                         }
-                        obzenflow_core::event::PipelineLifecycleEvent::Failed { .. } => {
-                            terminal_events_found = terminal_events_found.saturating_add(1);
-                            chosen = ArchiveStatus::Failed;
-                        }
-                        obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {
-                            terminal_events_found = terminal_events_found.saturating_add(1);
-                            chosen = ArchiveStatus::Cancelled;
-                        }
-                        _ => {}
                     }
                 }
             }
