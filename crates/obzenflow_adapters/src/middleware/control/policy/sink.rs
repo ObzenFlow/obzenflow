@@ -240,7 +240,7 @@ mod tests {
         ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
             match request.surface {
                 MiddlewareSurface::SinkDelivery(_) => Ok(
-                    MiddlewareSurfaceAttachment::SinkDelivery(Arc::new(AlwaysRejectPolicy)),
+                    MiddlewareSurfaceAttachment::sink_delivery(Arc::new(AlwaysRejectPolicy)),
                 ),
                 other => Err(MiddlewareFactoryError::materialization_failed(
                     self.label(),
@@ -291,18 +291,17 @@ mod tests {
             origin: &origin,
             declaration_index: crate::middleware::MiddlewareDeclarationIndex::resolved(0),
         };
-        let materialization = MiddlewareMaterializationContext::new(
+        let policy = crate::middleware::materialize_factory_checked(
+            &factory,
+            request,
             &config,
-            &control,
             obzenflow_core::event::context::StageType::Sink,
-        );
-        let attachment = factory
-            .materialize(request, &materialization)
-            .expect("third-party factory should materialize a sink policy");
-        let policy = match attachment {
-            MiddlewareSurfaceAttachment::SinkDelivery(policy) => policy,
-            _ => panic!("expected a SinkDelivery attachment from the third-party factory"),
-        };
+            &control,
+        )
+        .expect("third-party factory should materialize a sink policy");
+        let policy = policy
+            .into_sink_delivery()
+            .expect("expected a SinkDelivery attachment from the third-party factory");
 
         let boundary = PerSinkDeliveryPolicyBoundary::new(vec![policy]);
         let mut executor = PanicExecutor;

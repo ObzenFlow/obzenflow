@@ -1,0 +1,15 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/breaker_builder/materialization_context_constructor_private.rs:8:58
+  |
+8 |       let _constructor = MiddlewareMaterializationContext::new;
+  |                                                            ^^^ private associated function
+  |
+ ::: src/middleware/carrier.rs
+  |
+  | /     pub(crate) fn new(
+  | |         config: &'a StageConfig,
+  | |         stage_type: StageType,
+  | |         declaration: &MiddlewareDeclaration,
+  | |         request: &MiddlewareAttachmentRequest<'_>,
+  | |     ) -> Self {
+  | |_____________- private associated function defined here

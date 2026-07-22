@@ -759,6 +759,8 @@ mod tests {
         );
 
         let mut dsl = DslCandidates::default();
+        dsl.declare_effect_consumption(key, stage.clone(), authorize.clone());
+        dsl.declare_effect_consumption(key, stage.clone(), refund.clone());
         dsl.declare_for_effect(key, stage.clone(), authorize.clone(), ConfigValue::F64(2.0));
         dsl.declare_for_effect(key, stage.clone(), refund.clone(), ConfigValue::F64(3.0));
         let effective = materialize_flow_config(

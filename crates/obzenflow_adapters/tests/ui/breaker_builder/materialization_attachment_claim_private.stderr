@@ -1,0 +1,11 @@
+error[E0451]: field `claim` of struct `MiddlewareSurfaceAttachment` is private
+ --> tests/ui/breaker_builder/materialization_attachment_claim_private.rs:8:39
+  |
+8 |     let MiddlewareSurfaceAttachment { claim: _, .. } = attachment;
+  |                                       ^^^^^ private field
+
+error: type `middleware::carrier::MaterializationClaim` is private
+ --> tests/ui/breaker_builder/materialization_attachment_claim_private.rs:8:46
+  |
+8 |     let MiddlewareSurfaceAttachment { claim: _, .. } = attachment;
+  |                                              ^ private type

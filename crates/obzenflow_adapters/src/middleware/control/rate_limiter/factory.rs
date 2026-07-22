@@ -20,11 +20,11 @@ use super::hook_adapters::{
 };
 use super::{RateLimiterFamily, RateLimiterMiddleware};
 use crate::middleware::{
-    validate_attachment_request, EffectPolicyAttachment, MiddlewareAttachmentRequest,
-    MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
+    validate_attachment_request, EffectPolicyAttachment, MaterializationClaim,
+    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
     MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety, MiddlewareSurface,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, SinkPolicy, SourcePolicy,
-    SourcePollAttachment, TopologyMiddlewareConfigSlot,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceAttachmentKind, MiddlewareSurfaceKind,
+    SinkPolicy, SourcePolicy, SourcePollAttachment, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
@@ -243,8 +243,17 @@ impl MiddlewareFactory for RateLimiterFactory {
                     err,
                 )
             })?;
+        context
+            .authorize_materialization(MaterializationClaim::RateLimiter, &declaration, &request)
+            .map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            })?;
 
-        let config_view = context.config_view(request.protected_unit);
+        let config_view = context.config_view();
         let events_per_second = config_view
             .get(obzenflow_runtime::runtime_config::RATE_LIMITER_EVENTS_PER_SECOND_KEY)
             .and_then(|resolved| resolved.value.as_f64())
@@ -282,7 +291,8 @@ impl MiddlewareFactory for RateLimiterFactory {
                     RateLimiterMiddleware::new(
                         context.config.stage_id,
                         validated,
-                        context.control_middleware().clone(),
+                        context,
+                        MaterializationClaim::RateLimiter,
                     )
                     .map_err(|message| {
                         MiddlewareFactoryError::invalid_configuration(
@@ -294,12 +304,21 @@ impl MiddlewareFactory for RateLimiterFactory {
                 );
                 let policy: Arc<dyn SourcePolicy> =
                     Arc::new(RateLimiterSourcePolicy::new(middleware, charge_at));
-                Ok(MiddlewareSurfaceAttachment::SourcePoll(
-                    SourcePollAttachment {
+                MiddlewareSurfaceAttachment::claimed(
+                    MiddlewareSurfaceAttachmentKind::SourcePoll(SourcePollAttachment {
                         policy,
                         completion_gate: None,
-                    },
-                ))
+                    }),
+                    MaterializationClaim::RateLimiter,
+                    context,
+                )
+                .map_err(|error| {
+                    MiddlewareFactoryError::materialization_failed(
+                        self.label(),
+                        &context.config.name,
+                        error,
+                    )
+                })
             }
             MiddlewareSurface::Effect(effect_surface) => {
                 // FLOWIP-120c: one limiter instance guards one declared effect,
@@ -307,7 +326,8 @@ impl MiddlewareFactory for RateLimiterFactory {
                 let middleware = RateLimiterMiddleware::new_keyed(
                     context.config.stage_id,
                     validated,
-                    context.control_middleware().clone(),
+                    context,
+                    MaterializationClaim::RateLimiter,
                     Some(effect_surface.effect_type.clone()),
                 )
                 .map_err(|message| {
@@ -317,16 +337,28 @@ impl MiddlewareFactory for RateLimiterFactory {
                         std::io::Error::other(message),
                     )
                 })?;
-                Ok(MiddlewareSurfaceAttachment::Effect(
-                    EffectPolicyAttachment::neutral(Arc::new(middleware)),
-                ))
+                MiddlewareSurfaceAttachment::claimed(
+                    MiddlewareSurfaceAttachmentKind::Effect(EffectPolicyAttachment::neutral(
+                        Arc::new(middleware),
+                    )),
+                    MaterializationClaim::RateLimiter,
+                    context,
+                )
+                .map_err(|error| {
+                    MiddlewareFactoryError::materialization_failed(
+                        self.label(),
+                        &context.config.name,
+                        error,
+                    )
+                })
             }
             MiddlewareSurface::SinkDelivery(_) => {
                 let middleware = Arc::new(
                     RateLimiterMiddleware::new(
                         context.config.stage_id,
                         validated,
-                        context.control_middleware().clone(),
+                        context,
+                        MaterializationClaim::RateLimiter,
                     )
                     .map_err(|message| {
                         MiddlewareFactoryError::invalid_configuration(
@@ -337,7 +369,18 @@ impl MiddlewareFactory for RateLimiterFactory {
                     })?,
                 );
                 let policy: Arc<dyn SinkPolicy> = Arc::new(RateLimiterSinkPolicy::new(middleware));
-                Ok(MiddlewareSurfaceAttachment::SinkDelivery(policy))
+                MiddlewareSurfaceAttachment::claimed(
+                    MiddlewareSurfaceAttachmentKind::SinkDelivery(policy),
+                    MaterializationClaim::RateLimiter,
+                    context,
+                )
+                .map_err(|error| {
+                    MiddlewareFactoryError::materialization_failed(
+                        self.label(),
+                        &context.config.name,
+                        error,
+                    )
+                })
             }
             MiddlewareSurface::Ingress(_) => {
                 // FLOWIP-115d: source-backed hosted ingress. One core per hosted
@@ -346,7 +389,8 @@ impl MiddlewareFactory for RateLimiterFactory {
                     RateLimiterMiddleware::new(
                         context.config.stage_id,
                         validated,
-                        context.control_middleware().clone(),
+                        context,
+                        MaterializationClaim::RateLimiter,
                     )
                     .map_err(|message| {
                         MiddlewareFactoryError::invalid_configuration(
@@ -358,7 +402,18 @@ impl MiddlewareFactory for RateLimiterFactory {
                 );
                 let policy: Arc<dyn IngressBoundaryMiddleware> =
                     Arc::new(RateLimiterIngressPolicy::new(middleware));
-                Ok(MiddlewareSurfaceAttachment::Ingress(policy))
+                MiddlewareSurfaceAttachment::claimed(
+                    MiddlewareSurfaceAttachmentKind::Ingress(policy),
+                    MaterializationClaim::RateLimiter,
+                    context,
+                )
+                .map_err(|error| {
+                    MiddlewareFactoryError::materialization_failed(
+                        self.label(),
+                        &context.config.name,
+                        error,
+                    )
+                })
             }
             other => Err(MiddlewareFactoryError::materialization_failed(
                 self.label(),
@@ -436,6 +491,7 @@ pub fn rate_limit_with_burst(events_per_second: f64, burst: f64) -> Box<dyn Midd
 mod tests {
     use super::*;
     use crate::middleware::control::ControlMiddlewareAggregator;
+    use crate::middleware::materialize_factory_checked;
     use obzenflow_core::{StageId, StageKey};
     use obzenflow_runtime::pipeline::config::StageConfig;
     use obzenflow_runtime::runtime_config::{
@@ -689,9 +745,8 @@ mod tests {
     fn rate_limiter_ingress_admits_then_rejects_fail_fast() {
         use crate::middleware::{
             HostedIngressTargetKey, IngressRouteScope, IngressSurface, IngressUnitId,
-            MiddlewareAttachmentRequest, MiddlewareDeclarationIndex,
-            MiddlewareMaterializationContext, MiddlewareOrigin, ProtectedUnit, ProtectedUnitId,
-            SourceStageIngressOwner,
+            MiddlewareAttachmentRequest, MiddlewareDeclarationIndex, MiddlewareOrigin,
+            ProtectedUnit, ProtectedUnitId, SourceStageIngressOwner,
         };
         use obzenflow_core::ingress::{
             IngressAdmissionDecision, IngressAttemptContext, IngressAttemptSeq, IngressKey,
@@ -727,17 +782,17 @@ mod tests {
             origin: &origin,
             declaration_index: MiddlewareDeclarationIndex::resolved(0),
         };
-        let ctx =
-            MiddlewareMaterializationContext::new(&config, &control, StageType::InfiniteSource);
-
         // Burst capacity 1 (events_per_second defaults the burst), 1 event/sec.
-        let boundary = match factory
-            .materialize(request, &ctx)
-            .expect("ingress materialize")
-        {
-            MiddlewareSurfaceAttachment::Ingress(boundary) => boundary,
-            _ => panic!("expected an Ingress attachment"),
-        };
+        let boundary = materialize_factory_checked(
+            &factory,
+            request,
+            &config,
+            StageType::InfiniteSource,
+            &control,
+        )
+        .expect("ingress materialize")
+        .into_ingress()
+        .expect("expected an Ingress attachment");
 
         let attempt = IngressAttemptContext {
             attempt_seq: IngressAttemptSeq(0),

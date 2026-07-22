@@ -11,16 +11,16 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
-    validate_attachment_request, EffectPolicyAttachment, EffectSurface, EffectTypeKey,
-    EffectUnitId, EventAwareEffectPolicy, MiddlewareAttachmentRequest, MiddlewareContext,
-    MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareFactoryError,
-    MiddlewareFactoryResult, MiddlewareMaterializationContext, MiddlewareOrigin,
-    MiddlewareOverrideKey, MiddlewareSurface, MiddlewareSurfaceAttachment,
-    MiddlewareSurfaceKind::Effect, MiddlewareSurfaceKind::SinkDelivery,
-    MiddlewareSurfaceKind::SourcePoll, PolicyAdmission, ProtectedUnit, ProtectedUnitId,
-    SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface, SinkDeliveryTarget,
-    SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourcePolicy, SourcePolicyCtx,
-    SourcePollAttachment, SourcePollOutcome, SourcePollSurface, SourcePollUnitId,
+    validate_attachment_request, EffectSurface, EffectTypeKey, EffectUnitId,
+    EventAwareEffectPolicy, MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration,
+    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
+    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareOverrideKey, MiddlewareSurface,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind::Effect,
+    MiddlewareSurfaceKind::SinkDelivery, MiddlewareSurfaceKind::SourcePoll, PolicyAdmission,
+    ProtectedUnit, ProtectedUnitId, SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface,
+    SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission,
+    SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome, SourcePollSurface,
+    SourcePollUnitId,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
@@ -112,7 +112,7 @@ impl MiddlewareFactory for HookProofFactory {
                 self.counters
                     .source_materialized
                     .fetch_add(1, Ordering::SeqCst);
-                Ok(MiddlewareSurfaceAttachment::SourcePoll(
+                Ok(MiddlewareSurfaceAttachment::source_poll(
                     SourcePollAttachment {
                         policy: Arc::new(HookProofSourcePolicy {
                             counters: self.counters.clone(),
@@ -125,18 +125,18 @@ impl MiddlewareFactory for HookProofFactory {
                 self.counters
                     .effect_materialized
                     .fetch_add(1, Ordering::SeqCst);
-                Ok(MiddlewareSurfaceAttachment::Effect(
-                    EffectPolicyAttachment::event_aware(Arc::new(HookProofEffectPolicy {
+                Ok(MiddlewareSurfaceAttachment::event_aware_effect(Arc::new(
+                    HookProofEffectPolicy {
                         counters: self.counters.clone(),
                         reject_value: self.reject_effect_value,
-                    })),
-                ))
+                    },
+                )))
             }
             MiddlewareSurface::SinkDelivery(_) => {
                 self.counters
                     .sink_materialized
                     .fetch_add(1, Ordering::SeqCst);
-                Ok(MiddlewareSurfaceAttachment::SinkDelivery(Arc::new(
+                Ok(MiddlewareSurfaceAttachment::sink_delivery(Arc::new(
                     HookProofSinkPolicy {
                         counters: self.counters.clone(),
                     },
@@ -248,9 +248,9 @@ impl MiddlewareFactory for BreakerCauseProofFactory {
                 error,
             )
         })?;
-        Ok(MiddlewareSurfaceAttachment::Effect(
-            EffectPolicyAttachment::event_aware(Arc::new(BreakerCauseProofPolicy)),
-        ))
+        Ok(MiddlewareSurfaceAttachment::event_aware_effect(Arc::new(
+            BreakerCauseProofPolicy,
+        )))
     }
 }
 

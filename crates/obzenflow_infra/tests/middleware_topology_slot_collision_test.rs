@@ -69,7 +69,7 @@ impl MiddlewareFactory for SlotFactory {
         })?;
         match request.surface.kind() {
             MiddlewareSurfaceKind::StageLifecycle => Ok(
-                MiddlewareSurfaceAttachment::StageLifecycleObserver(Arc::new(NoopObserver)),
+                MiddlewareSurfaceAttachment::stage_lifecycle_observer(Arc::new(NoopObserver)),
             ),
             other => Err(MiddlewareFactoryError::materialization_failed(
                 self.label(),

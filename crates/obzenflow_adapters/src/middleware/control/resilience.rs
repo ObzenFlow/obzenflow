@@ -14,10 +14,11 @@ use super::rate_limiter::{
 };
 use crate::middleware::context_keys::{CircuitBreakerRetryAfterMs, EffectCallDurationNanos};
 use crate::middleware::{
-    validate_attachment_request, EffectPolicyAttachment, MiddlewareAttachmentRequest,
-    MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError, MiddlewareHints,
-    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety, MiddlewareSurface,
-    MiddlewareSurfaceAttachment, PolicyAdmission,
+    validate_attachment_request, EffectPolicyAttachment, MaterializationClaim,
+    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
+    MiddlewareHints, MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety,
+    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceAttachmentKind,
+    PolicyAdmission,
 };
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
@@ -402,9 +403,23 @@ impl MiddlewareFactory for EffectResilienceFactory {
         request: MiddlewareAttachmentRequest<'_>,
         context: &MiddlewareMaterializationContext<'_>,
     ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-        validate_attachment_request(&self.declaration(), &request).map_err(|err| {
+        let declaration = self.declaration();
+        validate_attachment_request(&declaration, &request).map_err(|err| {
             MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
         })?;
+        context
+            .authorize_materialization(
+                MaterializationClaim::EffectResilience,
+                &declaration,
+                &request,
+            )
+            .map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            })?;
         let MiddlewareSurface::Effect(effect) = request.surface else {
             return Err(MiddlewareFactoryError::materialization_failed(
                 self.label(),
@@ -412,7 +427,7 @@ impl MiddlewareFactory for EffectResilienceFactory {
                 std::io::Error::other("EffectResilience attaches only to declared effects"),
             ));
         };
-        let view = context.config_view(request.protected_unit);
+        let view = context.config_view();
         let breaker = self.resolved_breaker(&view).map_err(|err| {
             MiddlewareFactoryError::invalid_configuration(self.label(), &context.config.name, err)
         })?;
@@ -440,19 +455,21 @@ impl MiddlewareFactory for EffectResilienceFactory {
             MiddlewareFactoryError::invalid_configuration(self.label(), &context.config.name, err)
         })?;
 
-        let breaker = Arc::new(
-            CircuitBreakerFactory::from_effect_breaker(&breaker).build_middleware_keyed(
+        let (breaker, _) = CircuitBreakerFactory::from_effect_breaker(&breaker)
+            .build_middleware_keyed(
                 context.config,
-                context.control_middleware().clone(),
+                context,
+                MaterializationClaim::EffectResilience,
                 Some(effect.effect_type.clone()),
-            )?,
-        );
+            )?;
+        let breaker = Arc::new(breaker);
         let limiter = limiter
             .map(|config| {
                 RateLimiterMiddleware::new_keyed(
                     context.config.stage_id,
                     config.validate().expect("resolved limiter was validated"),
-                    context.control_middleware().clone(),
+                    context,
+                    MaterializationClaim::EffectResilience,
                     Some(effect.effect_type.clone()),
                 )
                 .map(Arc::new)
@@ -466,15 +483,26 @@ impl MiddlewareFactory for EffectResilienceFactory {
                 )
             })?;
 
-        Ok(MiddlewareSurfaceAttachment::Effect(
-            EffectPolicyAttachment::effect_resilience(Arc::new(EffectResilienceMiddleware {
-                breaker,
-                retry,
-                limiter,
-                #[cfg(test)]
-                final_admission_test_gate: std::sync::Mutex::new(None),
-            })),
-        ))
+        MiddlewareSurfaceAttachment::claimed(
+            MiddlewareSurfaceAttachmentKind::Effect(EffectPolicyAttachment::effect_resilience(
+                Arc::new(EffectResilienceMiddleware {
+                    breaker,
+                    retry,
+                    limiter,
+                    #[cfg(test)]
+                    final_admission_test_gate: std::sync::Mutex::new(None),
+                }),
+            )),
+            MaterializationClaim::EffectResilience,
+            context,
+        )
+        .map_err(|error| {
+            MiddlewareFactoryError::materialization_failed(
+                self.label(),
+                &context.config.name,
+                error,
+            )
+        })
     }
 
     fn safety_level(&self) -> MiddlewareSafety {

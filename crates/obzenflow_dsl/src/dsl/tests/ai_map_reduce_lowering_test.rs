@@ -69,9 +69,9 @@ mod tests {
                 )
             })?;
             match request.surface.kind() {
-                MiddlewareSurfaceKind::Handler => Ok(MiddlewareSurfaceAttachment::HandlerObserver(
-                    Arc::new(TestObserver(self.0)),
-                )),
+                MiddlewareSurfaceKind::Handler => Ok(
+                    MiddlewareSurfaceAttachment::handler_observer(Arc::new(TestObserver(self.0))),
+                ),
                 other => Err(MiddlewareFactoryError::materialization_failed(
                     self.label(),
                     &context.config.name,

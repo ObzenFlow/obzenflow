@@ -10,4 +10,7 @@ fn unchecked_breaker_builders_are_not_middleware_factories() {
     cases.compile_fail(
         "tests/ui/breaker_builder/materialization_context_hides_control_authority.rs",
     );
+    cases.compile_fail("tests/ui/breaker_builder/materialization_context_constructor_private.rs");
+    cases.compile_fail("tests/ui/breaker_builder/materialization_attachment_claim_private.rs");
+    cases.compile_fail("tests/ui/breaker_builder/raw_materialized_attachment_not_extractable.rs");
 }

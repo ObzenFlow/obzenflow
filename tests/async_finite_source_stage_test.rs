@@ -172,11 +172,11 @@ impl MiddlewareFactory for CountDataCommitFactory {
         })?;
         match request.surface.kind() {
             MiddlewareSurfaceKind::OutputCommit => {
-                Ok(MiddlewareSurfaceAttachment::OutputCommitObserver(Arc::new(
-                    CountDataCommitObserver {
+                Ok(MiddlewareSurfaceAttachment::output_commit_observer(
+                    Arc::new(CountDataCommitObserver {
                         calls: self.calls.clone(),
-                    },
-                )))
+                    }),
+                ))
             }
             other => Err(MiddlewareFactoryError::materialization_failed(
                 self.label(),

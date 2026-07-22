@@ -133,8 +133,9 @@ pub use handler::{
     ErrorAction, Middleware, MiddlewareAbortCause, MiddlewareAction, SourceMiddlewarePhase,
 };
 pub use middleware_factory::{
-    MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareKind,
-    MiddlewareOverrideKey, TopologyMiddlewareConfigSlot,
+    materialize_factory_checked, materialize_factory_checked_with_declaration,
+    MiddlewareBindingError, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
+    MiddlewareKind, MiddlewareOverrideKey, TopologyMiddlewareConfigSlot,
 };
 pub use middleware_safety::MiddlewareSafety;
 
@@ -154,16 +155,18 @@ pub use handler::{
 // Common utilities
 pub use carrier::{
     validate_attachment_request, validate_effect_control_composition,
-    validate_materialized_attachment, EffectControlCompositionError, EffectSurface, EffectTypeKey,
-    EffectUnitId, Flowip128gLegacyShellAttachment, HostedIngressTargetKey, IngressEndpointKind,
-    IngressRouteScope, IngressSurface, IngressUnitId, MiddlewareAttachmentId,
-    MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError, MiddlewareCapability,
-    MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareDeclarationScope,
-    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
-    SinkConfiguredTargetKey, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
-    SourcePollAttachment, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
+    CheckedMiddlewareSurfaceAttachment, EffectControlCompositionError, EffectSurface,
+    EffectTypeKey, EffectUnitId, Flowip128gLegacyShellAttachment, HostedIngressTargetKey,
+    IngressEndpointKind, IngressRouteScope, IngressSurface, IngressUnitId, MiddlewareAttachmentId,
+    MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError, MiddlewareAuthorityError,
+    MiddlewareCapability, MiddlewareDeclaration, MiddlewareDeclarationIndex,
+    MiddlewareDeclarationScope, MiddlewareMaterializationContext, MiddlewareOrigin,
+    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit,
+    ProtectedUnitId, SinkConfiguredTargetKey, SinkDeliverySurface, SinkDeliveryTarget,
+    SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface, SourcePollUnitId,
+    SourceStageIngressOwner,
 };
+pub(crate) use carrier::{MaterializationClaim, MiddlewareSurfaceAttachmentKind};
 pub use context::MiddlewareContext;
 pub use control::policy::{
     EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy,

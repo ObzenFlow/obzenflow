@@ -29,10 +29,9 @@ pub(super) use std::sync::{Arc, Mutex};
 pub(super) use std::time::Duration;
 
 use crate::middleware::{
-    EffectSurface, EffectTypeKey, EffectUnitId, MiddlewareAttachmentRequest,
-    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareMaterializationContext,
-    MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceAttachment, ProtectedUnit,
-    ProtectedUnitId,
+    materialize_factory_checked, EffectSurface, EffectTypeKey, EffectUnitId,
+    MiddlewareAttachmentRequest, MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareOrigin,
+    MiddlewareSurface, ProtectedUnit, ProtectedUnitId,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::EffectType;
@@ -147,14 +146,10 @@ pub(super) fn materialize_effect_attachment(
         origin: &origin,
         declaration_index: MiddlewareDeclarationIndex::effect_policy(declaration_index),
     };
-    let context = MiddlewareMaterializationContext::new(config, control, StageType::Transform);
-    match factory
-        .materialize(request, &context)
+    materialize_factory_checked(factory, request, config, StageType::Transform, control)
         .map_err(|error| error.to_string())?
-    {
-        MiddlewareSurfaceAttachment::Effect(attachment) => Ok(attachment),
-        _ => panic!("circuit breaker should materialize an effect attachment"),
-    }
+        .into_effect()
+        .ok_or_else(|| "circuit breaker should materialize an effect attachment".to_string())
 }
 
 pub(super) fn boundary_with_chain(chain: Vec<EffectPolicyAttachment>) -> PerEffectPolicyBoundary {

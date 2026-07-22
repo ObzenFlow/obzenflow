@@ -10,16 +10,21 @@
 
 use super::{MiddlewareHints, MiddlewareSafety};
 use obzenflow_core::event::context::StageType;
+use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::runtime_config::DslConfigDefault;
 use std::any::TypeId;
 use std::error::Error as StdError;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use thiserror::Error;
 
 use super::carrier::{
-    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareMaterializationContext,
-    MiddlewareSurfaceAttachment,
+    validate_attachment_request, validate_materialized_attachment,
+    CheckedMiddlewareSurfaceAttachment, MiddlewareAttachmentRequest,
+    MiddlewareAttachmentValidationError, MiddlewareAuthorityError, MiddlewareDeclaration,
+    MiddlewareMaterializationContext, MiddlewareSurfaceAttachment,
 };
+use super::control::ControlMiddlewareAggregator;
 pub type MiddlewareFactorySource = Box<dyn StdError + Send + Sync + 'static>;
 
 #[derive(Debug, Error)]
@@ -51,6 +56,66 @@ pub enum MiddlewareFactoryError {
 }
 
 pub type MiddlewareFactoryResult<T> = Result<T, MiddlewareFactoryError>;
+
+#[derive(Debug, Error)]
+pub enum MiddlewareBindingError {
+    #[error(transparent)]
+    Attachment(#[from] MiddlewareAttachmentValidationError),
+    #[error(transparent)]
+    Factory(#[from] MiddlewareFactoryError),
+    #[error(transparent)]
+    Authority(#[from] MiddlewareAuthorityError),
+    #[error("failed to commit middleware authority: {0}")]
+    AuthorityCommit(String),
+}
+
+/// Complete-mediation gateway for one factory invocation. The context is
+/// bound to the declaration's sealed semantic claim, registrations remain
+/// invocation-local until the returned attachment is fully validated, and the
+/// shared aggregator changes only through one atomic batch commit.
+#[doc(hidden)]
+pub fn materialize_factory_checked(
+    factory: &dyn MiddlewareFactory,
+    request: MiddlewareAttachmentRequest<'_>,
+    config: &StageConfig,
+    stage_type: StageType,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+) -> Result<CheckedMiddlewareSurfaceAttachment, MiddlewareBindingError> {
+    let declaration = factory.declaration();
+    materialize_factory_checked_with_declaration(
+        factory,
+        &declaration,
+        request,
+        config,
+        stage_type,
+        control_middleware,
+    )
+}
+
+/// Checked materialisation using a declaration already captured by the DSL's
+/// complete-set structural validation. This keeps the exact sealed claim that
+/// passed coherence validation bound to the later factory invocation.
+#[doc(hidden)]
+pub fn materialize_factory_checked_with_declaration(
+    factory: &dyn MiddlewareFactory,
+    declaration: &MiddlewareDeclaration,
+    request: MiddlewareAttachmentRequest<'_>,
+    config: &StageConfig,
+    stage_type: StageType,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+) -> Result<CheckedMiddlewareSurfaceAttachment, MiddlewareBindingError> {
+    validate_attachment_request(declaration, &request)?;
+    let context = MiddlewareMaterializationContext::new(config, stage_type, declaration, &request);
+    let attachment = factory.materialize(request, &context)?;
+    validate_materialized_attachment(declaration, &request, &attachment)?;
+    context.validate_returned_attachment(&attachment)?;
+    control_middleware
+        .commit_batch(context.take_pending())
+        .map_err(MiddlewareBindingError::AuthorityCommit)?;
+    Ok(CheckedMiddlewareSurfaceAttachment::from_validated(
+        attachment,
+    ))
+}
 
 impl MiddlewareFactoryError {
     pub fn invalid_configuration(
@@ -112,7 +177,9 @@ pub trait MiddlewareFactory: Send + Sync {
     fn declaration(&self) -> MiddlewareDeclaration;
 
     /// Materialize one typed surface attachment for one concrete protected
-    /// unit. The binder validates the declaration before invoking this method.
+    /// unit. The adapter-owned checked gateway validates the declaration before
+    /// invoking this method and validates the returned claim before committing
+    /// staged shared authority.
     fn materialize(
         &self,
         request: MiddlewareAttachmentRequest<'_>,

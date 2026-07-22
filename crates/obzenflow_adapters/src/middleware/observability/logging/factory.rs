@@ -107,18 +107,18 @@ impl MiddlewareFactory for LoggingMiddlewareFactory {
         let observer = Arc::new(self.build());
         match request.surface.kind() {
             MiddlewareSurfaceKind::Handler => {
-                Ok(MiddlewareSurfaceAttachment::HandlerObserver(observer))
+                Ok(MiddlewareSurfaceAttachment::handler_observer(observer))
             }
             MiddlewareSurfaceKind::Stateful => {
-                Ok(MiddlewareSurfaceAttachment::StatefulObserver(observer))
+                Ok(MiddlewareSurfaceAttachment::stateful_observer(observer))
             }
-            MiddlewareSurfaceKind::Join => Ok(MiddlewareSurfaceAttachment::JoinObserver(observer)),
+            MiddlewareSurfaceKind::Join => Ok(MiddlewareSurfaceAttachment::join_observer(observer)),
             MiddlewareSurfaceKind::SourcePoll => {
-                Ok(MiddlewareSurfaceAttachment::SourcePollObserver(observer))
+                Ok(MiddlewareSurfaceAttachment::source_poll_observer(observer))
             }
-            MiddlewareSurfaceKind::SinkDelivery => {
-                Ok(MiddlewareSurfaceAttachment::SinkDeliveryObserver(observer))
-            }
+            MiddlewareSurfaceKind::SinkDelivery => Ok(
+                MiddlewareSurfaceAttachment::sink_delivery_observer(observer),
+            ),
             surface => Err(MiddlewareFactoryError::materialization_failed(
                 self.label(),
                 &context.config.name,

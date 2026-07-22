@@ -326,6 +326,7 @@ mod tests {
 
         let mut dsl = DslCandidates::default();
         for effect_type in ["payments.authorize", "payments.refund"] {
+            dsl.declare_effect_consumption(RATE_LIMITER_EVENTS_PER_SECOND_KEY, "src", effect_type);
             dsl.declare_for_effect(
                 RATE_LIMITER_EVENTS_PER_SECOND_KEY,
                 "src",

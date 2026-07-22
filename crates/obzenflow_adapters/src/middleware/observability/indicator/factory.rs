@@ -163,7 +163,7 @@ impl MiddlewareFactory for IndicatorMiddlewareFactory {
         let observer = Arc::new(IndicatorMiddleware::with_config(self.config.clone()));
         match request.surface.kind() {
             MiddlewareSurfaceKind::Handler => {
-                Ok(MiddlewareSurfaceAttachment::HandlerObserver(observer))
+                Ok(MiddlewareSurfaceAttachment::handler_observer(observer))
             }
             surface => Err(MiddlewareFactoryError::materialization_failed(
                 self.label(),

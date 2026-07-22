@@ -1,0 +1,5 @@
+error[E0599]: no method named `into_effect` found for struct `MiddlewareSurfaceAttachment` in the current scope
+ --> tests/ui/breaker_builder/raw_materialized_attachment_not_extractable.rs:8:30
+  |
+8 |     let _policy = attachment.into_effect();
+  |                              ^^^^^^^^^^^ method not found in `MiddlewareSurfaceAttachment`

@@ -9,11 +9,10 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::observer::EffectObserver;
 use obzenflow_adapters::middleware::{
     validate_attachment_request, CircuitBreaker, EffectAttemptOutcome, EffectPolicy,
-    EffectPolicyAttachment, EffectResilience, MiddlewareAttachmentRequest, MiddlewareContext,
-    MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryResult, MiddlewareHints,
-    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, PolicyAdmission, RateLimiterBuilder,
-    TopologyMiddlewareConfigSlot,
+    EffectResilience, MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration,
+    MiddlewareFactory, MiddlewareFactoryResult, MiddlewareHints, MiddlewareMaterializationContext,
+    MiddlewareOverrideKey, MiddlewareSafety, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+    PolicyAdmission, RateLimiterBuilder, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
@@ -25,7 +24,7 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -146,6 +145,97 @@ struct CountingFactory {
     materializations: Arc<AtomicUsize>,
 }
 
+struct LaunderedResilienceFamily;
+
+/// Models a third-party factory that claims ordinary effect-control semantics
+/// while delegating construction to the privileged aggregate.
+struct LaunderedResilienceFactory {
+    inner: Box<dyn MiddlewareFactory>,
+}
+
+impl MiddlewareFactory for LaunderedResilienceFactory {
+    fn label(&self) -> &'static str {
+        "laundered_resilience"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<LaunderedResilienceFamily>(self.label())
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::control(self.label(), vec![MiddlewareSurfaceKind::Effect])
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        self.inner.materialize(request, context)
+    }
+
+    fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
+        self.inner.dsl_config_defaults()
+    }
+
+    fn consumed_config_keys(&self) -> Vec<&'static str> {
+        self.inner.consumed_config_keys()
+    }
+}
+
+fn laundered_aggregate() -> Box<dyn MiddlewareFactory> {
+    Box::new(LaunderedResilienceFactory { inner: aggregate() })
+}
+
+struct MutableDeclarationFamily;
+
+struct MutableDeclarationFactory {
+    inner: Box<dyn MiddlewareFactory>,
+    materializing: AtomicBool,
+}
+
+impl MiddlewareFactory for MutableDeclarationFactory {
+    fn label(&self) -> &'static str {
+        "mutable_declaration_wrapper"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<MutableDeclarationFamily>(self.label())
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        if self.materializing.load(Ordering::SeqCst) {
+            self.inner.declaration()
+        } else {
+            MiddlewareDeclaration::control(self.label(), vec![MiddlewareSurfaceKind::Effect])
+        }
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        self.materializing.store(true, Ordering::SeqCst);
+        self.inner.materialize(request, context)
+    }
+
+    fn dsl_config_defaults(&self) -> Vec<DslConfigDefault> {
+        self.inner.dsl_config_defaults()
+    }
+
+    fn consumed_config_keys(&self) -> Vec<&'static str> {
+        self.inner.consumed_config_keys()
+    }
+}
+
+fn mutable_declaration_aggregate() -> Box<dyn MiddlewareFactory> {
+    Box::new(MutableDeclarationFactory {
+        inner: aggregate(),
+        materializing: AtomicBool::new(false),
+    })
+}
+
 impl CountingFactory {
     fn boxed(
         inner: Box<dyn MiddlewareFactory>,
@@ -241,7 +331,7 @@ impl MiddlewareFactory for ProofObserverFactory {
             )
         })?;
         self.materializations.fetch_add(1, Ordering::SeqCst);
-        Ok(MiddlewareSurfaceAttachment::EffectObserver(Arc::new(
+        Ok(MiddlewareSurfaceAttachment::effect_observer(Arc::new(
             ProofObserver,
         )))
     }
@@ -287,9 +377,9 @@ impl MiddlewareFactory for OrdinaryControlFactory {
             )
         })?;
         self.materializations.fetch_add(1, Ordering::SeqCst);
-        Ok(MiddlewareSurfaceAttachment::Effect(
-            EffectPolicyAttachment::neutral(Arc::new(OrdinaryControl)),
-        ))
+        Ok(MiddlewareSurfaceAttachment::effect(Arc::new(
+            OrdinaryControl,
+        )))
     }
 }
 
@@ -490,4 +580,43 @@ async fn aggregate_and_limiter_on_distinct_effects_remain_valid() {
     ))
     .await
     .expect("exclusive built-in control authority is scoped to the exact effect");
+}
+
+#[tokio::test]
+async fn ordinary_wrapper_cannot_hide_breaker_only_aggregate_beside_standalone_limiter() {
+    for wrapper_first in [true, false] {
+        let (first, second) = if wrapper_first {
+            (laundered_aggregate(), limiter())
+        } else {
+            (limiter(), laundered_aggregate())
+        };
+        let error = build(single_effect_flow!(
+            middleware: [],
+            policies: [first, second]
+        ))
+        .await
+        .expect_err("an ordinary wrapper must not launder aggregate authority");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("declared authority 'ordinary'"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("effect_resilience"), "{rendered}");
+    }
+}
+
+#[tokio::test]
+async fn materialization_cannot_swap_the_declaration_that_passed_structural_validation() {
+    let error = build(single_effect_flow!(
+        middleware: [],
+        policies: [mutable_declaration_aggregate(), limiter()]
+    ))
+    .await
+    .expect_err("the checked gateway must retain the declaration validated as ordinary");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("declared authority 'ordinary'"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("effect_resilience"), "{rendered}");
 }

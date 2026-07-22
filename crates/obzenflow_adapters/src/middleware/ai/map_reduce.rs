@@ -14,10 +14,11 @@ use crate::middleware::{
     context_keys::{
         AiMapReduceChunkContext, AiMapReduceChunkContextKey, CircuitBreakerShouldRetry,
     },
-    validate_attachment_request, Flowip128gLegacyShellAttachment, Middleware, MiddlewareAction,
-    MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration, MiddlewareFactory,
-    MiddlewareFactoryError, MiddlewareMaterializationContext, MiddlewareOverrideKey,
-    MiddlewareSurface, MiddlewareSurfaceAttachment, SourceMiddlewarePhase,
+    validate_attachment_request, Flowip128gLegacyShellAttachment, MaterializationClaim, Middleware,
+    MiddlewareAction, MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
+    MiddlewareOverrideKey, MiddlewareSurface, MiddlewareSurfaceAttachment,
+    MiddlewareSurfaceAttachmentKind, SourceMiddlewarePhase,
 };
 use obzenflow_core::ai::{
     AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
@@ -334,18 +335,41 @@ where
         request: MiddlewareAttachmentRequest<'_>,
         context: &MiddlewareMaterializationContext<'_>,
     ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-        validate_attachment_request(&self.declaration(), &request).map_err(|err| {
+        let declaration = self.declaration();
+        validate_attachment_request(&declaration, &request).map_err(|err| {
             MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
         })?;
+        context
+            .authorize_materialization(
+                MaterializationClaim::Flowip128gLegacyShell,
+                &declaration,
+                &request,
+            )
+            .map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            })?;
         match request.surface {
-            MiddlewareSurface::Handler { .. } => {
-                Ok(MiddlewareSurfaceAttachment::Flowip128gLegacyShell(
+            MiddlewareSurface::Handler { .. } => MiddlewareSurfaceAttachment::claimed(
+                MiddlewareSurfaceAttachmentKind::Flowip128gLegacyShell(
                     Flowip128gLegacyShellAttachment::new(Box::new(
                         AiMapReduceChunkManifestMiddleware::<Chunk>::new()
                             .with_lineage(context.config.lineage),
                     )),
-                ))
-            }
+                ),
+                MaterializationClaim::Flowip128gLegacyShell,
+                context,
+            )
+            .map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            }),
             other => Err(MiddlewareFactoryError::materialization_failed(
                 self.label(),
                 &context.config.name,
@@ -615,18 +639,41 @@ where
         request: MiddlewareAttachmentRequest<'_>,
         context: &MiddlewareMaterializationContext<'_>,
     ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-        validate_attachment_request(&self.declaration(), &request).map_err(|err| {
+        let declaration = self.declaration();
+        validate_attachment_request(&declaration, &request).map_err(|err| {
             MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
         })?;
+        context
+            .authorize_materialization(
+                MaterializationClaim::Flowip128gLegacyShell,
+                &declaration,
+                &request,
+            )
+            .map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            })?;
         match request.surface {
-            MiddlewareSurface::Handler { .. } => {
-                Ok(MiddlewareSurfaceAttachment::Flowip128gLegacyShell(
+            MiddlewareSurface::Handler { .. } => MiddlewareSurfaceAttachment::claimed(
+                MiddlewareSurfaceAttachmentKind::Flowip128gLegacyShell(
                     Flowip128gLegacyShellAttachment::new(Box::new(
                         AiMapReduceMapMiddleware::<Chunk, Partial>::new()
                             .with_lineage(context.config.lineage),
                     )),
-                ))
-            }
+                ),
+                MaterializationClaim::Flowip128gLegacyShell,
+                context,
+            )
+            .map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            }),
             other => Err(MiddlewareFactoryError::materialization_failed(
                 self.label(),
                 &context.config.name,
@@ -644,8 +691,8 @@ mod tests {
     use super::*;
     use crate::middleware::control::ControlMiddlewareAggregator;
     use crate::middleware::{
-        MiddlewareAction, MiddlewareContext, MiddlewareDeclarationIndex, MiddlewareOrigin,
-        ProtectedUnit, ProtectedUnitId,
+        materialize_factory_checked, MiddlewareAction, MiddlewareContext,
+        MiddlewareDeclarationIndex, MiddlewareOrigin, ProtectedUnit, ProtectedUnitId,
     };
     use obzenflow_core::ai::ChunkPlanningSummary;
     use obzenflow_core::event::chain_event::ChainEventFactory;
@@ -715,18 +762,17 @@ mod tests {
             origin: &origin,
             declaration_index: MiddlewareDeclarationIndex::resolved(0),
         };
-        let context = MiddlewareMaterializationContext::new(
+        materialize_factory_checked(
+            factory,
+            request,
             &config,
-            &control,
             obzenflow_core::event::context::StageType::Transform,
-        );
-        match factory
-            .materialize(request, &context)
-            .expect("FLOWIP-128g migration shell should materialize")
-        {
-            MiddlewareSurfaceAttachment::Flowip128gLegacyShell(shell) => shell.into_middleware(),
-            _ => panic!("expected the sealed FLOWIP-128g shell attachment"),
-        }
+            &control,
+        )
+        .expect("FLOWIP-128g migration shell should materialize")
+        .into_flowip_128g_legacy_shell()
+        .expect("expected the sealed FLOWIP-128g shell attachment")
+        .into_middleware()
     }
 
     fn writer_id() -> WriterId {

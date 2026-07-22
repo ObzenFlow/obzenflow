@@ -16,9 +16,9 @@ use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::StageObserverSet;
 use obzenflow_adapters::middleware::{
     validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncInfiniteSourceHandlerExt,
-    AsyncTransformHandlerExt, FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
-    JoinHandlerMiddlewareExt, Middleware, MiddlewareDeclaration, MiddlewareDeclarationIndex,
-    MiddlewareFactory, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+    AsyncTransformHandlerExt, CheckedMiddlewareSurfaceAttachment, FiniteSourceHandlerExt,
+    InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareDeclaration,
+    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareSurfaceKind,
     PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary, SinkHandlerExt, SinkPolicy,
     StatefulHandlerMiddlewareExt, TopologyMiddlewareConfigSlot, TransformHandlerExt,
     UnifiedMiddlewareTransform,
@@ -132,7 +132,7 @@ fn observer_surfaces_for_stage(stage_type: StageType) -> &'static [MiddlewareSur
 
 fn push_observer_attachment(
     observers: &mut StageObserverSet,
-    attachment: MiddlewareSurfaceAttachment,
+    attachment: CheckedMiddlewareSurfaceAttachment,
 ) -> StageCreationResult<()> {
     observers.push_attachment(attachment).map_err(|e| e.into())
 }
@@ -1633,13 +1633,25 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
             let declaration = spec.factory.declaration();
             if declaration.is_observer() && declaration.supports(MiddlewareSurfaceKind::Effect) {
-                pending_effect_observer_specs.push((middleware_index, spec));
+                pending_effect_observer_specs.push((middleware_index, spec, declaration));
             } else if declaration.is_control() {
-                transitional_policy_specs.push((middleware_index, spec));
+                transitional_policy_specs.push((middleware_index, spec, declaration));
             } else {
                 shell_specs.push((middleware_index, spec));
             }
         }
+
+        let inline_policy_declarations: Vec<Vec<MiddlewareDeclaration>> = self
+            .effect_policies
+            .iter()
+            .map(|attachment| {
+                attachment
+                    .factories
+                    .iter()
+                    .map(|factory| factory.declaration())
+                    .collect()
+            })
+            .collect();
 
         if !transitional_policy_specs.is_empty() && effect_declarations.len() != 1 {
             return Err(format!(
@@ -1661,19 +1673,15 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 declarations.extend(
                     transitional_policy_specs
                         .iter()
-                        .map(|(_, spec)| spec.factory.declaration()),
+                        .map(|(_, _, declaration)| declaration.clone()),
                 );
             }
             declarations.extend(
                 self.effect_policies
                     .iter()
-                    .filter(|attachment| attachment.effect_type == effect.effect_type)
-                    .flat_map(|attachment| {
-                        attachment
-                            .factories
-                            .iter()
-                            .map(|factory| factory.declaration())
-                    }),
+                    .zip(&inline_policy_declarations)
+                    .filter(|(attachment, _)| attachment.effect_type == effect.effect_type)
+                    .flat_map(|(_, declarations)| declarations.iter().cloned()),
             );
             obzenflow_adapters::middleware::validate_effect_control_composition(
                 &self.name,
@@ -1684,8 +1692,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         }
 
         let mut effect_observers = StageObserverSet::default();
-        for (middleware_index, spec) in pending_effect_observer_specs {
-            let declaration = spec.factory.declaration();
+        for (middleware_index, spec, declaration) in pending_effect_observer_specs {
             let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
             materialize_effect_observers_for_declarations(
                 &mut effect_observers,
@@ -1713,10 +1720,13 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 
         if !transitional_policy_specs.is_empty() {
             let effect_type = effect_declarations[0].effect_type;
-            for (middleware_index, spec) in transitional_policy_specs {
+            for (middleware_index, spec, declaration) in transitional_policy_specs {
                 let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
                 let policy = crate::dsl::binder::bind_effect_policy(
-                    spec.factory.as_ref(),
+                    crate::dsl::binder::DeclaredMiddlewareFactory::new(
+                        spec.factory.as_ref(),
+                        &declaration,
+                    ),
                     &config,
                     StageType::Transform,
                     &control_middleware,
@@ -1728,10 +1738,17 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             }
         }
 
-        for attachment in &self.effect_policies {
-            for (middleware_index, factory) in attachment.factories.iter().enumerate() {
+        for (attachment, declarations) in
+            self.effect_policies.iter().zip(&inline_policy_declarations)
+        {
+            for ((middleware_index, factory), declaration) in
+                attachment.factories.iter().enumerate().zip(declarations)
+            {
                 let policy = crate::dsl::binder::bind_effect_policy(
-                    factory.as_ref(),
+                    crate::dsl::binder::DeclaredMiddlewareFactory::new(
+                        factory.as_ref(),
+                        declaration,
+                    ),
                     &config,
                     StageType::Transform,
                     &control_middleware,
@@ -3253,7 +3270,7 @@ mod tests {
                 )
             })?;
             match request.surface {
-                MiddlewareSurface::Ingress(_) => Ok(MiddlewareSurfaceAttachment::Ingress(
+                MiddlewareSurface::Ingress(_) => Ok(MiddlewareSurfaceAttachment::ingress(
                     std::sync::Arc::new(AllowOnceBoundary {
                         admitted: std::sync::atomic::AtomicBool::new(false),
                     }),
@@ -3630,20 +3647,20 @@ mod observer_placement_negative_tests {
             let observer = Arc::new(NoopObserver);
             match request.surface.kind() {
                 MiddlewareSurfaceKind::Handler => {
-                    Ok(MiddlewareSurfaceAttachment::HandlerObserver(observer))
+                    Ok(MiddlewareSurfaceAttachment::handler_observer(observer))
                 }
                 MiddlewareSurfaceKind::Stateful => {
-                    Ok(MiddlewareSurfaceAttachment::StatefulObserver(observer))
+                    Ok(MiddlewareSurfaceAttachment::stateful_observer(observer))
                 }
                 MiddlewareSurfaceKind::Join => {
-                    Ok(MiddlewareSurfaceAttachment::JoinObserver(observer))
+                    Ok(MiddlewareSurfaceAttachment::join_observer(observer))
                 }
                 MiddlewareSurfaceKind::SourcePoll => {
-                    Ok(MiddlewareSurfaceAttachment::SourcePollObserver(observer))
+                    Ok(MiddlewareSurfaceAttachment::source_poll_observer(observer))
                 }
-                MiddlewareSurfaceKind::SinkDelivery => {
-                    Ok(MiddlewareSurfaceAttachment::SinkDeliveryObserver(observer))
-                }
+                MiddlewareSurfaceKind::SinkDelivery => Ok(
+                    MiddlewareSurfaceAttachment::sink_delivery_observer(observer),
+                ),
                 other => Err(MiddlewareFactoryError::materialization_failed(
                     self.label(),
                     &context.config.name,
@@ -3676,7 +3693,7 @@ mod observer_placement_negative_tests {
             _request: MiddlewareAttachmentRequest<'_>,
             _context: &MiddlewareMaterializationContext<'_>,
         ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-            Ok(MiddlewareSurfaceAttachment::HandlerObserver(Arc::new(
+            Ok(MiddlewareSurfaceAttachment::handler_observer(Arc::new(
                 NoopObserver,
             )))
         }
@@ -3725,11 +3742,9 @@ mod observer_placement_negative_tests {
             _request: MiddlewareAttachmentRequest<'_>,
             _context: &MiddlewareMaterializationContext<'_>,
         ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-            Ok(MiddlewareSurfaceAttachment::Effect(
-                obzenflow_adapters::middleware::EffectPolicyAttachment::neutral(Arc::new(
-                    NoopEffectControl,
-                )),
-            ))
+            Ok(MiddlewareSurfaceAttachment::effect(Arc::new(
+                NoopEffectControl,
+            )))
         }
     }
 

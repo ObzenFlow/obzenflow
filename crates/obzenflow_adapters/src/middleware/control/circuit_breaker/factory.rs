@@ -14,17 +14,17 @@ use super::window::{FailureWindow, FailureWindowState};
 use super::{
     CircuitBreakerFamily, CircuitBreakerMiddleware, FailureClassificationClassifier, FailureHealth,
 };
-use crate::middleware::control::ControlMiddlewareAggregator;
+use crate::middleware::carrier::MaterializationClaim;
+use crate::middleware::control::provider::PendingControlRegistration;
 use crate::middleware::{
     validate_attachment_request, Flowip128gLegacyShellAttachment, MiddlewareAttachmentRequest,
     MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError, MiddlewareHints,
     MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety, MiddlewareSurface,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, SinkPolicy, SourcePolicy,
-    SourcePollAttachment, TopologyMiddlewareConfigSlot,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceAttachmentKind, MiddlewareSurfaceKind,
+    SinkPolicy, SourcePolicy, SourcePollAttachment, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_runtime::control_plane::{
     CircuitBreakerMetrics, CircuitBreakerSnapshotter, CircuitBreakerState, CircuitBreakerStateView,
-    ControlPlaneProvider,
 };
 use obzenflow_runtime::effects::EffectError;
 use obzenflow_runtime::pipeline::config::StageConfig;
@@ -123,11 +123,10 @@ impl CircuitBreaker {
 
     fn resolved_from_context(
         &self,
-        request: &MiddlewareAttachmentRequest<'_>,
         context: &MiddlewareMaterializationContext<'_>,
     ) -> Result<Self, MiddlewareFactoryError> {
         let threshold = context
-            .config_view(request.protected_unit)
+            .config_view()
             .get(obzenflow_runtime::runtime_config::CIRCUIT_BREAKER_THRESHOLD_KEY)
             .and_then(|resolved| resolved.value.as_u64())
             .ok_or_else(|| {
@@ -312,9 +311,13 @@ impl CircuitBreakerFactory {
     pub(in crate::middleware::control) fn build_middleware_keyed(
         &self,
         config: &StageConfig,
-        control_middleware: Arc<ControlMiddlewareAggregator>,
+        context: &MiddlewareMaterializationContext<'_>,
+        claimant: MaterializationClaim,
         effect_type: Option<crate::middleware::EffectTypeKey>,
-    ) -> crate::middleware::MiddlewareFactoryResult<CircuitBreakerMiddleware> {
+    ) -> crate::middleware::MiddlewareFactoryResult<(
+        CircuitBreakerMiddleware,
+        Arc<dyn CircuitBreakerStateView>,
+    )> {
         let threshold = match &self.config.failure_mode {
             CircuitBreakerFailureMode::Consecutive { max_failures } => max_failures.get() as usize,
             CircuitBreakerFailureMode::RateBased { window, .. } => match window {
@@ -385,27 +388,24 @@ impl CircuitBreakerFactory {
             }
         });
 
-        let registration = match effect_type {
-            Some(effect_type) => control_middleware.register_circuit_breaker_for_effect(
-                config.stage_id,
-                effect_type,
-                snapshotter,
-                state_view,
-            ),
-            None => control_middleware.register_circuit_breaker(
-                config.stage_id,
-                snapshotter,
-                state_view,
-            ),
-        };
-        registration.map_err(|message| {
-            MiddlewareFactoryError::invalid_configuration(
-                "circuit_breaker",
-                &config.name,
-                std::io::Error::other(message),
+        context
+            .stage_control_registration(
+                claimant,
+                PendingControlRegistration::CircuitBreaker {
+                    stage_id: config.stage_id,
+                    effect_type,
+                    metrics_fn: snapshotter,
+                    state_view: state_view.clone(),
+                },
             )
-        })?;
-        Ok(middleware)
+            .map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    "circuit_breaker",
+                    &config.name,
+                    error,
+                )
+            })?;
+        Ok((middleware, state_view))
     }
 }
 
@@ -419,7 +419,7 @@ impl MiddlewareFactory for CircuitBreaker {
     }
 
     fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::control_with_family(
+        MiddlewareDeclaration::circuit_breaker(
             self.label(),
             self.override_key().family_label(),
             vec![
@@ -445,46 +445,76 @@ impl MiddlewareFactory for CircuitBreaker {
         request: MiddlewareAttachmentRequest<'_>,
         context: &MiddlewareMaterializationContext<'_>,
     ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-        validate_attachment_request(&self.declaration(), &request).map_err(|error| {
+        let declaration = self.declaration();
+        validate_attachment_request(&declaration, &request).map_err(|error| {
             MiddlewareFactoryError::materialization_failed(
                 self.label(),
                 &context.config.name,
                 error,
             )
         })?;
-        let resolved = self.resolved_from_context(&request, context)?;
+        context
+            .authorize_materialization(MaterializationClaim::CircuitBreaker, &declaration, &request)
+            .map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            })?;
+        let resolved = self.resolved_from_context(context)?;
         let materializer = CircuitBreakerFactory::from_effect_breaker(&resolved);
 
         match request.surface {
             MiddlewareSurface::SourcePoll(_) => {
-                let breaker = Arc::new(materializer.build_middleware_keyed(
+                let (breaker, view) = materializer.build_middleware_keyed(
                     context.config,
-                    context.control_middleware().clone(),
+                    context,
+                    MaterializationClaim::CircuitBreaker,
                     None,
-                )?);
-                let view = context
-                    .control_middleware()
-                    .circuit_breaker_state_view(&context.config.stage_id)
-                    .expect("breaker just registered its state view");
+                )?;
+                let breaker = Arc::new(breaker);
                 let completion_gate: Arc<dyn CompletionGate> =
                     Arc::new(CircuitBreakerCompletionGate::new(view));
                 let policy: Arc<dyn SourcePolicy> =
                     Arc::new(CircuitBreakerSourcePolicy { breaker });
-                Ok(MiddlewareSurfaceAttachment::SourcePoll(
-                    SourcePollAttachment {
+                MiddlewareSurfaceAttachment::claimed(
+                    MiddlewareSurfaceAttachmentKind::SourcePoll(SourcePollAttachment {
                         policy,
                         completion_gate: Some(completion_gate),
-                    },
-                ))
+                    }),
+                    MaterializationClaim::CircuitBreaker,
+                    context,
+                )
+                .map_err(|error| {
+                    MiddlewareFactoryError::materialization_failed(
+                        self.label(),
+                        &context.config.name,
+                        error,
+                    )
+                })
             }
             MiddlewareSurface::SinkDelivery(_) => {
-                let breaker = Arc::new(materializer.build_middleware_keyed(
+                let (breaker, _) = materializer.build_middleware_keyed(
                     context.config,
-                    context.control_middleware().clone(),
+                    context,
+                    MaterializationClaim::CircuitBreaker,
                     None,
-                )?);
+                )?;
+                let breaker = Arc::new(breaker);
                 let policy: Arc<dyn SinkPolicy> = Arc::new(CircuitBreakerSinkPolicy { breaker });
-                Ok(MiddlewareSurfaceAttachment::SinkDelivery(policy))
+                MiddlewareSurfaceAttachment::claimed(
+                    MiddlewareSurfaceAttachmentKind::SinkDelivery(policy),
+                    MaterializationClaim::CircuitBreaker,
+                    context,
+                )
+                .map_err(|error| {
+                    MiddlewareFactoryError::materialization_failed(
+                        self.label(),
+                        &context.config.name,
+                        error,
+                    )
+                })
             }
             other => Err(MiddlewareFactoryError::materialization_failed(
                 self.label(),
@@ -569,25 +599,51 @@ impl MiddlewareFactory for AiCircuitBreakerFactory {
         request: MiddlewareAttachmentRequest<'_>,
         context: &MiddlewareMaterializationContext<'_>,
     ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-        validate_attachment_request(&self.declaration(), &request).map_err(|error| {
+        let declaration = self.declaration();
+        validate_attachment_request(&declaration, &request).map_err(|error| {
             MiddlewareFactoryError::materialization_failed(
                 self.label(),
                 &context.config.name,
                 error,
             )
         })?;
-        let resolved = self.breaker.resolved_from_context(&request, context)?;
+        context
+            .authorize_materialization(
+                MaterializationClaim::Flowip128gLegacyShell,
+                &declaration,
+                &request,
+            )
+            .map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            })?;
+        let resolved = self.breaker.resolved_from_context(context)?;
         match request.surface {
             MiddlewareSurface::Handler { .. } => {
-                let middleware = CircuitBreakerFactory::from_effect_breaker(&resolved)
+                let (middleware, _) = CircuitBreakerFactory::from_effect_breaker(&resolved)
                     .build_middleware_keyed(
                         context.config,
-                        context.control_middleware().clone(),
+                        context,
+                        MaterializationClaim::Flowip128gLegacyShell,
                         None,
                     )?;
-                Ok(MiddlewareSurfaceAttachment::Flowip128gLegacyShell(
-                    Flowip128gLegacyShellAttachment::new(Box::new(middleware)),
-                ))
+                MiddlewareSurfaceAttachment::claimed(
+                    MiddlewareSurfaceAttachmentKind::Flowip128gLegacyShell(
+                        Flowip128gLegacyShellAttachment::new(Box::new(middleware)),
+                    ),
+                    MaterializationClaim::Flowip128gLegacyShell,
+                    context,
+                )
+                .map_err(|error| {
+                    MiddlewareFactoryError::materialization_failed(
+                        self.label(),
+                        &context.config.name,
+                        error,
+                    )
+                })
             }
             other => Err(MiddlewareFactoryError::materialization_failed(
                 self.label(),
