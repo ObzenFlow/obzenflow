@@ -15,6 +15,9 @@ mod rig_builder;
 #[cfg(feature = "ai-rig")]
 mod model_config;
 
+#[cfg(feature = "ai-rig")]
+mod chat_effect_binding;
+
 mod model_profile;
 mod token_estimation;
 
@@ -38,3 +41,6 @@ pub use rig_builder::{
 
 #[cfg(feature = "ai-rig")]
 pub use model_config::{ModelChatBuilder, ModelChatBuilderWithContext, ModelConfig};
+
+#[cfg(feature = "ai-rig")]
+pub use chat_effect_binding::{ChatEffectBinding, ChatEffectBindingError};

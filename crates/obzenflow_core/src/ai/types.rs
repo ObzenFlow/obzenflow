@@ -7,6 +7,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::TypedPayload;
+
 /// Provider identifier for AI requests.
 ///
 /// Canonical names are lower-case identifiers (for example: `ollama`, `openai`).
@@ -39,6 +41,41 @@ impl From<String> for AiProvider {
 impl From<&str> for AiProvider {
     fn from(value: &str) -> Self {
         Self::new(value)
+    }
+}
+
+/// Credential-free identity of the immutable chat target bound to a flow.
+///
+/// Endpoint and credential material deliberately remain infrastructure
+/// concerns. This value is safe to place in descriptors, manifests, and
+/// diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ChatTarget {
+    pub provider: AiProvider,
+    pub model: String,
+}
+
+/// Component of a chat request that failed deterministic canonicalisation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalizationComponent {
+    Prompt,
+    Parameters,
+    ResponseSchema,
+}
+
+impl ChatTarget {
+    pub fn new(provider: impl Into<AiProvider>, model: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+        }
+    }
+}
+
+impl fmt::Display for ChatTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.provider, self.model)
     }
 }
 
@@ -266,6 +303,16 @@ pub struct ChatRequest {
 }
 
 impl ChatRequest {
+    /// Project the existing provider and model fields as the immutable target.
+    ///
+    /// This does not add anything to the serialised request shape.
+    pub fn target(&self) -> ChatTarget {
+        ChatTarget {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+        }
+    }
+
     pub fn resolved_response_format(&self) -> ChatResponseFormat {
         self.response_format.clone().unwrap_or_default()
     }
@@ -295,6 +342,18 @@ pub struct ChatResponse {
     pub usage: Option<Usage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<Value>,
+}
+
+/// Durable successful outcome of the replay-safe chat-completion effect.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatCompletionCompleted {
+    pub response: ChatResponse,
+    pub observability: super::LlmObservability,
+}
+
+impl TypedPayload for ChatCompletionCompleted {
+    const EVENT_TYPE: &'static str = "ai.chat_completion.completed";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -352,5 +411,6 @@ mod tests {
         };
 
         assert_eq!(req.resolved_response_format(), ChatResponseFormat::Text);
+        assert_eq!(req.target(), ChatTarget::new("ollama", "llama3.1:8b"));
     }
 }

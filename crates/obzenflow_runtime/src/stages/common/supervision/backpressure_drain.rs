@@ -22,7 +22,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use std::sync::Arc;
 
-use crate::backpressure::{BackpressureWriter, LimitingEdgeDetail};
+use crate::backpressure::{BackpressureWriter, DirectFactLease, LimitingEdgeDetail};
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;
@@ -143,6 +143,83 @@ pub(crate) async fn drain_one_pending(
             )
             .await;
             Ok(DrainOutcome::BackedOff)
+        }
+    }
+}
+
+/// Acquire one generated continuation's complete physical-row budget, or run
+/// one bounded credit-wait chunk and return `None`.
+///
+/// This deliberately shares the ordinary output stall anchor, diagnostics,
+/// activity pulse, and control-responsiveness bound. The caller retains the
+/// frozen input and re-enters supervisor dispatch after `None`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn acquire_direct_fact_lease(
+    writer: &BackpressureWriter,
+    bound: std::num::NonZeroU64,
+    stage_id: StageId,
+    flow_context: &FlowContext,
+    data_journal: &Arc<dyn Journal<ChainEvent>>,
+    instrumentation: &Arc<StageInstrumentation>,
+    backpressure_pulse: &mut BackpressureActivityPulse,
+    backpressure_stall: &mut Option<tokio::time::Instant>,
+) -> Result<Option<DirectFactLease>, Box<dyn std::error::Error + Send + Sync>> {
+    match DirectFactLease::try_acquire(writer, bound) {
+        Ok(Some(lease)) => {
+            *backpressure_stall = None;
+            Ok(Some(lease))
+        }
+        Err(message) => Err(message.into()),
+        Ok(None) => {
+            let started = *backpressure_stall.get_or_insert_with(tokio::time::Instant::now);
+            let detail = writer.limiting_detail().ok_or_else(|| {
+                "generated direct-fact admission was blocked without an enforced edge".to_string()
+            })?;
+            let elapsed = started.elapsed();
+            if elapsed >= detail.stall_timeout {
+                emit_stalled_fact(
+                    stage_id,
+                    flow_context,
+                    &detail,
+                    elapsed,
+                    data_journal,
+                    instrumentation,
+                )
+                .await;
+                emit_poison_eof(stage_id, flow_context, data_journal, instrumentation).await;
+                return Err(format!(
+                    "backpressure.stalled: generated direct-fact admission for {} rows on \
+                     edge {stage_id}|>{} exceeded its stall ceiling ({} ms elapsed, timeout \
+                     {} ms, window {}, in flight {})",
+                    bound,
+                    detail.downstream,
+                    elapsed.as_millis(),
+                    detail.stall_timeout.as_millis(),
+                    detail.window,
+                    detail.in_flight,
+                )
+                .into());
+            }
+
+            let wait_bound = (detail.stall_timeout - elapsed).min(CONTROL_RESPONSIVENESS_CAP);
+            let waker = writer
+                .credit_waker()
+                .ok_or_else(|| "generated direct-fact admission has no credit waker".to_string())?;
+            let wait_started = tokio::time::Instant::now();
+            let _ = suspend_until(&WakeOn::Notify(waker), Some(wait_bound)).await;
+            let measured = wait_started.elapsed();
+            writer.record_wait(measured);
+            emit_blocked_pulse(
+                stage_id,
+                flow_context,
+                measured,
+                data_journal,
+                instrumentation,
+                writer,
+                backpressure_pulse,
+            )
+            .await;
+            Ok(None)
         }
     }
 }

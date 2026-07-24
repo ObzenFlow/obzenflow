@@ -590,6 +590,8 @@ where
                         journal_writer_id: JournalWriterId::default(),
                         vector_clock: pending.vector_clock.clone(),
                         timestamp: chrono::Utc::now(),
+                        journal_group_id: None,
+                        journal_group_member: None,
                         event: pending.event.clone(),
                     };
                     (progress.stage_id, envelope)

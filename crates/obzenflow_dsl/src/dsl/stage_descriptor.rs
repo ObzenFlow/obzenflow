@@ -626,12 +626,21 @@ pub trait StageDescriptor: Send + Sync {
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
         Vec::new()
     }
+
+    /// Descriptor-owned exact-input proof for generated bounded direct facts.
+    #[doc(hidden)]
+    fn direct_fact_plan(
+        &self,
+    ) -> Option<&obzenflow_runtime::stages::resources_builder::DirectFactPlan> {
+        None
+    }
 }
 
 fn validate_effect_declarations(
     stage_name: &str,
     declarations: &[EffectDeclaration],
     effect_ports: &EffectPortRegistry,
+    port_registration_policy: obzenflow_runtime::execution::EffectPortRegistrationPolicy,
 ) -> Result<(), String> {
     let mut effect_types = std::collections::HashSet::new();
 
@@ -655,6 +664,18 @@ fn validate_effect_declarations(
             ));
         }
 
+        if matches!(declaration.safety, EffectSafety::NonIdempotentAtLeastOnce)
+            && !matches!(
+                declaration.idempotency_key_policy,
+                IdempotencyKeyPolicy::AtLeastOnceAcknowledged
+            )
+        {
+            return Err(format!(
+                "Effectful stage '{stage_name}' declares paid non-idempotent effect '{}' without explicit at_least_once(...) acknowledgement",
+                declaration.effect_type
+            ));
+        }
+
         if matches!(declaration.safety, EffectSafety::Transactional)
             && declaration.transactional_executor.is_none()
         {
@@ -665,7 +686,11 @@ fn validate_effect_declarations(
         }
 
         for requirement in &declaration.required_ports {
-            if !effect_ports.contains_requirement(requirement) {
+            if matches!(
+                port_registration_policy,
+                obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required
+            ) && !effect_ports.contains_requirement(requirement)
+            {
                 return Err(format!(
                     "Effectful stage '{stage_name}' requires effect port '{}' for type '{}' but it is not registered",
                     requirement.name, requirement.type_name
@@ -1538,6 +1563,10 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     /// Per-effect policy attachments from the `effects:` clause
     /// (FLOWIP-120c H7).
     pub effect_policies: Vec<EffectPolicyAttachment>,
+    /// Runtime-owned exact-input admission proof. Ordinary effectful stages
+    /// leave this empty; sealed generated adapters provide it.
+    #[doc(hidden)]
+    pub direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan,
     pub backpressure: Option<BackpressureClause>,
 }
 
@@ -1573,6 +1602,12 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         self.effects.clone()
     }
 
+    fn direct_fact_plan(
+        &self,
+    ) -> Option<&obzenflow_runtime::stages::resources_builder::DirectFactPlan> {
+        Some(&self.direct_fact_plan)
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
@@ -1595,9 +1630,23 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
+        if let Some(bound) = self.direct_fact_plan.maximum_bound() {
+            resources
+                .backpressure_writer
+                .validate_generated_direct_bound(bound)
+                .map_err(|message| format!("ai_map_reduce!: {message}"))?;
+        }
         let effect_declarations = self.effects.clone();
-        validate_effect_declarations(&self.name, &effect_declarations, &resources.effect_ports)?;
+        validate_effect_declarations(
+            &self.name,
+            &effect_declarations,
+            &resources.effect_ports,
+            resources
+                .runtime_execution
+                .effect_port_registration_policy(),
+        )?;
         resources.effect_declarations = effect_declarations.clone();
+        resources.direct_fact_plan = self.direct_fact_plan.clone();
 
         for factory in &self.middleware {
             let validation_result =
@@ -2442,7 +2491,14 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
         let effect_declarations = self.effects.clone();
-        validate_effect_declarations(&self.name, &effect_declarations, &resources.effect_ports)?;
+        validate_effect_declarations(
+            &self.name,
+            &effect_declarations,
+            &resources.effect_ports,
+            resources
+                .runtime_execution
+                .effect_port_registration_policy(),
+        )?;
         resources.effect_declarations = effect_declarations.clone();
 
         for factory in &self.middleware {
@@ -2915,9 +2971,13 @@ mod tests {
             outcome_fact_types: Vec::new(),
         };
 
-        let err =
-            validate_effect_declarations("effectful", &[declaration], &EffectPortRegistry::new())
-                .expect_err("missing key strategy must fail materialisation");
+        let err = validate_effect_declarations(
+            "effectful",
+            &[declaration],
+            &EffectPortRegistry::new(),
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
+        )
+        .expect_err("missing key strategy must fail materialisation");
 
         assert!(err.contains("without an idempotency-key strategy"));
     }
@@ -2977,9 +3037,13 @@ mod tests {
             EffectDeclaration::of::<DemoDuplicateEffect>(),
         ];
 
-        let err =
-            validate_effect_declarations("effectful", &declarations, &EffectPortRegistry::new())
-                .expect_err("duplicate effect type must fail materialisation");
+        let err = validate_effect_declarations(
+            "effectful",
+            &declarations,
+            &EffectPortRegistry::new(),
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
+        )
+        .expect_err("duplicate effect type must fail materialisation");
 
         assert!(err.contains("more than once"));
     }
@@ -2993,15 +3057,23 @@ mod tests {
             "effectful",
             std::slice::from_ref(&declaration),
             &EffectPortRegistry::new(),
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
         )
         .expect_err("missing required port must fail materialisation");
         assert!(missing.contains("requires effect port"));
 
         let mut registry = EffectPortRegistry::new();
-        registry.insert::<dyn DemoEffectPort>("primary", Arc::new(DemoEffectPortImpl));
+        registry
+            .insert::<dyn DemoEffectPort>("primary", Arc::new(DemoEffectPortImpl))
+            .expect("unique effect port");
 
-        validate_effect_declarations("effectful", &[declaration], &registry)
-            .expect("registered required port should pass");
+        validate_effect_declarations(
+            "effectful",
+            &[declaration],
+            &registry,
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
+        )
+        .expect("registered required port should pass");
     }
 
     #[test]
@@ -3012,18 +3084,26 @@ mod tests {
             "effectful",
             std::slice::from_ref(&declaration),
             &EffectPortRegistry::new(),
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
         )
         .expect_err("missing transactional port must fail materialisation");
         assert!(missing.contains("requires effect port"));
 
         let mut registry = EffectPortRegistry::new();
-        registry.insert::<dyn TransactionalEffectPort<DemoTransactionalEffect>>(
-            "tx",
-            Arc::new(DemoTransactionalPort),
-        );
+        registry
+            .insert::<dyn TransactionalEffectPort<DemoTransactionalEffect>>(
+                "tx",
+                Arc::new(DemoTransactionalPort),
+            )
+            .expect("unique transactional port");
 
-        validate_effect_declarations("effectful", &[declaration], &registry)
-            .expect("registered transactional typed port should pass");
+        validate_effect_declarations(
+            "effectful",
+            &[declaration],
+            &registry,
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
+        )
+        .expect("registered transactional typed port should pass");
     }
 
     #[derive(Clone, Debug)]
@@ -3521,6 +3601,8 @@ mod tests {
             ),
             effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
             effect_declarations: Vec::new(),
+            direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan::default(
+            ),
             deterministic_fan_in: false,
             seq_ordered_fan_in: false,
         };

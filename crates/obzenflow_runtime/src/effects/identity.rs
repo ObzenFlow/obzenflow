@@ -153,6 +153,25 @@ pub fn deterministic_effect_record_event_time(cursor: &EffectCursor) -> u64 {
         .saturating_add(u64::from(cursor.effect_ordinal.get()))
 }
 
+pub fn deterministic_effect_evidence_event_id(
+    cursor: &EffectCursor,
+    event_type: &str,
+    attempt: Option<EffectAttemptOrdinal>,
+) -> EventId {
+    let attempt = attempt.map(EffectAttemptOrdinal::get).unwrap_or(0);
+    let material = format!(
+        "effect-evidence:v1:{event_type}:{}:{}:{}:{}:{attempt}",
+        cursor.recorded_flow_id.as_str(),
+        cursor.stage_key.as_str(),
+        cursor.input_seq.get(),
+        cursor.effect_ordinal.get(),
+    );
+    let hash = digest(&SHA256, material.as_bytes());
+    let mut id_bytes = [0u8; 16];
+    id_bytes.copy_from_slice(&hash.as_ref()[..16]);
+    EventId::from(obzenflow_core::Ulid(u128::from_be_bytes(id_bytes)))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn deterministic_typed_output_event<Out>(
     writer_id: WriterId,
@@ -178,6 +197,14 @@ where
         lineage,
     );
     event.id = deterministic_event_id(recorded_flow_id, stage_key, input_seq, output_ordinal);
-    event.processing_info.event_time = deterministic_event_time(input_seq, output_ordinal);
+    let deterministic = deterministic_event_time(input_seq, output_ordinal);
+    event.processing_info.event_time = if parent.composite_activations().is_empty() {
+        deterministic
+    } else {
+        parent.composite_activations().iter().fold(
+            parent.processing_info.event_time.max(deterministic),
+            |time, activation| time.max(activation.entered_at_ms),
+        )
+    };
     Ok(event)
 }

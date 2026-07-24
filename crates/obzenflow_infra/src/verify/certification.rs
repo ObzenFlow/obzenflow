@@ -128,6 +128,8 @@ mod tests {
             stages: map,
             system_journal_file: "system.log".to_string(),
             effective_config: None,
+            capabilities: Default::default(),
+            bounded_direct_fact_admission: Vec::new(),
         }
     }
 

@@ -8,6 +8,7 @@
 //! request/response DTOs, client ports, structured output helpers, and stable
 //! observability/hash conventions.
 
+mod canonical;
 mod chat_budget;
 mod chunking;
 mod error;
@@ -20,6 +21,7 @@ mod structured_output;
 mod token_estimation;
 mod types;
 
+pub use canonical::{canonical_json_bytes_v1, AI_MAP_REDUCE_COLLECTOR_FACT_FORMAT_V1};
 pub use chat_budget::{
     plan_chat_input_budget, ChatBudgetError, ChatBudgetMessage, ChatBudgetPlan, ChatBudgetSpec,
     ChatBudgetTemplate,
@@ -36,8 +38,10 @@ pub use hashing::{
     schema_hash_from_text, AiHashError, LLM_HASH_VERSION_SHA256_V1,
 };
 pub use map_reduce::{
-    AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceReduceInput,
-    AiMapReduceTaggedPartial, Many,
+    AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceJobFailed,
+    AiMapReducePlanningFailed, AiMapReducePlanningFailure, AiMapReducePlanningManifest,
+    AiMapReduceReduceInput, AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiMapRole,
+    AiProviderFailureKind, AiRoleLogicFailure, Many,
 };
 pub use model_profile::{ChatModelProfile, ContextWindowSource};
 pub use observability::{
@@ -52,7 +56,8 @@ pub use token_estimation::{
     TokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 pub use types::{
-    AiProvider, ChatMessage, ChatParams, ChatRequest, ChatResponse, ChatResponseFormat, ChatRole,
-    EmbeddingParams, EmbeddingRequest, EmbeddingResponse, SystemPrompt, ToolCall, ToolDefinition,
-    Usage, UsageSource, UserPrompt,
+    AiProvider, CanonicalizationComponent, ChatCompletionCompleted, ChatMessage, ChatParams,
+    ChatRequest, ChatResponse, ChatResponseFormat, ChatRole, ChatTarget, EmbeddingParams,
+    EmbeddingRequest, EmbeddingResponse, SystemPrompt, ToolCall, ToolDefinition, Usage,
+    UsageSource, UserPrompt,
 };

@@ -34,11 +34,16 @@ pub use chain_event::{
 pub use event_envelope::EventEnvelope;
 pub use journal_event::JournalEvent;
 pub use payloads::effect_payload::{
-    CanonicalInputHash, EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOrigin,
-    EffectFactOwner, EffectFailureCause, EffectFailureCode, EffectFailureKind, EffectFailureSource,
-    EffectInputPosition, EffectLabel, EffectOrdinal, EffectOutcomeGroupId, EffectOutcomePayload,
-    EffectProvenance, EffectRecord, EffectSchemaVersion, EffectStageKey, EffectType,
-    OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion,
+    effect_escape_controls_group_id, CanonicalInputHash, EffectAttemptOrdinal,
+    EffectAttemptStarted, EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOrigin,
+    EffectFactOwner, EffectFailureCause, EffectFailureCode, EffectFailureDetail, EffectFailureKind,
+    EffectFailureSource, EffectInputPosition, EffectLabel, EffectOrdinal, EffectOutcomeGroupId,
+    EffectOutcomePayload, EffectProvenance, EffectRecord, EffectRecoveryAbandoned,
+    EffectSchemaVersion, EffectStageKey, EffectType, OutcomeFactOrdinal, RecordedFlowId,
+    RetryDisposition, StageLogicVersion,
+};
+pub use payloads::stage_fatal_payload::{
+    StageFatalCode, StageFatalReason, StageFatalRecorded, StageFatalSeverity,
 };
 pub use system_event::{
     EdgeLivenessState, MetricsCoordinationEvent, PipelineLifecycleEvent, ReplayLifecycleEvent,

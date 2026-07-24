@@ -222,6 +222,7 @@ mod tests {
             group_id: None,
             fact_owner: Default::default(),
             origin: None,
+            attempt: None,
         };
         let event = ChainEventFactory::data_event(writer(), "payment.authorized", json!({}))
             .with_effect_provenance(provenance);

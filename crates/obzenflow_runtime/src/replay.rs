@@ -105,6 +105,18 @@ pub trait ReplayArchive: Send + Sync {
 
     fn archive_path(&self) -> &Path;
 
+    /// Versioned archive capability advertised by the run manifest.
+    fn manifest_capability(&self, _name: &str) -> Option<u32> {
+        None
+    }
+
+    /// Stable descriptor-proved direct-fact metadata from the archive.
+    fn bounded_direct_fact_admission(
+        &self,
+    ) -> &[obzenflow_core::journal::run_manifest::RunManifestDirectFactAdmission] {
+        &[]
+    }
+
     /// Maximum recorded resume generation in this archive (FLOWIP-120n). A
     /// resume run enters this plus one. The default answers for archives with
     /// no recorded catch-up boundary; `DiskReplayArchive` overrides it

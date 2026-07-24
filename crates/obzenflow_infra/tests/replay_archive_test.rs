@@ -55,6 +55,8 @@ fn write_manifest(dir: &Path) {
         stages,
         system_journal_file: "system.log".to_string(),
         effective_config: None,
+        capabilities: Default::default(),
+        bounded_direct_fact_admission: Vec::new(),
     };
 
     let body = serde_json::to_string_pretty(&manifest).unwrap();
@@ -196,6 +198,8 @@ fn write_manifest_with_version(dir: &Path, version: &str) {
         stages,
         system_journal_file: "system.log".to_string(),
         effective_config: None,
+        capabilities: Default::default(),
+        bounded_direct_fact_admission: Vec::new(),
     };
 
     let body = serde_json::to_string_pretty(&manifest).unwrap();

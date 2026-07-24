@@ -22,6 +22,7 @@ use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
     FrameworkObservabilityCommit,
 };
+use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::observer::dispatch::{
     run_stateful_after_accumulate_observers, run_stateful_after_emit_observers,
     run_stateful_before_accumulate_observers,
@@ -299,7 +300,8 @@ pub(super) async fn dispatch_accumulating<
                         }
                         ControlAction::ForwardAndDrain => {
                             ctx.buffered_eof = Some(envelope.event.clone());
-                            sup.forward_control_event(ctx, &envelope).await?;
+                            ctx.terminal_envelope = Some(envelope.clone());
+                            ctx.drain_requested_by_handle = false;
                             EventLoopDirective::Transition(StatefulEvent::ReceivedEOF)
                         }
                         ControlAction::Suppress => EventLoopDirective::Continue,
@@ -415,6 +417,41 @@ pub(super) async fn dispatch_accumulating<
                     )
                     .await?;
                     if let Err(err) = &accumulate_result {
+                        if let Some(fatal) = err.as_fatal() {
+                            let duration = start.elapsed();
+                            ctx.instrumentation
+                                .in_flight_count
+                                .fetch_sub(1, Ordering::Relaxed);
+                            ctx.instrumentation.record_processing_time(duration);
+                            ctx.instrumentation.record_error(err.kind());
+                            let writer_id = ctx.writer_id.ok_or_else(|| {
+                                "fatal stateful input has no stage writer id".to_string()
+                            })?;
+                            record_stage_fatal(
+                                fatal,
+                                StageFatalCommit {
+                                    error_journal: &ctx.error_journal,
+                                    writer_id,
+                                    stage_id: ctx.stage_id,
+                                    stage_key: &ctx.stage_name,
+                                    input_position: stage_input_position,
+                                    parent: Some(&envelope),
+                                    lineage: ctx.lineage_policy,
+                                },
+                            )
+                            .await?;
+                            if let Some(upstream) = upstream_stage {
+                                if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                                    reader.ack_consumed(1);
+                                }
+                            }
+                            if let Some(state) = &heartbeat_state {
+                                state.record_last_consumed(event_id);
+                            }
+                            return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                                fatal.detail.clone(),
+                            )));
+                        }
                         if let Some(directive) = super::contract_violation_directive::<H>(
                             err,
                             "processing",
@@ -509,21 +546,18 @@ pub(super) async fn dispatch_accumulating<
                         );
                     }
 
-                    // Backpressure ack: upstream input was consumed into state.
-                    //
-                    // Note: This is intentionally independent of emission. Emission is driven by
-                    // accumulator state (and can also be timer-driven), whereas backpressure acks
-                    // reflect input consumption on the upstream edge.
-                    if let Some(upstream) = upstream_stage {
-                        if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
-                            reader.ack_consumed(1);
-                        }
-                    }
-
-                    // Check if we should emit based on updated state.
+                    // A closing collector input is not complete until the
+                    // output it caused is durable. Non-emitting inputs are
+                    // fully folded now and can release upstream credit.
                     if handler.should_emit(&mut ctx.current_state) {
+                        ctx.pending_ack_upstream = upstream_stage;
                         EventLoopDirective::Transition(StatefulEvent::ShouldEmit)
                     } else {
+                        if let Some(upstream) = upstream_stage {
+                            if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                                reader.ack_consumed(1);
+                            }
+                        }
                         EventLoopDirective::Continue
                     }
                 }
@@ -732,6 +766,8 @@ pub(super) async fn dispatch_emitting<
             }
         }
 
+        ctx.handler.outputs_committed(&mut ctx.current_state);
+
         if let Some(upstream) = ctx.pending_ack_upstream.take() {
             if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
                 reader.ack_consumed(1);
@@ -876,12 +912,51 @@ pub(super) async fn dispatch_emitting<
             Ok(EventLoopDirective::Continue)
         }
         Ok(_) => {
+            ctx.handler.outputs_committed(&mut ctx.current_state);
+            if let Some(upstream) = ctx.pending_ack_upstream.take() {
+                if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                    reader.ack_consumed(1);
+                }
+            }
             if ctx.emit_interval.is_some() {
                 ctx.last_data_event_time = Some(tokio::time::Instant::now());
             }
             Ok(EventLoopDirective::Transition(StatefulEvent::EmitComplete))
         }
         Err(e) => {
+            if let Some(handler_error) =
+                e.downcast_ref::<crate::stages::common::handler_error::HandlerError>()
+            {
+                if let Some(fatal) = handler_error.as_fatal() {
+                    let writer_id = ctx.writer_id.ok_or_else(|| {
+                        "fatal stateful emission has no stage writer id".to_string()
+                    })?;
+                    let parent = ctx.last_consumed_envelope.as_ref().ok_or_else(|| {
+                        "fatal stateful emission has no causal input envelope".to_string()
+                    })?;
+                    record_stage_fatal(
+                        fatal,
+                        StageFatalCommit {
+                            error_journal: &ctx.error_journal,
+                            writer_id,
+                            stage_id: ctx.stage_id,
+                            stage_key: &ctx.stage_name,
+                            input_position: ctx.last_input_position,
+                            parent: Some(parent),
+                            lineage: ctx.lineage_policy,
+                        },
+                    )
+                    .await?;
+                    if let Some(upstream) = ctx.pending_ack_upstream.take() {
+                        if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                            reader.ack_consumed(1);
+                        }
+                    }
+                    return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                        fatal.detail.clone(),
+                    )));
+                }
+            }
             tracing::error!(
                 stage_name = %ctx.stage_name,
                 error = ?e,

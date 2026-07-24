@@ -17,6 +17,7 @@ pub(crate) mod flow_context_factory;
 pub(crate) mod forward_control_event;
 pub(crate) mod lifecycle_actions;
 pub(crate) mod output_committer;
+pub(crate) mod stage_fatal;
 pub(crate) mod suspension;
 
 #[cfg(test)]

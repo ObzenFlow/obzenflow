@@ -4,6 +4,8 @@
 
 use std::time::Duration;
 
+use super::ChatTarget;
+
 /// Provider-agnostic client error taxonomy for AI calls.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum AiClientError {
@@ -27,6 +29,12 @@ pub enum AiClientError {
 
     #[error("unsupported operation: {message}")]
     Unsupported { message: String },
+
+    #[error("chat target mismatch: requested {requested}, bound {bound}")]
+    TargetMismatch {
+        requested: ChatTarget,
+        bound: ChatTarget,
+    },
 
     #[error("other AI client error: {message}")]
     Other { message: String },

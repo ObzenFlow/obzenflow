@@ -15,7 +15,7 @@ use super::scanner::{
 use async_trait::async_trait;
 use chrono::Utc;
 use crc32fast::Hasher;
-use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::event::event_envelope::{EventEnvelope, JournalGroupMember};
 use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
 use obzenflow_core::event::JournalEvent;
@@ -455,6 +455,8 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             journal_writer_id: JournalWriterId::from(self.journal_id),
             vector_clock: vector_clock.clone(),
             timestamp: Utc::now(),
+            journal_group_id: None,
+            journal_group_member: None,
             event: event.clone(),
         };
 
@@ -597,10 +599,14 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             }
         }
 
+        let group_size = u32::try_from(events.len()).map_err(|_| JournalError::Implementation {
+            message: format!("Atomic journal group '{group_id}' exceeds u32 member capacity"),
+            source: "atomic journal group is too large".into(),
+        })?;
         let mut next_writer_clocks = self.writer_clocks.read().await.clone();
         let mut envelopes = Vec::with_capacity(events.len());
         let mut records = Vec::with_capacity(events.len());
-        for event in events {
+        for (index, event) in events.into_iter().enumerate() {
             let writer_id = *event.writer_id();
             let vector_clock = CausalOrderingService::advance_for_append(
                 next_writer_clocks.get(&writer_id),
@@ -613,6 +619,12 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                 journal_writer_id: JournalWriterId::from(self.journal_id),
                 vector_clock: vector_clock.clone(),
                 timestamp,
+                journal_group_id: Some(group_id.to_string()),
+                journal_group_member: Some(JournalGroupMember {
+                    index: u32::try_from(index)
+                        .expect("group size was checked against u32 capacity"),
+                    size: group_size,
+                }),
                 event: event.clone(),
             });
             records.push(LogRecord {
@@ -737,17 +749,26 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                 },
             ) {
                 Disposition::Yield(frame) => {
-                    events.extend(
-                        frame
-                            .into_records()
-                            .into_iter()
-                            .map(|record| EventEnvelope {
-                                journal_writer_id: JournalWriterId::from(self.journal_id),
-                                vector_clock: record.vector_clock,
-                                timestamp: record.timestamp,
-                                event: record.event,
+                    let journal_group_id = frame.group_id().map(str::to_string);
+                    let records = frame.into_records();
+                    let group_size = journal_group_id.as_ref().map(|_| {
+                        u32::try_from(records.len())
+                            .expect("a materialised journal frame fits in addressable memory")
+                    });
+                    events.extend(records.into_iter().enumerate().map(|(index, record)| {
+                        EventEnvelope {
+                            journal_writer_id: JournalWriterId::from(self.journal_id),
+                            vector_clock: record.vector_clock,
+                            timestamp: record.timestamp,
+                            journal_group_id: journal_group_id.clone(),
+                            journal_group_member: group_size.map(|size| JournalGroupMember {
+                                index: u32::try_from(index)
+                                    .expect("group size was checked against u32 capacity"),
+                                size,
                             }),
-                    );
+                            event: record.event,
+                        }
+                    }));
                 }
                 Disposition::EndOfCommittedRecords | Disposition::Skip => break,
                 Disposition::Corrupt(problem) => {
@@ -822,16 +843,30 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                     tolerate_torn_tail: false,
                 },
             ) {
-                Disposition::Yield(frame) => Ok(frame
-                    .into_records()
-                    .into_iter()
-                    .find(|record| record.event_id == ulid)
-                    .map(|record| EventEnvelope {
-                        journal_writer_id: JournalWriterId::from(self.journal_id),
-                        vector_clock: record.vector_clock,
-                        timestamp: record.timestamp,
-                        event: record.event,
-                    })),
+                Disposition::Yield(frame) => {
+                    let journal_group_id = frame.group_id().map(str::to_string);
+                    let records = frame.into_records();
+                    let group_size = journal_group_id.as_ref().map(|_| {
+                        u32::try_from(records.len())
+                            .expect("a materialised journal frame fits in addressable memory")
+                    });
+                    Ok(records
+                        .into_iter()
+                        .enumerate()
+                        .find(|(_, record)| record.event_id == ulid)
+                        .map(|(index, record)| EventEnvelope {
+                            journal_writer_id: JournalWriterId::from(self.journal_id),
+                            vector_clock: record.vector_clock,
+                            timestamp: record.timestamp,
+                            journal_group_id,
+                            journal_group_member: group_size.map(|size| JournalGroupMember {
+                                index: u32::try_from(index)
+                                    .expect("group size was checked against u32 capacity"),
+                                size,
+                            }),
+                            event: record.event,
+                        }))
+                }
                 Disposition::EndOfCommittedRecords | Disposition::Skip => Ok(None),
                 Disposition::Corrupt(problem) => Err(JournalError::Implementation {
                     message: format!(
@@ -934,7 +969,13 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                 // committed record. It is never a replay/verification contract.
                 match classify_frame::<T>(line.as_bytes()) {
                     ParseOutcome::Complete(frame) => {
-                        for record in frame.into_records().into_iter().rev() {
+                        let journal_group_id = frame.group_id().map(str::to_string);
+                        let records = frame.into_records();
+                        let group_size = journal_group_id.as_ref().map(|_| {
+                            u32::try_from(records.len())
+                                .expect("a materialised journal frame fits in addressable memory")
+                        });
+                        for (index, record) in records.into_iter().enumerate().rev() {
                             if results.len() >= count {
                                 break;
                             }
@@ -942,6 +983,12 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                                 journal_writer_id: JournalWriterId::from(self.journal_id),
                                 vector_clock: record.vector_clock,
                                 timestamp: record.timestamp,
+                                journal_group_id: journal_group_id.clone(),
+                                journal_group_member: group_size.map(|size| JournalGroupMember {
+                                    index: u32::try_from(index)
+                                        .expect("group size was checked against u32 capacity"),
+                                    size,
+                                }),
                                 event: record.event,
                             });
                         }

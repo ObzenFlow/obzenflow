@@ -33,7 +33,7 @@ pub use obzenflow_infra::ai::TiktokenEstimator;
 
 #[cfg(feature = "ai")]
 pub use obzenflow_infra::ai::{
-    ChatRequestTemplate, ChatTransformBuilder, ChatTransformBuilderWithContext, ChatTransformExt,
-    EmbeddingTransformBuilder, EmbeddingTransformExt, ModelChatBuilder,
-    ModelChatBuilderWithContext, ModelConfig,
+    ChatEffectBinding, ChatEffectBindingError, ChatRequestTemplate, ChatTransformBuilder,
+    ChatTransformBuilderWithContext, ChatTransformExt, EmbeddingTransformBuilder,
+    EmbeddingTransformExt, ModelChatBuilder, ModelChatBuilderWithContext, ModelConfig,
 };

@@ -7,13 +7,16 @@
 use async_trait::async_trait;
 use obzenflow_core::event::context::FlowContext;
 pub use obzenflow_core::event::payloads::effect_payload::{
-    effect_outcome_group_id, framework_effect_event_type, is_framework_effect_event_type,
-    CanonicalInputHash, EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOrigin,
-    EffectFactOwner, EffectFailureCause, EffectFailureCode, EffectFailureKind, EffectFailureSource,
-    EffectInputPosition, EffectLabel, EffectOrdinal, EffectOutcomeGroupId, EffectOutcomePayload,
-    EffectProvenance, EffectRecord, EffectSchemaVersion, EffectStageKey, EffectType,
-    OutcomeFactCount, OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion,
-    CAPTURE_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
+    effect_escape_controls_group_id, effect_outcome_group_id, framework_effect_event_type,
+    is_framework_effect_event_type, CanonicalInputHash, EffectAttemptOrdinal, EffectAttemptStarted,
+    EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOrigin, EffectFactOwner,
+    EffectFailureCause, EffectFailureCode, EffectFailureDetail, EffectFailureKind,
+    EffectFailureSource, EffectInputPosition, EffectLabel, EffectOrdinal, EffectOutcomeGroupId,
+    EffectOutcomePayload, EffectProvenance, EffectRecord, EffectRecoveryAbandoned,
+    EffectSchemaVersion, EffectStageKey, EffectType, OutcomeFactCount, OutcomeFactOrdinal,
+    RecordedFlowId, RetryDisposition, StageLogicVersion, CAPTURE_EVENT_TYPE,
+    EFFECT_ATTEMPT_STARTED_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
+    EFFECT_RECOVERY_ABANDONED_EVENT_TYPE,
 };
 // `EffectOutcomeFacts` re-exports both the trait and its derive (FLOWIP-120m).
 pub use obzenflow_core::event::schema::{
@@ -28,6 +31,7 @@ use serde_json::{Map, Value};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -61,8 +65,9 @@ mod tests;
 
 pub(crate) use boundary::SingleUseEffectBoundaryOutcome;
 pub use boundary::{
-    EffectAbortReason, EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectIdentity,
-    PhysicalCallObservation, PhysicalCallOutcome, PhysicalCallReceipt,
+    AffineEffectBoundaryReport, AffineEffectExecution, AffineEffectOperation, EffectAbortReason,
+    EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectIdentity,
+    PhysicalCallObservation, PhysicalCallOutcome, PhysicalCallReceipt, PreparedAffineEffectCall,
     PreparedRepeatableEffectCall, PreparedSingleUseEffectCall, RepeatableEffectOperation,
     SingleUseEffectBoundaryReport, SingleUseEffectExecution, SingleUseEffectOperation,
 };
@@ -82,13 +87,20 @@ pub use effect_set::{
     assert_distinct_effect_set, DeclaredEffectSet, EffectList, EffectSet, EffectTypeDisjoint,
 };
 pub use error::EffectError;
+pub(crate) use history::{
+    current_cursor_history, merge_cursor_histories, EffectCursorCoordinator, EffectCursorHistory,
+    EffectHistorySelection,
+};
 pub use history::{EffectHistory, EffectHistoryReader, EffectHistoryStore};
 pub use identity::{
     deterministic_effect_record_event_id, deterministic_effect_record_event_time,
     deterministic_event_id, deterministic_event_time, deterministic_typed_output_event,
     EffectOutputOrdinal,
 };
-pub use ports::{EffectPortKey, EffectPortRegistry, EffectPortRequirement};
+pub use ports::{
+    EffectPortKey, EffectPortRegistrationError, EffectPortRegistry, EffectPortRequirement,
+    EffectPortResolutionError, EffectPortResolveFuture, EffectPortResolver,
+};
 pub(crate) use runtime::EffectsCore;
 // FLOWIP-120z/B9: the proof facades are doc-hidden public bounds so rustc can
 // report failures in handler vocabulary without weakening the underlying set
@@ -99,9 +111,12 @@ pub use typed::{AllowedEffectsAllowEffect, EffectOutcomeFitsOutput, OutputAllows
 
 use commit::{
     append_domain_effect_success_facts, append_effect_record, build_domain_effect_success_facts,
-    build_effect_record_event, EffectCommitHandleParams, PreparedEffectOutcome,
+    build_effect_attempt_started_event, build_effect_record_event,
+    build_effect_recovery_abandoned_event, EffectCommitHandleParams, PreparedEffectOutcome,
 };
-use identity::{descriptor_for_effect, descriptor_hash, hash_json_value};
+use identity::{
+    descriptor_for_effect, descriptor_hash, deterministic_effect_evidence_event_id, hash_json_value,
+};
 use replay::{
     decode_effect_outcome, decode_effect_outcome_group, effect_fact_set_error,
     effect_record_from_event, effect_record_group_materialization, is_routable_output_fact,

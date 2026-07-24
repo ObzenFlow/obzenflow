@@ -470,6 +470,8 @@ mod tests {
             stages: map,
             system_journal_file: "system.log".to_string(),
             effective_config: None,
+            capabilities: Default::default(),
+            bounded_direct_fact_admission: Vec::new(),
         }
     }
 
@@ -498,6 +500,7 @@ mod tests {
             group_id: None,
             fact_owner: Default::default(),
             origin: None,
+            attempt: None,
         };
         data("payment.authorized", payload).with_effect_provenance(provenance)
     }

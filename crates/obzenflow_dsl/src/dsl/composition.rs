@@ -489,7 +489,7 @@ pub struct CompositeBuildError {
 }
 
 impl CompositeBuildError {
-    fn new(message: String) -> Self {
+    pub(crate) fn new(message: String) -> Self {
         Self { message }
     }
 }

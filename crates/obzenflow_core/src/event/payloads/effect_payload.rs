@@ -6,13 +6,16 @@
 
 use std::fmt;
 
-use crate::event::types::EventType;
+use crate::event::types::{EventId, EventType};
+use crate::TypedPayload;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 pub const EFFECT_RECORD_EVENT_TYPE: &str = "obzenflow.effect_record.v1";
 pub const CAPTURE_EVENT_TYPE: &str = "obzenflow.capture.v1";
+pub const EFFECT_ATTEMPT_STARTED_EVENT_TYPE: &str = "obzenflow.effect_attempt_started.v1";
+pub const EFFECT_RECOVERY_ABANDONED_EVENT_TYPE: &str = "obzenflow.effect_recovery_abandoned.v1";
 
 macro_rules! string_newtype {
     ($name:ident, $doc:literal) => {
@@ -198,6 +201,10 @@ impl PartialEq<EffectInputPosition> for u64 {
 u32_newtype!(
     EffectOrdinal,
     "Per-input position of an fx.perform or fx.capture call."
+);
+u32_newtype!(
+    EffectAttemptOrdinal,
+    "One-based runtime-authorised execution attempt for one effect cursor."
 );
 u32_newtype!(
     EffectSchemaVersion,
@@ -517,6 +524,18 @@ pub struct EffectFailureCause {
     pub code: EffectFailureCode,
 }
 
+/// Replay-stable structured detail for generic effect failures whose message
+/// is diagnostic only and must never become a parsing authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EffectFailureDetail {
+    PortBindingInvariantViolation {
+        port: String,
+        expected: String,
+        observed: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum EffectOutcomePayload {
@@ -538,7 +557,45 @@ pub enum EffectOutcomePayload {
         retry: RetryDisposition,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cause: Option<EffectFailureCause>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<EffectFailureDetail>,
     },
+}
+
+/// Durable admission cut for a possible effect execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectAttemptStarted {
+    pub cursor: EffectCursor,
+    pub descriptor_hash: EffectDescriptorHash,
+    pub effect_type: EffectType,
+    pub attempt: EffectAttemptOrdinal,
+    pub outcome_group_id: EffectOutcomeGroupId,
+    pub causal_input_id: EventId,
+}
+
+impl TypedPayload for EffectAttemptStarted {
+    const EVENT_TYPE: &'static str = "obzenflow.effect_attempt_started";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// Logical terminal that records a recovery decision without claiming a new
+/// physical effect result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectRecoveryAbandoned {
+    pub cursor: EffectCursor,
+    pub descriptor_hash: EffectDescriptorHash,
+    pub effect_type: EffectType,
+    pub outcome_group_id: EffectOutcomeGroupId,
+    pub highest_started_attempt: EffectAttemptOrdinal,
+    pub causal_input_id: EventId,
+    pub cause: EffectFailureCause,
+    pub message: String,
+    pub retry: RetryDisposition,
+}
+
+impl TypedPayload for EffectRecoveryAbandoned {
+    const EVENT_TYPE: &'static str = "obzenflow.effect_recovery_abandoned";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -576,6 +633,10 @@ pub struct EffectProvenance {
     pub descriptor_hash: EffectDescriptorHash,
     /// Descriptor material retained so replay can diagnose hash drift loudly.
     pub descriptor: EffectDescriptor,
+    /// One-based effect-execution attempt that produced this terminal. Older
+    /// records and zero-attempt logical terminals decode as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<EffectAttemptOrdinal>,
     /// Fact position inside the effect outcome group. Reserved framework rows
     /// do not set this; user-authored effect outcome facts must set it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -608,6 +669,7 @@ impl EffectProvenance {
             cursor: record.cursor.clone(),
             descriptor_hash: record.descriptor_hash.clone(),
             descriptor: record.descriptor.clone(),
+            attempt: None,
             outcome_fact_ordinal: None,
             outcome_fact_count: None,
             group_id: Some(effect_outcome_group_id(&record.cursor)),
@@ -626,6 +688,22 @@ pub fn effect_outcome_group_id(cursor: &EffectCursor) -> EffectOutcomeGroupId {
         cursor.stage_key.as_str(),
         cursor.input_seq.get(),
         cursor.effect_ordinal.get()
+    ))
+}
+
+pub fn effect_escape_controls_group_id(
+    cursor: &EffectCursor,
+    attempt: EffectAttemptOrdinal,
+) -> EffectOutcomeGroupId {
+    EffectOutcomeGroupId::new(format!(
+        "effect-escape-controls:v1:{}:{}:{}:{}:{}:{}:{}",
+        cursor.recorded_flow_id.len(),
+        cursor.recorded_flow_id.as_str(),
+        cursor.stage_key.len(),
+        cursor.stage_key.as_str(),
+        cursor.input_seq.get(),
+        cursor.effect_ordinal.get(),
+        attempt.get()
     ))
 }
 
@@ -732,6 +810,7 @@ mod tests {
                 error_message: "try again".to_string(),
                 retry: RetryDisposition::Retryable,
                 cause: None,
+                detail: None,
             }
         );
 

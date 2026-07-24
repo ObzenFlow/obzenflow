@@ -7,6 +7,14 @@ pub(super) fn effect_record_from_event(
     event: &ChainEvent,
 ) -> Result<Option<EffectRecord>, EffectError> {
     match &event.content {
+        ChainEventContent::Data { event_type, .. }
+            if EffectAttemptStarted::event_type_matches(event_type)
+                || EffectRecoveryAbandoned::event_type_matches(event_type) =>
+        {
+            // These framework rows participate in attempt-history folding,
+            // not in the legacy EffectRecord outcome group.
+            Ok(None)
+        }
         ChainEventContent::Data {
             event_type,
             payload,
@@ -434,12 +442,17 @@ where
             error_message,
             retry,
             cause,
-        } => Err(EffectError::RecordedFailure {
-            error_type: error_type.clone(),
-            error_message: error_message.clone(),
-            retry: *retry,
-            cause: cause.clone(),
-        }),
+            detail,
+        } => {
+            validate_failure_detail(error_type, detail.as_ref())?;
+            Err(EffectError::RecordedFailure {
+                error_type: error_type.clone(),
+                error_message: error_message.clone(),
+                retry: *retry,
+                cause: cause.clone(),
+                detail: detail.clone(),
+            })
+        }
     }
 }
 
@@ -452,16 +465,38 @@ pub(super) fn recorded_failure_from_outcome<T>(
             error_message,
             retry,
             cause,
-        } => Err(EffectError::RecordedFailure {
-            error_type: error_type.clone(),
-            error_message: error_message.clone(),
-            retry: *retry,
-            cause: cause.clone(),
-        }),
+            detail,
+        } => {
+            validate_failure_detail(error_type, detail.as_ref())?;
+            Err(EffectError::RecordedFailure {
+                error_type: error_type.clone(),
+                error_message: error_message.clone(),
+                retry: *retry,
+                cause: cause.clone(),
+                detail: detail.clone(),
+            })
+        }
         _ => Err(EffectError::EffectProvenanceMismatch(
             "expected recorded effect failure".to_string(),
         )),
     }
+}
+
+fn validate_failure_detail(
+    error_type: &EffectFailureKind,
+    detail: Option<&EffectFailureDetail>,
+) -> Result<(), EffectError> {
+    let invariant_type = error_type.as_str() == "effect_port_binding_invariant_violation";
+    let invariant_detail = matches!(
+        detail,
+        Some(EffectFailureDetail::PortBindingInvariantViolation { .. })
+    );
+    if invariant_type != invariant_detail {
+        return Err(EffectError::EffectProvenanceMismatch(
+            "effect port-binding invariant failure type/detail pairing is invalid".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn effect_fact_set_error(error: TypedFactSetError) -> EffectError {

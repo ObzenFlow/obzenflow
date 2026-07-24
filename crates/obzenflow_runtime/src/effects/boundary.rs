@@ -455,6 +455,133 @@ impl SingleUseEffectBoundaryReport {
     }
 }
 
+/// Runtime-minted, single-use capability for one at-least-once effect
+/// execution attempt. It is deliberately non-`Clone`: executing or aborting
+/// consumes the only authority for this ordinal.
+pub struct AffineEffectOperation {
+    inner: SingleUseEffectOperation,
+    highest_prior_attempt: u32,
+}
+
+pub struct PreparedAffineEffectCall {
+    inner: PreparedSingleUseEffectCall,
+    highest_prior_attempt: u32,
+}
+
+impl PreparedAffineEffectCall {
+    pub fn receipt(&self) -> PhysicalCallReceipt {
+        self.inner.receipt()
+    }
+
+    pub async fn execute(self) -> AffineEffectExecution {
+        AffineEffectExecution {
+            inner: self.inner.execute().await,
+            highest_prior_attempt: self.highest_prior_attempt,
+        }
+    }
+}
+
+impl AffineEffectOperation {
+    pub(super) fn new_with_lifecycle<F, Fut>(highest_prior_attempt: u32, call: F) -> Self
+    where
+        F: FnOnce(PhysicalCallLifecycle) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<Vec<ChainEvent>, EffectError>> + Send + 'static,
+    {
+        Self {
+            inner: SingleUseEffectOperation::new_with_lifecycle(call),
+            highest_prior_attempt,
+        }
+    }
+
+    /// Highest durable Start already present before this invocation.
+    pub fn highest_prior_attempt(&self) -> u32 {
+        self.highest_prior_attempt
+    }
+
+    pub fn next_attempt(&self) -> u32 {
+        self.highest_prior_attempt.saturating_add(1)
+    }
+
+    pub(super) fn provenance(&self) -> SingleUseEffectProvenance {
+        self.inner.provenance()
+    }
+
+    pub fn prepare(self) -> PreparedAffineEffectCall {
+        PreparedAffineEffectCall {
+            inner: self.inner.prepare(),
+            highest_prior_attempt: self.highest_prior_attempt,
+        }
+    }
+
+    pub async fn execute(self) -> AffineEffectExecution {
+        self.prepare().execute().await
+    }
+
+    pub fn abort(
+        self,
+        reason: EffectAbortReason,
+        control_events: Vec<ChainEvent>,
+    ) -> AffineEffectBoundaryReport {
+        AffineEffectBoundaryReport {
+            inner: self.inner.abort(reason, control_events),
+            highest_prior_attempt: self.highest_prior_attempt,
+        }
+    }
+}
+
+pub struct AffineEffectExecution {
+    inner: SingleUseEffectExecution,
+    highest_prior_attempt: u32,
+}
+
+impl AffineEffectExecution {
+    pub fn result(&self) -> &Result<Vec<ChainEvent>, EffectError> {
+        self.inner.result()
+    }
+
+    pub fn attempt(&self) -> u32 {
+        self.highest_prior_attempt.saturating_add(1)
+    }
+
+    pub fn into_report(self, control_events: Vec<ChainEvent>) -> AffineEffectBoundaryReport {
+        let highest_prior_attempt = self.highest_prior_attempt;
+        AffineEffectBoundaryReport {
+            inner: self.inner.into_report(control_events),
+            highest_prior_attempt,
+        }
+    }
+}
+
+pub struct AffineEffectBoundaryReport {
+    inner: SingleUseEffectBoundaryReport,
+    highest_prior_attempt: u32,
+}
+
+impl AffineEffectBoundaryReport {
+    pub fn execution_result(&self) -> Option<&Result<Vec<ChainEvent>, EffectError>> {
+        self.inner.execution_result()
+    }
+
+    pub fn abort_reason(&self) -> Option<&EffectAbortReason> {
+        self.inner.abort_reason()
+    }
+
+    pub fn highest_prior_attempt(&self) -> u32 {
+        self.highest_prior_attempt
+    }
+
+    pub fn extend_control_events(&mut self, events: impl IntoIterator<Item = ChainEvent>) {
+        self.inner.extend_control_events(events);
+    }
+
+    pub(super) fn into_parts(
+        self,
+        expected: &SingleUseEffectProvenance,
+    ) -> Result<(SingleUseEffectBoundaryOutcome, Vec<ChainEvent>), EffectError> {
+        self.inner.into_parts(expected)
+    }
+}
+
 /// The effect-boundary seam (FLOWIP-120c phase 2).
 ///
 /// Replaces the `before_effect`/`after_effect` bracket: the boundary wraps
@@ -482,6 +609,17 @@ pub trait EffectBoundary: Send + Sync {
         event: &ChainEvent,
         operation: SingleUseEffectOperation,
     ) -> SingleUseEffectBoundaryReport;
+
+    /// Guard one affine at-least-once attempt. The default is the internal
+    /// admit-all path and still consumes the same capability.
+    async fn around_affine_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: AffineEffectOperation,
+    ) -> AffineEffectBoundaryReport {
+        operation.execute().await.into_report(Vec::new())
+    }
 }
 
 #[cfg(test)]

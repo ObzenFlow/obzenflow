@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::boundary::PhysicalCallOutcome;
+use super::history::{validate_affine_terminal_group, validate_invariant_settlement_evidence};
 use super::*;
 
 /// Slot a guarded execution future fills with the real typed outcome, so
@@ -13,6 +14,58 @@ type ExecutedOutcomeSlot<O> = Arc<Mutex<Option<(O, Vec<TypedFact>)>>>;
 /// result and the outcome committed through the handle, if any.
 type TransactionalSettleSlot<O> =
     Arc<Mutex<Option<(Result<(), EffectError>, Option<PreparedEffectOutcome<O>>)>>>;
+
+fn split_invariant_control_events(
+    cursor: &EffectCursor,
+    attempt: EffectAttemptOrdinal,
+    control_events: Vec<ChainEvent>,
+) -> Result<(Vec<ChainEvent>, Vec<ChainEvent>), EffectError> {
+    let (settlement_index, _) =
+        validate_invariant_settlement_evidence(cursor, attempt, &control_events)?;
+
+    let mut preterminal = control_events;
+    let terminal = preterminal.split_off(settlement_index);
+    Ok((preterminal, terminal))
+}
+
+fn restore_archived_effect_identity(
+    rebuilt: &mut ChainEvent,
+    archived: &ChainEvent,
+) -> Result<(), EffectError> {
+    let rebuilt_content = serde_json::to_value(&rebuilt.content)
+        .map_err(|error| EffectError::Serialization(error.to_string()))?;
+    let archived_content = serde_json::to_value(&archived.content)
+        .map_err(|error| EffectError::Serialization(error.to_string()))?;
+    if rebuilt.id != archived.id
+        || rebuilt_content != archived_content
+        || rebuilt.effect_provenance != archived.effect_provenance
+    {
+        return Err(EffectError::EffectProvenanceMismatch(format!(
+            "rematerialised effect event {} disagrees with its archived durable identity",
+            archived.id
+        )));
+    }
+    rebuilt.processing_info.event_time = archived.processing_info.event_time;
+    rebuilt.effect_provenance = archived.effect_provenance.clone();
+    Ok(())
+}
+
+fn restore_archived_terminal_identity(
+    rebuilt: &mut ChainEvent,
+    history: &EffectCursorHistory,
+) -> Result<(), EffectError> {
+    let archived = history
+        .terminal_group_events
+        .iter()
+        .find(|event| event.id == rebuilt.id)
+        .ok_or_else(|| {
+            EffectError::EffectProvenanceMismatch(format!(
+                "rematerialised terminal event {} is absent from its archived atomic group",
+                rebuilt.id
+            ))
+        })?;
+    restore_archived_effect_identity(rebuilt, archived)
+}
 
 /// The erased effectful authoring core: every runtime declaration, output
 /// contract, replay, and commit check lives here, unchanged by the typed
@@ -72,6 +125,60 @@ impl EffectsCore {
 
     pub(crate) fn drain_committed_facts(&mut self) -> Vec<ChainEvent> {
         std::mem::take(&mut self.committed_facts)
+    }
+
+    pub(crate) fn parent_composite_activations(
+        &self,
+    ) -> Vec<obzenflow_core::event::context::CompositeActivationContext> {
+        self.ctx.parent.event.composite_activations().to_vec()
+    }
+
+    pub(crate) async fn preflight_next_effect_cursor_is_empty(&self) -> Result<(), EffectError> {
+        let recorded_flow_id = self
+            .ctx
+            .effect_history
+            .as_ref()
+            .map(|history| history.recorded_flow_id().to_string())
+            .unwrap_or_else(|| self.ctx.flow_id.to_string());
+        let cursor = EffectCursor::new(
+            recorded_flow_id,
+            self.ctx.stage_key.clone(),
+            self.ctx.input_seq.0,
+            self.next_effect_ordinal,
+        );
+        let archived = self
+            .ctx
+            .effect_history
+            .as_ref()
+            .map(|history| history.cursor_history(&cursor))
+            .unwrap_or_default();
+        let current = current_cursor_history(&self.ctx.data_journal, &cursor).await?;
+        let selected = merge_cursor_histories(&cursor, archived, current)?;
+        match selected.select() {
+            EffectHistorySelection::Miss => Ok(()),
+            EffectHistorySelection::Hit(_) => Err(EffectError::EffectProvenanceMismatch(format!(
+                "pre-effect failure at cursor {cursor:?} would replace an existing terminal"
+            ))),
+            EffectHistorySelection::InDoubt(attempts) => {
+                let highest = attempts
+                    .last()
+                    .expect("InDoubt selection is non-empty")
+                    .attempt;
+                Err(EffectError::EffectProvenanceMismatch(format!(
+                    "pre-effect failure at cursor {cursor:?} would erase in-doubt Start({highest})"
+                )))
+            }
+        }
+    }
+
+    pub(crate) async fn request_generated_live_admission(&self) -> Result<(), EffectError> {
+        if let Some(admission) = self.ctx.backpressure_writer.direct_fact_admission() {
+            admission
+                .request_live()
+                .await
+                .map_err(EffectError::Execution)?;
+        }
+        Ok(())
     }
 
     async fn observe_effect_outcome(
@@ -327,57 +434,168 @@ impl EffectsCore {
             self.ctx.input_seq.0,
             effect_ordinal,
         );
+        let cursor_coordinator = self
+            .ctx
+            .runtime_execution
+            .effect_cursor_coordinator()
+            .clone();
+        let _cursor_guard = cursor_coordinator.lock(&cursor).await?;
+        let mut prior_attempts = Vec::new();
+        let archived = self
+            .ctx
+            .effect_history
+            .as_ref()
+            .map(|history| history.cursor_history(&cursor))
+            .unwrap_or_default();
+        let current = current_cursor_history(&self.ctx.data_journal, &cursor).await?;
+        let selected = merge_cursor_histories(&cursor, archived, current)?;
+        if matches!(E::SAFETY, EffectSafety::NonIdempotentAtLeastOnce) {
+            validate_affine_terminal_group(&cursor, &selected)?;
+        }
 
-        if let Some(history) = &self.ctx.effect_history {
-            if let Some(records) = history.find_group(&cursor) {
+        match selected.select() {
+            EffectHistorySelection::Hit(records) => {
+                for started in &selected.attempts {
+                    if started.descriptor_hash != descriptor_hash
+                        || started.effect_type.as_str() != E::EFFECT_TYPE
+                    {
+                        return Err(EffectError::DescriptorMismatch {
+                            cursor: cursor.clone(),
+                            expected: descriptor_hash.clone(),
+                            recorded: started.descriptor_hash.clone(),
+                        });
+                    }
+                }
+                let record_refs = records.iter().collect::<Vec<_>>();
                 let output_result = self.replay_records_output::<E::Outcome>(
-                    &records,
+                    &record_refs,
                     cursor.clone(),
                     descriptor_hash.clone(),
                 );
-                let output = match output_result {
-                    Ok(output) => output,
-                    Err(err @ EffectError::RecordedFailure { .. }) => {
-                        let materialization = effect_record_group_materialization(&records)?;
-                        self.append_replayed_records(
-                            cursor,
-                            descriptor_hash,
-                            descriptor,
-                            materialization,
-                        )
-                        .await?;
-                        self.observe_effect_outcome(
-                            E::EFFECT_TYPE,
-                            crate::stages::observer::EffectObserverOutcome::SuppressedByReplay,
-                        )
-                        .await?;
-                        return Err(err);
-                    }
-                    Err(err) => return Err(err),
-                };
-                let materialization = effect_record_group_materialization(&records)?;
-                self.append_replayed_records(cursor, descriptor_hash, descriptor, materialization)
+                if output_result
+                    .as_ref()
+                    .is_err_and(|error| !matches!(error, EffectError::RecordedFailure { .. }))
+                {
+                    return output_result;
+                }
+                let materialization = effect_record_group_materialization(&record_refs)?;
+                if selected.attempts.is_empty()
+                    && selected.abandonment.is_none()
+                    && selected.terminal_group_events.is_empty()
+                {
+                    // Records supplied through the legacy record-only history
+                    // API carry no physical-group envelope. Reconstruct them
+                    // through the existing per-record path rather than
+                    // inventing an atomic cut the archive never proved.
+                    self.append_replayed_records(
+                        cursor.clone(),
+                        descriptor_hash,
+                        descriptor,
+                        materialization,
+                    )
                     .await?;
+                } else {
+                    self.append_replayed_history(
+                        &selected,
+                        cursor.clone(),
+                        descriptor_hash,
+                        descriptor,
+                        materialization,
+                    )
+                    .await?;
+                }
                 self.observe_effect_outcome(
                     E::EFFECT_TYPE,
                     crate::stages::observer::EffectObserverOutcome::SuppressedByReplay,
                 )
                 .await?;
-                return Ok(output);
+                if let Some(abandoned) = selected.abandonment.as_ref() {
+                    return Err(EffectError::RecoveryAbandoned {
+                        last_started_attempt: abandoned.highest_started_attempt,
+                        failure_source: abandoned.cause.source.clone(),
+                        code: abandoned.cause.code.clone(),
+                        message: abandoned.message.clone(),
+                        boundary_retry: abandoned.retry,
+                    });
+                }
+                return output_result;
             }
-
-            if self.ctx.runtime_execution.missing_outcome_is_corruption(
-                crate::execution::ExecutionPosition {
-                    stage_id: self.ctx.stage_id,
-                    position: self.ctx.input_seq,
-                    // The effect context carries no generation; the effect-miss
-                    // decision is positional (FLOWIP-120n F7).
-                    generation: None,
-                },
-            ) {
-                return Err(EffectError::MissingRecordedEffect { cursor });
+            EffectHistorySelection::InDoubt(attempts) => {
+                if !matches!(E::SAFETY, EffectSafety::NonIdempotentAtLeastOnce) {
+                    return Err(EffectError::EffectProvenanceMismatch(format!(
+                        "effect cursor {cursor:?} has attempt history but effect '{}' is not NonIdempotentAtLeastOnce",
+                        E::EFFECT_TYPE
+                    )));
+                }
+                for started in &attempts {
+                    if started.descriptor_hash != descriptor_hash
+                        || started.effect_type.as_str() != E::EFFECT_TYPE
+                    {
+                        return Err(EffectError::DescriptorMismatch {
+                            cursor: cursor.clone(),
+                            expected: descriptor_hash.clone(),
+                            recorded: started.descriptor_hash.clone(),
+                        });
+                    }
+                }
+                let highest_started_attempt =
+                    attempts.last().expect("non-empty attempt history").attempt;
+                if self.ctx.runtime_execution.in_doubt_effect_is_fatal() {
+                    return Err(EffectError::EffectInDoubt {
+                        cursor,
+                        highest_started_attempt,
+                    });
+                }
+                self.append_replayed_prefix(&cursor, &selected, descriptor.clone())
+                    .await?;
+                prior_attempts = attempts;
+            }
+            EffectHistorySelection::Miss => {
+                if self.ctx.runtime_execution.missing_outcome_is_corruption(
+                    crate::execution::ExecutionPosition {
+                        stage_id: self.ctx.stage_id,
+                        position: self.ctx.input_seq,
+                        generation: None,
+                    },
+                ) {
+                    return Err(EffectError::MissingRecordedEffect { cursor });
+                }
             }
         }
+
+        if let Some(admission) = self.ctx.backpressure_writer.direct_fact_admission() {
+            admission
+                .request_live()
+                .await
+                .map_err(EffectError::Execution)?;
+        }
+
+        // A replay hit above never touches a resolver. Only a selected live
+        // continuation resolves its declared ports, then performs the
+        // effect-specific metadata-only binding check before consulting the
+        // boundary or authoring an attempt.
+        for requirement in &declaration.required_ports {
+            self.ctx
+                .effect_ports
+                .resolve_requirement(requirement)
+                .await
+                .map_err(|error| match error {
+                    EffectPortResolutionError::Missing { type_name, name } => {
+                        EffectError::MissingEffectPort { type_name, name }
+                    }
+                    EffectPortResolutionError::ResolverFailed {
+                        type_name,
+                        name,
+                        message,
+                    } => EffectError::EffectPortResolutionFailed {
+                        type_name,
+                        name,
+                        message,
+                    },
+                })?;
+        }
+        let binding_context = self.live_effect_context();
+        effect.validate_port_bindings(&binding_context)?;
 
         let identity = EffectIdentity {
             effect_type: E::EFFECT_TYPE,
@@ -386,17 +604,35 @@ impl EffectsCore {
             idempotency_key: effect.idempotency_key(),
         };
 
+        if matches!(E::SAFETY, EffectSafety::NonIdempotentAtLeastOnce) {
+            // Keep the generated affine state machine off the caller's async
+            // frame. `perform` is monomorphised for every effect safety class;
+            // storing this large future inline also bloats ordinary
+            // transactional/repeatable handler futures enough to exhaust the
+            // stage task stack before their own branch runs.
+            return Box::pin(self.perform_affine(
+                effect,
+                identity,
+                cursor,
+                descriptor_hash,
+                descriptor,
+                prior_attempts,
+            ))
+            .await;
+        }
+
         if matches!(E::SAFETY, EffectSafety::Transactional) {
-            return self
-                .perform_transactional(
-                    effect,
-                    declaration,
-                    identity,
-                    cursor,
-                    descriptor_hash,
-                    descriptor,
-                )
-                .await;
+            // The transactional boundary owns another sizeable single-use
+            // future. Heap-pin it for the same frame-containment reason.
+            return Box::pin(self.perform_transactional(
+                effect,
+                declaration,
+                identity,
+                cursor,
+                descriptor_hash,
+                descriptor,
+            ))
+            .await;
         }
 
         let Some(boundary) = self.ctx.effect_boundary.clone() else {
@@ -584,6 +820,455 @@ impl EffectsCore {
         Ok((output, facts))
     }
 
+    async fn perform_affine<E>(
+        &mut self,
+        effect: E,
+        identity: EffectIdentity,
+        cursor: EffectCursor,
+        descriptor_hash: EffectDescriptorHash,
+        descriptor: EffectDescriptor,
+        prior_attempts: Vec<EffectAttemptStarted>,
+    ) -> Result<E::Outcome, EffectError>
+    where
+        E: Effect,
+    {
+        let highest_prior_attempt = u32::try_from(prior_attempts.len()).map_err(|_| {
+            EffectError::EffectProvenanceMismatch(
+                "effect attempt history exceeds u32 range".to_string(),
+            )
+        })?;
+        let next_attempt = highest_prior_attempt
+            .checked_add(1)
+            .ok_or_else(|| EffectError::Execution("effect attempt ordinal overflow".to_string()))?;
+        let attempt = EffectAttemptOrdinal::new(next_attempt);
+        let outcome_group_id = effect_outcome_group_id(&cursor);
+        let started = EffectAttemptStarted {
+            cursor: cursor.clone(),
+            descriptor_hash: descriptor_hash.clone(),
+            effect_type: EffectType::new(E::EFFECT_TYPE),
+            attempt,
+            outcome_group_id: outcome_group_id.clone(),
+            causal_input_id: self.ctx.parent.event.id,
+        };
+        let start_event = build_effect_attempt_started_event(
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            started,
+            descriptor.clone(),
+            self.ctx.lineage,
+        )?;
+
+        let outcome_slot: ExecutedOutcomeSlot<E::Outcome> = Arc::new(Mutex::new(None));
+        let start_committed = Arc::new(AtomicBool::new(false));
+        let operation = {
+            let slot = outcome_slot.clone();
+            let start_committed = start_committed.clone();
+            let data_journal = self.ctx.data_journal.clone();
+            let flow_context = self.ctx.flow_context.clone();
+            let system_journal = self.ctx.system_journal.clone();
+            let instrumentation = self.ctx.instrumentation.clone();
+            let heartbeat_state = self.ctx.heartbeat_state.clone();
+            let backpressure_writer = self.ctx.backpressure_writer.clone();
+            let parent = self.ctx.parent.clone();
+            let writer_id = self.ctx.writer_id;
+            let parent_event = self.ctx.parent.event.clone();
+            let lineage = self.ctx.lineage;
+            let base_context = self.live_effect_context();
+            AffineEffectOperation::new_with_lifecycle(
+                highest_prior_attempt,
+                move |lifecycle| async move {
+                    let committer = OutputCommitter {
+                        data_journal: &data_journal,
+                        flow_context: flow_context.as_ref(),
+                        system_journal: system_journal.as_ref(),
+                        instrumentation: instrumentation.as_ref(),
+                        heartbeat_state: heartbeat_state.as_ref(),
+                        output_contract: None,
+                        backpressure_writer: Some(&backpressure_writer),
+                        observers: None,
+                        observer_scope:
+                            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+                    };
+                    committer
+                        .commit_prebuilt_with_intent(
+                            start_event,
+                            Some(&parent),
+                            CommitOptions::default(),
+                            StageAppendIntent::NonDataStageFact,
+                        )
+                        .await
+                        .map_err(|error| EffectError::Journal(error.to_string()))?;
+                    start_committed.store(true, Ordering::Release);
+
+                    lifecycle.mark_started();
+                    let mut effect_ctx = base_context;
+                    let output = match effect.execute(&mut effect_ctx).await {
+                        Ok(output) => {
+                            lifecycle.mark_completed(PhysicalCallOutcome::Succeeded);
+                            output
+                        }
+                        Err(error) => {
+                            lifecycle.mark_completed(PhysicalCallOutcome::Failed);
+                            return Err(error);
+                        }
+                    };
+                    let facts = output.clone().into_facts().map_err(effect_fact_set_error)?;
+                    if facts.is_empty() {
+                        return Err(EffectError::Execution(
+                            "effect success output must author at least one fact".to_string(),
+                        ));
+                    }
+                    let observation = facts
+                        .iter()
+                        .map(|fact| {
+                            ChainEventFactory::derived_data_event(
+                                writer_id,
+                                &parent_event,
+                                fact.event_type.as_str(),
+                                fact.payload.clone(),
+                                lineage,
+                            )
+                        })
+                        .collect();
+                    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some((output, facts));
+                    Ok(observation)
+                },
+            )
+        };
+        let provenance = operation.provenance();
+        let report = match self.ctx.effect_boundary.clone() {
+            Some(boundary) => {
+                boundary
+                    .around_affine_effect(&identity, &self.ctx.parent.event, operation)
+                    .await
+            }
+            None => operation.execute().await.into_report(Vec::new()),
+        };
+        let (boundary_outcome, control_events) = report.into_parts(&provenance)?;
+
+        match boundary_outcome {
+            SingleUseEffectBoundaryOutcome::Executed(execution) => {
+                let result = execution.result();
+                if !start_committed.load(Ordering::Acquire) {
+                    let error = match result {
+                        Err(error) => error.clone(),
+                        Ok(_) => EffectError::Execution(
+                            "affine executor returned without a durable attempt start".to_string(),
+                        ),
+                    };
+                    // A failed Start publication authorises neither the
+                    // executor nor an effect terminal. Publishing a failure
+                    // here would create a terminal without its required
+                    // Start and turn a journal cut into a false known result.
+                    self.ctx
+                        .runtime_execution
+                        .effect_cursor_coordinator()
+                        .poison(cursor);
+                    drop(control_events);
+                    return Err(error);
+                }
+
+                match result {
+                    Ok(_) => {
+                        let (output, facts) = outcome_slot
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .take()
+                            .ok_or_else(|| {
+                                EffectError::Execution(
+                                    "affine effect boundary reported success without an executed outcome"
+                                        .to_string(),
+                                )
+                            })?;
+                        self.append_affine_success_facts(
+                            cursor,
+                            descriptor_hash,
+                            descriptor,
+                            facts,
+                            attempt,
+                            control_events,
+                        )
+                        .await?;
+                        self.observe_effect_outcome(
+                            E::EFFECT_TYPE,
+                            crate::stages::observer::EffectObserverOutcome::Succeeded,
+                        )
+                        .await?;
+                        Ok(output)
+                    }
+                    Err(error) => {
+                        self.append_affine_failed_record(
+                            cursor,
+                            descriptor_hash,
+                            descriptor,
+                            error,
+                            attempt,
+                            control_events,
+                        )
+                        .await?;
+                        self.observe_effect_outcome(
+                            E::EFFECT_TYPE,
+                            crate::stages::observer::EffectObserverOutcome::Failed {
+                                message: error.error_message(),
+                            },
+                        )
+                        .await?;
+                        Err(error.clone())
+                    }
+                }
+            }
+            SingleUseEffectBoundaryOutcome::Aborted(reason) => {
+                if highest_prior_attempt == 0 {
+                    return self
+                        .record_boundary_abort_with_control_events(
+                            cursor,
+                            descriptor_hash,
+                            descriptor,
+                            reason,
+                            control_events,
+                        )
+                        .await;
+                }
+                self.record_recovery_abandonment(
+                    cursor,
+                    descriptor_hash,
+                    descriptor,
+                    EffectAttemptOrdinal::new(highest_prior_attempt),
+                    reason,
+                    control_events,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn commit_framework_effect_event(&self, event: ChainEvent) -> Result<(), EffectError> {
+        let cursor = event
+            .effect_provenance
+            .as_ref()
+            .map(|provenance| provenance.cursor.clone());
+        let committer = OutputCommitter {
+            data_journal: &self.ctx.data_journal,
+            flow_context: self.ctx.flow_context.as_ref(),
+            system_journal: self.ctx.system_journal.as_ref(),
+            instrumentation: self.ctx.instrumentation.as_ref(),
+            heartbeat_state: self.ctx.heartbeat_state.as_ref(),
+            output_contract: None,
+            backpressure_writer: Some(&self.ctx.backpressure_writer),
+            observers: None,
+            observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+        };
+        if let Err(error) = committer
+            .commit_prebuilt_with_intent(
+                event,
+                Some(&self.ctx.parent),
+                CommitOptions::default(),
+                StageAppendIntent::NonDataStageFact,
+            )
+            .await
+        {
+            if let Some(cursor) = cursor {
+                self.ctx
+                    .runtime_execution
+                    .effect_cursor_coordinator()
+                    .poison(cursor);
+            }
+            return Err(EffectError::Journal(error.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn append_affine_success_facts(
+        &mut self,
+        cursor: EffectCursor,
+        descriptor_hash: EffectDescriptorHash,
+        descriptor: EffectDescriptor,
+        facts: Vec<TypedFact>,
+        attempt: EffectAttemptOrdinal,
+        control_events: Vec<ChainEvent>,
+    ) -> Result<(), EffectError> {
+        let routed_fact_count = self.count_routed_facts(&facts);
+        self.ensure_routed_fanout_capacity(routed_fact_count)?;
+        let output_ordinal = self.reserve_output_ordinals(facts.len())?;
+        let mut committed_events = build_domain_effect_success_facts(
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            cursor.clone(),
+            descriptor_hash,
+            descriptor,
+            facts,
+            output_ordinal,
+            Some(EffectFactOrigin::Effect),
+            self.ctx.lineage,
+        )?;
+        for event in &mut committed_events {
+            let provenance = event.effect_provenance.as_mut().ok_or_else(|| {
+                EffectError::EffectProvenanceMismatch(
+                    "affine success fact is missing effect provenance".to_string(),
+                )
+            })?;
+            provenance.attempt = Some(attempt);
+        }
+        let entries = committed_events
+            .iter()
+            .cloned()
+            .map(|event| AtomicCommitEntry {
+                event,
+                options: CommitOptions {
+                    count_output: true,
+                    validate_output_contract: true,
+                },
+                intent: StageAppendIntent::NormalStageData,
+            })
+            .collect();
+        self.commit_terminal_group(&cursor, entries, control_events)
+            .await?;
+        self.routed_output_fact_count = self
+            .routed_output_fact_count
+            .checked_add(routed_fact_count)
+            .ok_or_else(|| EffectError::Execution("routed output fanout overflow".to_string()))?;
+        self.committed_facts.extend(committed_events);
+        Ok(())
+    }
+
+    async fn append_affine_failed_record(
+        &self,
+        cursor: EffectCursor,
+        descriptor_hash: EffectDescriptorHash,
+        descriptor: EffectDescriptor,
+        error: &EffectError,
+        attempt: EffectAttemptOrdinal,
+        mut control_events: Vec<ChainEvent>,
+    ) -> Result<(), EffectError> {
+        if matches!(
+            error,
+            EffectError::EffectPortBindingInvariantViolation { .. }
+        ) {
+            let (preterminal, terminal) =
+                split_invariant_control_events(&cursor, attempt, control_events)?;
+            self.commit_escape_control_group(
+                &cursor,
+                attempt,
+                preterminal,
+                obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+            )
+            .await?;
+            control_events = terminal;
+        }
+        let record = EffectRecord {
+            cursor: cursor.clone(),
+            descriptor_hash,
+            descriptor,
+            outcome: EffectOutcomePayload::Failed {
+                error_type: error.error_type(),
+                error_message: error.error_message(),
+                retry: error.retry_disposition(),
+                cause: error.failure_cause(),
+                detail: error.failure_detail(),
+            },
+            origin: None,
+        };
+        let mut event = build_effect_record_event(
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            record,
+            self.ctx.lineage,
+        )?;
+        event
+            .effect_provenance
+            .as_mut()
+            .ok_or_else(|| {
+                EffectError::EffectProvenanceMismatch(
+                    "affine failure record is missing effect provenance".to_string(),
+                )
+            })?
+            .attempt = Some(attempt);
+        self.commit_terminal_group(
+            &cursor,
+            vec![AtomicCommitEntry {
+                event,
+                options: CommitOptions::default(),
+                intent: StageAppendIntent::NonDataStageFact,
+            }],
+            control_events,
+        )
+        .await
+    }
+
+    async fn record_recovery_abandonment<T>(
+        &self,
+        cursor: EffectCursor,
+        descriptor_hash: EffectDescriptorHash,
+        descriptor: EffectDescriptor,
+        highest_started_attempt: EffectAttemptOrdinal,
+        reason: EffectAbortReason,
+        control_events: Vec<ChainEvent>,
+    ) -> Result<T, EffectError> {
+        let error = EffectError::RecoveryAbandoned {
+            last_started_attempt: highest_started_attempt,
+            failure_source: reason.cause.source.clone(),
+            code: reason.cause.code.clone(),
+            message: reason.message.clone(),
+            boundary_retry: reason.retry,
+        };
+        let record = EffectRecord {
+            cursor: cursor.clone(),
+            descriptor_hash: descriptor_hash.clone(),
+            descriptor: descriptor.clone(),
+            outcome: EffectOutcomePayload::Failed {
+                error_type: error.error_type(),
+                error_message: error.error_message(),
+                retry: RetryDisposition::NotRetryable,
+                cause: Some(reason.cause.clone()),
+                detail: None,
+            },
+            origin: None,
+        };
+        let record_event = build_effect_record_event(
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            record,
+            self.ctx.lineage,
+        )?;
+        let abandoned = EffectRecoveryAbandoned {
+            cursor: cursor.clone(),
+            descriptor_hash,
+            effect_type: descriptor.effect_type.clone(),
+            outcome_group_id: effect_outcome_group_id(&cursor),
+            highest_started_attempt,
+            causal_input_id: self.ctx.parent.event.id,
+            cause: reason.cause,
+            message: reason.message,
+            retry: reason.retry,
+        };
+        let abandoned_event = build_effect_recovery_abandoned_event(
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            abandoned,
+            descriptor,
+            self.ctx.lineage,
+        )?;
+        self.commit_terminal_group(
+            &cursor,
+            vec![
+                AtomicCommitEntry {
+                    event: record_event,
+                    options: CommitOptions::default(),
+                    intent: StageAppendIntent::NonDataStageFact,
+                },
+                AtomicCommitEntry {
+                    event: abandoned_event,
+                    options: CommitOptions::default(),
+                    intent: StageAppendIntent::NonDataStageFact,
+                },
+            ],
+            control_events,
+        )
+        .await?;
+        Err(error)
+    }
+
     async fn append_failed_record(
         &mut self,
         cursor: EffectCursor,
@@ -600,6 +1285,7 @@ impl EffectsCore {
                 error_message: err.error_message(),
                 retry: err.retry_disposition(),
                 cause: err.failure_cause(),
+                detail: err.failure_detail(),
             },
             origin: None,
         })
@@ -623,6 +1309,7 @@ impl EffectsCore {
                 error_message: err.error_message(),
                 retry: err.retry_disposition(),
                 cause: err.failure_cause(),
+                detail: err.failure_detail(),
             },
             origin: None,
         };
@@ -668,6 +1355,7 @@ impl EffectsCore {
                 error_message: err.error_message(),
                 retry: reason.retry,
                 cause: Some(reason.cause),
+                detail: None,
             },
             origin: None,
         };
@@ -1310,10 +1998,228 @@ impl EffectsCore {
             observers: None,
             observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
         };
-        committer
+        if let Err(error) = committer
             .commit_atomic_group(group_id.as_str(), outcome_entries, Some(&self.ctx.parent))
             .await
-            .map_err(|error| EffectError::Journal(error.to_string()))?;
+        {
+            self.ctx
+                .runtime_execution
+                .effect_cursor_coordinator()
+                .poison(cursor.clone());
+            return Err(EffectError::Journal(error.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn commit_escape_control_group(
+        &self,
+        cursor: &EffectCursor,
+        attempt: EffectAttemptOrdinal,
+        control_events: Vec<ChainEvent>,
+        observer_scope: obzenflow_core::MiddlewareExecutionScope,
+    ) -> Result<(), EffectError> {
+        if control_events.is_empty() {
+            return Ok(());
+        }
+        if control_events.iter().any(ChainEvent::is_data) {
+            return Err(EffectError::EffectProvenanceMismatch(format!(
+                "escape-control batch for cursor {cursor:?} attempt {attempt} contains Data"
+            )));
+        }
+        let entries = control_events
+            .into_iter()
+            .map(|event| AtomicCommitEntry {
+                event,
+                options: CommitOptions::default(),
+                intent: StageAppendIntent::FrameworkObservability,
+            })
+            .collect();
+        let group_id = effect_escape_controls_group_id(cursor, attempt);
+        let committer = OutputCommitter {
+            data_journal: &self.ctx.data_journal,
+            flow_context: self.ctx.flow_context.as_ref(),
+            system_journal: self.ctx.system_journal.as_ref(),
+            instrumentation: self.ctx.instrumentation.as_ref(),
+            heartbeat_state: self.ctx.heartbeat_state.as_ref(),
+            output_contract: None,
+            backpressure_writer: Some(&self.ctx.backpressure_writer),
+            observers: None,
+            observer_scope,
+        };
+        if let Err(error) = committer
+            .commit_atomic_group(group_id.as_str(), entries, Some(&self.ctx.parent))
+            .await
+        {
+            self.ctx
+                .runtime_execution
+                .effect_cursor_coordinator()
+                .poison(cursor.clone());
+            return Err(EffectError::Journal(error.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn append_replayed_prefix(
+        &self,
+        cursor: &EffectCursor,
+        history: &EffectCursorHistory,
+        descriptor: EffectDescriptor,
+    ) -> Result<(), EffectError> {
+        for started in &history.attempts {
+            let mut event = build_effect_attempt_started_event(
+                self.ctx.writer_id,
+                &self.ctx.parent,
+                started.clone(),
+                descriptor.clone(),
+                self.ctx.lineage,
+            )?;
+            let archived = history
+                .attempt_events
+                .get(&started.attempt)
+                .ok_or_else(|| {
+                    EffectError::EffectProvenanceMismatch(format!(
+                        "effect cursor {cursor:?} Start({}) lacks its archived event identity",
+                        started.attempt
+                    ))
+                })?;
+            restore_archived_effect_identity(&mut event, archived)?;
+            self.commit_framework_effect_event(event).await?;
+            if let Some(control_events) = history.escape_control_batches.get(&started.attempt) {
+                self.commit_escape_control_group(
+                    cursor,
+                    started.attempt,
+                    control_events.clone(),
+                    obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn append_replayed_history(
+        &mut self,
+        history: &EffectCursorHistory,
+        cursor: EffectCursor,
+        descriptor_hash: EffectDescriptorHash,
+        descriptor: EffectDescriptor,
+        materialization: EffectRecordMaterialization,
+    ) -> Result<(), EffectError> {
+        self.append_replayed_prefix(&cursor, history, descriptor.clone())
+            .await?;
+
+        let mut terminal_control_events = Vec::new();
+        for event in &history.terminal_group_events {
+            if EffectRecoveryAbandoned::event_type_matches(&event.event_type()) {
+                continue;
+            }
+            if effect_record_from_event(event)?.is_some() {
+                continue;
+            }
+            if event.is_data() {
+                return Err(EffectError::EffectProvenanceMismatch(format!(
+                    "terminal control evidence for cursor {cursor:?} contains unrecognised Data"
+                )));
+            }
+            terminal_control_events.push(event.clone());
+        }
+
+        let terminal_attempt = history.terminal_attempt.flatten();
+        let mut entries = Vec::new();
+        let mut committed_domain_events = Vec::new();
+        let mut routed_fact_count = 0_usize;
+        match materialization {
+            EffectRecordMaterialization::DomainFacts {
+                facts,
+                origin: recorded_origin,
+            } => {
+                routed_fact_count = self.count_routed_facts(&facts);
+                self.ensure_routed_fanout_capacity(routed_fact_count)?;
+                let output_ordinal = self.reserve_output_ordinals(facts.len())?;
+                let mut events = build_domain_effect_success_facts(
+                    self.ctx.writer_id,
+                    &self.ctx.parent,
+                    cursor.clone(),
+                    descriptor_hash,
+                    descriptor.clone(),
+                    facts,
+                    output_ordinal,
+                    recorded_origin.or(Some(EffectFactOrigin::Effect)),
+                    self.ctx.lineage,
+                )?;
+                for event in &mut events {
+                    event
+                        .effect_provenance
+                        .as_mut()
+                        .ok_or_else(|| {
+                            EffectError::EffectProvenanceMismatch(
+                                "replayed effect fact is missing effect provenance".to_string(),
+                            )
+                        })?
+                        .attempt = terminal_attempt;
+                    restore_archived_terminal_identity(event, history)?;
+                }
+                entries.extend(events.iter().cloned().map(|event| AtomicCommitEntry {
+                    event,
+                    options: CommitOptions {
+                        count_output: true,
+                        validate_output_contract: true,
+                    },
+                    intent: StageAppendIntent::NormalStageData,
+                }));
+                committed_domain_events = events;
+            }
+            EffectRecordMaterialization::FrameworkRecords(records) => {
+                for record in records {
+                    let mut event = build_effect_record_event(
+                        self.ctx.writer_id,
+                        &self.ctx.parent,
+                        record,
+                        self.ctx.lineage,
+                    )?;
+                    event
+                        .effect_provenance
+                        .as_mut()
+                        .ok_or_else(|| {
+                            EffectError::EffectProvenanceMismatch(
+                                "replayed framework record is missing effect provenance"
+                                    .to_string(),
+                            )
+                        })?
+                        .attempt = terminal_attempt;
+                    restore_archived_terminal_identity(&mut event, history)?;
+                    entries.push(AtomicCommitEntry {
+                        event,
+                        options: CommitOptions::default(),
+                        intent: StageAppendIntent::NonDataStageFact,
+                    });
+                }
+            }
+        }
+
+        if let Some(abandoned) = history.abandonment.clone() {
+            let mut event = build_effect_recovery_abandoned_event(
+                self.ctx.writer_id,
+                &self.ctx.parent,
+                abandoned,
+                descriptor,
+                self.ctx.lineage,
+            )?;
+            restore_archived_terminal_identity(&mut event, history)?;
+            entries.push(AtomicCommitEntry {
+                event,
+                options: CommitOptions::default(),
+                intent: StageAppendIntent::NonDataStageFact,
+            });
+        }
+
+        self.commit_terminal_group(&cursor, entries, terminal_control_events)
+            .await?;
+        self.routed_output_fact_count = self
+            .routed_output_fact_count
+            .checked_add(routed_fact_count)
+            .ok_or_else(|| EffectError::Execution("routed output fanout overflow".to_string()))?;
+        self.committed_facts.extend(committed_domain_events);
         Ok(())
     }
 

@@ -4,7 +4,7 @@
 
 use super::mock_server::{spawn_mock_hn_server, MockHnServer};
 use anyhow::{anyhow, Result};
-use obzenflow::ai::{ModelConfig, TokenCount};
+use obzenflow::ai::TokenCount;
 use obzenflow::env::{env_bool_or, env_var, env_var_or};
 use obzenflow::sources::Url;
 
@@ -15,9 +15,7 @@ pub struct DemoConfig {
     pub max_stories: usize,
     pub poll_timeout_secs: usize,
     pub source_rate_limit: f64,
-    pub ai: ModelConfig,
-    pub budget_per_group_tokens: u64,
-    pub budget_per_group: TokenCount,
+    pub budget_per_group_override: Option<TokenCount>,
     pub max_stories_per_group: Option<usize>,
     pub interests: Option<String>,
     pub mode_label: String,
@@ -50,21 +48,17 @@ impl DemoConfig {
             (url, "mock".to_string())
         };
 
-        let ai = ModelConfig::from_env_with_prefix("HN_AI_")?;
-
-        let budget_per_group_tokens = env_var_or::<usize>(
-            "HN_AI_GROUP_BUDGET_TOKENS",
-            match ai.provider_label() {
-                "ollama" => 2500,
-                _ => 6000,
-            },
-        )? as u64;
-        if budget_per_group_tokens == 0 {
-            return Err(anyhow!(
-                "HN_AI_GROUP_BUDGET_TOKENS must be greater than zero"
-            ));
-        }
-        let budget_per_group = TokenCount::new(budget_per_group_tokens);
+        let budget_per_group_override = env_var::<usize>("HN_AI_GROUP_BUDGET_TOKENS")?
+            .map(|tokens| {
+                if tokens == 0 {
+                    Err(anyhow!(
+                        "HN_AI_GROUP_BUDGET_TOKENS must be greater than zero"
+                    ))
+                } else {
+                    Ok(TokenCount::new(tokens as u64))
+                }
+            })
+            .transpose()?;
 
         let max_stories_per_group = match env_var_or::<usize>("HN_AI_GROUP_MAX_STORIES", 10)? {
             0 => None,
@@ -77,9 +71,7 @@ impl DemoConfig {
             max_stories,
             poll_timeout_secs,
             source_rate_limit,
-            ai,
-            budget_per_group_tokens,
-            budget_per_group,
+            budget_per_group_override,
             max_stories_per_group,
             interests,
             mode_label,

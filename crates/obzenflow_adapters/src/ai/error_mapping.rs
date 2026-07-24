@@ -43,6 +43,11 @@ pub fn ai_client_error_to_handler_error_with_context(
         AiClientError::Unsupported { message } => {
             HandlerError::Validation(wrap(format!("unsupported: {message}")))
         }
+        AiClientError::TargetMismatch { requested, bound } => {
+            HandlerError::ContractViolation(wrap(format!(
+                "chat target mismatch: requested {requested}, bound {bound}"
+            )))
+        }
         AiClientError::Other { message } => HandlerError::Other(wrap(message)),
     }
 }

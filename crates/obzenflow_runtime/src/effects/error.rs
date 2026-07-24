@@ -15,6 +15,14 @@ pub enum EffectError {
     #[error("missing recorded effect for cursor {cursor:?}")]
     MissingRecordedEffect { cursor: EffectCursor },
 
+    #[error(
+        "effect cursor {cursor:?} is in doubt after durable attempt {highest_started_attempt}"
+    )]
+    EffectInDoubt {
+        cursor: EffectCursor,
+        highest_started_attempt: EffectAttemptOrdinal,
+    },
+
     #[error("duplicate recorded effect for cursor {cursor:?}")]
     DuplicateRecordedEffect { cursor: EffectCursor },
 
@@ -31,6 +39,7 @@ pub enum EffectError {
         error_message: String,
         retry: RetryDisposition,
         cause: Option<EffectFailureCause>,
+        detail: Option<EffectFailureDetail>,
     },
 
     #[error("effect rejected at boundary by {rejected_by}: {code}: {message}")]
@@ -85,6 +94,46 @@ pub enum EffectError {
         name: String,
     },
 
+    #[error("effect port '{name}' for type '{type_name}' failed to resolve: {message}")]
+    EffectPortResolutionFailed {
+        type_name: &'static str,
+        name: String,
+        message: String,
+    },
+
+    #[error("effect port '{port}' binding mismatch: expected {expected}, observed {observed}")]
+    EffectPortBindingMismatch {
+        port: String,
+        expected: String,
+        observed: String,
+    },
+
+    #[error("effect port '{port}' target mismatch: expected {expected}, observed {observed}")]
+    EffectPortBindingInvariantViolation {
+        port: String,
+        expected: String,
+        observed: String,
+    },
+
+    #[error("effect dependency '{failure_source}' failed ({code}): {message}")]
+    DependencyFailed {
+        failure_source: EffectFailureSource,
+        code: EffectFailureCode,
+        message: String,
+        retry: RetryDisposition,
+    },
+
+    #[error(
+        "effect recovery abandoned after attempt {last_started_attempt} by {failure_source} ({code}): {message}"
+    )]
+    RecoveryAbandoned {
+        last_started_attempt: EffectAttemptOrdinal,
+        failure_source: EffectFailureSource,
+        code: EffectFailureCode,
+        message: String,
+        boundary_retry: RetryDisposition,
+    },
+
     #[error(
         "transactional effect '{effect_type}' using executor '{executor}' returned without committing an effect result"
     )]
@@ -133,10 +182,14 @@ impl EffectError {
     fn recovery_eligible_by_default(&self) -> bool {
         match self {
             EffectError::RecordedFailure { retry, .. }
-            | EffectError::BoundaryRejected { retry, .. } => retry.is_retryable(),
+            | EffectError::BoundaryRejected { retry, .. }
+            | EffectError::DependencyFailed { retry, .. } => retry.is_retryable(),
+            EffectError::RecoveryAbandoned { .. }
+            | EffectError::EffectPortBindingInvariantViolation { .. } => false,
             EffectError::EffectProvenanceMismatch(_) => false,
             EffectError::IncompleteOutcomeGroup { .. } => false,
             EffectError::MissingRecordedEffect { .. }
+            | EffectError::EffectInDoubt { .. }
             | EffectError::DuplicateRecordedEffect { .. }
             | EffectError::DescriptorMismatch { .. }
             | EffectError::MissingIdempotencyKey { .. }
@@ -146,6 +199,8 @@ impl EffectError {
             | EffectError::CompletedWithoutOutput { .. }
             | EffectError::CompletedEmptyWithOutput { .. }
             | EffectError::MissingEffectPort { .. }
+            | EffectError::EffectPortResolutionFailed { .. }
+            | EffectError::EffectPortBindingMismatch { .. }
             | EffectError::TransactionalCommitMissing { .. } => false,
             EffectError::Timeout(_)
             | EffectError::Transport(_)
@@ -169,6 +224,7 @@ impl EffectError {
             EffectError::Serialization(_) => "serialization",
             EffectError::Journal(_) => "journal",
             EffectError::MissingRecordedEffect { .. } => "missing_recorded_effect",
+            EffectError::EffectInDoubt { .. } => "effect_in_doubt",
             EffectError::DuplicateRecordedEffect { .. } => "duplicate_recorded_effect",
             EffectError::DescriptorMismatch { .. } => "descriptor_mismatch",
             EffectError::RecordedFailure { error_type, .. } => return error_type.clone(),
@@ -182,6 +238,13 @@ impl EffectError {
             EffectError::CompletedWithoutOutput { .. } => "completed_without_output",
             EffectError::CompletedEmptyWithOutput { .. } => "completed_empty_with_output",
             EffectError::MissingEffectPort { .. } => "missing_effect_port",
+            EffectError::EffectPortResolutionFailed { .. } => "effect_port_resolution_failed",
+            EffectError::EffectPortBindingMismatch { .. } => "effect_port_binding_mismatch",
+            EffectError::EffectPortBindingInvariantViolation { .. } => {
+                "effect_port_binding_invariant_violation"
+            }
+            EffectError::DependencyFailed { code, .. } => return code.as_str().into(),
+            EffectError::RecoveryAbandoned { .. } => "recovery_abandoned",
             EffectError::TransactionalCommitMissing { .. } => "transactional_commit_missing",
             EffectError::Execution(_) => "execution",
             EffectError::Timeout(_) => "timeout",
@@ -221,7 +284,10 @@ impl EffectError {
             }
             EffectError::RateLimited { message, .. } => std::borrow::Cow::Borrowed(message),
             EffectError::BoundaryRejected { message, .. } => std::borrow::Cow::Borrowed(message),
+            EffectError::DependencyFailed { message, .. }
+            | EffectError::RecoveryAbandoned { message, .. } => std::borrow::Cow::Borrowed(message),
             EffectError::MissingRecordedEffect { .. }
+            | EffectError::EffectInDoubt { .. }
             | EffectError::DuplicateRecordedEffect { .. }
             | EffectError::DescriptorMismatch { .. }
             | EffectError::IncompleteOutcomeGroup { .. }
@@ -232,6 +298,9 @@ impl EffectError {
             | EffectError::CompletedWithoutOutput { .. }
             | EffectError::CompletedEmptyWithOutput { .. }
             | EffectError::MissingEffectPort { .. }
+            | EffectError::EffectPortResolutionFailed { .. }
+            | EffectError::EffectPortBindingMismatch { .. }
+            | EffectError::EffectPortBindingInvariantViolation { .. }
             | EffectError::TransactionalCommitMissing { .. } => {
                 std::borrow::Cow::Owned(self.to_string())
             }
@@ -260,6 +329,35 @@ impl EffectError {
                 code: code.clone(),
             }),
             EffectError::RecordedFailure { cause, .. } => cause.clone(),
+            EffectError::DependencyFailed {
+                failure_source,
+                code,
+                ..
+            }
+            | EffectError::RecoveryAbandoned {
+                failure_source,
+                code,
+                ..
+            } => Some(EffectFailureCause {
+                source: failure_source.clone(),
+                code: code.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn failure_detail(&self) -> Option<EffectFailureDetail> {
+        match self {
+            Self::EffectPortBindingInvariantViolation {
+                port,
+                expected,
+                observed,
+            } => Some(EffectFailureDetail::PortBindingInvariantViolation {
+                port: port.clone(),
+                expected: expected.clone(),
+                observed: observed.clone(),
+            }),
+            Self::RecordedFailure { detail, .. } => detail.clone(),
             _ => None,
         }
     }
@@ -290,6 +388,7 @@ mod tests {
             error_message: live.error_message(),
             retry: live.retry_disposition(),
             cause: live.failure_cause(),
+            detail: live.failure_detail(),
         };
         assert_eq!(replayed.semantic_reason(), live.semantic_reason());
         assert_eq!(

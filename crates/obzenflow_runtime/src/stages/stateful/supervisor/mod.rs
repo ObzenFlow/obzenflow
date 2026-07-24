@@ -171,6 +171,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
 
                 on StatefulEvent::BeginDrain => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
                     Box::pin(async move {
+                        ctx.drain_requested_by_handle = true;
                         ctx.instrumentation.transition_to_state("Draining");
                         Ok(Transition {
                             next_state: StatefulState::Draining,
@@ -224,6 +225,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
 
                 on StatefulEvent::BeginDrain => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
                     Box::pin(async move {
+                        ctx.drain_requested_by_handle = true;
                         ctx.instrumentation.transition_to_state("Draining");
                         Ok(Transition {
                             next_state: StatefulState::Draining,

@@ -1908,11 +1908,10 @@ async fn fan_out_sibling_effects_use_distinct_cursors_and_replay_suppresses_exec
         live_domain_outputs
     );
     let replay_archive = latest_run_dir(&journal_base);
-    assert!(
-        circuit_breaker_recovery_completions_in_stage(&replay_archive, "effectful")
-            .await
-            .is_empty(),
-        "replay must not regenerate per-cursor live clock evidence"
+    assert_eq!(
+        circuit_breaker_recovery_completions_in_stage(&replay_archive, "effectful").await,
+        completion_evidence,
+        "replay must rematerialise each cursor's archived terminal evidence unchanged"
     );
 }
 
@@ -2152,11 +2151,10 @@ async fn cancellation_after_perform_preserves_atomic_terminal_evidence_and_resum
             .count(),
         1
     );
-    assert!(
-        circuit_breaker_recovery_completions_in_stage(&replay_archive, "effectful")
-            .await
-            .is_empty(),
-        "replay must not append a second live recovery completion"
+    assert_eq!(
+        circuit_breaker_recovery_completions_in_stage(&replay_archive, "effectful").await,
+        completions,
+        "resume must rematerialise the archived recovery completion unchanged"
     );
 }
 
@@ -3462,7 +3460,9 @@ async fn flow_supplied_registry_satisfies_required_effect_port() {
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn GreetingPort>("primary", Arc::new(DoublingGreetingPort));
+    ports
+        .insert::<dyn GreetingPort>("primary", Arc::new(DoublingGreetingPort))
+        .expect("greeting port registration is unique");
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
@@ -3666,12 +3666,14 @@ async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<LedgerEffect>>(
-        "ledger_tx",
-        Arc::new(LedgerPort {
-            calls: port_calls.clone(),
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<LedgerEffect>>(
+            "ledger_tx",
+            Arc::new(LedgerPort {
+                calls: port_calls.clone(),
+            }),
+        )
+        .expect("ledger port registration is unique");
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
@@ -3734,12 +3736,14 @@ async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
     let mut replay_ports = EffectPortRegistry::new();
-    replay_ports.insert::<dyn TransactionalEffectPort<LedgerEffect>>(
-        "ledger_tx",
-        Arc::new(LedgerPort {
-            calls: replay_calls.clone(),
-        }),
-    );
+    replay_ports
+        .insert::<dyn TransactionalEffectPort<LedgerEffect>>(
+            "ledger_tx",
+            Arc::new(LedgerPort {
+                calls: replay_calls.clone(),
+            }),
+        )
+        .expect("replay ledger port registration is unique");
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
@@ -3762,25 +3766,36 @@ async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
         domain
     );
     let replay_archive = latest_run_dir(&journal_base);
-    assert!(
-        circuit_breaker_recovery_completions_in_stage(&replay_archive, "ledger")
-            .await
-            .is_empty(),
-        "transactional replay must not regenerate terminal clock evidence"
+    assert_eq!(
+        circuit_breaker_recovery_completions_in_stage(&replay_archive, "ledger").await,
+        completions,
+        "transactional replay must rematerialise archived terminal evidence unchanged"
     );
-    assert!(
-        exported_chain_events(
-            &replay_archive,
-            &temp.path().join("transactional-replay.jsonl"),
-        )
-        .into_iter()
-        .all(|event| !matches!(
-            event.content,
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RecoveryCompleted { .. })
-            ))
-        )),
-        "the supported replay JSONL projection must contain no fresh terminal clock row"
+    let exported_replay_completions: Vec<_> = exported_chain_events(
+        &replay_archive,
+        &temp.path().join("transactional-replay.jsonl"),
+    )
+    .into_iter()
+    .filter_map(|event| match event.content {
+        ChainEventContent::Observability(ObservabilityPayload::Middleware(
+            MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RecoveryCompleted {
+                cursor,
+                total_attempts,
+                backoff_elapsed_ms,
+                recovery_elapsed_ms,
+            }),
+        )) => Some(RecoveryCompletionEvidence {
+            cursor,
+            total_attempts,
+            backoff_elapsed_ms,
+            recovery_elapsed_ms,
+        }),
+        _ => None,
+    })
+    .collect();
+    assert_eq!(
+        exported_replay_completions, completions,
+        "the supported replay JSONL projection must preserve the archived terminal evidence"
     );
 }
 

@@ -9,3 +9,4 @@ pub mod delivery_payload;
 pub mod effect_payload;
 pub mod flow_control_payload;
 pub mod observability_payload;
+pub mod stage_fatal_payload;

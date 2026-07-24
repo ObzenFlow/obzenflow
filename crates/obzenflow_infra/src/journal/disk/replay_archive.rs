@@ -368,6 +368,16 @@ impl ReplayArchive for DiskReplayArchive {
         &self.archive_path
     }
 
+    fn manifest_capability(&self, name: &str) -> Option<u32> {
+        self.manifest.capabilities.get(name).copied()
+    }
+
+    fn bounded_direct_fact_admission(
+        &self,
+    ) -> &[obzenflow_core::journal::run_manifest::RunManifestDirectFactAdmission] {
+        &self.manifest.bounded_direct_fact_admission
+    }
+
     /// Journal-scan authority (FLOWIP-120n): the max generation with a
     /// recorded catch-up boundary in any source journal, computed at open.
     /// The manifest's resume field records the generation the archived run
