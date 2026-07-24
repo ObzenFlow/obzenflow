@@ -9,13 +9,27 @@
 //! polled. The fixture compares the framework evidence and domain effect fact
 //! identities emitted by both runs.
 
+#[path = "../examples/hn_ai_digest_demo/config.rs"]
+mod config;
+#[path = "../examples/hn_ai_digest_demo/decoder.rs"]
+mod decoder;
+#[path = "../examples/hn_ai_digest_demo/domain.rs"]
+mod domain;
+#[path = "../examples/hn_ai_digest_demo/flow.rs"]
+mod hn_demo_flow;
+#[path = "../examples/hn_ai_digest_demo/mock_server.rs"]
+mod mock_server;
+#[path = "../examples/hn_ai_digest_demo/util.rs"]
+mod util;
+
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_core::ai::{
     AiClientError, AiFinaliseRole, AiMapReduceChunkFailed, AiMapReducePlanningManifest,
     AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind,
     AiRoleLogicFailure, ChatClient, ChatCompletionCompleted, ChatMessage, ChatParams, ChatRequest,
-    ChatResponse, ChatTarget, HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenCount,
+    ChatResponse, ChatTarget, EstimateSource, HeuristicTokenEstimator, Many,
+    ResolvedTokenEstimator, TokenCount, TokenEstimate, TokenEstimator,
     TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
@@ -244,6 +258,44 @@ fn estimator() -> ResolvedTokenEstimator {
     )
 }
 
+#[derive(Debug)]
+struct ObservabilityOnlyEstimator {
+    calls: Arc<AtomicUsize>,
+}
+
+impl TokenEstimator for ObservabilityOnlyEstimator {
+    fn estimate_text(&self, _text: &str) -> TokenEstimate {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        TokenEstimate {
+            tokens: TokenCount::new(91_337),
+            source: EstimateSource::Heuristic,
+        }
+    }
+
+    fn estimate_chat_request(&self, _request: &ChatRequest) -> TokenEstimate {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        TokenEstimate {
+            tokens: TokenCount::new(91_337),
+            source: EstimateSource::Heuristic,
+        }
+    }
+
+    fn source(&self) -> EstimateSource {
+        EstimateSource::Heuristic
+    }
+}
+
+fn observability_only_estimator(calls: Arc<AtomicUsize>) -> ResolvedTokenEstimator {
+    ResolvedTokenEstimator::new(
+        Arc::new(ObservabilityOnlyEstimator { calls }),
+        TokenEstimatorResolutionInfo::heuristic(
+            "deterministic",
+            TokenEstimatorFallbackReason::ExplicitHeuristic,
+            None,
+        ),
+    )
+}
+
 fn deferred_chat_port(
     resolutions: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
@@ -266,6 +318,29 @@ fn deferred_chat_port(
     EffectPortRegistry::new()
         .with_deferred::<dyn ChatClient>("chat", resolver)
         .expect("one chat resolver is registered")
+}
+
+fn counting_chat_resolver(
+    client_target: ChatTarget,
+    resolutions: Arc<AtomicUsize>,
+    calls: Arc<AtomicUsize>,
+    forbidden: bool,
+) -> EffectPortResolver<dyn ChatClient> {
+    Arc::new(move || {
+        let target = client_target.clone();
+        let resolutions = resolutions.clone();
+        let calls = calls.clone();
+        Box::pin(async move {
+            resolutions.fetch_add(1, Ordering::SeqCst);
+            assert!(!forbidden, "strict replay resolved the real-flow chat port");
+            Ok(Arc::new(CountingChatClient {
+                target,
+                calls,
+                forbidden,
+                response_error: None,
+            }) as Arc<dyn ChatClient>)
+        })
+    })
 }
 
 fn post_start_mismatch_port(
@@ -407,20 +482,19 @@ fn build_flow(
     map_request_target: ChatTarget,
     map_prepare_failure: bool,
 ) -> FlowDefinition {
-    build_flow_with_behaviour(
+    build_flow_with_behaviour(FlowBehaviour {
         journal_base,
         outputs,
         effect_ports,
         backpressure_window,
         map_request_target,
         map_prepare_failure,
-        false,
-        estimator(),
-    )
+        map_interpret_failure: false,
+        chat_estimator: estimator(),
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_flow_with_behaviour(
+struct FlowBehaviour {
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DigestOut>>>,
     effect_ports: EffectPortRegistry,
@@ -429,7 +503,19 @@ fn build_flow_with_behaviour(
     map_prepare_failure: bool,
     map_interpret_failure: bool,
     chat_estimator: ResolvedTokenEstimator,
-) -> FlowDefinition {
+}
+
+fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
+    let FlowBehaviour {
+        journal_base,
+        outputs,
+        effect_ports,
+        backpressure_window,
+        map_request_target,
+        map_prepare_failure,
+        map_interpret_failure,
+        chat_estimator,
+    } = behaviour;
     let chat_target = target();
     flow! {
         name: "hn_ai_digest_effect_replay_journal",
@@ -453,7 +539,7 @@ fn build_flow_with_behaviour(
                     },
                 },
                 chunking: by_budget {
-                    estimator: chat_estimator.estimator(),
+                    estimator: estimator().estimator(),
                     items: |seed: &DigestSeed| {
                         (1..=seed.n)
                             .map(|value| DigestItem { value })
@@ -588,6 +674,7 @@ fn assert_completion_contract(
     envelopes: &[EventEnvelope<ChainEvent>],
     expected: usize,
     expected_label: &str,
+    expected_target: &ChatTarget,
 ) {
     let completions = envelopes
         .iter()
@@ -604,8 +691,8 @@ fn assert_completion_contract(
             .as_ref()
             .expect("completion carries effect provenance");
         assert_eq!(provenance.descriptor.label.as_str(), expected_label);
-        assert_eq!(completion.observability.provider, target().provider);
-        assert_eq!(completion.observability.model, target().model);
+        assert_eq!(completion.observability.provider, expected_target.provider);
+        assert_eq!(completion.observability.model, expected_target.model);
         assert_eq!(
             completion.observability.hashes.version,
             obzenflow_core::ai::LLM_HASH_VERSION_SHA256_V1
@@ -620,7 +707,7 @@ fn assert_completion_contract(
                 .as_ref()
                 .expect("completion records estimator resolution")
                 .model,
-            target().model
+            expected_target.model
         );
         assert_eq!(
             completion.observability.usage, completion.response.usage,
@@ -667,6 +754,14 @@ fn chunk_failures(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<AiMapReduceChu
 
 #[test]
 fn hn_witness_source_uses_the_snapshot_binding_and_deferred_port_contract() {
+    let _ = config::DEFAULT_HN_MAX_STORIES;
+    let _ = config::DEFAULT_HN_SOURCE_RATE_LIMIT;
+    let _ = config::DemoConfig::from_env;
+    let _ = config::DemoConfig::group_max_stories_label;
+    let _ = hn_demo_flow::run_example;
+    let _ = hn_demo_flow::run_demo_blocking;
+    let _ = hn_demo_flow::build_presentation;
+
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let flow_source = std::fs::read_to_string(root.join("examples/hn_ai_digest_demo/flow.rs"))
         .expect("HN witness flow source is readable");
@@ -722,16 +817,20 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
     let prepare_base = prepare_temp.path().join("journals");
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_flow_with_behaviour(
-            prepare_base.clone(),
-            prepare_outputs.clone(),
-            deferred_chat_port(prepare_resolutions.clone(), prepare_calls.clone(), false),
-            3,
-            target(),
-            true,
-            false,
-            estimator(),
-        ))
+        .run_async(build_flow_with_behaviour(FlowBehaviour {
+            journal_base: prepare_base.clone(),
+            outputs: prepare_outputs.clone(),
+            effect_ports: deferred_chat_port(
+                prepare_resolutions.clone(),
+                prepare_calls.clone(),
+                false,
+            ),
+            backpressure_window: 3,
+            map_request_target: target(),
+            map_prepare_failure: true,
+            map_interpret_failure: false,
+            chat_estimator: estimator(),
+        }))
         .await
         .expect("pure preparation failures close the generated collector job");
     let prepare_map = stage_envelopes(&latest_run_dir(&prepare_base), "digest__map").await;
@@ -761,20 +860,20 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
     let interpretation_base = interpretation_temp.path().join("journals");
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_flow_with_behaviour(
-            interpretation_base.clone(),
-            interpretation_outputs.clone(),
-            deferred_chat_port(
+        .run_async(build_flow_with_behaviour(FlowBehaviour {
+            journal_base: interpretation_base.clone(),
+            outputs: interpretation_outputs.clone(),
+            effect_ports: deferred_chat_port(
                 interpretation_resolutions.clone(),
                 interpretation_calls.clone(),
                 false,
             ),
-            3,
-            target(),
-            false,
-            true,
-            estimator(),
-        ))
+            backpressure_window: 3,
+            map_request_target: target(),
+            map_prepare_failure: false,
+            map_interpret_failure: true,
+            chat_estimator: estimator(),
+        }))
         .await
         .expect("interpretation failures retain their successful completions");
     let interpretation_map =
@@ -793,6 +892,7 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
         &interpretation_map,
         MAP_CHUNKS,
         "ai_map_reduce.map.chat_completion",
+        &target(),
     );
     assert!(interpretation_outputs
         .lock()
@@ -805,21 +905,21 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
     let provider_base = provider_temp.path().join("journals");
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_flow_with_behaviour(
-            provider_base.clone(),
-            provider_outputs.clone(),
-            error_chat_port(
+        .run_async(build_flow_with_behaviour(FlowBehaviour {
+            journal_base: provider_base.clone(),
+            outputs: provider_outputs.clone(),
+            effect_ports: error_chat_port(
                 provider_calls.clone(),
                 AiClientError::InvalidRequest {
                     message: "fixture rejected request".to_string(),
                 },
             ),
-            3,
-            target(),
-            false,
-            false,
-            estimator(),
-        ))
+            backpressure_window: 3,
+            map_request_target: target(),
+            map_prepare_failure: false,
+            map_interpret_failure: false,
+            chat_estimator: estimator(),
+        }))
         .await
         .expect("ordinary provider failures are domain terminals, not stage fatals");
     let provider_map = stage_envelopes(&latest_run_dir(&provider_base), "digest__map").await;
@@ -929,8 +1029,14 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
         &live_map,
         expected_map_calls,
         "ai_map_reduce.map.chat_completion",
+        &target(),
     );
-    assert_completion_contract(&live_finalise, 1, "ai_map_reduce.finalise.chat_completion");
+    assert_completion_contract(
+        &live_finalise,
+        1,
+        "ai_map_reduce.finalise.chat_completion",
+        &target(),
+    );
     let live_map_ids = effect_evidence_ids(&live_map);
     let live_finalise_ids = effect_evidence_ids(&live_finalise);
 
@@ -1059,6 +1165,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
 
     let replay_resolutions = Arc::new(AtomicUsize::new(0));
     let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_estimator_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
         .with_cli_args(vec![
@@ -1066,19 +1173,30 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
             OsString::from("--replay-from"),
             live_archive.as_os_str().to_os_string(),
         ])
-        .run_async(build_flow(
-            journal_base.clone(),
-            replay_outputs.clone(),
-            deferred_chat_port(replay_resolutions.clone(), replay_calls.clone(), true),
-            3,
-            target(),
-            false,
-        ))
+        .run_async(build_flow_with_behaviour(FlowBehaviour {
+            journal_base: journal_base.clone(),
+            outputs: replay_outputs.clone(),
+            effect_ports: deferred_chat_port(
+                replay_resolutions.clone(),
+                replay_calls.clone(),
+                true,
+            ),
+            backpressure_window: 3,
+            map_request_target: target(),
+            map_prepare_failure: false,
+            map_interpret_failure: false,
+            chat_estimator: observability_only_estimator(replay_estimator_calls.clone()),
+        }))
         .await
         .expect("strict replay rematerialises the generated effect history");
 
     assert_eq!(replay_resolutions.load(Ordering::SeqCst), 0);
     assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        replay_estimator_calls.load(Ordering::SeqCst),
+        0,
+        "a history hit returns archived completion observation without consulting the current estimator"
+    );
     assert_eq!(
         *replay_outputs.lock().expect("replay output lock"),
         vec![DigestOut { total: 15 }]
@@ -1157,6 +1275,148 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
 }
 
 #[tokio::test]
+async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
+    let temp = tempfile::tempdir().expect("temporary real HN-flow journal root");
+    let journal_base = temp.path().join("journals");
+    let server = mock_server::spawn_mock_hn_server()
+        .await
+        .expect("deterministic HN server starts");
+    let demo_config = config::DemoConfig {
+        max_stories: 5,
+        poll_timeout_secs: 10,
+        source_rate_limit: 1_000.0,
+        budget_per_group_override: Some(TokenCount::new(10_000)),
+        max_stories_per_group: Some(5),
+        interests: Some("runtime protocols".to_string()),
+        mode_label: "checked-fixture".to_string(),
+        base_url: server.base_url(),
+        _mock_server: Some(server),
+    };
+    assert!(
+        demo_config._mock_server.is_some(),
+        "the shared checked fixture keeps its mock HN server alive"
+    );
+    let config_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/hn_ai_digest_demo/obzenflow.toml");
+    let production_target = ChatTarget::new("ollama", "llama3.1:8b");
+    let live_resolutions = Arc::new(AtomicUsize::new(0));
+    let live_calls = Arc::new(AtomicUsize::new(0));
+
+    let live_flow = hn_demo_flow::build_flow_definition(
+        &demo_config,
+        hn_demo_flow::HnFlowOptions {
+            journal_base: journal_base.clone(),
+            chat_resolver_override: Some(counting_chat_resolver(
+                production_target.clone(),
+                live_resolutions.clone(),
+                live_calls.clone(),
+                false,
+            )),
+        },
+    )
+    .expect("the production HN flow assembles for the checked fixture");
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--config"),
+            config_path.as_os_str().to_os_string(),
+        ])
+        .run_async(live_flow)
+        .await
+        .expect("the shared production HN flow runs live");
+
+    let live_archive = latest_run_dir(&journal_base);
+    let live_chunk = stage_envelopes(&live_archive, "digest__chunk").await;
+    let live_map = stage_envelopes(&live_archive, "digest__map").await;
+    let live_finalise = stage_envelopes(&live_archive, "digest__finalize").await;
+    let manifests = live_chunk
+        .iter()
+        .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.event))
+        .collect::<Vec<_>>();
+    let [manifest] = manifests.as_slice() else {
+        panic!(
+            "shared production HN flow must publish one manifest, found {}",
+            manifests.len()
+        );
+    };
+    let map_calls = manifest.chunk_count;
+    assert!(map_calls > 0);
+    assert_eq!(live_resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(live_calls.load(Ordering::SeqCst), map_calls + 1);
+    assert_completion_contract(
+        &live_map,
+        map_calls,
+        "ai_map_reduce.map.chat_completion",
+        &production_target,
+    );
+    assert_completion_contract(
+        &live_finalise,
+        1,
+        "ai_map_reduce.finalise.chat_completion",
+        &production_target,
+    );
+    let live_map_ids = effect_evidence_ids(&live_map);
+    let live_finalise_ids = effect_evidence_ids(&live_finalise);
+
+    let replay_resolutions = Arc::new(AtomicUsize::new(0));
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_flow = hn_demo_flow::build_flow_definition(
+        &demo_config,
+        hn_demo_flow::HnFlowOptions {
+            journal_base: journal_base.clone(),
+            chat_resolver_override: Some(counting_chat_resolver(
+                production_target,
+                replay_resolutions.clone(),
+                replay_calls.clone(),
+                true,
+            )),
+        },
+    )
+    .expect("the production HN replay flow assembles");
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--config"),
+            config_path.as_os_str().to_os_string(),
+            OsString::from("--replay-from"),
+            live_archive.as_os_str().to_os_string(),
+        ])
+        .run_async(replay_flow)
+        .await
+        .expect("strict replay rematerialises the shared production HN flow");
+
+    assert_eq!(replay_resolutions.load(Ordering::SeqCst), 0);
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    let replay_archive = latest_run_dir(&journal_base);
+    let replay_map = stage_envelopes(&replay_archive, "digest__map").await;
+    let replay_finalise = stage_envelopes(&replay_archive, "digest__finalize").await;
+    assert_eq!(effect_evidence_ids(&replay_map), live_map_ids);
+    assert_eq!(effect_evidence_ids(&replay_finalise), live_finalise_ids);
+
+    let verification = verify_run_dirs(
+        &live_archive,
+        &replay_archive,
+        &VerifyOptions {
+            write_report: false,
+            ..VerifyOptions::default()
+        },
+    )
+    .expect("shared production run-directory verification executes");
+    let verification_details = match &verification {
+        VerifyOutcome::Completed { report, .. } => {
+            serde_json::to_string_pretty(report).expect("verification report serialises")
+        }
+        VerifyOutcome::Refused(reason) => format!("verification refused: {reason}"),
+    };
+    assert_eq!(
+        verification.exit_code(),
+        0,
+        "{}\n{verification_details}",
+        obzenflow_infra::verify::render_verdict(&verification),
+    );
+}
+
+#[tokio::test]
 async fn descriptor_bound_rejects_one_and_two_credit_windows_before_port_resolution() {
     for window in [1_u64, 2] {
         let temp = tempfile::tempdir().expect("temporary journal root");
@@ -1218,8 +1478,7 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
         .iter()
         .find_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.event))
         .expect("the generated plan should publish its manifest");
-    let port_invocations =
-        usize::try_from(manifest.chunk_count + 1).expect("fixture count fits usize");
+    let port_invocations = manifest.chunk_count + 1;
 
     assert_eq!(calls.load(Ordering::SeqCst), port_invocations);
     assert_eq!(
@@ -1288,7 +1547,7 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
             (AiMapReducePlanningManifest::versioned_event_type(), 1_usize,),
             (
                 AiMapReduceTaggedPartial::<DigestPartial>::versioned_event_type(),
-                usize::try_from(manifest.chunk_count).expect("fixture count fits usize"),
+                manifest.chunk_count,
             ),
             (
                 ChatCompletionCompleted::versioned_event_type(),

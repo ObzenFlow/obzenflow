@@ -192,8 +192,12 @@ mod tests {
             effects: {
                 chat_target: target,
                 chat_estimator: estimator,
-                map: [at_least_once(ChatCompletion) with []],
-                reduce: [at_least_once(ChatCompletion) with []],
+                map: [at_least_once(ChatCompletion) with [
+                    obzenflow_adapters::middleware::control::ai_resilience()
+                ]],
+                reduce: [at_least_once(ChatCompletion) with [
+                    obzenflow_adapters::middleware::control::ai_resilience()
+                ]],
             }
         )
     }
@@ -316,8 +320,12 @@ mod tests {
             effects: {
                 chat_target: target,
                 chat_estimator: estimator,
-                map: [at_least_once(ChatCompletion) with []],
-                reduce: [at_least_once(ChatCompletion) with []],
+                map: [at_least_once(ChatCompletion) with [
+                    obzenflow_adapters::middleware::control::ai_resilience()
+                ]],
+                reduce: [at_least_once(ChatCompletion) with [
+                    obzenflow_adapters::middleware::control::ai_resilience()
+                ]],
             }
         );
 
@@ -341,9 +349,9 @@ mod tests {
     }
 
     #[test]
-    fn ai_map_reduce_rejects_an_estimator_for_a_different_target_model() {
+    fn ai_map_reduce_rejects_generated_roles_without_effect_resilience() {
         let target = ChatTarget::new("ollama", "test-model");
-        let estimator = test_estimator("different-model");
+        let estimator = test_estimator("test-model");
         let digest = crate::ai_map_reduce!(
             TestSeed -> TestOut => {
                 map: [TestItem] -> TestPartial => TestMapRole {
@@ -373,16 +381,68 @@ mod tests {
         members.insert("digest".to_string(), digest.into_flow_member());
         let mut connections = Vec::new();
         let error = match lower_composites(members, &mut connections) {
+            Ok(_) => panic!("generated chat roles require their resilience aggregate"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            crate::dsl::FlowBuildError::StageResourcesFailed(message)
+                if message.contains("role 'map'")
+                    && message.contains("exactly one EffectResilience")
+        ));
+    }
+
+    #[test]
+    fn ai_map_reduce_rejects_an_estimator_for_a_different_target_model() {
+        let target = ChatTarget::new("ollama", "test-model");
+        let estimator = test_estimator("different-model");
+        let digest = crate::ai_map_reduce!(
+            TestSeed -> TestOut => {
+                map: [TestItem] -> TestPartial => TestMapRole {
+                    target: target.clone(),
+                },
+                reduce: (TestSeed, [TestPartial]) -> TestOut => TestFinaliseRole {
+                    target: target.clone(),
+                },
+            },
+            chunking: by_budget {
+                estimator: estimator.estimator(),
+                items: |seed: &TestSeed| seed.items.clone(),
+                render: |item: &TestItem, _ctx| format!("{}", item.value),
+                budget: ::obzenflow_core::ai::TokenCount::new(100),
+                max_items: None,
+                oversize: error,
+            },
+            effects: {
+                chat_target: target,
+                chat_estimator: estimator,
+                map: [at_least_once(ChatCompletion) with [
+                    obzenflow_adapters::middleware::control::ai_resilience()
+                ]],
+                reduce: [at_least_once(ChatCompletion) with [
+                    obzenflow_adapters::middleware::control::ai_resilience()
+                ]],
+            }
+        );
+
+        let mut members: HashMap<String, FlowMember> = HashMap::new();
+        members.insert("digest".to_string(), digest.into_flow_member());
+        let mut connections = Vec::new();
+        let error = match lower_composites(members, &mut connections) {
             Ok(_) => panic!("the estimator model must agree with effects.chat_target"),
             Err(error) => error,
         };
-        let message = error.to_string();
-        assert!(
-            message.contains("effects.chat_estimator")
-                && message.contains("different-model")
-                && message.contains("test-model"),
-            "the curated diagnostic must name both binding values: {message}"
-        );
+        match error {
+            crate::dsl::FlowBuildError::BindingConfiguration { binding, detail } => {
+                assert_eq!(binding, "chat_estimator");
+                assert!(detail.contains("effects.chat_estimator"));
+                assert!(detail.contains("different-model"));
+                assert!(detail.contains("test-model"));
+            }
+            other => panic!(
+                "estimator mismatch must be a typed pre-substrate binding error, got {other:?}"
+            ),
+        }
     }
 
     /// FLOWIP-114c Acceptance #20: composite outer-boundary invariant.

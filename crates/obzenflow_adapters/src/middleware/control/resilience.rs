@@ -480,25 +480,33 @@ impl MiddlewareFactory for EffectResilienceFactory {
                 Some(effect.effect_type.clone()),
             )?;
         let breaker = Arc::new(breaker);
-        let limiter = limiter
-            .map(|config| {
+        let limiter = if let Some(config) = limiter {
+            let validated = config.validate().map_err(|error| {
+                MiddlewareFactoryError::invalid_configuration(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            })?;
+            Some(Arc::new(
                 RateLimiterMiddleware::new_keyed(
                     context.config.stage_id,
-                    config.validate().expect("resolved limiter was validated"),
+                    validated,
                     context,
                     MaterializationClaim::EffectResilience,
                     Some(effect.effect_type.clone()),
                 )
-                .map(Arc::new)
-            })
-            .transpose()
-            .map_err(|message| {
-                MiddlewareFactoryError::invalid_configuration(
-                    self.label(),
-                    &context.config.name,
-                    std::io::Error::other(message),
-                )
-            })?;
+                .map_err(|message| {
+                    MiddlewareFactoryError::invalid_configuration(
+                        self.label(),
+                        &context.config.name,
+                        std::io::Error::other(message),
+                    )
+                })?,
+            ))
+        } else {
+            None
+        };
 
         MiddlewareSurfaceAttachment::claimed(
             MiddlewareSurfaceAttachmentKind::Effect(EffectPolicyAttachment::effect_resilience(

@@ -8,8 +8,8 @@ use obzenflow::ai::TokenCount;
 use obzenflow::env::{env_bool_or, env_var, env_var_or};
 use obzenflow::sources::Url;
 
-const DEFAULT_HN_MAX_STORIES: usize = 60;
-const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
+pub(crate) const DEFAULT_HN_MAX_STORIES: usize = 60;
+pub(crate) const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
 
 pub struct DemoConfig {
     pub max_stories: usize,
@@ -20,7 +20,7 @@ pub struct DemoConfig {
     pub interests: Option<String>,
     pub mode_label: String,
     pub base_url: Url,
-    pub(crate) mock_server: Option<MockHnServer>,
+    pub(crate) _mock_server: Option<MockHnServer>,
 }
 
 impl DemoConfig {
@@ -76,7 +76,7 @@ impl DemoConfig {
             interests,
             mode_label,
             base_url,
-            mock_server,
+            _mock_server: mock_server,
         })
     }
 

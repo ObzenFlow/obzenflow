@@ -165,7 +165,7 @@ macro_rules! flow {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         $(backpressure: $flow_bp:expr,)?
-        $(bindings: |$runtime_config:ident| { $($binding:stmt)* },)?
+        $(bindings: |$runtime_config:ident| { $($binding:tt)* },)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -188,12 +188,9 @@ macro_rules! flow {
             $(
                 let $runtime_config = __build_ctx.runtime_config().as_ref();
                 $(
-                    #[allow(redundant_semicolons)]
-                    $binding;
+                    $binding
                 )*
             )?
-            let journals = $journals;
-            let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
             // Collect flow members (FLOWIP-128a D5): stages and composites
             // both enter through IntoFlowMember; user syntax is unchanged.
@@ -226,6 +223,11 @@ macro_rules! flow {
             // only stages exist; the signature enforces it.
             let (stages, lowering_artifacts) =
                 $crate::dsl::composites::lower_composites(members, &mut connections)?;
+
+            // Composite expansion performs all pre-substrate binding
+            // validation before journal or effect-port expressions run.
+            let journals = $journals;
+            let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
             // Create closure for flow middleware
             let create_flow_middleware =
@@ -255,7 +257,7 @@ macro_rules! flow {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         $(backpressure: $flow_bp:expr,)?
-        $(bindings: |$runtime_config:ident| { $($binding:stmt)* },)?
+        $(bindings: |$runtime_config:ident| { $($binding:tt)* },)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -278,12 +280,9 @@ macro_rules! flow {
             $(
                 let $runtime_config = __build_ctx.runtime_config().as_ref();
                 $(
-                    #[allow(redundant_semicolons)]
-                    $binding;
+                    $binding
                 )*
             )?
-            let journals = $journals;
-            let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
             // Collect flow members (FLOWIP-128a D5): stages and composites
             // both enter through IntoFlowMember; user syntax is unchanged.
@@ -316,6 +315,11 @@ macro_rules! flow {
             // only stages exist; the signature enforces it.
             let (stages, lowering_artifacts) =
                 $crate::dsl::composites::lower_composites(members, &mut connections)?;
+
+            // Composite expansion performs all pre-substrate binding
+            // validation before journal or effect-port expressions run.
+            let journals = $journals;
+            let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
             // Create closure for flow middleware
             let create_flow_middleware =
@@ -355,7 +359,7 @@ macro_rules! test_flow {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         $(backpressure: $flow_bp:expr,)?
-        $(bindings: |$runtime_config:ident| { $($binding:stmt)* },)?
+        $(bindings: |$runtime_config:ident| { $($binding:tt)* },)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -379,12 +383,9 @@ macro_rules! test_flow {
             $(
                 let $runtime_config = __build_ctx.runtime_config().as_ref();
                 $(
-                    #[allow(redundant_semicolons)]
-                    $binding;
+                    $binding
                 )*
             )?
-            let journals = $journals;
-            let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
             let mut members: HashMap<String, $crate::dsl::composition::FlowMember> = HashMap::new();
             $(
@@ -403,6 +404,11 @@ macro_rules! test_flow {
 
             let (stages, lowering_artifacts) =
                 $crate::dsl::composites::lower_composites(members, &mut connections)?;
+
+            // Composite expansion performs all pre-substrate binding
+            // validation before journal or effect-port expressions run.
+            let journals = $journals;
+            let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
             let create_flow_middleware =
                 || -> Vec<Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>> {
@@ -436,7 +442,7 @@ macro_rules! test_flow {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         $(backpressure: $flow_bp:expr,)?
-        $(bindings: |$runtime_config:ident| { $($binding:stmt)* },)?
+        $(bindings: |$runtime_config:ident| { $($binding:tt)* },)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {

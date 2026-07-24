@@ -1,0 +1,17 @@
+use obzenflow_dsl::ai_map_reduce;
+
+fn main() {
+    let _ = ai_map_reduce!(
+        Seed -> Out => {
+            map: [Item] -> Partial => map_role,
+            reduce: (Seed, [Partial]) -> Out => finalise_role,
+        },
+        chunking: by_budget { placeholder },
+        effects: {
+            chat_target: target,
+            chat_estimator: estimator,
+            map: [at_least_once(ChatCompletion) with [ai_circuit_breaker()]],
+            reduce: [at_least_once(ChatCompletion) with []],
+        }
+    );
+}

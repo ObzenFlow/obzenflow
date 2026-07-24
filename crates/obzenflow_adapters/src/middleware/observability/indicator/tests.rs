@@ -118,10 +118,6 @@ fn indicator_factory_is_hook_bound() {
         declaration.is_observer(),
         "indicator declares an observer surface"
     );
-    assert!(
-        !declaration.is_flowip_128g_legacy_shell(),
-        "indicator must not use the sealed AI migration route"
-    );
 }
 
 #[test]

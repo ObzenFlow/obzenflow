@@ -13,7 +13,8 @@ use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{
-    acquire_direct_fact_lease, drain_one_pending, DrainOutcome, PendingOutput,
+    acquire_direct_fact_lease, drain_one_pending, DirectFactLeaseRequest, DrainOutcome,
+    PendingOutput,
 };
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::output_committer::{
@@ -25,7 +26,8 @@ use crate::stages::observer::dispatch::{
     run_after_handler_observers, run_before_handler_observers,
 };
 use crate::stages::transform::fsm::{
-    DirectFactContinuation, DirectFactPollState, TransformContext, TransformEvent,
+    DirectFactContinuation, DirectFactContinuationStart, DirectFactPollState, TransformContext,
+    TransformEvent,
 };
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::FlowContext;
@@ -165,12 +167,14 @@ pub(super) async fn start_if_eligible<
         DirectFactPollState::DrivingReconstruction
     };
     ctx.direct_fact_continuation = Some(DirectFactContinuation::new(
-        envelope.clone(),
-        upstream_stage,
-        Some(input_position),
-        scope,
-        admission,
-        poll_state,
+        DirectFactContinuationStart {
+            envelope: envelope.clone(),
+            upstream_stage,
+            input_position: Some(input_position),
+            scope,
+            admission,
+            poll_state,
+        },
         future,
     ));
     Ok(true)
@@ -446,16 +450,16 @@ pub(super) async fn service<
     loop {
         match continuation.poll_state {
             DirectFactPollState::FreshUnpolled | DirectFactPollState::ResumeAtLiveBarrier => {
-                let acquisition = acquire_direct_fact_lease(
-                    &ctx.backpressure_writer,
-                    continuation.admission.bound(),
-                    ctx.stage_id,
+                let acquisition = acquire_direct_fact_lease(DirectFactLeaseRequest {
+                    writer: &ctx.backpressure_writer,
+                    bound: continuation.admission.bound(),
+                    stage_id: ctx.stage_id,
                     flow_context,
-                    &ctx.data_journal,
-                    &ctx.instrumentation,
-                    &mut ctx.backpressure_pulse,
-                    &mut ctx.backpressure_stall,
-                )
+                    data_journal: &ctx.data_journal,
+                    instrumentation: &ctx.instrumentation,
+                    backpressure_pulse: &mut ctx.backpressure_pulse,
+                    backpressure_stall: &mut ctx.backpressure_stall,
+                })
                 .await;
                 let lease = match acquisition {
                     Ok(Some(lease)) => lease,

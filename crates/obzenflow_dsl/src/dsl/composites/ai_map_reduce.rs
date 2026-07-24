@@ -29,26 +29,27 @@ use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{Effect, EffectDeclaration};
 use obzenflow_runtime::stages::common::handlers::TransformHandler;
 use obzenflow_runtime::stages::resources_builder::DirectFactPlan;
-use obzenflow_runtime::stages::stateful::{CollectByInput, SeededCollectByInput};
+use obzenflow_runtime::stages::stateful::SeededCollectByInput;
 use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
+
+type GeneratedEffectPolicies = (
+    Vec<Box<dyn MiddlewareFactory>>,
+    Vec<Box<dyn MiddlewareFactory>>,
+);
+type GeneratedMapReduceTypes<Seed, Item, Partial, Out> = fn() -> (Seed, Item, Partial, Out);
 
 /// Macro-only constructor for the FLOWIP-128g generated protocol.
 ///
 /// The concrete role adapters, effect declarations, collector, and
 /// direct-fact bounds are fixed as one generated call graph.
 #[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
 pub fn generated_map_reduce<Seed, Item, Partial, Out, Chunker, MapRole, FinaliseRole>(
     name: impl Into<String>,
-    chunker: Chunker,
-    map_role: MapRole,
-    finalise_role: FinaliseRole,
-    chat_target: ChatTarget,
-    chat_estimator: ResolvedTokenEstimator,
-    map_policies: Vec<Box<dyn MiddlewareFactory>>,
-    finalise_policies: Vec<Box<dyn MiddlewareFactory>>,
+    roles: (Chunker, MapRole, FinaliseRole),
+    chat_binding: (ChatTarget, ResolvedTokenEstimator),
+    policies: GeneratedEffectPolicies,
 ) -> Box<dyn CompositeDescriptor>
 where
     Seed: Clone
@@ -72,6 +73,9 @@ where
     MapRole: AiMapRole<Item, Partial>,
     FinaliseRole: AiFinaliseRole<Seed, Many<Partial>, Out>,
 {
+    let (chunker, map_role, finalise_role) = roles;
+    let (chat_target, chat_estimator) = chat_binding;
+    let (map_policies, finalise_policies) = policies;
     Box::new(GeneratedAiMapReduceCompositeDescriptor {
         name: name.into(),
         chunker,
@@ -102,7 +106,7 @@ struct GeneratedAiMapReduceCompositeDescriptor<
     chat_estimator: ResolvedTokenEstimator,
     map_policies: Vec<Box<dyn MiddlewareFactory>>,
     finalise_policies: Vec<Box<dyn MiddlewareFactory>>,
-    _types: PhantomData<fn() -> (Seed, Item, Partial, Out)>,
+    _types: PhantomData<GeneratedMapReduceTypes<Seed, Item, Partial, Out>>,
 }
 
 impl<Seed, Item, Partial, Out, Chunker, MapRole, FinaliseRole> CompositeDescriptor
@@ -155,16 +159,22 @@ where
 
     fn expand(self: Box<Self>, ctx: &mut CompositeBuildContext) -> Result<(), CompositeBuildError> {
         if self.chat_estimator.info().model != self.chat_target.model {
-            return Err(CompositeBuildError::new(format!(
-                "ai_map_reduce!: `effects.chat_estimator` model '{}' does not match \
+            return Err(CompositeBuildError::binding_configuration(
+                "chat_estimator",
+                format!(
+                    "ai_map_reduce!: `effects.chat_estimator` model '{}' does not match \
                  `effects.chat_target` model '{}'",
-                self.chat_estimator.info().model,
-                self.chat_target.model
-            )));
+                    self.chat_estimator.info().model,
+                    self.chat_target.model
+                ),
+            ));
         }
 
+        require_generated_resilience("map", &self.map_policies)?;
+        require_generated_resilience("reduce", &self.finalise_policies)?;
+
         let composite_id = CompositeId::new(format!("ai_map_reduce:{}", self.name));
-        let direct_bound = NonZeroU64::new(3).expect("generated direct bound is non-zero");
+        let direct_bound = NonZeroU64::MIN.saturating_add(2);
 
         let chunk_handler = GeneratedAiChunkHandler::<ChunkEnvelope<Item>, _>::new(
             self.chunker,
@@ -222,13 +232,12 @@ where
         );
 
         let collector: SeededCollectByInput<Partial, Seed, Many<Partial>> =
-            CollectByInput::new(Many::<Partial>::default(), |acc, partial: &Partial| {
+            SeededCollectByInput::new(Many::<Partial>::default(), |acc, partial: &Partial| {
                 acc.items.push(partial.clone());
             })
             .with_planning_summary(|acc, planning| {
                 acc.planning = planning.clone();
             })
-            .with_seed::<Seed>()
             .with_composite_id(composite_id);
         let collect_descriptor = wrap_typed_descriptor(
             Box::new(StatefulDescriptor {
@@ -308,4 +317,22 @@ where
             .default();
         Ok(())
     }
+}
+
+fn require_generated_resilience(
+    role: &'static str,
+    policies: &[Box<dyn MiddlewareFactory>],
+) -> Result<(), CompositeBuildError> {
+    let count = policies
+        .iter()
+        .filter(|policy| policy.declaration().is_effect_resilience())
+        .count();
+    if count == 1 {
+        return Ok(());
+    }
+
+    Err(CompositeBuildError::new(format!(
+        "ai_map_reduce!: generated role '{role}' requires exactly one EffectResilience \
+         policy on 'ChatCompletion'; attach `ai_resilience()` in `effects:` (found {count})"
+    )))
 }

@@ -188,7 +188,7 @@ struct SourceMiddlewareBinding {
 }
 
 struct MiddlewarePlacement {
-    legacy_shell: Vec<Box<dyn Middleware>>,
+    system_middleware: Vec<Box<dyn Middleware>>,
     observers: StageObserverSet,
     expects_circuit_breaker: bool,
     expects_rate_limiter: bool,
@@ -208,7 +208,7 @@ fn plan_stage_middleware(
         spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
     });
 
-    let mut legacy_shell = create_system_middleware(config, stage_type);
+    let system_middleware = create_system_middleware(config, stage_type);
     let mut observers = create_system_observers(config);
     let observer_surfaces = observer_surfaces_for_stage(stage_type);
 
@@ -245,19 +245,6 @@ fn plan_stage_middleware(
             continue;
         }
 
-        if declaration.is_flowip_128g_legacy_shell() {
-            let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
-            legacy_shell.push(crate::dsl::binder::materialize_flowip_128g_legacy_shell(
-                spec.factory.as_ref(),
-                config,
-                stage_type,
-                control_middleware,
-                &origin,
-                MiddlewareDeclarationIndex::resolved(middleware_index),
-            )?);
-            continue;
-        }
-
         return Err(format!(
             "middleware '{}' declares hook surfaces {:?}, but stage '{}' ({stage_type:?}) has no compatible placement",
             declaration.label,
@@ -268,7 +255,7 @@ fn plan_stage_middleware(
     }
 
     Ok(MiddlewarePlacement {
-        legacy_shell,
+        system_middleware,
         observers,
         expects_circuit_breaker,
         expects_rate_limiter,
@@ -283,7 +270,7 @@ fn build_source_middleware_and_register_policies(
     hosted_ingress_slot: Option<obzenflow_core::ingress::HostedIngressBindingSlot>,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
 ) -> StageCreationResult<SourceMiddlewareBinding> {
-    let mut all_middleware = create_system_middleware(config, stage_type);
+    let all_middleware = create_system_middleware(config, stage_type);
     let mut observers = create_system_observers(config);
     let expects_circuit_breaker = resolved
         .middleware
@@ -378,19 +365,6 @@ fn build_source_middleware_and_register_policies(
             if binding.completion_gate.is_some() {
                 completion_gate = binding.completion_gate;
             }
-            continue;
-        }
-
-        if declaration.is_flowip_128g_legacy_shell() {
-            let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
-            all_middleware.push(crate::dsl::binder::materialize_flowip_128g_legacy_shell(
-                spec.factory.as_ref(),
-                config,
-                stage_type,
-                control_middleware,
-                &origin,
-                MiddlewareDeclarationIndex::resolved(middleware_index),
-            )?);
             continue;
         }
 
@@ -1359,7 +1333,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
 
         let placement =
             plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
-        let all_middleware = placement.legacy_shell;
+        let all_middleware = placement.system_middleware;
 
         instrumentation
             .bind_control_plane(
@@ -1493,7 +1467,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
         let placement =
             plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
-        let all_middleware = placement.legacy_shell;
+        let all_middleware = placement.system_middleware;
 
         instrumentation
             .bind_control_plane(
@@ -1835,7 +1809,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         )?;
         let mut observers = placement.observers;
         observers.extend(effect_observers);
-        let all_middleware = placement.legacy_shell;
+        let all_middleware = placement.system_middleware;
 
         // Stage-level control binding covers shell instances only; per-effect
         // instances register under their effect key and surface through the
@@ -1974,7 +1948,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             control_middleware.clone();
 
         // Create system middleware with instrumentation
-        let mut all_middleware = create_system_middleware(&config, StageType::Sink);
+        let all_middleware = create_system_middleware(&config, StageType::Sink);
 
         let expects_circuit_breaker = resolved
             .middleware
@@ -2032,16 +2006,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
                     MiddlewareDeclarationIndex::resolved(middleware_index),
                 )?;
                 sink_policies.push(policy);
-            } else if declaration.is_flowip_128g_legacy_shell() {
-                let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
-                all_middleware.push(crate::dsl::binder::materialize_flowip_128g_legacy_shell(
-                    spec.factory.as_ref(),
-                    &config,
-                    StageType::Sink,
-                    &control_middleware,
-                    &origin,
-                    MiddlewareDeclarationIndex::resolved(middleware_index),
-                )?);
             } else {
                 return Err(format!(
                     "middleware '{}' declares capability {:?} and surfaces {:?}, but sink stage '{}' has no matching typed binding",
@@ -2343,7 +2307,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
 
         let placement =
             plan_stage_middleware(&config, StageType::Stateful, resolved, &control_middleware)?;
-        let all_middleware = placement.legacy_shell;
+        let all_middleware = placement.system_middleware;
 
         instrumentation
             .bind_control_plane(
@@ -2733,7 +2697,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 
         let placement =
             plan_stage_middleware(&config, StageType::Join, resolved, &control_middleware)?;
-        let all_middleware = placement.legacy_shell;
+        let all_middleware = placement.system_middleware;
 
         instrumentation
             .bind_control_plane(
@@ -3867,11 +3831,11 @@ mod observer_placement_negative_tests {
                     panic!("observer placement must succeed for {stage_type:?}: {err}")
                 });
 
-            // The observer never lands in the legacy shell: that bucket holds only
-            // the (now empty) system middleware, never a hook-bound observer.
+            // Hook-bound observers never enter the generic system middleware
+            // stack.
             assert!(
-                placement.legacy_shell.is_empty(),
-                "observer middleware must not be placed in the legacy shell for {stage_type:?}"
+                placement.system_middleware.is_empty(),
+                "observer middleware must not be placed in system middleware for {stage_type:?}"
             );
         }
     }

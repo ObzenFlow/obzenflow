@@ -40,7 +40,7 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 // ── Typed payloads for each stage of the ai_map_reduce composite ──────────
@@ -94,17 +94,6 @@ impl TypedPayload for BuildOnlyOut {
 
 fn test_target() -> ChatTarget {
     ChatTarget::new("test", "deterministic")
-}
-
-fn test_estimator() -> ResolvedTokenEstimator {
-    ResolvedTokenEstimator::new(
-        Arc::new(HeuristicTokenEstimator::default()),
-        TokenEstimatorResolutionInfo::heuristic(
-            "deterministic",
-            TokenEstimatorFallbackReason::ExplicitHeuristic,
-            None,
-        ),
-    )
 }
 
 struct BuildMapRole {
@@ -220,8 +209,18 @@ fn test_effect_ports() -> EffectPortRegistry {
 
 macro_rules! generated_digest {
     () => {{
+        generated_digest!("deterministic")
+    }};
+    ($estimator_model:expr) => {{
         let target = test_target();
-        let estimator = test_estimator();
+        let estimator = ResolvedTokenEstimator::new(
+            Arc::new(HeuristicTokenEstimator::default()),
+            TokenEstimatorResolutionInfo::heuristic(
+                $estimator_model,
+                TokenEstimatorFallbackReason::ExplicitHeuristic,
+                None,
+            ),
+        );
         ai_map_reduce!(
             BuildOnlySeed -> BuildOnlyOut => {
                 map: [BuildOnlyItem] -> BuildOnlyPartial => BuildMapRole {
@@ -247,8 +246,12 @@ macro_rules! generated_digest {
             effects: {
                 chat_target: target,
                 chat_estimator: estimator,
-                map: [at_least_once(ChatCompletion) with []],
-                reduce: [at_least_once(ChatCompletion) with []],
+                map: [at_least_once(ChatCompletion) with [
+                    obzenflow_adapters::middleware::control::ai_resilience()
+                ]],
+                reduce: [at_least_once(ChatCompletion) with [
+                    obzenflow_adapters::middleware::control::ai_resilience()
+                ]],
             }
         )
     }};
@@ -529,6 +532,61 @@ async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
              {err:?}"
         )
     });
+}
+
+#[tokio::test]
+async fn estimator_mismatch_fails_before_journal_or_effect_port_evaluation() {
+    let journals_evaluated = Arc::new(AtomicBool::new(false));
+    let ports_evaluated = Arc::new(AtomicBool::new(false));
+    let journal_probe = Arc::clone(&journals_evaluated);
+    let port_probe = Arc::clone(&ports_evaluated);
+
+    let result = flow! {
+        name: "amr_pre_substrate_binding_failure",
+        journals: {
+            journal_probe.store(true, Ordering::SeqCst);
+            memory_journals()
+        },
+        middleware: [],
+        effect_ports: {
+            port_probe.store(true, Ordering::SeqCst);
+            test_effect_ports()
+        },
+
+        stages: {
+            seed = source!(BuildOnlySeed => NoEventSource);
+            digest = generated_digest!("different-model");
+            sink_stage = sink!(BuildOnlyOut => NoopSink);
+        },
+
+        topology: {
+            seed |> digest;
+            digest |> sink_stage;
+        }
+    }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await;
+    let failure = match result {
+        Ok(_) => panic!("an estimator for a different model must fail flow build"),
+        Err(failure) => failure,
+    };
+
+    match failure.error {
+        obzenflow_dsl::dsl::FlowBuildError::BindingConfiguration { binding, detail } => {
+            assert_eq!(binding, "chat_estimator");
+            assert!(detail.contains("different-model"));
+            assert!(detail.contains("deterministic"));
+        }
+        other => panic!("expected typed chat_estimator binding failure, got {other:?}"),
+    }
+    assert!(
+        !journals_evaluated.load(Ordering::SeqCst),
+        "journal construction must remain outside a rejected composite build"
+    );
+    assert!(
+        !ports_evaluated.load(Ordering::SeqCst),
+        "effect-port registration must remain outside a rejected composite build"
+    );
 }
 
 #[tokio::test]

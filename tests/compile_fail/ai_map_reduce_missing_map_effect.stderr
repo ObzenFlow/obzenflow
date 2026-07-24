@@ -1,0 +1,13 @@
+error: ai_map_reduce!: missing mandatory effects entry for role 'map'; add `map: [at_least_once(ChatCompletion) ...]`
+  --> tests/compile_fail/ai_map_reduce_missing_map_effect.rs:4:13
+   |
+ 4 |       let _ = ai_map_reduce!(
+   |  _____________^
+ 5 | |         Seed -> Out => {
+ 6 | |             map: [Item] -> Partial => map_role,
+ 7 | |             reduce: (Seed, [Partial]) -> Out => finalise_role,
+...  |
+15 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_ai_map_reduce_effects_contract` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)

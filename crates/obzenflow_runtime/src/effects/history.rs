@@ -249,6 +249,74 @@ impl EffectHistory {
         Self::from_records_with_policy(recorded_flow_id, records, true)
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_cursor_history_for_test(
+        recorded_flow_id: impl Into<RecordedFlowId>,
+        cursor: EffectCursor,
+        history: EffectCursorHistory,
+    ) -> Result<Self, EffectError> {
+        validate_cursor_history(&cursor, &history)?;
+        let records = history.records;
+        let index = if records.is_empty() {
+            HashMap::new()
+        } else {
+            HashMap::from([(cursor.clone(), (0..records.len()).collect::<Vec<usize>>())])
+        };
+        let attempts = HashMap::from([(cursor.clone(), history.attempts.clone())]);
+        let abandonments = history
+            .abandonment
+            .map(|abandonment| HashMap::from([(cursor.clone(), abandonment)]))
+            .unwrap_or_default();
+        let terminal_attempts = history
+            .terminal_attempt
+            .map(|attempt| HashMap::from([(cursor.clone(), attempt)]))
+            .unwrap_or_default();
+        let mut grouped_events = HashMap::new();
+        if !history.terminal_group_events.is_empty() {
+            grouped_events.insert(
+                effect_outcome_group_id(&cursor).to_string(),
+                history
+                    .terminal_group_events
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, event)| (position, None, event))
+                    .collect(),
+            );
+        }
+        for (attempt, events) in history.escape_control_batches {
+            grouped_events.insert(
+                effect_escape_controls_group_id(&cursor, attempt).to_string(),
+                events
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, event)| (position, None, event))
+                    .collect(),
+            );
+        }
+        let attempt_positions = history
+            .attempts
+            .iter()
+            .enumerate()
+            .map(|(position, attempt)| ((cursor.clone(), attempt.attempt), position))
+            .collect();
+        let attempt_events = history
+            .attempt_events
+            .into_iter()
+            .map(|(attempt, event)| ((cursor.clone(), attempt), event))
+            .collect();
+        Ok(Self {
+            recorded_flow_id: recorded_flow_id.into(),
+            records: Arc::new(records),
+            index: Arc::new(index),
+            attempts: Arc::new(attempts),
+            abandonments: Arc::new(abandonments),
+            terminal_attempts: Arc::new(terminal_attempts),
+            grouped_events: Arc::new(grouped_events),
+            attempt_positions: Arc::new(attempt_positions),
+            attempt_events: Arc::new(attempt_events),
+        })
+    }
+
     /// Build under an explicit torn-tail policy. With `tolerate_torn_tail` false
     /// (a `Completed` archive), an incomplete outcome group is corruption and
     /// fails loud instead of being dropped.
@@ -349,10 +417,6 @@ impl EffectHistory {
                 .filter_map(|position| self.records.get(*position))
                 .collect()
         })
-    }
-
-    pub(crate) fn select(&self, cursor: &EffectCursor) -> EffectHistorySelection {
-        self.cursor_history(cursor).select()
     }
 
     pub(crate) fn attempts(&self, cursor: &EffectCursor) -> &[EffectAttemptStarted] {

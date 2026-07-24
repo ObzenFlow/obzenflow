@@ -11,3 +11,9 @@ fn stages_block_rejects_non_member_expressions() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile_fail/flow_member_rejects_non_member.rs");
 }
+
+#[test]
+fn ai_map_reduce_effect_contract_has_curated_diagnostics() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/compile_fail/ai_map_reduce_*.rs");
+}

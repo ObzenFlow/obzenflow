@@ -162,7 +162,11 @@ impl EffectsCore {
             EffectHistorySelection::InDoubt(attempts) => {
                 let highest = attempts
                     .last()
-                    .expect("InDoubt selection is non-empty")
+                    .ok_or_else(|| {
+                        EffectError::EffectProvenanceMismatch(format!(
+                            "effect cursor {cursor:?} selected InDoubt without an attempt"
+                        ))
+                    })?
                     .attempt;
                 Err(EffectError::EffectProvenanceMismatch(format!(
                     "pre-effect failure at cursor {cursor:?} would erase in-doubt Start({highest})"
@@ -172,6 +176,9 @@ impl EffectsCore {
     }
 
     pub(crate) async fn request_generated_live_admission(&self) -> Result<(), EffectError> {
+        if self.is_replaying() {
+            return Ok(());
+        }
         if let Some(admission) = self.ctx.backpressure_writer.direct_fact_admission() {
             admission
                 .request_live()
@@ -538,8 +545,14 @@ impl EffectsCore {
                         });
                     }
                 }
-                let highest_started_attempt =
-                    attempts.last().expect("non-empty attempt history").attempt;
+                let highest_started_attempt = attempts
+                    .last()
+                    .ok_or_else(|| {
+                        EffectError::EffectProvenanceMismatch(format!(
+                            "effect cursor {cursor:?} selected InDoubt without an attempt"
+                        ))
+                    })?
+                    .attempt;
                 if self.ctx.runtime_execution.in_doubt_effect_is_fatal() {
                     return Err(EffectError::EffectInDoubt {
                         cursor,

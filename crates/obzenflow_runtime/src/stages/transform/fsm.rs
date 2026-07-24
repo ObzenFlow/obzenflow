@@ -117,6 +117,15 @@ pub(crate) struct DirectFactContinuation {
     wake: Arc<ContinuationWake>,
 }
 
+pub(crate) struct DirectFactContinuationStart {
+    pub envelope: EventEnvelope<ChainEvent>,
+    pub upstream_stage: Option<StageId>,
+    pub input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
+    pub scope: obzenflow_core::MiddlewareExecutionScope,
+    pub admission: DirectFactAdmission,
+    pub poll_state: DirectFactPollState,
+}
+
 impl std::fmt::Debug for DirectFactContinuation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -130,16 +139,15 @@ impl std::fmt::Debug for DirectFactContinuation {
 }
 
 impl DirectFactContinuation {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        envelope: EventEnvelope<ChainEvent>,
-        upstream_stage: Option<StageId>,
-        input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
-        scope: obzenflow_core::MiddlewareExecutionScope,
-        admission: DirectFactAdmission,
-        poll_state: DirectFactPollState,
-        future: SealedGeneratedFuture,
-    ) -> Self {
+    pub(crate) fn new(start: DirectFactContinuationStart, future: SealedGeneratedFuture) -> Self {
+        let DirectFactContinuationStart {
+            envelope,
+            upstream_stage,
+            input_position,
+            scope,
+            admission,
+            poll_state,
+        } = start;
         Self {
             envelope,
             upstream_stage,
@@ -245,10 +253,38 @@ impl Drop for DirectFactContinuation {
 #[cfg(test)]
 mod direct_fact_continuation_tests {
     use super::*;
-    use crate::backpressure::DirectFactAdmission;
+    use crate::backpressure::{
+        BackpressurePlan, BackpressureRegistry, DirectFactAdmission, DirectFactLease,
+    };
+    use crate::id_conversions::StageIdExt;
     use obzenflow_core::event::JournalWriterId;
     use obzenflow_core::{EventEnvelope, EventType};
+    use obzenflow_topology::TopologyBuilder;
     use std::num::NonZeroU64;
+    use std::time::Duration;
+
+    fn enforced_writer() -> (
+        crate::backpressure::BackpressureRegistry,
+        StageId,
+        StageId,
+        crate::backpressure::BackpressureWriter,
+    ) {
+        let mut topology = TopologyBuilder::new();
+        let upstream = topology.add_stage(Some("generated".to_string()));
+        let downstream = topology.add_stage(Some("collector".to_string()));
+        let topology = topology.build_unchecked().expect("fixture topology");
+        let upstream = StageId::from_topology_id(upstream);
+        let downstream = StageId::from_topology_id(downstream);
+        let plan = BackpressurePlan::disabled().with_edge_enforced(
+            upstream,
+            downstream,
+            NonZeroU64::new(3).expect("non-zero window"),
+            Duration::from_secs(1),
+        );
+        let registry = BackpressureRegistry::new(&topology, &plan);
+        let writer = registry.writer(upstream);
+        (registry, upstream, downstream, writer)
+    }
 
     #[tokio::test]
     async fn panicking_generated_future_reports_failure_instead_of_hanging_supervision() {
@@ -259,15 +295,17 @@ mod direct_fact_continuation_tests {
         );
         let envelope = EventEnvelope::new(JournalWriterId::new(), event);
         let continuation = DirectFactContinuation::new(
-            envelope,
-            None,
-            None,
-            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
-            DirectFactAdmission::new(
-                EventType::from("test.generated_input.v1"),
-                NonZeroU64::new(3).expect("non-zero test bound"),
-            ),
-            DirectFactPollState::LiveLeased,
+            DirectFactContinuationStart {
+                envelope,
+                upstream_stage: None,
+                input_position: None,
+                scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+                admission: DirectFactAdmission::new(
+                    EventType::from("test.generated_input.v1"),
+                    NonZeroU64::new(3).expect("non-zero test bound"),
+                ),
+                poll_state: DirectFactPollState::LiveLeased,
+            },
             Box::pin(async {
                 panic!("fixture panic");
             }),
@@ -277,6 +315,62 @@ mod direct_fact_continuation_tests {
             panic!("a panicking continuation must become a ready handler failure");
         };
         assert!(error.to_string().contains("future panicked"));
+    }
+
+    #[tokio::test]
+    async fn dropping_parked_or_active_continuations_releases_unused_live_capacity() {
+        for poll_before_drop in [false, true] {
+            let (registry, upstream, downstream, writer) = enforced_writer();
+            let admission = DirectFactAdmission::new(
+                EventType::from("test.generated_input.v1"),
+                NonZeroU64::new(3).expect("non-zero test bound"),
+            );
+            admission
+                .grant(
+                    DirectFactLease::try_acquire(
+                        &writer,
+                        NonZeroU64::new(3).expect("non-zero test bound"),
+                    )
+                    .expect("lease calculation succeeds")
+                    .expect("three credits are available"),
+                )
+                .expect("live lease is granted");
+            assert_eq!(registry.edge_in_flight(upstream, downstream), Some(3));
+
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "test.generated_input.v1",
+                serde_json::json!({}),
+            );
+            let envelope = EventEnvelope::new(JournalWriterId::new(), event);
+            let continuation = DirectFactContinuation::new(
+                DirectFactContinuationStart {
+                    envelope,
+                    upstream_stage: None,
+                    input_position: None,
+                    scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+                    admission,
+                    poll_state: DirectFactPollState::LiveLeased,
+                },
+                Box::pin(std::future::pending()),
+            );
+            if poll_before_drop {
+                let mut poll = Box::pin(continuation.poll_once());
+                assert!(
+                    futures::poll!(poll.as_mut()).is_pending(),
+                    "fixture future remains active"
+                );
+            }
+            drop(continuation);
+            tokio::task::yield_now().await;
+
+            assert_eq!(
+                registry.edge_in_flight(upstream, downstream),
+                Some(0),
+                "dropping a {} continuation releases its unused affine reservation",
+                if poll_before_drop { "polled" } else { "parked" }
+            );
+        }
     }
 }
 

@@ -31,7 +31,11 @@
 //! writer ids, the comparing runs' own flow ids, vector clocks,
 //! `replay_context` (present on every `Data` row of a replay run by design),
 //! `runtime_context`, `observability`, `ingress_context`, and cycle metadata.
-//! Payloads are compared as parsed values, never bytes.
+//! Payloads are compared as parsed values, never bytes. Framework-owned
+//! `ai.map_reduce.*` payloads normalise their top-level `job_key`: that key is
+//! the composite input event id and is deliberately run-scoped, just like the
+//! top-level event ids excluded by this projection. All remaining protocol and
+//! domain content is compared positionally.
 //!
 //! Rows carrying `effect_provenance` additionally expose their deterministic
 //! identity (event id, deterministic event time, and the full provenance,
@@ -111,7 +115,7 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
             kind: RowKind::Data {
                 event_type: event_type.clone(),
             },
-            payload: payload.clone(),
+            payload: comparable_data_payload(event_type, payload),
             status: Some(semantic_status(event)),
             identity: effect_identity(event),
         })),
@@ -139,6 +143,21 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
         | ChainEventContent::Delivery(_)
         | ChainEventContent::Observability(_) => None,
     }
+}
+
+fn comparable_data_payload(event_type: &str, payload: &Value) -> Value {
+    let mut payload = payload.clone();
+    if event_type.starts_with("ai.map_reduce.") {
+        if let Some(object) = payload.as_object_mut() {
+            if object.contains_key("job_key") {
+                object.insert(
+                    "job_key".to_string(),
+                    Value::String("<run-local-composite-activation>".to_string()),
+                );
+            }
+        }
+    }
+    payload
 }
 
 fn semantic_status(event: &ChainEvent) -> SemanticStatus {
@@ -197,6 +216,43 @@ mod tests {
         assert_eq!(row.payload, json!({"id": 7}));
         assert_eq!(row.status.as_ref().expect("data status").status, "success");
         assert!(row.identity.is_none());
+    }
+
+    #[test]
+    fn ai_map_reduce_job_keys_are_normalised_as_run_local_identity() {
+        let event = ChainEventFactory::data_event(
+            writer(),
+            "ai.map_reduce.planning_manifest.v1",
+            json!({
+                "job_key": "01ABCDEFG",
+                "chunk_count": 2,
+                "seed_payload": {"id": 7}
+            }),
+        );
+        let Some(ProjectedRow::Positional(row)) = project(&event) else {
+            panic!("AI map-reduce data row must project positionally");
+        };
+        assert_eq!(
+            row.payload,
+            json!({
+                "job_key": "<run-local-composite-activation>",
+                "chunk_count": 2,
+                "seed_payload": {"id": 7}
+            })
+        );
+    }
+
+    #[test]
+    fn user_payload_job_keys_remain_comparable_domain_content() {
+        let event = ChainEventFactory::data_event(
+            writer(),
+            "orders.batch.v1",
+            json!({"job_key": "customer-visible-key"}),
+        );
+        let Some(ProjectedRow::Positional(row)) = project(&event) else {
+            panic!("user data row must project positionally");
+        };
+        assert_eq!(row.payload, json!({"job_key": "customer-visible-key"}));
     }
 
     #[test]

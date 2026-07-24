@@ -20,10 +20,10 @@ use obzenflow_core::ai::{
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::error::FlowBuildError;
-use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform};
+use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::EffectPortRegistry;
+use obzenflow_runtime::effects::{EffectPortRegistry, EffectPortResolver};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -327,19 +327,34 @@ fn resolve_hn_group_budget(
     }))
 }
 
-pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Result<()> {
-    let DemoConfig {
-        max_stories,
-        poll_timeout_secs,
-        source_rate_limit,
-        budget_per_group_override,
-        max_stories_per_group,
-        interests,
-        mode_label: mode_label_for_summary,
-        base_url,
-        mock_server: _mock_server,
-        ..
-    } = config;
+pub(crate) struct HnFlowOptions {
+    pub journal_base: std::path::PathBuf,
+    pub chat_resolver_override: Option<EffectPortResolver<dyn ChatClient>>,
+}
+
+impl Default for HnFlowOptions {
+    fn default() -> Self {
+        Self {
+            journal_base: std::path::PathBuf::from("target/hn-ai-digest-logs"),
+            chat_resolver_override: None,
+        }
+    }
+}
+
+pub(crate) fn build_flow_definition(
+    config: &DemoConfig,
+    options: HnFlowOptions,
+) -> Result<FlowDefinition> {
+    let max_stories = config.max_stories;
+    let poll_timeout_secs = config.poll_timeout_secs;
+    let source_rate_limit = config.source_rate_limit;
+    let budget_per_group_override = config.budget_per_group_override;
+    let max_stories_per_group = config.max_stories_per_group;
+    let interests = config.interests.clone();
+    let mode_label_for_summary = config.mode_label.clone();
+    let base_url = config.base_url.clone();
+    let journal_base = options.journal_base;
+    let chat_resolver_override = options.chat_resolver_override;
 
     let base_url_for_summary = base_url.to_string();
 
@@ -371,101 +386,110 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
         .open_for(Duration::from_secs(HN_SOURCE_BREAKER_COOLDOWN_SECS))
         .build()?;
 
+    Ok(flow! {
+        name: "hn_ai_digest_demo",
+        journals: disk_journals(journal_base),
+        middleware: [],
+        bindings: |runtime_config| {
+            let ai_models = runtime_config.ai_models();
+            let chat = ChatEffectBinding::from_config(&ai_models).map_err(|error|
+                FlowBuildError::BindingConfiguration {
+                    binding: "chat".to_string(),
+                    detail: error.to_string(),
+                }
+            )?;
+            let chat_target = chat.target().clone();
+            let resolved_estimator = chat.resolved_estimator().clone();
+            let estimator = resolved_estimator.estimator();
+            let budget_per_group =
+                resolve_hn_group_budget(budget_per_group_override, &chat_target)?;
+            let map_role = HnMapRole::new(
+                chat_target.clone(),
+                system_prompt.clone(),
+                map_role_config,
+            );
+            let finalise_role = HnFinaliseRole::new(
+                chat_target.clone(),
+                DigestReduceCtx {
+                    mode_label: mode_label_for_summary,
+                    base_url: base_url_for_summary,
+                    ai_provider: chat_target.provider.to_string(),
+                    ai_model: chat_target.model.clone(),
+                    token_estimator: resolved_estimator.source(),
+                    budget_per_group,
+                    interests: finalise_interests,
+                    chat_prompt_system: system_prompt,
+                },
+            );
+            let effect_ports = if let Some(resolver) = chat_resolver_override {
+                EffectPortRegistry::new()
+                    .with_deferred::<dyn ChatClient>("chat", resolver)
+            } else {
+                EffectPortRegistry::new()
+                    .with_deferred::<dyn ChatClient>("chat", chat.into_resolver())
+            }
+                .map_err(|error| FlowBuildError::BindingConfiguration {
+                    binding: "chat".to_string(),
+                    detail: error.to_string(),
+                })?;
+        },
+        effect_ports: effect_ports,
+
+        stages: {
+            // Source-boundary policies (FLOWIP-115a): the breaker protects
+            // the external HN HTTP dependency; the limiter paces API reads.
+            // Replay reconstructs archived stories and suppresses both.
+            hn_stories = async_source!(HnStory => HttpPullSource::new(decoder, config), [
+                source_breaker,
+                RateLimiterBuilder::new(source_rate_limit).build()
+            ]);
+            formatter = transform!(HnStory -> FormattedStory => formatter);
+            batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
+
+            // Type bridge:
+            // - map's `[FormattedStory]` comes from `HnTopStories.stories` via
+            //   `items: |seed: &HnTopStories| seed.stories.clone()`.
+            // - map's render uses `ChunkRenderContext.item_ordinal` to assign stable story numbers.
+            // - reduce's `[HnDigestGroupSummary]` is collected in chunk-index order.
+            digest = ai_map_reduce!(
+                HnTopStories -> HnDigestSummary => {
+                    map: [FormattedStory] -> HnDigestGroupSummary => map_role,
+                    reduce: (HnTopStories, [HnDigestGroupSummary]) -> HnDigestSummary => finalise_role,
+                },
+                chunking: by_budget {
+                    estimator: estimator.clone(),
+                    items: |seed: &HnTopStories| seed.stories.clone(),
+                    render: |story: &FormattedStory, ctx| render_story_line(ctx.item_ordinal + 1, story),
+                    budget: budget_per_group,
+                    max_items: max_stories_per_group,
+                    oversize: decompose { max_depth: 5, exhaustion: fail },
+                    snapshot_excluded_items_limit: 25,
+                },
+                effects: {
+                    chat_target: chat_target,
+                    chat_estimator: resolved_estimator.clone(),
+                    map: [at_least_once(ChatCompletion) with [ai_resilience()]],
+                    reduce: [at_least_once(ChatCompletion) with [ai_resilience()]],
+                }
+            );
+            digest_summary = sink!(HnDigestSummary => sinks::console(format_digest_summary_for_console));
+        },
+
+        topology: {
+            hn_stories |> formatter;
+            formatter |> batch;
+            batch |> digest;
+            digest |> digest_summary;
+        }
+    })
+}
+
+pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Result<()> {
+    let flow = build_flow_definition(&config, HnFlowOptions::default())?;
     FlowApplication::builder()
         .with_presentation(presentation)
-        .run_async(flow! {
-            name: "hn_ai_digest_demo",
-            journals: disk_journals(std::path::PathBuf::from("target/hn-ai-digest-logs")),
-            middleware: [],
-            bindings: |runtime_config| {
-                let ai_models = runtime_config.ai_models();
-                let chat = ChatEffectBinding::from_config(&ai_models).map_err(|error|
-                    FlowBuildError::BindingConfiguration {
-                        binding: "chat".to_string(),
-                        detail: error.to_string(),
-                    }
-                )?;
-                let chat_target = chat.target().clone();
-                let resolved_estimator = chat.resolved_estimator().clone();
-                let estimator = resolved_estimator.estimator();
-                let budget_per_group =
-                    resolve_hn_group_budget(budget_per_group_override, &chat_target)?;
-                let map_role = HnMapRole::new(
-                    chat_target.clone(),
-                    system_prompt.clone(),
-                    map_role_config,
-                );
-                let finalise_role = HnFinaliseRole::new(
-                    chat_target.clone(),
-                    DigestReduceCtx {
-                        mode_label: mode_label_for_summary,
-                        base_url: base_url_for_summary,
-                        ai_provider: chat_target.provider.to_string(),
-                        ai_model: chat_target.model.clone(),
-                        token_estimator: resolved_estimator.source(),
-                        budget_per_group,
-                        interests: finalise_interests,
-                        chat_prompt_system: system_prompt,
-                    },
-                );
-                let effect_ports = EffectPortRegistry::new()
-                    .with_deferred::<dyn ChatClient>("chat", chat.into_resolver())
-                    .map_err(|error| FlowBuildError::BindingConfiguration {
-                        binding: "chat".to_string(),
-                        detail: error.to_string(),
-                    })?;
-            },
-            effect_ports: effect_ports,
-
-            stages: {
-                // Source-boundary policies (FLOWIP-115a): the breaker protects
-                // the external HN HTTP dependency; the limiter paces API reads.
-                // Replay reconstructs archived stories and suppresses both.
-                hn_stories = async_source!(HnStory => HttpPullSource::new(decoder, config), [
-                    source_breaker,
-                    RateLimiterBuilder::new(source_rate_limit).build()
-                ]);
-                formatter = transform!(HnStory -> FormattedStory => formatter);
-                batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
-
-                // Type bridge:
-                // - map's `[FormattedStory]` comes from `HnTopStories.stories` via
-                //   `items: |seed: &HnTopStories| seed.stories.clone()`.
-                // - map's render uses `ChunkRenderContext.item_ordinal` to assign stable story numbers.
-                // - reduce's `[HnDigestGroupSummary]` is collected in chunk-index order.
-                digest = ai_map_reduce!(
-                    HnTopStories -> HnDigestSummary => {
-                        map: [FormattedStory] -> HnDigestGroupSummary => map_role,
-                        reduce: (HnTopStories, [HnDigestGroupSummary]) -> HnDigestSummary => finalise_role,
-                    },
-                    chunking: by_budget {
-                        estimator: estimator.clone(),
-                        items: |seed: &HnTopStories| seed.stories.clone(),
-                        render: |story: &FormattedStory, ctx| render_story_line(ctx.item_ordinal + 1, story),
-                        budget: budget_per_group,
-                        max_items: max_stories_per_group,
-                        oversize: decompose { max_depth: 5, exhaustion: fail },
-                        snapshot_excluded_items_limit: 25,
-                    },
-                    effects: {
-                        chat_target: chat_target,
-                        chat_estimator: resolved_estimator.clone(),
-                        map: [at_least_once(ChatCompletion) with [ai_resilience()]],
-                        reduce: [at_least_once(ChatCompletion) with [ai_resilience()]],
-                    }
-                );
-                digest_summary = sink!(HnDigestSummary => sinks::console(format_digest_summary_for_console));
-            },
-
-            topology: {
-                hn_stories |> formatter;
-                formatter |> batch;
-                batch |> digest;
-                digest |> digest_summary;
-            }
-        })
+        .run_async(flow)
         .await?;
-
     Ok(())
 }
 
@@ -481,7 +505,7 @@ pub fn run_demo_blocking() -> Result<()> {
     })
 }
 
-fn build_presentation(config: &DemoConfig) -> Presentation {
+pub(crate) fn build_presentation(config: &DemoConfig) -> Presentation {
     Presentation::new(
         Banner::new("HN AI Digest Demo")
             .description(

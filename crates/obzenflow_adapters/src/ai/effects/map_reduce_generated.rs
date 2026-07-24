@@ -21,6 +21,8 @@ use std::sync::Arc;
 pub const MAP_CHAT_COMPLETION_LABEL: &str = "ai_map_reduce.map.chat_completion";
 pub const FINALISE_CHAT_COMPLETION_LABEL: &str = "ai_map_reduce.finalise.chat_completion";
 
+type GeneratedFinaliseTypes<Seed, Collected, Out> = fn() -> (Seed, Collected, Out);
+
 pub struct GeneratedAiMapHandler<Item, Partial, Role> {
     role: Arc<Role>,
     chat_target: ChatTarget,
@@ -72,7 +74,7 @@ pub struct GeneratedAiFinaliseHandler<Seed, Collected, Out, Role> {
     role: Arc<Role>,
     chat_target: ChatTarget,
     chat_estimator: ResolvedTokenEstimator,
-    _types: std::marker::PhantomData<fn() -> (Seed, Collected, Out)>,
+    _types: std::marker::PhantomData<GeneratedFinaliseTypes<Seed, Collected, Out>>,
 }
 
 impl<Seed, Collected, Out, Role> Clone for GeneratedAiFinaliseHandler<Seed, Collected, Out, Role> {
@@ -333,9 +335,13 @@ where
                 error.to_string(),
             )
         })?;
-    fx.__generated_request_live_admission()
-        .await
-        .map_err(fatal_from_effect)
+    if fx.is_replaying() {
+        Ok(())
+    } else {
+        fx.__generated_request_live_admission()
+            .await
+            .map_err(fatal_from_effect)
+    }
 }
 
 fn target_assertion_failure(expected: &ChatTarget, observed: &ChatTarget) -> HandlerError {
@@ -567,7 +573,36 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::ai::CanonicalizationComponent;
     use obzenflow_runtime::effects::{EffectAttemptOrdinal, EffectCursor};
+
+    #[test]
+    fn canonicalization_components_map_one_to_one_into_domain_failures() {
+        for component in [
+            CanonicalizationComponent::Prompt,
+            CanonicalizationComponent::Parameters,
+            CanonicalizationComponent::ResponseSchema,
+        ] {
+            let mapped = request_canonicalization_failure(
+                ChatCompletionBuildError::RequestCanonicalization {
+                    component,
+                    detail: format!("{component:?} fixture"),
+                },
+            );
+            assert_eq!(
+                mapped,
+                AiMapReduceRoleFailure::RequestCanonicalization {
+                    component,
+                    message: format!("{component:?} fixture"),
+                }
+            );
+            assert_eq!(
+                serde_json::to_value(&mapped).expect("canonicalisation domain failure serialises")
+                    ["component"],
+                serde_json::to_value(component).expect("component serialises")
+            );
+        }
+    }
 
     #[test]
     fn strict_in_doubt_history_maps_to_typed_replay_fatal() {

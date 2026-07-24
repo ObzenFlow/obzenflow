@@ -701,6 +701,5 @@ mod tests {
         assert!(declaration.supports(MiddlewareSurfaceKind::SourcePoll));
         assert!(declaration.supports(MiddlewareSurfaceKind::SinkDelivery));
         assert!(!declaration.supports(MiddlewareSurfaceKind::Effect));
-        assert!(!declaration.is_flowip_128g_legacy_shell());
     }
 }

@@ -1135,6 +1135,93 @@ mod direct_fact_tests {
         )
     }
 
+    fn mixed_writer(
+        enforced_window: u64,
+    ) -> (
+        BackpressureWriter,
+        BackpressureReader,
+        BackpressureReader,
+        Arc<StageState>,
+    ) {
+        let upstream = StageId::new();
+        let enforced_downstream = StageId::new();
+        let tracked_downstream = StageId::new();
+        let credit_waker = CreditWaker::new();
+        let enforced = Arc::new(EdgeState {
+            upstream,
+            downstream: enforced_downstream,
+            window: enforced_window,
+            stall_timeout: Duration::from_secs(1),
+            reader_seq: AtomicU64::new(0),
+            upstream_waker: credit_waker.clone(),
+        });
+        let tracked = Arc::new(EdgeState {
+            upstream,
+            downstream: tracked_downstream,
+            window: u64::MAX,
+            stall_timeout: Duration::MAX,
+            reader_seq: AtomicU64::new(0),
+            upstream_waker: credit_waker.clone(),
+        });
+        let state = Arc::new(StageState {
+            effective_writer: AtomicU64::new(0),
+            writer_seq: AtomicU64::new(0),
+            reserved: AtomicU64::new(0),
+            wait_nanos_total: AtomicU64::new(0),
+            credit_waker,
+            downstream_edges: vec![enforced.clone(), tracked.clone()],
+        });
+        (
+            BackpressureWriter {
+                state: Some(state.clone()),
+                direct_fact_admission: None,
+            },
+            BackpressureReader {
+                state: Some(enforced),
+            },
+            BackpressureReader {
+                state: Some(tracked),
+            },
+            state,
+        )
+    }
+
+    async fn run_generated_role_after_admission(
+        admission: DirectFactAdmission,
+        effect_ordinals: Arc<AtomicU64>,
+        chat_invocations: Arc<AtomicU64>,
+    ) {
+        admission
+            .request_live()
+            .await
+            .expect("fixture admission is granted");
+        effect_ordinals.fetch_add(1, Ordering::AcqRel);
+        chat_invocations.fetch_add(1, Ordering::AcqRel);
+        for _ in 0..3 {
+            admission
+                .claim(1)
+                .expect("admitted role has a claim capability")
+                .expect("generated live rows are accounted")
+                .commit()
+                .expect("generated row settles");
+        }
+        assert_eq!(
+            admission.close().expect("generated lease closes"),
+            3,
+            "Start, effect terminal, and generated terminal consume the branch bound"
+        );
+    }
+
+    async fn wait_for_direct_fact_request(admission: &DirectFactAdmission) {
+        for _ in 0..32 {
+            if admission.is_requested() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("generated role did not publish its live admission request");
+    }
+
     #[test]
     fn partial_claims_conserve_one_whole_continuation_reservation() {
         let (writer, _reader, state) = enforced_writer(3);
@@ -1200,6 +1287,166 @@ mod direct_fact_tests {
                 .is_some(),
             "acknowledging the committed row restores the full window"
         );
+    }
+
+    #[test]
+    fn track_and_off_modes_keep_the_local_three_row_bound_without_blocking() {
+        let (track_writer, _reader, track_state) = enforced_writer(u64::MAX);
+        assert!(track_writer.has_tracked_edges());
+        assert!(!track_writer.has_enforced_edges());
+        let track = DirectFactLease::try_acquire(&track_writer, NonZeroU64::new(3).expect("bound"))
+            .expect("track admission calculation succeeds")
+            .expect("track mode never blocks");
+        track
+            .claim(1)
+            .expect("first track row fits")
+            .commit()
+            .expect("first track row commits");
+        assert_eq!(track_state.effective_writer.load(Ordering::Acquire), 3);
+        assert_eq!(track_state.writer_seq.load(Ordering::Acquire), 1);
+        assert!(
+            track.claim(3).is_err(),
+            "track mode still enforces the local bound"
+        );
+        assert_eq!(track.close().expect("track lease closes"), 1);
+        assert_eq!(
+            track_state.effective_writer.load(Ordering::Acquire),
+            1,
+            "closing transfers the durable row to writer_seq and releases the unused tail"
+        );
+        assert_eq!(track_state.reserved.load(Ordering::Acquire), 0);
+
+        let off_writer = BackpressureWriter::disabled();
+        let off = DirectFactLease::try_acquire(&off_writer, NonZeroU64::new(3).expect("bound"))
+            .expect("off admission calculation succeeds")
+            .expect("off mode uses a local lease");
+        off.claim(3)
+            .expect("three off-mode rows fit")
+            .commit()
+            .expect("off-mode rows commit");
+        assert!(off.claim(1).is_err(), "off mode rejects a fourth row");
+        assert_eq!(off.close().expect("off lease closes"), 3);
+        assert!(
+            off_writer.state.is_none(),
+            "off mode leaves the physical registry untouched"
+        );
+    }
+
+    #[test]
+    fn mixed_enforce_track_fanout_gates_only_on_the_enforced_reader() {
+        let (writer, enforced_reader, tracked_reader, state) = mixed_writer(3);
+        let occupied = writer
+            .reserve_strict(1)
+            .expect("one initial row fits the enforced window");
+        occupied.commit(1);
+        assert_eq!(state.writer_seq.load(Ordering::Acquire), 1);
+        assert!(
+            DirectFactLease::try_acquire(&writer, NonZeroU64::new(3).expect("bound"))
+                .expect("mixed admission calculation succeeds")
+                .is_none(),
+            "the enforced edge has only two credits even though track has no finite gate"
+        );
+
+        enforced_reader.ack_consumed(1);
+        let lease = DirectFactLease::try_acquire(&writer, NonZeroU64::new(3).expect("bound"))
+            .expect("mixed admission calculation succeeds")
+            .expect("restoring the enforced reader grants the whole continuation");
+        assert_eq!(
+            state.effective_writer.load(Ordering::Acquire),
+            4,
+            "one writer reservation advances both physical fan-out views once"
+        );
+        assert_eq!(
+            enforced_reader
+                .state
+                .as_ref()
+                .expect("enforced edge")
+                .reader_seq
+                .load(Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            tracked_reader
+                .state
+                .as_ref()
+                .expect("tracked edge")
+                .reader_seq
+                .load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(lease.close().expect("unused mixed lease closes"), 0);
+        assert_eq!(state.effective_writer.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn frozen_collectors_fence_map_and_finalise_at_exactly_three_rows() {
+        for role in ["map", "finalise"] {
+            let (writer, reader, state) = enforced_writer(3);
+            let effect_ordinals = Arc::new(AtomicU64::new(0));
+            let chat_invocations = Arc::new(AtomicU64::new(0));
+
+            let first = DirectFactAdmission::new(
+                EventType::from(format!("test.ai_map_reduce.{role}.input")),
+                NonZeroU64::new(3).expect("non-zero generated bound"),
+            );
+            let first_task = tokio::spawn(run_generated_role_after_admission(
+                first.clone(),
+                effect_ordinals.clone(),
+                chat_invocations.clone(),
+            ));
+            wait_for_direct_fact_request(&first).await;
+            let first_lease = DirectFactLease::try_acquire(
+                &writer,
+                NonZeroU64::new(3).expect("non-zero generated bound"),
+            )
+            .expect("first admission calculation succeeds")
+            .expect("the first branch has all three credits");
+            first.grant(first_lease).expect("first lease grant");
+            first_task.await.expect("first generated role joins");
+
+            assert_eq!(effect_ordinals.load(Ordering::Acquire), 1, "{role}");
+            assert_eq!(chat_invocations.load(Ordering::Acquire), 1, "{role}");
+            assert_eq!(state.writer_seq.load(Ordering::Acquire), 3, "{role}");
+            assert_eq!(state.effective_writer.load(Ordering::Acquire), 3, "{role}");
+
+            let next = DirectFactAdmission::new(
+                EventType::from(format!("test.ai_map_reduce.{role}.input")),
+                NonZeroU64::new(3).expect("non-zero generated bound"),
+            );
+            let next_task = tokio::spawn(run_generated_role_after_admission(
+                next.clone(),
+                effect_ordinals.clone(),
+                chat_invocations.clone(),
+            ));
+            wait_for_direct_fact_request(&next).await;
+            assert!(
+                DirectFactLease::try_acquire(
+                    &writer,
+                    NonZeroU64::new(3).expect("non-zero generated bound"),
+                )
+                .expect("blocked admission calculation succeeds")
+                .is_none(),
+                "{role} must park while the collector holds all three physical rows"
+            );
+            assert_eq!(effect_ordinals.load(Ordering::Acquire), 1, "{role}");
+            assert_eq!(chat_invocations.load(Ordering::Acquire), 1, "{role}");
+            assert_eq!(state.effective_writer.load(Ordering::Acquire), 3, "{role}");
+
+            reader.ack_consumed(3);
+            let next_lease = DirectFactLease::try_acquire(
+                &writer,
+                NonZeroU64::new(3).expect("non-zero generated bound"),
+            )
+            .expect("restored admission calculation succeeds")
+            .expect("all three credits return together");
+            next.grant(next_lease).expect("next lease grant");
+            next_task.await.expect("next generated role joins");
+
+            assert_eq!(effect_ordinals.load(Ordering::Acquire), 2, "{role}");
+            assert_eq!(chat_invocations.load(Ordering::Acquire), 2, "{role}");
+            assert_eq!(state.writer_seq.load(Ordering::Acquire), 6, "{role}");
+            assert_eq!(state.effective_writer.load(Ordering::Acquire), 6, "{role}");
+        }
     }
 
     #[test]

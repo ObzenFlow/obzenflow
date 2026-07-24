@@ -153,17 +153,30 @@ pub(crate) async fn drain_one_pending(
 /// This deliberately shares the ordinary output stall anchor, diagnostics,
 /// activity pulse, and control-responsiveness bound. The caller retains the
 /// frozen input and re-enters supervisor dispatch after `None`.
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct DirectFactLeaseRequest<'a> {
+    pub writer: &'a BackpressureWriter,
+    pub bound: std::num::NonZeroU64,
+    pub stage_id: StageId,
+    pub flow_context: &'a FlowContext,
+    pub data_journal: &'a Arc<dyn Journal<ChainEvent>>,
+    pub instrumentation: &'a Arc<StageInstrumentation>,
+    pub backpressure_pulse: &'a mut BackpressureActivityPulse,
+    pub backpressure_stall: &'a mut Option<tokio::time::Instant>,
+}
+
 pub(crate) async fn acquire_direct_fact_lease(
-    writer: &BackpressureWriter,
-    bound: std::num::NonZeroU64,
-    stage_id: StageId,
-    flow_context: &FlowContext,
-    data_journal: &Arc<dyn Journal<ChainEvent>>,
-    instrumentation: &Arc<StageInstrumentation>,
-    backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_stall: &mut Option<tokio::time::Instant>,
+    request: DirectFactLeaseRequest<'_>,
 ) -> Result<Option<DirectFactLease>, Box<dyn std::error::Error + Send + Sync>> {
+    let DirectFactLeaseRequest {
+        writer,
+        bound,
+        stage_id,
+        flow_context,
+        data_journal,
+        instrumentation,
+        backpressure_pulse,
+        backpressure_stall,
+    } = request;
     match DirectFactLease::try_acquire(writer, bound) {
         Ok(Some(lease)) => {
             *backpressure_stall = None;

@@ -15,8 +15,8 @@
 pub mod ai_map_reduce;
 
 use crate::dsl::composition::{
-    CompositeBuildContext, CompositeExpansion, FlowMember, PortResolveError, ResolvedBoundary,
-    ResolvedInternalFeed, ResolvedPort,
+    CompositeBuildContext, CompositeBuildError, CompositeExpansion, FlowMember, PortResolveError,
+    ResolvedBoundary, ResolvedInternalFeed, ResolvedPort,
 };
 use crate::dsl::stage_descriptor::StageDescriptor;
 use crate::dsl::typing::TypeHint;
@@ -132,7 +132,7 @@ pub fn lower_composites(
         let mut ctx = CompositeBuildContext::new(kind);
         descriptor
             .expand(&mut ctx)
-            .map_err(|err| build_error(err.to_string()))?;
+            .map_err(CompositeBuildError::into_flow_build_error)?;
         let expansion = ctx
             .finish(&binding, schema_version)
             .map_err(|err| build_error(err.to_string()))?;

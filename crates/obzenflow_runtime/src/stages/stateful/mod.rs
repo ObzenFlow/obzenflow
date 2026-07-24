@@ -66,8 +66,9 @@ pub use handle::{StatefulHandle, StatefulHandleExt};
 pub use strategies::accumulators::{Accumulator, Conflate, GroupBy, Reduce, StatefulWithEmission};
 pub use strategies::emissions::{EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow};
 
-// FLOWIP-086z-part-2: AI map-reduce keyed collector
-pub use ai_map_reduce::{CollectByInput, SeededCollectByInput};
+// FLOWIP-128g: sealed seeded AI map-reduce collector
+#[doc(hidden)]
+pub use ai_map_reduce::SeededCollectByInput;
 
 // Re-export control strategies for convenience
 pub use crate::stages::common::control_strategies::{
