@@ -20,17 +20,23 @@
 //! validate_edge_typing); it does not drive the runtime.
 
 use async_trait::async_trait;
+use obzenflow_core::ai::{
+    AiClientError, AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatClient,
+    ChatCompletionCompleted, ChatMessage, ChatParams, ChatRequest, ChatResponse, ChatTarget,
+    HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenCount,
+    TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
+};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{id::StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source};
 use obzenflow_infra::journal::memory_journals;
+use obzenflow_runtime::effects::EffectPortRegistry;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     AsyncTransformHandler, FiniteSourceHandler, SinkHandler, TransformHandler,
 };
-use obzenflow_runtime::stages::stateful::CollectByInput;
 use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -45,6 +51,11 @@ struct BuildOnlySeed {
 }
 impl TypedPayload for BuildOnlySeed {
     const EVENT_TYPE: &'static str = "regression.amr.seed";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BuildOnlyItem {
+    value: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -79,6 +90,168 @@ struct BuildOnlyOut {
 }
 impl TypedPayload for BuildOnlyOut {
     const EVENT_TYPE: &'static str = "regression.amr.out";
+}
+
+fn test_target() -> ChatTarget {
+    ChatTarget::new("test", "deterministic")
+}
+
+fn test_estimator() -> ResolvedTokenEstimator {
+    ResolvedTokenEstimator::new(
+        Arc::new(HeuristicTokenEstimator::default()),
+        TokenEstimatorResolutionInfo::heuristic(
+            "deterministic",
+            TokenEstimatorFallbackReason::ExplicitHeuristic,
+            None,
+        ),
+    )
+}
+
+struct BuildMapRole {
+    target: ChatTarget,
+}
+
+impl AiMapRole<BuildOnlyItem, BuildOnlyPartial> for BuildMapRole {
+    type Prepared = ();
+
+    fn prepare(
+        &self,
+        items: &[BuildOnlyItem],
+        _chunk: &obzenflow_core::ai::ChunkInfo,
+    ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure> {
+        Ok((
+            ChatRequest {
+                provider: self.target.provider.clone(),
+                model: self.target.model.clone(),
+                messages: vec![ChatMessage::user(format!("{} items", items.len()))],
+                params: ChatParams::default(),
+                tools: Vec::new(),
+                response_format: None,
+            },
+            (),
+        ))
+    }
+
+    fn interpret(
+        &self,
+        items: Vec<BuildOnlyItem>,
+        _prepared: Self::Prepared,
+        _completion: ChatCompletionCompleted,
+    ) -> Result<BuildOnlyPartial, AiRoleLogicFailure> {
+        Ok(BuildOnlyPartial {
+            value: items.into_iter().map(|item| item.value).sum(),
+        })
+    }
+}
+
+struct BuildFinaliseRole {
+    target: ChatTarget,
+}
+
+impl AiFinaliseRole<BuildOnlySeed, Many<BuildOnlyPartial>, BuildOnlyOut> for BuildFinaliseRole {
+    type Prepared = ();
+
+    fn prepare(
+        &self,
+        _seed: &BuildOnlySeed,
+        collected: &Many<BuildOnlyPartial>,
+    ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure> {
+        Ok((
+            ChatRequest {
+                provider: self.target.provider.clone(),
+                model: self.target.model.clone(),
+                messages: vec![ChatMessage::user(format!(
+                    "{} partials",
+                    collected.items.len()
+                ))],
+                params: ChatParams::default(),
+                tools: Vec::new(),
+                response_format: None,
+            },
+            (),
+        ))
+    }
+
+    fn interpret(
+        &self,
+        _seed: BuildOnlySeed,
+        collected: Many<BuildOnlyPartial>,
+        _prepared: Self::Prepared,
+        _completion: ChatCompletionCompleted,
+    ) -> Result<BuildOnlyOut, AiRoleLogicFailure> {
+        Ok(BuildOnlyOut {
+            total: collected
+                .items
+                .into_iter()
+                .map(|partial| partial.value)
+                .sum(),
+        })
+    }
+}
+
+struct DeterministicChatClient {
+    target: ChatTarget,
+}
+
+#[async_trait]
+impl ChatClient for DeterministicChatClient {
+    fn target(&self) -> &ChatTarget {
+        &self.target
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, AiClientError> {
+        Ok(ChatResponse {
+            text: "ok".to_string(),
+            tool_calls: Vec::new(),
+            usage: None,
+            raw: None,
+        })
+    }
+}
+
+fn test_effect_ports() -> EffectPortRegistry {
+    let client: Arc<dyn ChatClient> = Arc::new(DeterministicChatClient {
+        target: test_target(),
+    });
+    EffectPortRegistry::new()
+        .with_port::<dyn ChatClient>("chat", client)
+        .expect("one deterministic chat port")
+}
+
+macro_rules! generated_digest {
+    () => {{
+        let target = test_target();
+        let estimator = test_estimator();
+        ai_map_reduce!(
+            BuildOnlySeed -> BuildOnlyOut => {
+                map: [BuildOnlyItem] -> BuildOnlyPartial => BuildMapRole {
+                    target: target.clone(),
+                },
+                reduce: (BuildOnlySeed, [BuildOnlyPartial]) -> BuildOnlyOut
+                    => BuildFinaliseRole {
+                        target: target.clone(),
+                    },
+            },
+            chunking: by_budget {
+                estimator: estimator.estimator(),
+                items: |seed: &BuildOnlySeed| {
+                    (1..=seed.n)
+                        .map(|value| BuildOnlyItem { value })
+                        .collect::<Vec<_>>()
+                },
+                render: |item: &BuildOnlyItem, _ctx| item.value.to_string(),
+                budget: TokenCount::new(100),
+                max_items: Some(1),
+                oversize: error,
+            },
+            effects: {
+                chat_target: target,
+                chat_estimator: estimator,
+                map: [at_least_once(ChatCompletion) with []],
+                reduce: [at_least_once(ChatCompletion) with []],
+            }
+        )
+    }};
 }
 
 // ── Stub handlers (build-only; never invoked under this test's run path) ──
@@ -224,7 +397,7 @@ impl FiniteSourceHandler for OneSeedSource {
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
             BuildOnlySeed::versioned_event_type(),
-            json!(BuildOnlySeed { n: 2 }),
+            json!(BuildOnlySeed { n: 5 }),
         )]))
     }
 }
@@ -330,20 +503,11 @@ async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
         name: "amr_build_only",
         journals: memory_journals(),
         middleware: [],
+        effect_ports: test_effect_ports(),
 
         stages: {
             seed = source!(BuildOnlySeed => NoEventSource);
-            digest = ai_map_reduce!(
-                chunk: BuildOnlySeed -> BuildOnlyChunk => NoopChunker,
-                map: BuildOnlyChunk -> BuildOnlyPartial => NoopMap,
-                collect: BuildOnlyPartial -> BuildOnlyCollected => CollectByInput::new(
-                    BuildOnlyCollected::default(),
-                    |acc: &mut BuildOnlyCollected, partial: &BuildOnlyPartial| {
-                        acc.values.push(partial.value);
-                    },
-                ),
-                reduce: BuildOnlyCollected -> BuildOnlyOut => NoopFinalize,
-            );
+            digest = generated_digest!();
             sink_stage = sink!(BuildOnlyOut => NoopSink);
         },
 
@@ -373,20 +537,11 @@ async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
         name: "amr_boundary_payload_contract",
         journals: memory_journals(),
         middleware: [],
+        effect_ports: test_effect_ports(),
 
         stages: {
             seed = source!(BuildOnlySeed => NoEventSource);
-            digest = ai_map_reduce!(
-                chunk: BuildOnlySeed -> BuildOnlyChunk => NoopChunker,
-                map: BuildOnlyChunk -> BuildOnlyPartial => NoopMap,
-                collect: BuildOnlyPartial -> BuildOnlyCollected => CollectByInput::new(
-                    BuildOnlyCollected::default(),
-                    |acc: &mut BuildOnlyCollected, partial: &BuildOnlyPartial| {
-                        acc.values.push(partial.value);
-                    },
-                ),
-                reduce: BuildOnlyCollected -> BuildOnlyOut => NoopFinalize,
-            );
+            digest = generated_digest!();
             sink_stage = sink!(BuildOnlyOut => NoopSink);
         },
 
@@ -442,22 +597,13 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
         name: "amr_runtime_internal_contracts",
         journals: memory_journals(),
         middleware: [],
-        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(2)
+        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
             .stall_timeout_ms(3_000),
+        effect_ports: test_effect_ports(),
 
         stages: {
             seed = source!(BuildOnlySeed => OneSeedSource::new());
-            digest = ai_map_reduce!(
-                chunk: BuildOnlySeed -> BuildOnlyChunk => RuntimeChunker,
-                map: BuildOnlyChunk -> BuildOnlyPartial => RuntimeMap,
-                collect: BuildOnlyPartial -> BuildOnlyCollected => CollectByInput::new(
-                    BuildOnlyCollected::default(),
-                    |acc: &mut BuildOnlyCollected, partial: &BuildOnlyPartial| {
-                        acc.values.push(partial.value);
-                    },
-                ),
-                reduce: BuildOnlyCollected -> BuildOnlyOut => RuntimeFinalize,
-            );
+            digest = generated_digest!();
             sink_stage = sink!(BuildOnlyOut => sink_handler);
         },
 
@@ -550,20 +696,11 @@ async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
         name: "amr_boundary_mismatch",
         journals: memory_journals(),
         middleware: [],
+        effect_ports: test_effect_ports(),
 
         stages: {
             seed = source!(BuildOnlySeed => NoEventSource);
-            digest = ai_map_reduce!(
-                chunk: BuildOnlySeed -> BuildOnlyChunk => NoopChunker,
-                map: BuildOnlyChunk -> BuildOnlyPartial => NoopMap,
-                collect: BuildOnlyPartial -> BuildOnlyCollected => CollectByInput::new(
-                    BuildOnlyCollected::default(),
-                    |acc: &mut BuildOnlyCollected, partial: &BuildOnlyPartial| {
-                        acc.values.push(partial.value);
-                    },
-                ),
-                reduce: BuildOnlyCollected -> BuildOnlyOut => NoopFinalize,
-            );
+            digest = generated_digest!();
             // Wrong type: no output port carries BuildOnlySeed, so the edge
             // binds the default `out` port and must fail edge typing there.
             sink_stage = sink!(BuildOnlySeed => NoopSink);
@@ -658,20 +795,11 @@ async fn join_reference_resolves_through_composite_boundary_port() {
         name: "amr_join_reference",
         journals: memory_journals(),
         middleware: [],
+        effect_ports: test_effect_ports(),
 
         stages: {
             seed = source!(BuildOnlySeed => NoEventSource);
-            digest = ai_map_reduce!(
-                chunk: BuildOnlySeed -> BuildOnlyChunk => NoopChunker,
-                map: BuildOnlyChunk -> BuildOnlyPartial => NoopMap,
-                collect: BuildOnlyPartial -> BuildOnlyCollected => CollectByInput::new(
-                    BuildOnlyCollected::default(),
-                    |acc: &mut BuildOnlyCollected, partial: &BuildOnlyPartial| {
-                        acc.values.push(partial.value);
-                    },
-                ),
-                reduce: BuildOnlyCollected -> BuildOnlyOut => NoopFinalize,
-            );
+            digest = generated_digest!();
             stream_src = source!(JoinStreamP => NoStreamSource);
             enrich = join!(catalog digest: BuildOnlyOut, JoinStreamP -> JoinedP => LocalNoopJoin);
             joined_sink = sink!(JoinedP => NoopSink);

@@ -1,0 +1,13 @@
+# The generated map and finalise roles each reserve their complete three-row
+# direct-fact bound before starting a live chat continuation.
+[runtime.backpressure.flow]
+mode = "enforce"
+window = 3
+stall_timeout_ms = 30000
+
+# One immutable target supplies the descriptor, estimator, role requests, and
+# deferred chat client. Secrets are read only when a live effect first executes.
+[ai.models]
+provider = "ollama"
+model = "llama3.1:8b"
+

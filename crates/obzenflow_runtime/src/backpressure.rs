@@ -13,11 +13,14 @@
 
 use crate::id_conversions::StageIdExt;
 use crate::stages::common::control_strategies::CreditWaker;
+use futures::task::AtomicWaker;
+use obzenflow_core::EventType;
 use obzenflow_core::StageId;
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -283,6 +286,7 @@ impl BackpressureRegistry {
     pub fn writer(&self, stage_id: StageId) -> BackpressureWriter {
         BackpressureWriter {
             state: self.stages.get(&stage_id).cloned(),
+            direct_fact_admission: None,
         }
     }
 
@@ -307,17 +311,81 @@ impl BackpressureRegistry {
 #[derive(Clone, Debug)]
 pub struct BackpressureWriter {
     state: Option<Arc<StageState>>,
+    direct_fact_admission: Option<DirectFactAdmission>,
 }
 
 impl BackpressureWriter {
     pub fn disabled() -> Self {
-        Self { state: None }
+        Self {
+            state: None,
+            direct_fact_admission: None,
+        }
+    }
+
+    pub(crate) fn with_direct_fact_admission(mut self, admission: DirectFactAdmission) -> Self {
+        self.direct_fact_admission = Some(admission);
+        self
+    }
+
+    pub(crate) fn direct_fact_admission(&self) -> Option<&DirectFactAdmission> {
+        self.direct_fact_admission.as_ref()
     }
 
     pub fn is_enabled(&self) -> bool {
         self.state
             .as_ref()
             .is_some_and(|s| !s.downstream_edges.is_empty())
+    }
+
+    pub(crate) fn has_enforced_edges(&self) -> bool {
+        self.state.as_ref().is_some_and(|state| {
+            state
+                .downstream_edges
+                .iter()
+                .any(|edge| edge.window != u64::MAX)
+        })
+    }
+
+    pub(crate) fn has_tracked_edges(&self) -> bool {
+        self.state.as_ref().is_some_and(|state| {
+            state
+                .downstream_edges
+                .iter()
+                .any(|edge| edge.window == u64::MAX)
+        })
+    }
+
+    /// Validate a generated descriptor's whole-continuation row bound against
+    /// every participating enforced physical edge.
+    #[doc(hidden)]
+    pub fn validate_generated_direct_bound(&self, bound: NonZeroU64) -> Result<(), String> {
+        let Some(state) = &self.state else {
+            return Ok(());
+        };
+        let enforced = state
+            .downstream_edges
+            .iter()
+            .filter(|edge| edge.window != u64::MAX)
+            .collect::<Vec<_>>();
+        if enforced.is_empty() {
+            return Ok(());
+        }
+        if Self::is_bypass_enabled() {
+            return Err(format!(
+                "generated role requires enforced direct admission for {} physical Data rows, \
+                 but OBZENFLOW_BACKPRESSURE_DISABLED is set; unset it or configure the edge \
+                 explicitly as track/off",
+                bound
+            ));
+        }
+        if let Some(edge) = enforced.iter().find(|edge| edge.window < bound.get()) {
+            return Err(format!(
+                "generated role requires {} live physical Data credits; edge to stage '{}' \
+                 resolved enforced window {}; set runtime.backpressure.window to at least {}",
+                bound, edge.downstream, edge.window, bound
+            ));
+        }
+        Ok(())
     }
 
     pub fn min_downstream_credit(&self) -> u64 {
@@ -442,22 +510,31 @@ impl BackpressureWriter {
         state.reserved.fetch_add(n, Ordering::AcqRel);
         BackpressureReservation {
             state: Some(state.clone()),
-            reserved: n,
+            remaining: n,
             committed_or_released: false,
         }
     }
 
     pub fn reserve(&self, n: u64) -> Option<BackpressureReservation> {
+        if bypass_enabled() {
+            return Some(self.reserve_tracked(n));
+        }
+        self.reserve_strict(n)
+    }
+
+    /// Enforced reservation that never honours the global debug bypass.
+    ///
+    /// Generated bounded continuations use this entry point after
+    /// materialisation has selected enforce mode. A debug environment toggle
+    /// must not silently turn that finite-window claim into track-only
+    /// accounting.
+    pub(crate) fn reserve_strict(&self, n: u64) -> Option<BackpressureReservation> {
         let Some(state) = &self.state else {
             return Some(BackpressureReservation::noop());
         };
 
         if state.downstream_edges.is_empty() {
             return Some(BackpressureReservation::noop());
-        }
-
-        if bypass_enabled() {
-            return Some(self.reserve_tracked(n));
         }
 
         loop {
@@ -495,7 +572,7 @@ impl BackpressureWriter {
                 state.reserved.fetch_add(n, Ordering::AcqRel);
                 return Some(BackpressureReservation {
                     state: Some(state.clone()),
-                    reserved: n,
+                    remaining: n,
                     committed_or_released: false,
                 });
             }
@@ -524,7 +601,7 @@ pub struct LimitingEdgeDetail {
 #[derive(Debug)]
 pub struct BackpressureReservation {
     state: Option<Arc<StageState>>,
-    reserved: u64,
+    remaining: u64,
     committed_or_released: bool,
 }
 
@@ -533,9 +610,28 @@ impl BackpressureReservation {
     fn noop() -> Self {
         Self {
             state: None,
-            reserved: 0,
+            remaining: 0,
             committed_or_released: true,
         }
+    }
+
+    /// Settle a durable subset of an existing reservation without releasing
+    /// the remaining capacity.
+    pub(crate) fn commit_partial(&mut self, used: u64) -> Result<(), &'static str> {
+        if self.committed_or_released || used > self.remaining {
+            return Err("backpressure reservation over-commit");
+        }
+        let Some(state) = &self.state else {
+            if used != 0 {
+                return Err("no-op backpressure reservation cannot commit physical rows");
+            }
+            return Ok(());
+        };
+
+        state.writer_seq.fetch_add(used, Ordering::AcqRel);
+        state.reserved.fetch_sub(used, Ordering::AcqRel);
+        self.remaining -= used;
+        Ok(())
     }
 
     pub fn commit(mut self, used: u64) {
@@ -544,15 +640,16 @@ impl BackpressureReservation {
             return;
         };
 
-        let used = used.min(self.reserved);
+        let used = used.min(self.remaining);
 
         // `effective_writer` already includes the reservation. A commit keeps
         // its used rows admitted and removes only the unused remainder.
         state.writer_seq.fetch_add(used, Ordering::AcqRel);
-        state.reserved.fetch_sub(self.reserved, Ordering::AcqRel);
+        state.reserved.fetch_sub(self.remaining, Ordering::AcqRel);
         state
             .effective_writer
-            .fetch_sub(self.reserved - used, Ordering::AcqRel);
+            .fetch_sub(self.remaining.saturating_sub(used), Ordering::AcqRel);
+        self.remaining = 0;
 
         self.committed_or_released = true;
     }
@@ -563,10 +660,11 @@ impl BackpressureReservation {
             return;
         };
 
-        state.reserved.fetch_sub(self.reserved, Ordering::AcqRel);
+        state.reserved.fetch_sub(self.remaining, Ordering::AcqRel);
         state
             .effective_writer
-            .fetch_sub(self.reserved, Ordering::AcqRel);
+            .fetch_sub(self.remaining, Ordering::AcqRel);
+        self.remaining = 0;
         self.committed_or_released = true;
     }
 }
@@ -579,11 +677,363 @@ impl Drop for BackpressureReservation {
         let Some(state) = &self.state else {
             return;
         };
-        state.reserved.fetch_sub(self.reserved, Ordering::AcqRel);
+        state.reserved.fetch_sub(self.remaining, Ordering::AcqRel);
         state
             .effective_writer
-            .fetch_sub(self.reserved, Ordering::AcqRel);
+            .fetch_sub(self.remaining, Ordering::AcqRel);
+        self.remaining = 0;
         self.committed_or_released = true;
+    }
+}
+
+/// Supervisor-owned affine capacity for one descriptor-bounded direct-fact
+/// continuation.
+///
+/// The lease itself is not cloneable. Internal commit claims share its private
+/// state so `OutputCommitter` can settle durable subsets while supervision
+/// retains authority to release the unused tail.
+#[derive(Debug)]
+pub(crate) struct DirectFactLease {
+    state: Arc<Mutex<DirectFactLeaseState>>,
+}
+
+#[derive(Debug)]
+struct DirectFactLeaseState {
+    reservation: Option<BackpressureReservation>,
+    remaining: u64,
+    in_flight: u64,
+    committed: u64,
+    closed: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct DirectFactClaim {
+    state: Arc<Mutex<DirectFactLeaseState>>,
+    rows: u64,
+    accounting: DirectFactClaimAccounting,
+    settled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectFactClaimAccounting {
+    LiveReservation,
+    ReconstructionTrack,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DirectFactAdmission {
+    inner: Arc<DirectFactAdmissionInner>,
+}
+
+#[derive(Debug)]
+struct DirectFactAdmissionInner {
+    event_type: EventType,
+    bound: NonZeroU64,
+    slot: Mutex<DirectFactAdmissionSlot>,
+    waker: AtomicWaker,
+}
+
+#[derive(Debug)]
+enum DirectFactAdmissionSlot {
+    ReconstructionTrack(DirectFactLease),
+    Requested {
+        reconstructed_committed: u64,
+    },
+    LiveLeased {
+        lease: DirectFactLease,
+        reconstructed_committed: u64,
+    },
+    Closed,
+}
+
+impl DirectFactLease {
+    fn reconstruction_track() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(DirectFactLeaseState {
+                reservation: None,
+                remaining: u64::MAX,
+                in_flight: 0,
+                committed: 0,
+                closed: false,
+            })),
+        }
+    }
+
+    pub(crate) fn try_acquire(
+        writer: &BackpressureWriter,
+        bound: NonZeroU64,
+    ) -> Result<Option<Self>, String> {
+        let rows = bound.get();
+        let reservation = if writer.has_enforced_edges() {
+            if BackpressureWriter::is_bypass_enabled() {
+                return Err(
+                    "generated direct-fact admission requires enforce mode, but \
+                     OBZENFLOW_BACKPRESSURE_DISABLED is set"
+                        .to_string(),
+                );
+            }
+            let Some(reservation) = writer.reserve_strict(rows) else {
+                return Ok(None);
+            };
+            Some(reservation)
+        } else if writer.has_tracked_edges() {
+            Some(writer.reserve_tracked(rows))
+        } else {
+            None
+        };
+        Ok(Some(Self {
+            state: Arc::new(Mutex::new(DirectFactLeaseState {
+                reservation,
+                remaining: rows,
+                in_flight: 0,
+                committed: 0,
+                closed: false,
+            })),
+        }))
+    }
+
+    pub(crate) fn claim(&self, rows: u64) -> Result<DirectFactClaim, String> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.closed {
+            return Err("direct-fact lease is closed".to_string());
+        }
+        if rows > state.remaining {
+            return Err(format!(
+                "direct-fact lease over-claim: requested {rows}, remaining {}",
+                state.remaining
+            ));
+        }
+        state.remaining -= rows;
+        state.in_flight = state
+            .in_flight
+            .checked_add(rows)
+            .ok_or_else(|| "direct-fact in-flight row overflow".to_string())?;
+        drop(state);
+        Ok(DirectFactClaim {
+            state: self.state.clone(),
+            rows,
+            accounting: DirectFactClaimAccounting::LiveReservation,
+            settled: false,
+        })
+    }
+
+    pub(crate) fn close(self) -> Result<u64, String> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.closed {
+            return Err("direct-fact lease closed more than once".to_string());
+        }
+        if state.in_flight != 0 {
+            return Err(format!(
+                "direct-fact lease closed with {} rows still in flight",
+                state.in_flight
+            ));
+        }
+        state.closed = true;
+        state.remaining = 0;
+        let committed = state.committed;
+        let reservation = state.reservation.take();
+        drop(state);
+        drop(reservation);
+        Ok(committed)
+    }
+}
+
+impl DirectFactAdmission {
+    pub(crate) fn new(event_type: EventType, bound: NonZeroU64) -> Self {
+        Self {
+            inner: Arc::new(DirectFactAdmissionInner {
+                event_type,
+                bound,
+                slot: Mutex::new(DirectFactAdmissionSlot::ReconstructionTrack(
+                    DirectFactLease::reconstruction_track(),
+                )),
+                waker: AtomicWaker::new(),
+            }),
+        }
+    }
+
+    pub(crate) fn event_type(&self) -> &EventType {
+        &self.inner.event_type
+    }
+
+    pub(crate) fn bound(&self) -> NonZeroU64 {
+        self.inner.bound
+    }
+
+    pub(crate) fn is_requested(&self) -> bool {
+        matches!(
+            &*self
+                .inner
+                .slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            DirectFactAdmissionSlot::Requested { .. }
+        )
+    }
+
+    pub(crate) async fn request_live(&self) -> Result<(), String> {
+        futures::future::poll_fn(|cx| {
+            let mut slot = self
+                .inner
+                .slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match &*slot {
+                DirectFactAdmissionSlot::LiveLeased { .. } => std::task::Poll::Ready(Ok(())),
+                DirectFactAdmissionSlot::Closed => {
+                    std::task::Poll::Ready(Err("direct-fact admission is closed".to_string()))
+                }
+                DirectFactAdmissionSlot::Requested { .. } => {
+                    self.inner.waker.register(cx.waker());
+                    std::task::Poll::Pending
+                }
+                DirectFactAdmissionSlot::ReconstructionTrack(_) => {
+                    self.inner.waker.register(cx.waker());
+                    let previous = std::mem::replace(&mut *slot, DirectFactAdmissionSlot::Closed);
+                    let DirectFactAdmissionSlot::ReconstructionTrack(track) = previous else {
+                        unreachable!("slot was matched above")
+                    };
+                    match track.close() {
+                        Ok(reconstructed_committed) => {
+                            *slot = DirectFactAdmissionSlot::Requested {
+                                reconstructed_committed,
+                            };
+                            std::task::Poll::Pending
+                        }
+                        Err(error) => std::task::Poll::Ready(Err(error)),
+                    }
+                }
+            }
+        })
+        .await
+    }
+
+    pub(crate) fn grant(&self, lease: DirectFactLease) -> Result<(), String> {
+        let mut slot = self
+            .inner
+            .slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::mem::replace(&mut *slot, DirectFactAdmissionSlot::Closed);
+        let reconstructed_committed = match previous {
+            DirectFactAdmissionSlot::ReconstructionTrack(track) => track.close()?,
+            DirectFactAdmissionSlot::Requested {
+                reconstructed_committed,
+            } => reconstructed_committed,
+            DirectFactAdmissionSlot::LiveLeased { .. } | DirectFactAdmissionSlot::Closed => {
+                return Err("direct-fact admission grant is not single-use".to_string())
+            }
+        };
+        *slot = DirectFactAdmissionSlot::LiveLeased {
+            lease,
+            reconstructed_committed,
+        };
+        drop(slot);
+        self.inner.waker.wake();
+        Ok(())
+    }
+
+    pub(crate) fn claim(&self, rows: u64) -> Result<Option<DirectFactClaim>, String> {
+        let slot = self
+            .inner
+            .slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &*slot {
+            DirectFactAdmissionSlot::ReconstructionTrack(track) => {
+                let mut claim = track.claim(rows)?;
+                claim.accounting = DirectFactClaimAccounting::ReconstructionTrack;
+                Ok(Some(claim))
+            }
+            DirectFactAdmissionSlot::Requested { .. } => Err(
+                "direct-fact append attempted while live admission was still pending".to_string(),
+            ),
+            DirectFactAdmissionSlot::LiveLeased { lease, .. } => lease.claim(rows).map(Some),
+            DirectFactAdmissionSlot::Closed => {
+                Err("direct-fact append attempted after lease closure".to_string())
+            }
+        }
+    }
+
+    pub(crate) fn close(&self) -> Result<u64, String> {
+        let mut slot = self
+            .inner
+            .slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::mem::replace(&mut *slot, DirectFactAdmissionSlot::Closed);
+        drop(slot);
+        self.inner.waker.wake();
+        match previous {
+            DirectFactAdmissionSlot::LiveLeased {
+                lease,
+                reconstructed_committed,
+            } => lease
+                .close()?
+                .checked_add(reconstructed_committed)
+                .ok_or_else(|| "direct-fact committed-row overflow".to_string()),
+            DirectFactAdmissionSlot::ReconstructionTrack(track) => track.close(),
+            DirectFactAdmissionSlot::Requested {
+                reconstructed_committed,
+            } => Ok(reconstructed_committed),
+            DirectFactAdmissionSlot::Closed => {
+                Err("direct-fact admission closed more than once".to_string())
+            }
+        }
+    }
+}
+
+impl DirectFactClaim {
+    pub(crate) fn requires_track_accounting(&self) -> bool {
+        matches!(
+            self.accounting,
+            DirectFactClaimAccounting::ReconstructionTrack
+        )
+    }
+
+    pub(crate) fn commit(mut self) -> Result<(), String> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.closed || state.in_flight < self.rows {
+            return Err("direct-fact claim settlement state is inconsistent".to_string());
+        }
+        if let Some(reservation) = state.reservation.as_mut() {
+            reservation
+                .commit_partial(self.rows)
+                .map_err(str::to_string)?;
+        }
+        state.in_flight -= self.rows;
+        state.committed = state
+            .committed
+            .checked_add(self.rows)
+            .ok_or_else(|| "direct-fact committed-row overflow".to_string())?;
+        self.settled = true;
+        Ok(())
+    }
+}
+
+impl Drop for DirectFactClaim {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.closed {
+            return;
+        }
+        state.in_flight = state.in_flight.saturating_sub(self.rows);
+        state.remaining = state.remaining.saturating_add(self.rows);
     }
 }
 
@@ -649,4 +1099,187 @@ pub(crate) fn complete_filtered_data_rows(
 fn bypass_enabled() -> bool {
     static BYPASS: OnceLock<bool> = OnceLock::new();
     *BYPASS.get_or_init(|| std::env::var_os("OBZENFLOW_BACKPRESSURE_DISABLED").is_some())
+}
+
+#[cfg(test)]
+mod direct_fact_tests {
+    use super::*;
+
+    fn enforced_writer(window: u64) -> (BackpressureWriter, BackpressureReader, Arc<StageState>) {
+        let upstream = StageId::new();
+        let downstream = StageId::new();
+        let credit_waker = CreditWaker::new();
+        let edge = Arc::new(EdgeState {
+            upstream,
+            downstream,
+            window,
+            stall_timeout: Duration::from_secs(1),
+            reader_seq: AtomicU64::new(0),
+            upstream_waker: credit_waker.clone(),
+        });
+        let state = Arc::new(StageState {
+            effective_writer: AtomicU64::new(0),
+            writer_seq: AtomicU64::new(0),
+            reserved: AtomicU64::new(0),
+            wait_nanos_total: AtomicU64::new(0),
+            credit_waker,
+            downstream_edges: vec![edge.clone()],
+        });
+        (
+            BackpressureWriter {
+                state: Some(state.clone()),
+                direct_fact_admission: None,
+            },
+            BackpressureReader { state: Some(edge) },
+            state,
+        )
+    }
+
+    #[test]
+    fn partial_claims_conserve_one_whole_continuation_reservation() {
+        let (writer, _reader, state) = enforced_writer(3);
+        let lease =
+            DirectFactLease::try_acquire(&writer, NonZeroU64::new(3).expect("non-zero bound"))
+                .expect("admission calculation succeeds")
+                .expect("three credits are available");
+
+        assert_eq!(state.effective_writer.load(Ordering::Acquire), 3);
+        assert_eq!(state.reserved.load(Ordering::Acquire), 3);
+
+        lease
+            .claim(1)
+            .expect("first row fits")
+            .commit()
+            .expect("first row settles");
+        assert_eq!(state.writer_seq.load(Ordering::Acquire), 1);
+        assert_eq!(state.reserved.load(Ordering::Acquire), 2);
+        assert_eq!(state.effective_writer.load(Ordering::Acquire), 3);
+
+        drop(lease.claim(2).expect("a dropped claim is reversible"));
+        lease
+            .claim(2)
+            .expect("dropped rows return to the lease")
+            .commit()
+            .expect("remaining rows settle");
+        assert!(lease.claim(1).is_err(), "the bound cannot be over-claimed");
+        assert_eq!(lease.close().expect("lease closes"), 3);
+
+        assert_eq!(state.writer_seq.load(Ordering::Acquire), 3);
+        assert_eq!(state.reserved.load(Ordering::Acquire), 0);
+        assert_eq!(state.effective_writer.load(Ordering::Acquire), 3);
+    }
+
+    #[test]
+    fn closing_releases_the_unused_tail_without_refunding_committed_rows() {
+        let (writer, reader, state) = enforced_writer(3);
+        let lease =
+            DirectFactLease::try_acquire(&writer, NonZeroU64::new(3).expect("non-zero bound"))
+                .expect("admission calculation succeeds")
+                .expect("three credits are available");
+        lease
+            .claim(1)
+            .expect("one row fits")
+            .commit()
+            .expect("one row settles");
+
+        assert_eq!(lease.close().expect("lease closes"), 1);
+        assert_eq!(state.writer_seq.load(Ordering::Acquire), 1);
+        assert_eq!(state.reserved.load(Ordering::Acquire), 0);
+        assert_eq!(state.effective_writer.load(Ordering::Acquire), 1);
+        assert!(
+            DirectFactLease::try_acquire(&writer, NonZeroU64::new(3).expect("non-zero bound"))
+                .expect("admission calculation succeeds")
+                .is_none(),
+            "the committed row still occupies one physical credit"
+        );
+
+        reader.ack_consumed(1);
+        assert!(
+            DirectFactLease::try_acquire(&writer, NonZeroU64::new(3).expect("non-zero bound"))
+                .expect("admission calculation succeeds")
+                .is_some(),
+            "acknowledging the committed row restores the full window"
+        );
+    }
+
+    #[test]
+    fn reconstruction_claims_count_only_committed_physical_rows() {
+        let admission = DirectFactAdmission::new(
+            EventType::from("effect-record"),
+            NonZeroU64::new(3).expect("non-zero bound"),
+        );
+
+        let committed = admission
+            .claim(4)
+            .expect("reconstruction claim succeeds")
+            .expect("reconstruction uses a counter-only claim");
+        assert!(
+            committed.requires_track_accounting(),
+            "reconstruction must retain physical track accounting"
+        );
+        committed.commit().expect("claim commits");
+
+        let dropped = admission
+            .claim(2)
+            .expect("second reconstruction claim succeeds")
+            .expect("reconstruction uses a counter-only claim");
+        drop(dropped);
+
+        assert_eq!(
+            admission.close().expect("admission closes"),
+            4,
+            "only durable reconstruction rows enter completion accounting"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_carries_reconstruction_rows_into_live_lease_accounting() {
+        let admission = DirectFactAdmission::new(
+            EventType::from("effect-record"),
+            NonZeroU64::new(3).expect("non-zero bound"),
+        );
+        admission
+            .claim(2)
+            .expect("reconstruction claim succeeds")
+            .expect("reconstruction uses a counter-only claim")
+            .commit()
+            .expect("reconstruction claim commits");
+
+        let waiter = {
+            let admission = admission.clone();
+            tokio::spawn(async move { admission.request_live().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(admission.is_requested(), "resume requests live authority");
+
+        let lease = DirectFactLease::try_acquire(
+            &BackpressureWriter::disabled(),
+            NonZeroU64::new(3).expect("non-zero bound"),
+        )
+        .expect("admission calculation succeeds")
+        .expect("disabled writer needs no physical reservation");
+        admission
+            .grant(lease)
+            .expect("supervisor grants live lease");
+        waiter
+            .await
+            .expect("request task joins")
+            .expect("request receives grant");
+
+        let live = admission
+            .claim(1)
+            .expect("live claim succeeds")
+            .expect("live lease supplies a claim");
+        assert!(
+            !live.requires_track_accounting(),
+            "live claims settle through the affine lease"
+        );
+        live.commit().expect("live claim commits");
+
+        assert_eq!(
+            admission.close().expect("admission closes"),
+            3,
+            "completion includes reconstruction and resumed live rows"
+        );
+    }
 }

@@ -134,7 +134,12 @@ where
             + AllowedEffectsAllowEffect<AllowedEffects, EffectAt>
             + EffectOutcomeFitsOutput<Output, OutcomeProof>,
     {
-        self.core.perform(effect).await
+        // `EffectsCore::perform` contains the replay, repeatable,
+        // transactional, and affine state machines. Keep that combined
+        // monomorphised future off the handler's task stack: generated affine
+        // support must not enlarge an ordinary transactional handler future
+        // enough to overflow the executor's default worker stack.
+        Box::pin(self.core.perform(effect)).await
     }
 
     /// Capture deterministic ambient data. Capture records are framework
@@ -171,5 +176,25 @@ where
 
     pub(crate) fn drain_committed_facts(&mut self) -> Vec<ChainEvent> {
         self.core.drain_committed_facts()
+    }
+
+    /// Sealed generated-adapter access to the parent composite identity.
+    #[doc(hidden)]
+    pub fn __generated_parent_composite_activations(
+        &self,
+    ) -> Vec<obzenflow_core::event::context::CompositeActivationContext> {
+        self.core.parent_composite_activations()
+    }
+
+    /// Read-only preflight used before a generated pre-effect domain terminal.
+    #[doc(hidden)]
+    pub async fn __generated_preflight_first_effect_is_empty(&self) -> Result<(), EffectError> {
+        self.core.preflight_next_effect_cursor_is_empty().await
+    }
+
+    /// Yield at the generated resume-to-live admission barrier.
+    #[doc(hidden)]
+    pub async fn __generated_request_live_admission(&self) -> Result<(), EffectError> {
+        self.core.request_generated_live_admission().await
     }
 }

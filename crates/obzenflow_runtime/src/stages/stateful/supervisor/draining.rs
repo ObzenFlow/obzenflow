@@ -7,7 +7,9 @@
 use crate::backpressure::BackpressureReader;
 use crate::effects::EffectInvocationContext;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
-use crate::stages::common::handlers::{StatefulOutputContext, UnifiedStatefulHandler};
+use crate::stages::common::handlers::{
+    StatefulOutputContext, StatefulTerminationKind, TerminalValidation, UnifiedStatefulHandler,
+};
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
@@ -16,6 +18,7 @@ use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
     FrameworkObservabilityCommit,
 };
+use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::observer::dispatch::{
     run_stateful_after_accumulate_observers, run_stateful_after_emit_observers,
     run_stateful_before_accumulate_observers,
@@ -23,8 +26,9 @@ use crate::stages::observer::dispatch::{
 use crate::stages::observer::StatefulObserverContext;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::vector_clock::CausalOrderingService;
+use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::StageId;
 use obzenflow_fsm::StateVariant;
 use std::collections::HashMap;
@@ -42,6 +46,47 @@ fn acknowledge_consumed_drain_input(
 ) {
     if let Some(reader) = upstream.and_then(|stage_id| readers.get(&stage_id)) {
         reader.ack_consumed(1);
+    }
+}
+
+fn terminal_kind<H>(ctx: &StatefulContext<H>) -> StatefulTerminationKind
+where
+    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+{
+    if ctx.drain_requested_by_handle {
+        return StatefulTerminationKind::BeginDrain;
+    }
+
+    match ctx
+        .terminal_envelope
+        .as_ref()
+        .map(|envelope| &envelope.event.content)
+    {
+        Some(ChainEventContent::FlowControl(FlowControlPayload::Drain)) => {
+            StatefulTerminationKind::Drain
+        }
+        Some(ChainEventContent::FlowControl(FlowControlPayload::PipelineAbort { .. })) => {
+            StatefulTerminationKind::PipelineAbort
+        }
+        _ => match ctx.terminal_eof_kind.unwrap_or(EofKind::Natural) {
+            EofKind::Natural => StatefulTerminationKind::NaturalEof,
+            EofKind::Truncated => StatefulTerminationKind::TruncatedEof,
+            EofKind::Poison => StatefulTerminationKind::PoisonedEof,
+        },
+    }
+}
+
+fn terminal_primary_cause<H>(ctx: &StatefulContext<H>) -> Option<obzenflow_core::EventId>
+where
+    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+{
+    let envelope = ctx.terminal_envelope.as_ref()?;
+    match &envelope.event.content {
+        ChainEventContent::FlowControl(FlowControlPayload::Eof {
+            last_event_id: Some(event_id),
+            ..
+        }) => Some(*event_id),
+        _ => Some(envelope.event.id),
     }
 }
 
@@ -104,6 +149,8 @@ pub(super) async fn dispatch_draining<
             DrainOutcome::BackedOff => return Ok(EventLoopDirective::Continue),
         }
     }
+
+    ctx.handler.outputs_committed(&mut ctx.current_state);
 
     if let Some(upstream) = ctx.pending_ack_upstream.take() {
         if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
@@ -237,6 +284,40 @@ pub(super) async fn dispatch_draining<
                     )
                     .await?;
                     if let Err(err) = &accumulate_result {
+                        if let Some(fatal) = err.as_fatal() {
+                            let duration = start.elapsed();
+                            ctx.instrumentation
+                                .in_flight_count
+                                .fetch_sub(1, Ordering::Relaxed);
+                            ctx.instrumentation.record_processing_time(duration);
+                            ctx.instrumentation.record_error(err.kind());
+                            let writer_id = ctx.writer_id.ok_or_else(|| {
+                                "fatal stateful drain input has no stage writer id".to_string()
+                            })?;
+                            record_stage_fatal(
+                                fatal,
+                                StageFatalCommit {
+                                    error_journal: &ctx.error_journal,
+                                    writer_id,
+                                    stage_id: ctx.stage_id,
+                                    stage_key: &ctx.stage_name,
+                                    input_position: stage_input_position,
+                                    parent: Some(&envelope),
+                                    lineage: ctx.lineage_policy,
+                                },
+                            )
+                            .await?;
+                            acknowledge_consumed_drain_input(
+                                &ctx.backpressure_readers,
+                                upstream_stage,
+                            );
+                            if let Some(state) = &heartbeat_state {
+                                state.record_last_consumed(event_id);
+                            }
+                            return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                                fatal.detail.clone(),
+                            )));
+                        }
                         if let Some(directive) = super::contract_violation_directive::<H>(
                             err,
                             "draining",
@@ -436,6 +517,33 @@ pub(super) async fn dispatch_draining<
                                 }
                             }
                             Err(err) => {
+                                if let Some(fatal) = err.as_fatal() {
+                                    let writer_id = ctx.writer_id.ok_or_else(|| {
+                                        "fatal stateful drain emission has no stage writer id"
+                                            .to_string()
+                                    })?;
+                                    record_stage_fatal(
+                                        fatal,
+                                        StageFatalCommit {
+                                            error_journal: &ctx.error_journal,
+                                            writer_id,
+                                            stage_id: ctx.stage_id,
+                                            stage_key: &ctx.stage_name,
+                                            input_position: stage_input_position,
+                                            parent: Some(&envelope),
+                                            lineage: ctx.lineage_policy,
+                                        },
+                                    )
+                                    .await?;
+                                    ctx.pending_ack_upstream = None;
+                                    acknowledge_consumed_drain_input(
+                                        &ctx.backpressure_readers,
+                                        upstream_stage,
+                                    );
+                                    return Ok(EventLoopDirective::Transition(
+                                        StatefulEvent::Error(fatal.detail.clone()),
+                                    ));
+                                }
                                 tracing::error!(
                                     stage_name = %ctx.stage_name,
                                     error = ?err,
@@ -560,6 +668,85 @@ pub(super) async fn dispatch_draining<
                 )));
             }
         }
+    }
+
+    if !ctx.terminal_validated {
+        let kind = terminal_kind(ctx);
+        let validation = if matches!(
+            kind,
+            StatefulTerminationKind::PipelineAbort | StatefulTerminationKind::ForceShutdown
+        ) {
+            TerminalValidation::Clean
+        } else {
+            ctx.handler.validate_terminal(&ctx.current_state, kind)
+        };
+
+        match validation {
+            TerminalValidation::Clean => {}
+            TerminalValidation::Primary(fatal) => {
+                let writer_id = ctx.writer_id.ok_or_else(|| {
+                    "terminal validation has no stateful stage writer id".to_string()
+                })?;
+                record_stage_fatal(
+                    &fatal,
+                    StageFatalCommit {
+                        error_journal: &ctx.error_journal,
+                        writer_id,
+                        stage_id: ctx.stage_id,
+                        stage_key: &ctx.stage_name,
+                        input_position: None,
+                        parent: ctx.terminal_envelope.as_ref(),
+                        lineage: ctx.lineage_policy,
+                    },
+                )
+                .await?;
+                return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                    fatal.detail,
+                )));
+            }
+            TerminalValidation::Secondary(mut fatal) => {
+                if fatal.primary_cause_event_id.is_none() {
+                    fatal.primary_cause_event_id = terminal_primary_cause(ctx);
+                }
+                let result = match ctx.writer_id {
+                    Some(writer_id) => {
+                        record_stage_fatal(
+                            &fatal,
+                            StageFatalCommit {
+                                error_journal: &ctx.error_journal,
+                                writer_id,
+                                stage_id: ctx.stage_id,
+                                stage_key: &ctx.stage_name,
+                                input_position: None,
+                                parent: ctx.terminal_envelope.as_ref(),
+                                lineage: ctx.lineage_policy,
+                            },
+                        )
+                        .await
+                    }
+                    None => Err(
+                        "secondary terminal validation has no stateful stage writer id"
+                            .to_string()
+                            .into(),
+                    ),
+                };
+                if let Err(error) = result {
+                    tracing::warn!(
+                        stage_name = %ctx.stage_name,
+                        error = %error,
+                        "suppressed secondary terminal-validation evidence append failure"
+                    );
+                }
+            }
+        }
+        ctx.terminal_validated = true;
+    }
+
+    if !ctx.terminal_forwarded {
+        if let Some(envelope) = ctx.terminal_envelope.clone() {
+            sup.forward_control_event(ctx, &envelope).await?;
+        }
+        ctx.terminal_forwarded = true;
     }
 
     // Flush any remaining accumulated events into a final heartbeat snapshot before emitting drain results.
@@ -708,6 +895,35 @@ pub(super) async fn dispatch_draining<
             Ok(EventLoopDirective::Continue)
         }
         Err(e) => {
+            if let Some(handler_error) =
+                e.downcast_ref::<crate::stages::common::handler_error::HandlerError>()
+            {
+                if let Some(fatal) = handler_error.as_fatal() {
+                    let writer_id = ctx
+                        .writer_id
+                        .ok_or_else(|| "fatal stateful drain has no stage writer id".to_string())?;
+                    let parent = ctx
+                        .terminal_envelope
+                        .as_ref()
+                        .or(ctx.last_consumed_envelope.as_ref());
+                    record_stage_fatal(
+                        fatal,
+                        StageFatalCommit {
+                            error_journal: &ctx.error_journal,
+                            writer_id,
+                            stage_id: ctx.stage_id,
+                            stage_key: &ctx.stage_name,
+                            input_position: None,
+                            parent,
+                            lineage: ctx.lineage_policy,
+                        },
+                    )
+                    .await?;
+                    return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                        fatal.detail.clone(),
+                    )));
+                }
+            }
             tracing::error!(
                 stage_name = %ctx.stage_name,
                 error = ?e,

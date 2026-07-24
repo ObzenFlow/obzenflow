@@ -239,6 +239,8 @@ mod tests {
             journal_writer_id: crate::event::JournalWriterId::new(),
             vector_clock,
             timestamp: Utc::now(),
+            journal_group_id: None,
+            journal_group_member: None,
             event,
         }
     }

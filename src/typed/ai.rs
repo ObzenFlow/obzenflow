@@ -6,7 +6,6 @@
 //!
 //! These helpers construct handlers intended for use with typed stage macros.
 
-pub use obzenflow_dsl::dsl::composites::ai_map_reduce::{map_reduce, AiMapReduceBuilder};
 pub use obzenflow_runtime::stages::stateful::CollectByInput;
 pub type Chunk<T> = obzenflow_core::ai::ChunkEnvelope<T>;
 pub use obzenflow_core::ai::Many;

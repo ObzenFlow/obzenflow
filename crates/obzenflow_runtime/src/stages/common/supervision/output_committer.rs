@@ -50,7 +50,7 @@ use obzenflow_core::event::{ChainEventContent, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::ChainEvent;
 
-use crate::backpressure::BackpressureWriter;
+use crate::backpressure::{BackpressureReservation, BackpressureWriter, DirectFactClaim};
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;
@@ -78,6 +78,60 @@ fn output_contract_summary(output_contract: &StageOutputContract) -> String {
 /// its own error type: the drain prefixes it with `Failed to write pending
 /// output`, and the effects layer wraps it in `EffectError::Journal`.
 pub(crate) type CommitError = Box<dyn std::error::Error + Send + Sync>;
+
+enum PhysicalDataReservation {
+    Legacy(BackpressureReservation),
+    Direct(DirectFactClaim),
+    DirectTracked {
+        claim: DirectFactClaim,
+        reservation: BackpressureReservation,
+    },
+}
+
+impl PhysicalDataReservation {
+    fn commit(self, rows: u64) -> Result<(), CommitError> {
+        match self {
+            Self::Legacy(reservation) => {
+                reservation.commit(rows);
+                Ok(())
+            }
+            Self::Direct(claim) => claim.commit().map_err(Into::into),
+            Self::DirectTracked { claim, reservation } => {
+                claim
+                    .commit()
+                    .map_err(|error| -> CommitError { error.into() })?;
+                reservation.commit(rows);
+                Ok(())
+            }
+        }
+    }
+}
+
+fn reserve_direct_data_rows(
+    writer: Option<&BackpressureWriter>,
+    rows: u64,
+) -> Result<Option<PhysicalDataReservation>, CommitError> {
+    if rows == 0 {
+        return Ok(None);
+    }
+    let Some(writer) = writer else {
+        return Ok(None);
+    };
+    if let Some(admission) = writer.direct_fact_admission() {
+        if let Some(claim) = admission.claim(rows)? {
+            if claim.requires_track_accounting() {
+                return Ok(Some(PhysicalDataReservation::DirectTracked {
+                    claim,
+                    reservation: writer.reserve_tracked(rows),
+                }));
+            }
+            return Ok(Some(PhysicalDataReservation::Direct(claim)));
+        }
+    }
+    Ok(Some(PhysicalDataReservation::Legacy(
+        writer.reserve_tracked(rows),
+    )))
+}
 
 /// Per-commit behaviour that is not implied by which handles are present.
 #[derive(Debug, Clone, Copy, Default)]
@@ -217,13 +271,8 @@ impl OutputCommitter<'_> {
         // Direct facts are already past input admission, so this path must not
         // wait. It nevertheless records every durable physical Data row. A
         // failed append drops the reservation and releases it.
-        let backpressure_reservation = event
-            .is_data()
-            .then(|| {
-                self.backpressure_writer
-                    .map(|writer| writer.reserve_tracked(1))
-            })
-            .flatten();
+        let backpressure_reservation =
+            reserve_direct_data_rows(self.backpressure_writer, u64::from(event.is_data()))?;
 
         let written = self
             .data_journal
@@ -232,7 +281,7 @@ impl OutputCommitter<'_> {
             .map_err(|e| -> CommitError { e.to_string().into() })?;
 
         if let Some(reservation) = backpressure_reservation {
-            reservation.commit(1);
+            reservation.commit(1)?;
         }
 
         self.finish_committed(&written, options, intent).await;
@@ -271,12 +320,8 @@ impl OutputCommitter<'_> {
         }
 
         let data_count = prepared.iter().filter(|event| event.is_data()).count() as u64;
-        let backpressure_reservation = (data_count > 0)
-            .then(|| {
-                self.backpressure_writer
-                    .map(|writer| writer.reserve_tracked(data_count))
-            })
-            .flatten();
+        let backpressure_reservation =
+            reserve_direct_data_rows(self.backpressure_writer, data_count)?;
 
         let member_count = metadata.len();
         let written = match self
@@ -305,7 +350,7 @@ impl OutputCommitter<'_> {
         // Account the physical rows before checking the returned-envelope
         // cardinality so a broken Journal implementation cannot leak debt.
         if let Some(reservation) = backpressure_reservation {
-            reservation.commit(data_count);
+            reservation.commit(data_count)?;
         }
         if let Some(instrumentation) = self.instrumentation {
             instrumentation
@@ -581,6 +626,7 @@ pub(crate) async fn append_observer_diagnostics(
     if report.is_empty() {
         return Ok(());
     }
+    validate_observer_diagnostics(&report)?;
 
     let committer = OutputCommitter {
         data_journal,
@@ -602,6 +648,51 @@ pub(crate) async fn append_observer_diagnostics(
     }
 
     Ok(())
+}
+
+fn validate_observer_diagnostics(report: &ObserverReport) -> Result<(), CommitError> {
+    for diagnostic in &report.diagnostics {
+        if diagnostic.is_data() || diagnostic.is_control() {
+            return Err(format!(
+                "observer diagnostic '{}' cannot author Data or flow-control events",
+                diagnostic.event_type()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod observer_diagnostic_tests {
+    use super::*;
+    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::{StageId, WriterId};
+
+    #[test]
+    fn observer_reports_reject_data_and_flow_control_before_append() {
+        let writer = WriterId::from(StageId::new());
+        let reports = [
+            ObserverReport::empty().with_diagnostic(ChainEventFactory::data_event(
+                writer,
+                "test.rogue",
+                serde_json::json!({ "value": 1 }),
+            )),
+            ObserverReport::empty().with_diagnostic(ChainEventFactory::eof_event(writer, true)),
+        ];
+
+        for report in reports {
+            let diagnostic = &report.diagnostics[0];
+            assert!(
+                diagnostic.is_data() || diagnostic.is_control(),
+                "fixture must exercise a prohibited observer side channel"
+            );
+            assert!(
+                validate_observer_diagnostics(&report).is_err(),
+                "prohibited diagnostics must fail before any journal append"
+            );
+        }
+    }
 }
 
 fn value_preserving_projection(event: &ChainEvent) -> Result<serde_json::Value, CommitError> {

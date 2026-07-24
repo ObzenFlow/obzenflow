@@ -17,11 +17,11 @@ use super::{
 use crate::middleware::carrier::MaterializationClaim;
 use crate::middleware::control::provider::PendingControlRegistration;
 use crate::middleware::{
-    validate_attachment_request, Flowip128gLegacyShellAttachment, MiddlewareAttachmentRequest,
-    MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError, MiddlewareHints,
-    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety, MiddlewareSurface,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceAttachmentKind, MiddlewareSurfaceKind,
-    SinkPolicy, SourcePolicy, SourcePollAttachment, TopologyMiddlewareConfigSlot,
+    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareHints, MiddlewareMaterializationContext,
+    MiddlewareOverrideKey, MiddlewareSafety, MiddlewareSurface, MiddlewareSurfaceAttachment,
+    MiddlewareSurfaceAttachmentKind, MiddlewareSurfaceKind, SinkPolicy, SourcePolicy,
+    SourcePollAttachment, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_runtime::control_plane::{
     CircuitBreakerMetrics, CircuitBreakerSnapshotter, CircuitBreakerState, CircuitBreakerStateView,
@@ -557,111 +557,6 @@ impl MiddlewareFactory for CircuitBreaker {
     }
 }
 
-/// Sealed compatibility factory for the two AI map-reduce shell consumers
-/// explicitly assigned to FLOWIP-128g.
-struct AiCircuitBreakerFactory {
-    breaker: CircuitBreaker,
-}
-
-impl MiddlewareFactory for AiCircuitBreakerFactory {
-    fn label(&self) -> &'static str {
-        "ai_circuit_breaker"
-    }
-
-    fn override_key(&self) -> MiddlewareOverrideKey {
-        MiddlewareOverrideKey::of::<CircuitBreakerFamily>("circuit_breaker")
-    }
-
-    fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::flowip_128g_legacy_shell(
-            self.label(),
-            self.override_key().family_label(),
-        )
-    }
-
-    fn dsl_config_defaults(&self) -> Vec<obzenflow_runtime::runtime_config::DslConfigDefault> {
-        self.breaker.dsl_config_defaults()
-    }
-
-    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-        Some(TopologyMiddlewareConfigSlot::CircuitBreaker)
-    }
-
-    fn materialize(
-        &self,
-        request: MiddlewareAttachmentRequest<'_>,
-        context: &MiddlewareMaterializationContext<'_>,
-    ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-        let declaration = self.declaration();
-        validate_attachment_request(&declaration, &request).map_err(|error| {
-            MiddlewareFactoryError::materialization_failed(
-                self.label(),
-                &context.config.name,
-                error,
-            )
-        })?;
-        context
-            .authorize_materialization(
-                MaterializationClaim::Flowip128gLegacyShell,
-                &declaration,
-                &request,
-            )
-            .map_err(|error| {
-                MiddlewareFactoryError::materialization_failed(
-                    self.label(),
-                    &context.config.name,
-                    error,
-                )
-            })?;
-        let resolved = self.breaker.resolved_from_context(context)?;
-        match request.surface {
-            MiddlewareSurface::Handler { .. } => {
-                let (middleware, _) = CircuitBreakerFactory::from_effect_breaker(&resolved)
-                    .build_middleware_keyed(
-                        context.config,
-                        context,
-                        MaterializationClaim::Flowip128gLegacyShell,
-                        None,
-                    )?;
-                MiddlewareSurfaceAttachment::claimed(
-                    MiddlewareSurfaceAttachmentKind::Flowip128gLegacyShell(
-                        Flowip128gLegacyShellAttachment::new(Box::new(middleware)),
-                    ),
-                    MaterializationClaim::Flowip128gLegacyShell,
-                    context,
-                )
-                .map_err(|error| {
-                    MiddlewareFactoryError::materialization_failed(
-                        self.label(),
-                        &context.config.name,
-                        error,
-                    )
-                })
-            }
-            other => Err(MiddlewareFactoryError::materialization_failed(
-                self.label(),
-                &context.config.name,
-                std::io::Error::other(format!(
-                    "FLOWIP-128g migration shell cannot attach to {:?}",
-                    other.kind()
-                )),
-            )),
-        }
-    }
-
-    fn safety_level(&self) -> MiddlewareSafety {
-        MiddlewareSafety::Advanced
-    }
-}
-
-pub fn ai_circuit_breaker() -> Box<dyn MiddlewareFactory> {
-    let breaker = CircuitBreaker::builder()
-        .consecutive_failures(5)
-        .build()
-        .expect("constant AI breaker configuration is valid");
-    Box::new(AiCircuitBreakerFactory { breaker })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,12 +702,5 @@ mod tests {
         assert!(declaration.supports(MiddlewareSurfaceKind::SinkDelivery));
         assert!(!declaration.supports(MiddlewareSurfaceKind::Effect));
         assert!(!declaration.is_flowip_128g_legacy_shell());
-    }
-
-    #[test]
-    fn only_ai_helper_uses_the_sealed_legacy_shell() {
-        assert!(ai_circuit_breaker()
-            .declaration()
-            .is_flowip_128g_legacy_shell());
     }
 }

@@ -105,7 +105,7 @@ where
         }
 
         // Accumulate with inner handler
-        self.inner.accumulate(state, event.clone());
+        self.inner.try_accumulate(state, event.clone())?;
 
         // Post-processing phase (reverse order)
         // Note: accumulate doesn't produce output, so results is empty
@@ -190,6 +190,18 @@ where
         results.extend(control_events);
 
         Ok(results)
+    }
+
+    fn validate_terminal(
+        &self,
+        state: &Self::State,
+        kind: obzenflow_runtime::stages::common::handlers::StatefulTerminationKind,
+    ) -> obzenflow_runtime::stages::common::handlers::TerminalValidation {
+        self.inner.validate_terminal(state, kind)
+    }
+
+    fn outputs_committed(&self, state: &mut Self::State) {
+        self.inner.outputs_committed(state);
     }
 }
 

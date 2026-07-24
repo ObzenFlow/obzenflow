@@ -248,6 +248,17 @@ pub trait EffectfulTransformHandler: Send + Sync {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> std::result::Result<crate::effects::StageCompletion<Self::Output>, HandlerError>;
 
+    /// Framework-generated physical dispatch seam. Ordinary implementations
+    /// use the default and never receive a raw event.
+    #[doc(hidden)]
+    async fn __generated_raw_dispatch(
+        &self,
+        _event: ChainEvent,
+        _fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Option<std::result::Result<Vec<ChainEvent>, HandlerError>> {
+        None
+    }
+
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
         Ok(())
     }
@@ -280,12 +291,19 @@ where
         effect_context: Option<EffectInvocationContext>,
         _scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let input = H::Input::try_from_event(&event)
-            .map_err(|e| HandlerError::Deserialization(e.to_string()))?;
         let effect_context = effect_context.ok_or_else(|| {
             HandlerError::Other("effectful transform invoked without effect context".to_string())
         })?;
         let mut fx = Effects::<H::Output, H::AllowedEffects>::new(effect_context);
+        if let Some(result) = self
+            .0
+            .__generated_raw_dispatch(event.clone(), &mut fx)
+            .await
+        {
+            return result;
+        }
+        let input = H::Input::try_from_event(&event)
+            .map_err(|e| HandlerError::Deserialization(e.to_string()))?;
         let _completion = self.0.process(input, &mut fx).await?;
         Ok(Vec::new())
     }

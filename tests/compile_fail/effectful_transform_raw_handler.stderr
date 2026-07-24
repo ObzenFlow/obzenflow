@@ -15,6 +15,24 @@ help: the trait `EffectfulTransformHandler` is not implemented for `RawTransform
 27 | struct RawTransform;
    | ^^^^^^^^^^^^^^^^^^^
    = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `effects:` clause (FLOWIP-120z B9)
+help: the following other types implement trait `EffectfulTransformHandler`
+  --> crates/obzenflow_adapters/src/ai/effects/map_reduce_generated.rs
+   |
+   | / impl<Item, Partial, Role> EffectfulTransformHandler for GeneratedAiMapHandler<Item, Partial, Role>
+   | | where
+   | |     Item: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+   | |     Partial: TypedPayload + Clone + Send + Sync + 'static,
+   | |     Role: AiMapRole<Item, Partial>,
+   | |___________________________________^ `GeneratedAiMapHandler<Item, Partial, Role>`
+...
+   | / impl<Seed, Collected, Out, Role> EffectfulTransformHandler
+   | |     for GeneratedAiFinaliseHandler<Seed, Collected, Out, Role>
+   | | where
+   | |     Seed: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+   | |     Collected: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+   | |     Out: TypedPayload + Clone + Send + Sync + 'static,
+   | |     Role: AiFinaliseRole<Seed, Collected, Out>,
+   | |_______________________________________________^ `GeneratedAiFinaliseHandler<Seed, Collected, Out, Role>`
 note: required by a bound in `__obzenflow_assert_effectful_transform_contract`
   --> tests/compile_fail/effectful_transform_raw_handler.rs:46:13
    |
@@ -47,6 +65,24 @@ help: the trait `EffectfulTransformHandler` is not implemented for `RawTransform
 27 | struct RawTransform;
    | ^^^^^^^^^^^^^^^^^^^
    = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `effects:` clause (FLOWIP-120z B9)
+help: the following other types implement trait `EffectfulTransformHandler`
+  --> crates/obzenflow_adapters/src/ai/effects/map_reduce_generated.rs
+   |
+   | / impl<Item, Partial, Role> EffectfulTransformHandler for GeneratedAiMapHandler<Item, Partial, Role>
+   | | where
+   | |     Item: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+   | |     Partial: TypedPayload + Clone + Send + Sync + 'static,
+   | |     Role: AiMapRole<Item, Partial>,
+   | |___________________________________^ `GeneratedAiMapHandler<Item, Partial, Role>`
+...
+   | / impl<Seed, Collected, Out, Role> EffectfulTransformHandler
+   | |     for GeneratedAiFinaliseHandler<Seed, Collected, Out, Role>
+   | | where
+   | |     Seed: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+   | |     Collected: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+   | |     Out: TypedPayload + Clone + Send + Sync + 'static,
+   | |     Role: AiFinaliseRole<Seed, Collected, Out>,
+   | |_______________________________________________^ `GeneratedAiFinaliseHandler<Seed, Collected, Out, Role>`
 note: required by a bound in `EffectfulTransformDescriptor`
   --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
    |
@@ -71,6 +107,24 @@ help: the trait `EffectfulTransformHandler` is not implemented for `RawTransform
 27 | struct RawTransform;
    | ^^^^^^^^^^^^^^^^^^^
    = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `effects:` clause (FLOWIP-120z B9)
+help: the following other types implement trait `EffectfulTransformHandler`
+  --> crates/obzenflow_adapters/src/ai/effects/map_reduce_generated.rs
+   |
+   | / impl<Item, Partial, Role> EffectfulTransformHandler for GeneratedAiMapHandler<Item, Partial, Role>
+   | | where
+   | |     Item: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+   | |     Partial: TypedPayload + Clone + Send + Sync + 'static,
+   | |     Role: AiMapRole<Item, Partial>,
+   | |___________________________________^ `GeneratedAiMapHandler<Item, Partial, Role>`
+...
+   | / impl<Seed, Collected, Out, Role> EffectfulTransformHandler
+   | |     for GeneratedAiFinaliseHandler<Seed, Collected, Out, Role>
+   | | where
+   | |     Seed: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+   | |     Collected: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+   | |     Out: TypedPayload + Clone + Send + Sync + 'static,
+   | |     Role: AiFinaliseRole<Seed, Collected, Out>,
+   | |_______________________________________________^ `GeneratedAiFinaliseHandler<Seed, Collected, Out, Role>`
 note: required by a bound in `EffectfulTransformDescriptor`
   --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
    |
@@ -95,6 +149,24 @@ help: the trait `EffectfulTransformHandler` is not implemented for `RawTransform
 27 | struct RawTransform;
    | ^^^^^^^^^^^^^^^^^^^
    = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `effects:` clause (FLOWIP-120z B9)
+help: the following other types implement trait `EffectfulTransformHandler`
+  --> crates/obzenflow_adapters/src/ai/effects/map_reduce_generated.rs
+   |
+   | / impl<Item, Partial, Role> EffectfulTransformHandler for GeneratedAiMapHandler<Item, Partial, Role>
+   | | where
+   | |     Item: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+   | |     Partial: TypedPayload + Clone + Send + Sync + 'static,
+   | |     Role: AiMapRole<Item, Partial>,
+   | |___________________________________^ `GeneratedAiMapHandler<Item, Partial, Role>`
+...
+   | / impl<Seed, Collected, Out, Role> EffectfulTransformHandler
+   | |     for GeneratedAiFinaliseHandler<Seed, Collected, Out, Role>
+   | | where
+   | |     Seed: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+   | |     Collected: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+   | |     Out: TypedPayload + Clone + Send + Sync + 'static,
+   | |     Role: AiFinaliseRole<Seed, Collected, Out>,
+   | |_______________________________________________^ `GeneratedAiFinaliseHandler<Seed, Collected, Out, Role>`
 note: required by a bound in `EffectfulTransformDescriptor`
   --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
    |

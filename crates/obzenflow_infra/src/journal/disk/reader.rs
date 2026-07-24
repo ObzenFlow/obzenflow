@@ -10,7 +10,7 @@
 
 use super::scanner::{classify_frame, dispose, read_frame_async, Disposition, ReadPolicy};
 use async_trait::async_trait;
-use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::event::event_envelope::{EventEnvelope, JournalGroupMember};
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::id::JournalId;
@@ -87,6 +87,10 @@ pub struct DiskJournalReader<T: JournalEvent> {
     /// `read_offset` advances past the physical frame as soon as it is parsed;
     /// these members are then yielded one-by-one without another disk read.
     pending: VecDeque<super::log_record::LogRecord<T>>,
+    pending_group_id: Option<String>,
+    pending_group_size: Option<u32>,
+    pending_group_next_index: u32,
+    yielded_group_member: Option<JournalGroupMember>,
     /// Path to the journal file (for error messages)
     path: PathBuf,
     /// Journal ID for creating JournalWriterId
@@ -118,6 +122,10 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 policy: ReadPolicy::LiveTail,
                 buf: Vec::new(),
                 pending: VecDeque::new(),
+                pending_group_id: None,
+                pending_group_size: None,
+                pending_group_next_index: 0,
+                yielded_group_member: None,
                 path,
                 journal_id,
                 at_end: true,
@@ -148,6 +156,10 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             policy: ReadPolicy::LiveTail,
             buf: Vec::new(),
             pending: VecDeque::new(),
+            pending_group_id: None,
+            pending_group_size: None,
+            pending_group_next_index: 0,
+            yielded_group_member: None,
             path,
             journal_id,
             at_end: false,
@@ -185,6 +197,10 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             policy,
             buf: Vec::new(),
             pending: VecDeque::new(),
+            pending_group_id: None,
+            pending_group_size: None,
+            pending_group_next_index: 0,
+            yielded_group_member: None,
             path,
             journal_id,
             at_end: false,
@@ -264,10 +280,30 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         &mut self,
         reader: &mut B,
     ) -> Result<(Disposition<T>, u64), JournalError> {
+        self.yielded_group_member = None;
         if let Some(record) = self.pending.pop_front() {
+            let group_id = self.pending_group_id.clone();
+            self.yielded_group_member = group_id.as_ref().map(|_| JournalGroupMember {
+                index: self.pending_group_next_index,
+                size: self
+                    .pending_group_size
+                    .expect("pending atomic group has a member count"),
+            });
+            self.pending_group_next_index = self.pending_group_next_index.saturating_add(1);
+            if self.pending.is_empty() {
+                self.pending_group_id = None;
+                self.pending_group_size = None;
+                self.pending_group_next_index = 0;
+            }
             self.position += 1;
             return Ok((
-                Disposition::Yield(super::log_record::LogFrame::Record(record)),
+                Disposition::Yield(match group_id {
+                    Some(group_id) => super::log_record::LogFrame::AtomicGroup {
+                        group_id,
+                        records: vec![record],
+                    },
+                    None => super::log_record::LogFrame::Record(record),
+                }),
                 self.read_offset,
             ));
         }
@@ -292,7 +328,19 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             match dispose(classify_frame::<T>(&self.buf), termination, self.policy) {
                 Disposition::Yield(frame) => {
                     self.read_offset += consumed as u64;
-                    self.pending.extend(frame.into_records());
+                    self.pending_group_id = frame.group_id().map(str::to_string);
+                    let records = frame.into_records();
+                    self.pending_group_size = self
+                        .pending_group_id
+                        .as_ref()
+                        .map(|_| u32::try_from(records.len()))
+                        .transpose()
+                        .map_err(|_| JournalError::Implementation {
+                            message: "Atomic journal group exceeds u32 member capacity".to_string(),
+                            source: "atomic journal group is too large".into(),
+                        })?;
+                    self.pending_group_next_index = 0;
+                    self.pending.extend(records);
                     let record =
                         self.pending
                             .pop_front()
@@ -300,9 +348,28 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                                 message: "Committed journal frame contained no records".to_string(),
                                 source: "empty committed journal frame".into(),
                             })?;
+                    let group_id = self.pending_group_id.clone();
+                    self.yielded_group_member = group_id.as_ref().map(|_| JournalGroupMember {
+                        index: self.pending_group_next_index,
+                        size: self
+                            .pending_group_size
+                            .expect("pending atomic group has a member count"),
+                    });
+                    self.pending_group_next_index = self.pending_group_next_index.saturating_add(1);
+                    if self.pending.is_empty() {
+                        self.pending_group_id = None;
+                        self.pending_group_size = None;
+                        self.pending_group_next_index = 0;
+                    }
                     self.position += 1;
                     return Ok((
-                        Disposition::Yield(super::log_record::LogFrame::Record(record)),
+                        Disposition::Yield(match group_id {
+                            Some(group_id) => super::log_record::LogFrame::AtomicGroup {
+                                group_id,
+                                records: vec![record],
+                            },
+                            None => super::log_record::LogFrame::Record(record),
+                        }),
                         frame_start,
                     ));
                 }
@@ -348,6 +415,8 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
         let (disposition, frame_start) = self.advance_one(&mut reader).await?;
         match disposition {
             Disposition::Yield(frame) => {
+                let journal_group_id = frame.group_id().map(str::to_string);
+                let journal_group_member = self.yielded_group_member.take();
                 let mut records = frame.into_records();
                 let record = records
                     .pop()
@@ -358,6 +427,8 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
                     journal_writer_id: JournalWriterId::from(self.journal_id),
                     vector_clock: record.vector_clock,
                     timestamp: record.timestamp,
+                    journal_group_id,
+                    journal_group_member,
                     event: record.event,
                 }))
             }

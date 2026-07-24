@@ -113,6 +113,13 @@ pub(crate) fn serialize_record<T: JournalEvent>(
 }
 
 impl<T: JournalEvent> LogFrame<T> {
+    pub(crate) fn group_id(&self) -> Option<&str> {
+        match self {
+            Self::Record(_) => None,
+            Self::AtomicGroup { group_id, .. } => Some(group_id),
+        }
+    }
+
     pub(crate) fn into_records(self) -> Vec<LogRecord<T>> {
         match self {
             Self::Record(record) => vec![record],

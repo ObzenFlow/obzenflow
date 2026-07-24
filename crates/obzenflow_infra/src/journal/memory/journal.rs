@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
-use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::event::event_envelope::{EventEnvelope, JournalGroupMember};
 use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
 use obzenflow_core::event::JournalEvent;
@@ -127,6 +127,8 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             journal_writer_id: JournalWriterId::from(self.journal_id),
             vector_clock,
             timestamp: Utc::now(),
+            journal_group_id: None,
+            journal_group_member: None,
             event,
         };
 
@@ -167,8 +169,12 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         // Build against a private clock snapshot, then publish clocks and
         // events together while holding the single state mutex.
         let mut next_writer_clocks = state.writer_clocks.clone();
+        let group_size = u32::try_from(events.len()).map_err(|_| JournalError::Implementation {
+            message: format!("Atomic journal group '{group_id}' exceeds u32 member capacity"),
+            source: "atomic journal group is too large".into(),
+        })?;
         let mut envelopes = Vec::with_capacity(events.len());
-        for event in events {
+        for (index, event) in events.into_iter().enumerate() {
             let writer_id = *event.writer_id();
             let vector_clock = CausalOrderingService::advance_for_append(
                 next_writer_clocks.get(&writer_id),
@@ -180,6 +186,12 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
                 journal_writer_id: JournalWriterId::from(self.journal_id),
                 vector_clock,
                 timestamp: Utc::now(),
+                journal_group_id: Some(group_id.to_string()),
+                journal_group_member: Some(JournalGroupMember {
+                    index: u32::try_from(index)
+                        .expect("group size was checked against u32 capacity"),
+                    size: group_size,
+                }),
                 event,
             });
         }

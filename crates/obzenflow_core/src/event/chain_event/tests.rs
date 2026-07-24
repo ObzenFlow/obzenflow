@@ -66,6 +66,7 @@ fn framework_effect_data_is_not_source_replayable() {
         group_id: None,
         fact_owner: EffectFactOwner::Framework,
         origin: None,
+        attempt: None,
     });
 
     assert!(!event.is_source_replayable());

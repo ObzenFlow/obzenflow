@@ -2,405 +2,140 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! AI map-reduce composite descriptor (FLOWIP-086z-part-2, migrated to the
-//! FLOWIP-128a composite substrate).
+//! Generated AI map-reduce protocol descriptor.
 //!
-//! This is a DSL-level authoring surface that expands into ordinary stages:
-//! `<binding>__chunk`, `<binding>__map`, `<binding>__collect`, `<binding>__finalize`.
+//! This module deliberately exposes no programmatic builder. The
+//! `ai_map_reduce!` macro is the only public authoring surface and expands to
+//! the fixed four-stage FLOWIP-128g protocol.
 
 use crate::dsl::composition::{CompositeBuildContext, CompositeBuildError, CompositeDescriptor};
 use crate::dsl::stage_descriptor::{
-    AsyncTransformDescriptor, StatefulDescriptor, TransformDescriptor,
-    BINDING_DERIVED_NAME_SENTINEL,
+    EffectPolicyAttachment, EffectfulTransformDescriptor, StatefulDescriptor, TransformDescriptor,
 };
-use crate::dsl::typing::{
-    wrap_typed_descriptor, BoundAsyncTransform, BoundTransform, StageTypingMetadata, TypeHint,
+use crate::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
+use obzenflow_adapters::ai::effects::{
+    ChatCompletion, GeneratedAiFinaliseHandler, GeneratedAiMapHandler,
 };
-use obzenflow_adapters::middleware::ai::map_reduce::{
-    AiMapReduceChunkManifestFactory, AiMapReduceMapFactory,
-};
+use obzenflow_adapters::ai::GeneratedAiChunkHandler;
 use obzenflow_adapters::middleware::MiddlewareFactory;
 use obzenflow_core::ai::{
-    AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
+    AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceJobFailed,
+    AiMapReducePlanningFailed, AiMapReducePlanningManifest, AiMapReduceReduceInput,
+    AiMapReduceTaggedPartial, AiMapRole, ChatCompletionCompleted, ChatTarget, ChunkEnvelope, Many,
+    ResolvedTokenEstimator,
 };
+use obzenflow_core::id::CompositeId;
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
-use obzenflow_runtime::stages::stateful::CollectByInput;
-use std::any::type_name;
+use obzenflow_runtime::effects::{Effect, EffectDeclaration};
+use obzenflow_runtime::stages::common::handlers::TransformHandler;
+use obzenflow_runtime::stages::resources_builder::DirectFactPlan;
+use obzenflow_runtime::stages::stateful::{CollectByInput, SeededCollectByInput};
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::num::NonZeroU64;
 
+/// Macro-only constructor for the FLOWIP-128g generated protocol.
+///
+/// The concrete role adapters, effect declarations, collector, and
+/// direct-fact bounds are fixed as one generated call graph.
 #[doc(hidden)]
-pub struct AiMapReduceReduceInputManyAdapter<Seed, Partial, H> {
-    inner: H,
-    _phantom: PhantomData<(Seed, Partial)>,
-}
-
-impl<Seed, Partial, H> AiMapReduceReduceInputManyAdapter<Seed, Partial, H> {
-    pub fn new(inner: H) -> Self {
-        Self {
-            inner,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl<Seed, Partial, H> AsyncTransformHandler for AiMapReduceReduceInputManyAdapter<Seed, Partial, H>
+#[allow(clippy::too_many_arguments)]
+pub fn generated_map_reduce<Seed, Item, Partial, Out, Chunker, MapRole, FinaliseRole>(
+    name: impl Into<String>,
+    chunker: Chunker,
+    map_role: MapRole,
+    finalise_role: FinaliseRole,
+    chat_target: ChatTarget,
+    chat_estimator: ResolvedTokenEstimator,
+    map_policies: Vec<Box<dyn MiddlewareFactory>>,
+    finalise_policies: Vec<Box<dyn MiddlewareFactory>>,
+) -> Box<dyn CompositeDescriptor>
 where
-    Seed: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
-    Partial: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
-    H: AsyncTransformHandler + Send + Sync,
-{
-    async fn process(
-        &self,
-        event: obzenflow_core::ChainEvent,
-    ) -> Result<Vec<obzenflow_core::ChainEvent>, HandlerError> {
-        let reduce_input = obzenflow_core::ai::AiMapReduceReduceInput::<
-            Seed,
-            obzenflow_core::ai::Many<Partial>,
-        >::try_from_event(&event)
-        .map_err(|err| {
-            HandlerError::Deserialization(format!(
-                "ai_map_reduce: reduce_input decode failed: {err}"
-            ))
-        })?;
-
-        let seed = reduce_input.seed.ok_or_else(|| {
-            HandlerError::Validation("ai_map_reduce: reduce_input missing seed".to_string())
-        })?;
-
-        let tuple_payload =
-            serde_json::to_value((seed, reduce_input.collected.items)).map_err(|err| {
-                HandlerError::Other(format!("ai_map_reduce: reduce tuple encode failed: {err}"))
-            })?;
-
-        let mut tuple_event = event;
-        if let obzenflow_core::event::ChainEventContent::Data { payload, .. } =
-            &mut tuple_event.content
-        {
-            *payload = tuple_payload;
-        }
-
-        self.inner.process(tuple_event).await
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        self.inner.drain().await
-    }
-}
-
-#[doc(hidden)]
-pub struct AiMapReduceReduceInputCollectedAdapter<Seed, Collected, H> {
-    inner: H,
-    _phantom: PhantomData<(Seed, Collected)>,
-}
-
-impl<Seed, Collected, H> AiMapReduceReduceInputCollectedAdapter<Seed, Collected, H> {
-    pub fn new(inner: H) -> Self {
-        Self {
-            inner,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl<Seed, Collected, H> AsyncTransformHandler
-    for AiMapReduceReduceInputCollectedAdapter<Seed, Collected, H>
-where
-    Seed: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
-    Collected: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
-    H: AsyncTransformHandler + Send + Sync,
-{
-    async fn process(
-        &self,
-        event: obzenflow_core::ChainEvent,
-    ) -> Result<Vec<obzenflow_core::ChainEvent>, HandlerError> {
-        let reduce_input =
-            obzenflow_core::ai::AiMapReduceReduceInput::<Seed, Collected>::try_from_event(&event)
-                .map_err(|err| {
-                HandlerError::Deserialization(format!(
-                    "ai_map_reduce: reduce_input decode failed: {err}"
-                ))
-            })?;
-
-        let seed = reduce_input.seed.ok_or_else(|| {
-            HandlerError::Validation("ai_map_reduce: reduce_input missing seed".to_string())
-        })?;
-
-        let tuple_payload =
-            serde_json::to_value((seed, reduce_input.collected)).map_err(|err| {
-                HandlerError::Other(format!("ai_map_reduce: reduce tuple encode failed: {err}"))
-            })?;
-
-        let mut tuple_event = event;
-        if let obzenflow_core::event::ChainEventContent::Data { payload, .. } =
-            &mut tuple_event.content
-        {
-            *payload = tuple_payload;
-        }
-
-        self.inner.process(tuple_event).await
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        self.inner.drain().await
-    }
-}
-
-#[derive(Clone)]
-struct DynTransformHandler {
-    inner: Arc<dyn TransformHandler>,
-    inner_type: &'static str,
-}
-
-impl DynTransformHandler {
-    fn new<H>(handler: H) -> Self
-    where
-        H: TransformHandler + Send + Sync + 'static,
-    {
-        Self {
-            inner: Arc::new(handler),
-            inner_type: type_name::<H>(),
-        }
-    }
-}
-
-impl fmt::Debug for DynTransformHandler {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DynTransformHandler")
-            .field("inner_type", &self.inner_type)
-            .finish()
-    }
-}
-
-#[async_trait::async_trait]
-impl TransformHandler for DynTransformHandler {
-    fn process(
-        &self,
-        event: obzenflow_core::ChainEvent,
-    ) -> Result<Vec<obzenflow_core::ChainEvent>, HandlerError> {
-        self.inner.process(event)
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
-            HandlerError::Validation("DynTransformHandler: drain requires unique Arc".to_string())
-        })?;
-        inner.drain().await
-    }
-}
-
-#[derive(Clone)]
-struct DynAsyncTransformHandler {
-    inner: Arc<dyn AsyncTransformHandler>,
-    inner_type: &'static str,
-}
-
-impl DynAsyncTransformHandler {
-    fn new<H>(handler: H) -> Self
-    where
-        H: AsyncTransformHandler + Send + Sync + 'static,
-    {
-        Self {
-            inner: Arc::new(handler),
-            inner_type: type_name::<H>(),
-        }
-    }
-}
-
-impl fmt::Debug for DynAsyncTransformHandler {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DynAsyncTransformHandler")
-            .field("inner_type", &self.inner_type)
-            .finish()
-    }
-}
-
-#[async_trait::async_trait]
-impl AsyncTransformHandler for DynAsyncTransformHandler {
-    async fn process(
-        &self,
-        event: obzenflow_core::ChainEvent,
-    ) -> Result<Vec<obzenflow_core::ChainEvent>, HandlerError> {
-        self.inner.process(event).await
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
-            HandlerError::Validation(
-                "DynAsyncTransformHandler: drain requires unique Arc".to_string(),
-            )
-        })?;
-        inner.drain().await
-    }
-}
-
-pub fn map_reduce<In, Chunk, Partial, Collected, Out>(
-) -> AiMapReduceBuilder<In, Chunk, Partial, Collected, Out> {
-    AiMapReduceBuilder::new()
-}
-
-pub struct AiMapReduceBuilder<In, Chunk, Partial, Collected, Out> {
-    chunker: Option<DynTransformHandler>,
-    map: Option<DynAsyncTransformHandler>,
-    collect: Option<CollectByInput<Partial, Collected>>,
-    finalize: Option<DynAsyncTransformHandler>,
-    chunk_middleware: Vec<Box<dyn MiddlewareFactory>>,
-    map_middleware: Vec<Box<dyn MiddlewareFactory>>,
-    collect_middleware: Vec<Box<dyn MiddlewareFactory>>,
-    finalize_middleware: Vec<Box<dyn MiddlewareFactory>>,
-    _phantom: PhantomData<(In, Chunk, Partial, Collected, Out)>,
-}
-
-impl<In, Chunk, Partial, Collected, Out> AiMapReduceBuilder<In, Chunk, Partial, Collected, Out> {
-    fn new() -> Self {
-        Self {
-            chunker: None,
-            map: None,
-            collect: None,
-            finalize: None,
-            chunk_middleware: Vec::new(),
-            map_middleware: Vec::new(),
-            collect_middleware: Vec::new(),
-            finalize_middleware: Vec::new(),
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn chunker<H>(mut self, handler: H) -> Self
-    where
-        H: TransformHandler + Send + Sync + 'static,
-    {
-        self.chunker = Some(DynTransformHandler::new(handler));
-        self
-    }
-
-    pub fn map<H>(mut self, handler: H) -> Self
-    where
-        H: AsyncTransformHandler + Send + Sync + 'static,
-    {
-        self.map = Some(DynAsyncTransformHandler::new(handler));
-        self
-    }
-
-    pub fn collect(mut self, collector: CollectByInput<Partial, Collected>) -> Self {
-        self.collect = Some(collector);
-        self
-    }
-
-    pub fn finalize<H>(mut self, handler: H) -> Self
-    where
-        H: AsyncTransformHandler + Send + Sync + 'static,
-    {
-        self.finalize = Some(DynAsyncTransformHandler::new(handler));
-        self
-    }
-
-    pub fn chunk_middleware<I, M>(mut self, middleware: I) -> Self
-    where
-        I: IntoIterator<Item = M>,
-        M: MiddlewareFactory + 'static,
-    {
-        self.chunk_middleware.extend(
-            middleware
-                .into_iter()
-                .map(|mw| Box::new(mw) as Box<dyn MiddlewareFactory>),
-        );
-        self
-    }
-
-    pub fn map_middleware<I, M>(mut self, middleware: I) -> Self
-    where
-        I: IntoIterator<Item = M>,
-        M: MiddlewareFactory + 'static,
-    {
-        self.map_middleware.extend(
-            middleware
-                .into_iter()
-                .map(|mw| Box::new(mw) as Box<dyn MiddlewareFactory>),
-        );
-        self
-    }
-
-    pub fn collect_middleware<I, M>(mut self, middleware: I) -> Self
-    where
-        I: IntoIterator<Item = M>,
-        M: MiddlewareFactory + 'static,
-    {
-        self.collect_middleware.extend(
-            middleware
-                .into_iter()
-                .map(|mw| Box::new(mw) as Box<dyn MiddlewareFactory>),
-        );
-        self
-    }
-
-    pub fn finalize_middleware<I, M>(mut self, middleware: I) -> Self
-    where
-        I: IntoIterator<Item = M>,
-        M: MiddlewareFactory + 'static,
-    {
-        self.finalize_middleware.extend(
-            middleware
-                .into_iter()
-                .map(|mw| Box::new(mw) as Box<dyn MiddlewareFactory>),
-        );
-        self
-    }
-
-    pub fn build(self) -> Box<dyn CompositeDescriptor>
-    where
-        In: Clone + TypedPayload + Send + Sync + 'static,
-        Chunk: Clone + TypedPayload + Send + Sync + 'static,
-        Partial: TypedPayload + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
-        Collected:
-            Clone + serde::Serialize + TypedPayload + std::fmt::Debug + Send + Sync + 'static,
-        Out: Clone + TypedPayload + Send + Sync + 'static,
-    {
-        Box::new(
-            AiMapReduceCompositeDescriptor::<In, Chunk, Partial, Collected, Out> {
-                name: BINDING_DERIVED_NAME_SENTINEL.to_string(),
-                chunker: self.chunker.expect("ai::map_reduce: missing chunker(...)"),
-                map: self.map.expect("ai::map_reduce: missing map(...)"),
-                collect: self.collect.expect("ai::map_reduce: missing collect(...)"),
-                finalize: self
-                    .finalize
-                    .expect("ai::map_reduce: missing finalize(...)"),
-                chunk_middleware: self.chunk_middleware,
-                map_middleware: self.map_middleware,
-                collect_middleware: self.collect_middleware,
-                finalize_middleware: self.finalize_middleware,
-                _phantom: PhantomData,
-            },
-        )
-    }
-}
-
-struct AiMapReduceCompositeDescriptor<In, Chunk, Partial, Collected, Out> {
-    name: String,
-    chunker: DynTransformHandler,
-    map: DynAsyncTransformHandler,
-    collect: CollectByInput<Partial, Collected>,
-    finalize: DynAsyncTransformHandler,
-    chunk_middleware: Vec<Box<dyn MiddlewareFactory>>,
-    map_middleware: Vec<Box<dyn MiddlewareFactory>>,
-    collect_middleware: Vec<Box<dyn MiddlewareFactory>>,
-    finalize_middleware: Vec<Box<dyn MiddlewareFactory>>,
-    _phantom: PhantomData<(In, Chunk, Partial, Collected, Out)>,
-}
-
-impl<In, Chunk, Partial, Collected, Out> CompositeDescriptor
-    for AiMapReduceCompositeDescriptor<In, Chunk, Partial, Collected, Out>
-where
-    In: Clone + TypedPayload + Send + Sync + 'static,
-    Chunk: Clone + TypedPayload + Send + Sync + 'static,
-    Partial: TypedPayload + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
-    Collected: Clone + serde::Serialize + TypedPayload + std::fmt::Debug + Send + Sync + 'static,
+    Seed: Clone
+        + fmt::Debug
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + TypedPayload
+        + Send
+        + Sync
+        + 'static,
+    Item: Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static,
+    Partial: Clone
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + TypedPayload
+        + Send
+        + Sync
+        + 'static,
     Out: Clone + TypedPayload + Send + Sync + 'static,
+    Chunker: TransformHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    MapRole: AiMapRole<Item, Partial>,
+    FinaliseRole: AiFinaliseRole<Seed, Many<Partial>, Out>,
+{
+    Box::new(GeneratedAiMapReduceCompositeDescriptor {
+        name: name.into(),
+        chunker,
+        map_role,
+        finalise_role,
+        chat_target,
+        chat_estimator,
+        map_policies,
+        finalise_policies,
+        _types: PhantomData,
+    })
+}
+
+struct GeneratedAiMapReduceCompositeDescriptor<
+    Seed,
+    Item,
+    Partial,
+    Out,
+    Chunker,
+    MapRole,
+    FinaliseRole,
+> {
+    name: String,
+    chunker: Chunker,
+    map_role: MapRole,
+    finalise_role: FinaliseRole,
+    chat_target: ChatTarget,
+    chat_estimator: ResolvedTokenEstimator,
+    map_policies: Vec<Box<dyn MiddlewareFactory>>,
+    finalise_policies: Vec<Box<dyn MiddlewareFactory>>,
+    _types: PhantomData<fn() -> (Seed, Item, Partial, Out)>,
+}
+
+impl<Seed, Item, Partial, Out, Chunker, MapRole, FinaliseRole> CompositeDescriptor
+    for GeneratedAiMapReduceCompositeDescriptor<
+        Seed,
+        Item,
+        Partial,
+        Out,
+        Chunker,
+        MapRole,
+        FinaliseRole,
+    >
+where
+    Seed: Clone
+        + fmt::Debug
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + TypedPayload
+        + Send
+        + Sync
+        + 'static,
+    Item: Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static,
+    Partial: Clone
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + TypedPayload
+        + Send
+        + Sync
+        + 'static,
+    Out: Clone + TypedPayload + Send + Sync + 'static,
+    Chunker: TransformHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    MapRole: AiMapRole<Item, Partial>,
+    FinaliseRole: AiFinaliseRole<Seed, Many<Partial>, Out>,
 {
     fn name(&self) -> &str {
         &self.name
@@ -415,136 +150,162 @@ where
     }
 
     fn schema_version(&self) -> u32 {
-        1
+        2
     }
 
     fn expand(self: Box<Self>, ctx: &mut CompositeBuildContext) -> Result<(), CompositeBuildError> {
-        // ---------------------------------------------------------------------
-        // Chunk stage: In -> Chunk (+ manifest control event)
-        // ---------------------------------------------------------------------
-        let mut chunk_middleware = self.chunk_middleware;
-        chunk_middleware.push(Box::new(AiMapReduceChunkManifestFactory::<Chunk>::new()));
+        if self.chat_estimator.info().model != self.chat_target.model {
+            return Err(CompositeBuildError::new(format!(
+                "ai_map_reduce!: `effects.chat_estimator` model '{}' does not match \
+                 `effects.chat_target` model '{}'",
+                self.chat_estimator.info().model,
+                self.chat_target.model
+            )));
+        }
 
-        let chunk_handler = BoundTransform::<In, Chunk, _>::new(self.chunker);
-        let chunk_descriptor = TransformDescriptor {
-            // Placeholder; the derived `{binding}__chunk` is stamped at
-            // expansion finish (D2 derived names).
-            name: "chunk".to_string(),
-            handler: chunk_handler,
-            middleware: chunk_middleware,
-            backpressure: None,
-        };
-        let chunk_descriptor = wrap_typed_descriptor(
-            Box::new(chunk_descriptor),
-            StageTypingMetadata::transform(
-                TypeHint::exact_payload::<In>(),
-                TypeHint::exact_payload::<Chunk>(),
-                false,
-                None,
-            )
-            .with_additional_output_contract(vec![TypeHint::exact_payload::<
-                AiMapReducePlanningManifest,
-            >()]),
+        let composite_id = CompositeId::new(format!("ai_map_reduce:{}", self.name));
+        let direct_bound = NonZeroU64::new(3).expect("generated direct bound is non-zero");
+
+        let chunk_handler = GeneratedAiChunkHandler::<ChunkEnvelope<Item>, _>::new(
+            self.chunker,
+            composite_id.clone(),
         );
-
-        // ---------------------------------------------------------------------
-        // Map stage: Chunk -> Partial (+ wrapper to forward manifests, tag partials, emit chunk_failed)
-        // ---------------------------------------------------------------------
-        let mut map_middleware: Vec<Box<dyn MiddlewareFactory>> = Vec::new();
-        map_middleware.push(Box::new(AiMapReduceMapFactory::<Chunk, Partial>::new()));
-        map_middleware.extend(self.map_middleware);
-
-        let map_handler = BoundAsyncTransform::<Chunk, Partial, _>::new(self.map);
-        let map_descriptor = AsyncTransformDescriptor {
-            name: "map".to_string(),
-            handler: map_handler,
-            middleware: map_middleware,
-            backpressure: None,
-        };
-        let map_descriptor = wrap_typed_descriptor(
-            Box::new(map_descriptor),
+        let chunk_descriptor = wrap_typed_descriptor(
+            Box::new(TransformDescriptor {
+                name: "chunk".to_string(),
+                handler: chunk_handler,
+                middleware: Vec::new(),
+                backpressure: None,
+            }),
             StageTypingMetadata::transform(
-                TypeHint::exact_payload::<Chunk>(),
-                TypeHint::exact_payload::<Partial>(),
+                TypeHint::exact_payload::<Seed>(),
+                TypeHint::exact_payload::<ChunkEnvelope<Item>>(),
                 false,
                 None,
             )
             .with_additional_output_contract(vec![
                 TypeHint::exact_payload::<AiMapReducePlanningManifest>(),
-                TypeHint::exact_payload::<AiMapReduceTaggedPartial<serde_json::Value>>(),
+                TypeHint::exact_payload::<AiMapReducePlanningFailed>(),
+            ]),
+        );
+
+        let map_handler = GeneratedAiMapHandler::<Item, Partial, _>::new(
+            self.map_role,
+            self.chat_target.clone(),
+            self.chat_estimator.clone(),
+            composite_id.clone(),
+        );
+        let map_descriptor = wrap_typed_descriptor(
+            Box::new(EffectfulTransformDescriptor {
+                name: "map".to_string(),
+                handler: map_handler,
+                effects: vec![EffectDeclaration::at_least_once::<ChatCompletion>()],
+                middleware: Vec::new(),
+                effect_policies: vec![EffectPolicyAttachment {
+                    effect_type: ChatCompletion::EFFECT_TYPE,
+                    factories: self.map_policies,
+                }],
+                direct_fact_plan: DirectFactPlan::generated::<ChunkEnvelope<Item>>(direct_bound),
+                backpressure: None,
+            }),
+            StageTypingMetadata::transform(
+                TypeHint::exact_payload::<ChunkEnvelope<Item>>(),
+                TypeHint::exact_payload::<ChatCompletionCompleted>(),
+                false,
+                None,
+            )
+            .with_additional_output_contract(vec![
+                TypeHint::exact_payload::<AiMapReducePlanningManifest>(),
+                TypeHint::exact_payload::<AiMapReduceTaggedPartial<Partial>>(),
                 TypeHint::exact_payload::<AiMapReduceChunkFailed>(),
             ]),
         );
 
-        // ---------------------------------------------------------------------
-        // Collect stage: Partial -> Collected (consumes the manifest and
-        // tagged partials from the single map journal)
-        // ---------------------------------------------------------------------
-        let collect_descriptor = StatefulDescriptor {
-            name: "collect".to_string(),
-            handler: self.collect,
-            emit_interval: None,
-            middleware: self.collect_middleware,
-            backpressure: None,
-        };
+        let collector: SeededCollectByInput<Partial, Seed, Many<Partial>> =
+            CollectByInput::new(Many::<Partial>::default(), |acc, partial: &Partial| {
+                acc.items.push(partial.clone());
+            })
+            .with_planning_summary(|acc, planning| {
+                acc.planning = planning.clone();
+            })
+            .with_seed::<Seed>()
+            .with_composite_id(composite_id);
         let collect_descriptor = wrap_typed_descriptor(
-            Box::new(collect_descriptor),
+            Box::new(StatefulDescriptor {
+                name: "collect".to_string(),
+                handler: collector,
+                emit_interval: None,
+                middleware: Vec::new(),
+                backpressure: None,
+            }),
             StageTypingMetadata::stateful(
-                TypeHint::exact_payload::<Partial>(),
-                TypeHint::exact_payload::<Collected>(),
+                TypeHint::exact_payload::<AiMapReduceTaggedPartial<Partial>>(),
+                TypeHint::exact_payload::<AiMapReduceReduceInput<Seed, Many<Partial>>>(),
                 false,
                 None,
-            ),
+            )
+            .with_additional_output_contract(vec![TypeHint::exact_payload::<
+                AiMapReduceJobFailed,
+            >()]),
         );
 
-        // ---------------------------------------------------------------------
-        // Finalise stage: Collected -> Out
-        // ---------------------------------------------------------------------
-        let finalize_handler = BoundAsyncTransform::<Collected, Out, _>::new(self.finalize);
-        let finalize_descriptor = AsyncTransformDescriptor {
-            name: "finalize".to_string(),
-            handler: finalize_handler,
-            middleware: self.finalize_middleware,
-            backpressure: None,
-        };
-        let finalize_descriptor = wrap_typed_descriptor(
-            Box::new(finalize_descriptor),
+        let finalise_handler = GeneratedAiFinaliseHandler::<Seed, Many<Partial>, Out, _>::new(
+            self.finalise_role,
+            self.chat_target,
+            self.chat_estimator,
+        );
+        let finalise_descriptor = wrap_typed_descriptor(
+            Box::new(EffectfulTransformDescriptor {
+                name: "finalize".to_string(),
+                handler: finalise_handler,
+                effects: vec![EffectDeclaration::at_least_once::<ChatCompletion>()],
+                middleware: Vec::new(),
+                effect_policies: vec![EffectPolicyAttachment {
+                    effect_type: ChatCompletion::EFFECT_TYPE,
+                    factories: self.finalise_policies,
+                }],
+                direct_fact_plan: DirectFactPlan::generated::<
+                    AiMapReduceReduceInput<Seed, Many<Partial>>,
+                >(direct_bound),
+                backpressure: None,
+            }),
             StageTypingMetadata::transform(
-                TypeHint::exact_payload::<Collected>(),
+                TypeHint::exact_payload::<AiMapReduceReduceInput<Seed, Many<Partial>>>(),
                 TypeHint::exact_payload::<Out>(),
                 false,
                 None,
-            ),
+            )
+            .with_additional_output_contract(vec![
+                TypeHint::exact_payload::<ChatCompletionCompleted>(),
+                TypeHint::exact_payload::<AiMapReduceFinaliseFailed>(),
+            ]),
         );
 
-        // ---------------------------------------------------------------------
-        // Composite declaration (FLOWIP-128a): members, lanes, boundary.
-        // Declaration order is manifest presentation order.
-        // ---------------------------------------------------------------------
         ctx.member("chunk").descriptor(chunk_descriptor);
         ctx.member("map").descriptor(map_descriptor);
         ctx.member("collect").descriptor(collect_descriptor);
-        ctx.member("finalize").descriptor(finalize_descriptor);
+        ctx.member("finalize").descriptor(finalise_descriptor);
 
         ctx.feed("chunk", "map")
             .lane("data")
-            .payload::<Chunk>()
+            .payload::<ChunkEnvelope<Item>>()
             .payload::<AiMapReducePlanningManifest>();
         ctx.feed("map", "collect")
             .lane("data")
             .payload::<AiMapReducePlanningManifest>()
-            .payload::<AiMapReduceTaggedPartial<serde_json::Value>>()
+            .payload::<AiMapReduceTaggedPartial<Partial>>()
             .payload::<AiMapReduceChunkFailed>();
-        ctx.edge("collect", "finalize");
+        ctx.feed("collect", "finalize")
+            .lane("data")
+            .payload::<AiMapReduceReduceInput<Seed, Many<Partial>>>();
 
         ctx.boundary()
             .input("in", "chunk")
-            .payload::<In>()
+            .payload::<Seed>()
             .default()
             .output("out", "finalize")
             .payload::<Out>()
             .default();
-
         Ok(())
     }
 }

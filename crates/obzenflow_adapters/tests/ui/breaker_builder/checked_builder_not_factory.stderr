@@ -5,8 +5,6 @@ error[E0277]: the trait bound `CheckedCircuitBreakerBuilder: MiddlewareFactory` 
    |                   ^^^^^^^^^^ the trait `MiddlewareFactory` is not implemented for `CheckedCircuitBreakerBuilder`
    |
    = help: the following other types implement trait `MiddlewareFactory`:
-             AiMapReduceChunkManifestFactory<Chunk>
-             AiMapReduceMapFactory<Chunk, Partial>
              Box<F>
              IndicatorMiddlewareFactory
              LoggingMiddlewareFactory

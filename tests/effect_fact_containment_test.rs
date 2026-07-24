@@ -198,6 +198,7 @@ where
         effects,
         middleware: Vec::new(),
         effect_policies: Vec::new(),
+        direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan::default(),
         backpressure: None,
     });
     let metadata = StageTypingMetadata::transform(

@@ -62,6 +62,23 @@ pub struct EffectResilienceBuilder {
     rate_limiter: Option<RateLimiter>,
 }
 
+/// Fixed no-retry resilience policy for generated AI chat effects.
+///
+/// Map and finalise each receive their own instance: five consecutive
+/// unhealthy calls open the breaker for sixty seconds, with one half-open
+/// probe. Transport retries, if any, remain below the chat port contract.
+pub fn ai_resilience() -> Box<dyn MiddlewareFactory> {
+    let breaker = CircuitBreaker::builder()
+        .consecutive_failures(5)
+        .open_for(Duration::from_secs(60))
+        .probes(1)
+        .build()
+        .expect("the fixed AI resilience breaker configuration is valid");
+    EffectResilience::with_breaker(breaker)
+        .build()
+        .expect("the fixed no-retry AI resilience configuration is valid")
+}
+
 #[derive(Debug, Error)]
 pub enum EffectResilienceConfigError {
     #[error(transparent)]
@@ -558,9 +575,9 @@ struct RecoveryCompletion {
 
 /// Invocation-local authority for effect recovery.
 ///
-/// In particular, the initial breaker epoch is write-once and the affine
-/// limiter reservation lives here until it is committed immediately before a
-/// physical call or cancelled by any terminal path.
+/// In particular, the initial breaker epoch is write-once and the limiter
+/// reservation lives here until it is transferred to the physical-call
+/// settlement guard or cancelled by a terminal path.
 struct EffectRecoveryController {
     session_started: Instant,
     first_physical_call_started: Option<Instant>,
@@ -594,6 +611,13 @@ impl EffectRecoveryController {
             terminal_decision: None,
             completion: None,
         }
+    }
+
+    fn with_attempt_base(highest_prior_attempt: u32) -> Self {
+        let mut controller = Self::new();
+        controller.attempt_ordinal = highest_prior_attempt;
+        controller.retry_count = highest_prior_attempt.saturating_sub(1);
+        controller
     }
 
     fn initial_epoch(&self) -> Option<EffectAdmissionEpoch> {
@@ -655,6 +679,22 @@ impl EffectRecoveryController {
     }
 
     fn begin_physical_attempt(&mut self, attempt_start_window: Option<Duration>) -> u32 {
+        let attempt = self.begin_physical_attempt_state(attempt_start_window);
+        if let Some(reservation) = self.current_reservation.take() {
+            reservation.commit();
+        }
+        attempt
+    }
+
+    fn begin_affine_attempt(
+        &mut self,
+        attempt_start_window: Option<Duration>,
+    ) -> (u32, Option<RateLimitReservation>) {
+        let attempt = self.begin_physical_attempt_state(attempt_start_window);
+        (attempt, self.current_reservation.take())
+    }
+
+    fn begin_physical_attempt_state(&mut self, attempt_start_window: Option<Duration>) -> u32 {
         debug_assert_eq!(self.cancellation_state, RecoveryCancellationState::Reserved);
         let now = Instant::now();
         if self.first_physical_call_started.is_none() {
@@ -665,9 +705,6 @@ impl EffectRecoveryController {
         self.attempt_ordinal = self.attempt_ordinal.saturating_add(1);
         self.retry_count = self.attempt_ordinal.saturating_sub(1);
         self.cancellation_state = RecoveryCancellationState::InFlight;
-        if let Some(reservation) = self.current_reservation.take() {
-            reservation.commit();
-        }
         self.attempt_ordinal
     }
 
@@ -703,6 +740,15 @@ impl EffectRecoveryController {
             drop(cause);
             RecoveryTerminalDecision::ReturnLastPhysicalError
         });
+        self.take_terminal_decision()
+    }
+
+    fn finish_affine_admission(
+        &mut self,
+        cause: Box<crate::middleware::MiddlewareAbortCause>,
+    ) -> RecoveryTerminalDecision {
+        self.cancel_reservation();
+        self.terminal_decision = Some(RecoveryTerminalDecision::BoundaryRejected(cause));
         self.take_terminal_decision()
     }
 
@@ -835,6 +881,43 @@ impl Drop for AttemptSettlementGuard {
         {
             self.breaker.settle_cancelled_in_flight();
         }
+    }
+}
+
+/// The affine runtime publishes its durable Start inside the prepared future,
+/// before it marks the protected dependency as started. Keep the limiter
+/// reservation refundable across that publication cut, then account it
+/// exactly once as soon as the runtime-owned receipt proves the physical call
+/// began. Drop performs the same decision for cancellation.
+struct AffineLimiterSettlementGuard {
+    receipt: PhysicalCallReceipt,
+    reservation: Option<RateLimitReservation>,
+}
+
+impl AffineLimiterSettlementGuard {
+    fn new(receipt: PhysicalCallReceipt, reservation: Option<RateLimitReservation>) -> Self {
+        Self {
+            receipt,
+            reservation,
+        }
+    }
+
+    fn settle(&mut self) {
+        let Some(reservation) = self.reservation.take() else {
+            return;
+        };
+        match self.receipt.observation() {
+            PhysicalCallObservation::Started { .. } | PhysicalCallObservation::Completed { .. } => {
+                reservation.commit()
+            }
+            PhysicalCallObservation::Prepared => drop(reservation),
+        }
+    }
+}
+
+impl Drop for AffineLimiterSettlementGuard {
+    fn drop(&mut self) {
+        self.settle();
     }
 }
 
@@ -1270,6 +1353,124 @@ impl EffectResilienceMiddleware {
         write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
         execution.into_report(ctx.take_control_events())
     }
+
+    pub(in crate::middleware::control) async fn execute_affine(
+        &self,
+        identity: &EffectIdentity,
+        event: &ChainEvent,
+        ctx: &mut crate::middleware::MiddlewareContext,
+        operation: obzenflow_runtime::effects::AffineEffectOperation,
+    ) -> obzenflow_runtime::effects::AffineEffectBoundaryReport {
+        debug_assert_eq!(
+            identity.safety,
+            obzenflow_runtime::effects::EffectSafety::NonIdempotentAtLeastOnce
+        );
+        debug_assert!(self.retry.is_none());
+        let highest_prior_attempt = operation.highest_prior_attempt();
+        let mut recovery = EffectRecoveryController::with_attempt_base(highest_prior_attempt);
+
+        let reservation_epoch = match self.breaker.effect_precheck(ctx, None) {
+            Ok(epoch) => epoch,
+            Err(cause) => {
+                let decision = recovery.finish_affine_admission(cause);
+                write_recovery_completed(
+                    &mut recovery,
+                    self.breaker.as_ref(),
+                    identity,
+                    event,
+                    ctx,
+                );
+                return affine_admission_terminal(decision, ctx, operation);
+            }
+        };
+        recovery.observe_precheck(reservation_epoch);
+
+        let admission_started = Instant::now();
+        recovery.begin_limiter_wait();
+        let reservation = match &self.limiter {
+            Some(limiter) => Some(limiter.reserve_permit_async(ctx).await),
+            None => None,
+        };
+        recovery.install_reservation(reservation);
+
+        #[cfg(test)]
+        self.pause_before_final_admission(&identity.cursor, recovery.attempts())
+            .await;
+
+        if let PolicyAdmission::Reject(cause) =
+            self.breaker.effect_admit(ctx, recovery.admission_fence())
+        {
+            let decision = recovery.finish_affine_admission(cause);
+            write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
+            return affine_admission_terminal(decision, ctx, operation);
+        }
+        let admission_wait = admission_started.elapsed();
+
+        let prepared = operation.prepare();
+        let receipt = prepared.receipt();
+        let mut settlement_guard =
+            AttemptSettlementGuard::new(self.breaker.clone(), receipt.clone());
+        let (attempt, reservation) = recovery.begin_affine_attempt(None);
+        let mut limiter_settlement =
+            AffineLimiterSettlementGuard::new(receipt.clone(), reservation);
+        let execution = prepared.execute().await;
+        limiter_settlement.settle();
+        settlement_guard.disarm();
+        recovery.finish_physical_attempt(execution.result());
+        let PhysicalCallObservation::Completed {
+            outcome,
+            dependency_elapsed,
+        } = receipt.observation()
+        else {
+            self.breaker.settle_not_executed(ctx);
+            let terminal = recovery.finish_with_physical_result();
+            debug_assert!(matches!(
+                terminal,
+                RecoveryTerminalDecision::ReturnPhysicalResult
+            ));
+            write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
+            return execution.into_report(ctx.take_control_events());
+        };
+
+        ctx.insert::<EffectCallDurationNanos>(
+            dependency_elapsed.as_nanos().min(u64::MAX as u128) as u64
+        );
+        prepare_retry_context(execution.result(), ctx);
+        let classification = classify_physical_result(
+            self.breaker.as_ref(),
+            event,
+            execution.result(),
+            outcome,
+            ctx,
+        );
+        if let Some(classification) = classification.as_ref() {
+            self.breaker.settle_classified_call(classification, ctx);
+        } else {
+            self.breaker.settle_unobserved_call(ctx);
+        }
+        if let Some(limiter) = &self.limiter {
+            limiter.observe_resilience_attempt(ctx);
+        }
+        ctx.write_control_event(ChainEventFactory::circuit_breaker_attempt_settled(
+            self.breaker.evidence_writer_id(),
+            CircuitBreakerAttemptSettledEventParams {
+                cursor: identity.cursor.clone(),
+                attempt,
+                health_classification: evidence_classification(classification.as_ref()),
+                slow: self.breaker.is_slow_dependency_call(dependency_elapsed),
+                dependency_elapsed_ms: duration_ms(dependency_elapsed),
+                admission_wait_ms: duration_ms(admission_wait),
+            },
+            event.id,
+        ));
+        let terminal = recovery.finish_with_physical_result();
+        debug_assert!(matches!(
+            terminal,
+            RecoveryTerminalDecision::ReturnPhysicalResult
+        ));
+        write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
+        execution.into_report(ctx.take_control_events())
+    }
 }
 
 fn write_recovery_completed(
@@ -1380,6 +1581,33 @@ fn single_use_admission_terminal(
     }
 }
 
+fn affine_admission_terminal(
+    decision: RecoveryTerminalDecision,
+    ctx: &mut crate::middleware::MiddlewareContext,
+    operation: obzenflow_runtime::effects::AffineEffectOperation,
+) -> obzenflow_runtime::effects::AffineEffectBoundaryReport {
+    match decision {
+        RecoveryTerminalDecision::BoundaryRejected(cause) => {
+            let cause = *cause;
+            operation.abort(
+                EffectAbortReason {
+                    cause: EffectFailureCause {
+                        source: cause.source,
+                        code: cause.code,
+                    },
+                    message: cause.message,
+                    retry: cause.retry,
+                },
+                ctx.take_control_events(),
+            )
+        }
+        RecoveryTerminalDecision::ReturnLastPhysicalError
+        | RecoveryTerminalDecision::ReturnPhysicalResult => {
+            unreachable!("affine admission occurs before the next physical call")
+        }
+    }
+}
+
 fn single_use_report_from_admission(
     admission: PolicyAdmission,
     ctx: &mut crate::middleware::MiddlewareContext,
@@ -1465,6 +1693,10 @@ fn classify_physical_result(
             None
         }
         (PhysicalCallOutcome::Succeeded, Err(_)) => Some(FailureClassification::Success),
+        (
+            PhysicalCallOutcome::Failed,
+            Err(EffectError::EffectPortBindingInvariantViolation { .. }),
+        ) => Some(FailureClassification::Ignored),
         (PhysicalCallOutcome::Failed, Err(error)) if error_has_health_observation(error) => {
             Some(breaker.classify_effect_error(event, error, ctx))
         }
@@ -1497,6 +1729,7 @@ fn error_has_health_observation(error: &EffectError) -> bool {
         EffectError::Serialization(_)
         | EffectError::Journal(_)
         | EffectError::MissingRecordedEffect { .. }
+        | EffectError::EffectInDoubt { .. }
         | EffectError::DuplicateRecordedEffect { .. }
         | EffectError::DescriptorMismatch { .. }
         | EffectError::BoundaryRejected { .. }
@@ -1509,6 +1742,11 @@ fn error_has_health_observation(error: &EffectError) -> bool {
         | EffectError::CompletedWithoutOutput { .. }
         | EffectError::CompletedEmptyWithOutput { .. }
         | EffectError::MissingEffectPort { .. }
+        | EffectError::EffectPortResolutionFailed { .. }
+        | EffectError::EffectPortBindingMismatch { .. }
+        | EffectError::EffectPortBindingInvariantViolation { .. }
+        | EffectError::DependencyFailed { .. }
+        | EffectError::RecoveryAbandoned { .. }
         | EffectError::TransactionalCommitMissing { .. }
         | EffectError::ReplayArchive(_) => false,
     }
@@ -1712,6 +1950,35 @@ mod tests {
         assert!(!retryable_error(&EffectError::Domain(
             "declined".to_string()
         )));
+    }
+
+    #[test]
+    fn post_start_port_invariant_has_fixed_ignored_health() {
+        let breaker = Arc::new(CircuitBreakerMiddleware::new(5));
+        let event = ChainEventFactory::data_event(
+            obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
+            "test.effect_input.v1",
+            serde_json::json!({}),
+        );
+        let result = Err(EffectError::EffectPortBindingInvariantViolation {
+            port: "chat".to_string(),
+            expected: "fixture/bound".to_string(),
+            observed: "fixture/mutated".to_string(),
+        });
+        let ctx = crate::middleware::MiddlewareContext::with_scope(
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        );
+
+        assert!(matches!(
+            classify_physical_result(
+                breaker.as_ref(),
+                &event,
+                &result,
+                PhysicalCallOutcome::Failed,
+                &ctx,
+            ),
+            Some(FailureClassification::Ignored)
+        ));
     }
 
     #[test]

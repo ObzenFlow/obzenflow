@@ -165,6 +165,7 @@ macro_rules! flow {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         $(backpressure: $flow_bp:expr,)?
+        $(bindings: |$runtime_config:ident| { $($binding:stmt)* },)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -184,6 +185,13 @@ macro_rules! flow {
             use $crate::dsl::stage_descriptor::*;
             use std::collections::HashMap;
 
+            $(
+                let $runtime_config = __build_ctx.runtime_config().as_ref();
+                $(
+                    #[allow(redundant_semicolons)]
+                    $binding;
+                )*
+            )?
             let journals = $journals;
             let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
@@ -247,6 +255,7 @@ macro_rules! flow {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         $(backpressure: $flow_bp:expr,)?
+        $(bindings: |$runtime_config:ident| { $($binding:stmt)* },)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -266,6 +275,13 @@ macro_rules! flow {
             use $crate::dsl::stage_descriptor::*;
             use std::collections::HashMap;
 
+            $(
+                let $runtime_config = __build_ctx.runtime_config().as_ref();
+                $(
+                    #[allow(redundant_semicolons)]
+                    $binding;
+                )*
+            )?
             let journals = $journals;
             let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
@@ -339,6 +355,7 @@ macro_rules! test_flow {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         $(backpressure: $flow_bp:expr,)?
+        $(bindings: |$runtime_config:ident| { $($binding:stmt)* },)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -356,6 +373,16 @@ macro_rules! test_flow {
             use $crate::dsl::stage_descriptor::*;
             use std::collections::HashMap;
 
+            // Explicit built-in-defaults context: test_flow! builds without
+            // a host (FLOWIP-010 §7).
+            let __build_ctx = obzenflow_runtime::run_context::FlowBuildContext::for_tests();
+            $(
+                let $runtime_config = __build_ctx.runtime_config().as_ref();
+                $(
+                    #[allow(redundant_semicolons)]
+                    $binding;
+                )*
+            )?
             let journals = $journals;
             let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
@@ -384,10 +411,6 @@ macro_rules! test_flow {
                     ]
                 };
 
-            // Explicit built-in-defaults context: test_flow! builds without
-            // a host (FLOWIP-010 §7).
-            let __build_ctx = obzenflow_runtime::run_context::FlowBuildContext::for_tests();
-
             $crate::build_typed_flow!(
                 $flow_name,
                 journals,
@@ -413,6 +436,7 @@ macro_rules! test_flow {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         $(backpressure: $flow_bp:expr,)?
+        $(bindings: |$runtime_config:ident| { $($binding:stmt)* },)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -430,6 +454,9 @@ macro_rules! test_flow {
             journals: $journals,
             middleware: [$($flow_mw),*],
             $(backpressure: $flow_bp,)?
+            $(
+                bindings: |$runtime_config| { $($binding)* },
+            )?
             $(
                 effect_ports: $effect_ports,
             )?
@@ -1410,6 +1437,7 @@ macro_rules! build_typed_flow {
         let mut stage_journals = HashMap::new();
         let mut error_journals = HashMap::new();
         let mut manifest_stages: HashMap<String, obzenflow_core::journal::run_manifest::RunManifestStage> = HashMap::new();
+        let mut bounded_direct_fact_admission = Vec::new();
         // FLOWIP-095j: per-stage delivery metadata for the manifest, derived after
         // wrap_deterministic_orderers so orderer answers match the runtime.
         let manifest_delivery_metadata = $crate::dsl::typing::derive_manifest_delivery_metadata(
@@ -1425,6 +1453,17 @@ macro_rules! build_typed_flow {
                     name
                 ))
             })?;
+            if let Some(plan) = descriptor.direct_fact_plan() {
+                bounded_direct_fact_admission.extend(plan.manifest_entries().map(
+                    |(input_event_type, max_live_data_rows)| {
+                        obzenflow_core::journal::run_manifest::RunManifestDirectFactAdmission {
+                            stage_key: descriptor.name().to_string(),
+                            input_event_type: input_event_type.to_string(),
+                            max_live_data_rows,
+                        }
+                    },
+                ));
+            }
 
             let journal = obzenflow_runtime::journal::FlowJournalFactory::create_chain_journal(
                     &mut journal_factory,
@@ -1493,12 +1532,43 @@ macro_rules! build_typed_flow {
                 },
             );
         }
+        bounded_direct_fact_admission.sort();
 
         // FLOWIP-120n: take the replay archive before the manifest is written,
         // so a resume records the generation it enters (max recorded + 1).
         // FLOWIP-120u: the host opened it into the bootstrap snapshot; the
         // factory only consumes it, to seed the F18 admission sequencer.
         let replay_archive = obzenflow_runtime::bootstrap::replay_archive();
+        if !bounded_direct_fact_admission.is_empty() {
+            if let Some(archive) = replay_archive.as_ref() {
+                use obzenflow_core::journal::run_manifest::{
+                    BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY,
+                    EFFECT_ATTEMPT_HISTORY_CAPABILITY,
+                };
+                for capability in [
+                    EFFECT_ATTEMPT_HISTORY_CAPABILITY,
+                    BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY,
+                ] {
+                    if archive.manifest_capability(capability) != Some(1) {
+                        return Err(FlowBuildError::StageResourcesFailed(format!(
+                            "replay archive is missing required run-manifest capability \
+                             '{capability}: 1' for generated direct-effect stages"
+                        )));
+                    }
+                }
+                let archived = archive.bounded_direct_fact_admission();
+                if archived.iter().any(|entry| entry.max_live_data_rows == 0)
+                    || archived.windows(2).any(|pair| pair[0] >= pair[1])
+                    || archived != bounded_direct_fact_admission.as_slice()
+                {
+                    return Err(FlowBuildError::StageResourcesFailed(format!(
+                        "replay archive bounded direct-fact admission metadata does not \
+                         match the current generated descriptor plan; archived={archived:?}, \
+                         current={bounded_direct_fact_admission:?}"
+                    )));
+                }
+            }
+        }
         if let Some(archive) = replay_archive.as_ref() {
             obzenflow_runtime::journal::FlowJournalFactory::seed_admission_from_archive(
                 &journal_factory,
@@ -1527,6 +1597,18 @@ macro_rules! build_typed_flow {
                 }
             });
 
+        let mut manifest_capabilities = std::collections::BTreeMap::new();
+        manifest_capabilities.insert(
+            obzenflow_core::journal::run_manifest::EFFECT_ATTEMPT_HISTORY_CAPABILITY.to_string(),
+            1,
+        );
+        if !bounded_direct_fact_admission.is_empty() {
+            manifest_capabilities.insert(
+                obzenflow_core::journal::run_manifest::BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY
+                    .to_string(),
+                1,
+            );
+        }
         let run_manifest = obzenflow_core::journal::run_manifest::RunManifest {
             manifest_version: obzenflow_core::journal::run_manifest::RUN_MANIFEST_VERSION.to_string(),
             journal_format_version: obzenflow_core::journal::run_manifest::JOURNAL_FORMAT_VERSION,
@@ -1540,6 +1622,8 @@ macro_rules! build_typed_flow {
             system_journal_file: JournalName::System.to_filename(),
             // FLOWIP-010 §6a: the redacted effective config is run evidence.
             effective_config: Some(__flow_effective.manifest_evidence()),
+            capabilities: manifest_capabilities,
+            bounded_direct_fact_admission,
         };
         // FLOWIP-120u: the manifest is a durable-run artifact; ephemeral runs
         // have no location to persist it within.

@@ -221,10 +221,12 @@ fn effect_context_with_boundary(
         ),
     );
     let mut effect_ports = EffectPortRegistry::new();
-    effect_ports.insert::<dyn TransactionalEffectPort<TransactionProbe>>(
-        "tx",
-        Arc::new(TransactionProbePort { calls, trace, mode }),
-    );
+    effect_ports
+        .insert::<dyn TransactionalEffectPort<TransactionProbe>>(
+            "tx",
+            Arc::new(TransactionProbePort { calls, trace, mode }),
+        )
+        .expect("transaction probe port registration is unique");
 
     EffectInvocationContext {
         flow_id: FlowId::new(),

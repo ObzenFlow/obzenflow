@@ -8,78 +8,23 @@
 mod tests {
     use std::collections::HashMap;
 
-    use obzenflow_adapters::middleware::{
-        validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
-        MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
-        MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
-    };
     use obzenflow_core::TypedPayload;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
-    use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
+    use obzenflow_runtime::stages::common::handlers::TransformHandler;
     use obzenflow_topology::EdgeKind;
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
 
-    use crate::dsl::composites::ai_map_reduce;
     use crate::dsl::composites::lower_composites;
     use crate::dsl::composition::{FlowMember, IntoFlowMember};
     use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
     use crate::dsl::typing::TypeHint;
     use obzenflow_core::ai::{
-        AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
+        AiFinaliseRole, AiMapReduceChunkFailed, AiMapReducePlanningManifest,
+        AiMapReduceTaggedPartial, AiMapRole, AiRoleLogicFailure, ChatCompletionCompleted,
+        ChatMessage, ChatParams, ChatRequest, ChatTarget, HeuristicTokenEstimator, Many,
+        ResolvedTokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
     };
-
-    struct TestObserver(&'static str);
-
-    impl obzenflow_runtime::stages::observer::HandlerObserver for TestObserver {
-        fn label(&self) -> &'static str {
-            self.0
-        }
-    }
-
-    #[derive(Clone)]
-    struct TestMiddlewareFactory(&'static str);
-
-    impl MiddlewareFactory for TestMiddlewareFactory {
-        fn label(&self) -> &'static str {
-            self.0
-        }
-
-        fn override_key(&self) -> MiddlewareOverrideKey {
-            // In production, override keys are stable family identifiers independent of display
-            // labels. For this test factory, the label itself is the family boundary.
-            MiddlewareOverrideKey::of::<Self>(self.0)
-        }
-
-        fn declaration(&self) -> MiddlewareDeclaration {
-            MiddlewareDeclaration::observer(self.0, vec![MiddlewareSurfaceKind::Handler])
-        }
-
-        fn materialize(
-            &self,
-            request: MiddlewareAttachmentRequest<'_>,
-            context: &MiddlewareMaterializationContext<'_>,
-        ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment>
-        {
-            validate_attachment_request(&self.declaration(), &request).map_err(|err| {
-                MiddlewareFactoryError::materialization_failed(
-                    self.label(),
-                    &context.config.name,
-                    err,
-                )
-            })?;
-            match request.surface.kind() {
-                MiddlewareSurfaceKind::Handler => Ok(
-                    MiddlewareSurfaceAttachment::handler_observer(Arc::new(TestObserver(self.0))),
-                ),
-                other => Err(MiddlewareFactoryError::materialization_failed(
-                    self.label(),
-                    &context.config.name,
-                    std::io::Error::other(format!("unsupported observer surface {other:?}")),
-                )),
-            }
-        }
-    }
 
     #[derive(Debug, Clone)]
     struct NoopTransform;
@@ -96,30 +41,6 @@ mod tests {
         async fn drain(&mut self) -> Result<(), HandlerError> {
             Ok(())
         }
-    }
-
-    #[derive(Debug, Clone)]
-    struct NoopAsyncTransform;
-
-    #[async_trait::async_trait]
-    impl AsyncTransformHandler for NoopAsyncTransform {
-        async fn process(
-            &self,
-            _event: obzenflow_core::ChainEvent,
-        ) -> Result<Vec<obzenflow_core::ChainEvent>, HandlerError> {
-            Ok(vec![])
-        }
-
-        async fn drain(&mut self) -> Result<(), HandlerError> {
-            Ok(())
-        }
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    struct TestIn;
-
-    impl TypedPayload for TestIn {
-        const EVENT_TYPE: &'static str = "test.ai_map_reduce.in";
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,16 +65,6 @@ mod tests {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    struct TestChunk {
-        chunk_index: usize,
-        chunk_count: usize,
-    }
-
-    impl TypedPayload for TestChunk {
-        const EVENT_TYPE: &'static str = "test.ai_map_reduce.chunk";
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestPartial {
         value: u32,
     }
@@ -162,13 +73,91 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.ai_map_reduce.partial";
     }
 
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-    struct TestCollected {
-        values: Vec<u32>,
+    struct TestMapRole {
+        target: ChatTarget,
     }
 
-    impl TypedPayload for TestCollected {
-        const EVENT_TYPE: &'static str = "test.ai_map_reduce.collected";
+    impl AiMapRole<TestItem, TestPartial> for TestMapRole {
+        type Prepared = ();
+
+        fn prepare(
+            &self,
+            items: &[TestItem],
+            _chunk: &obzenflow_core::ai::ChunkInfo,
+        ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure> {
+            Ok((
+                ChatRequest {
+                    provider: self.target.provider.clone(),
+                    model: self.target.model.clone(),
+                    messages: vec![ChatMessage::user(format!("{} items", items.len()))],
+                    params: ChatParams::default(),
+                    tools: Vec::new(),
+                    response_format: None,
+                },
+                (),
+            ))
+        }
+
+        fn interpret(
+            &self,
+            items: Vec<TestItem>,
+            _prepared: Self::Prepared,
+            _completion: ChatCompletionCompleted,
+        ) -> Result<TestPartial, AiRoleLogicFailure> {
+            Ok(TestPartial {
+                value: items.iter().map(|item| item.value).sum(),
+            })
+        }
+    }
+
+    struct TestFinaliseRole {
+        target: ChatTarget,
+    }
+
+    impl AiFinaliseRole<TestSeed, Many<TestPartial>, TestOut> for TestFinaliseRole {
+        type Prepared = ();
+
+        fn prepare(
+            &self,
+            _seed: &TestSeed,
+            collected: &Many<TestPartial>,
+        ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure> {
+            Ok((
+                ChatRequest {
+                    provider: self.target.provider.clone(),
+                    model: self.target.model.clone(),
+                    messages: vec![ChatMessage::user(format!(
+                        "{} partials",
+                        collected.items.len()
+                    ))],
+                    params: ChatParams::default(),
+                    tools: Vec::new(),
+                    response_format: None,
+                },
+                (),
+            ))
+        }
+
+        fn interpret(
+            &self,
+            _seed: TestSeed,
+            _collected: Many<TestPartial>,
+            _prepared: Self::Prepared,
+            _completion: ChatCompletionCompleted,
+        ) -> Result<TestOut, AiRoleLogicFailure> {
+            Ok(TestOut)
+        }
+    }
+
+    fn test_estimator(model: &str) -> ResolvedTokenEstimator {
+        ResolvedTokenEstimator::new(
+            Arc::new(HeuristicTokenEstimator::default()),
+            TokenEstimatorResolutionInfo::heuristic(
+                model,
+                TokenEstimatorFallbackReason::ExplicitHeuristic,
+                None,
+            ),
+        )
     }
 
     fn mk_transform(name: &str) -> Box<dyn StageDescriptor> {
@@ -178,6 +167,35 @@ mod tests {
             middleware: vec![],
             backpressure: None,
         })
+    }
+
+    fn generated_digest() -> Box<dyn crate::dsl::composition::CompositeDescriptor> {
+        let target = ChatTarget::new("ollama", "test-model");
+        let estimator = test_estimator("test-model");
+        crate::ai_map_reduce!(
+            TestSeed -> TestOut => {
+                map: [TestItem] -> TestPartial => TestMapRole {
+                    target: target.clone(),
+                },
+                reduce: (TestSeed, [TestPartial]) -> TestOut => TestFinaliseRole {
+                    target: target.clone(),
+                },
+            },
+            chunking: by_budget {
+                estimator: estimator.estimator(),
+                items: |seed: &TestSeed| seed.items.clone(),
+                render: |item: &TestItem, _ctx| format!("{}", item.value),
+                budget: ::obzenflow_core::ai::TokenCount::new(100),
+                max_items: None,
+                oversize: error,
+            },
+            effects: {
+                chat_target: target,
+                chat_estimator: estimator,
+                map: [at_least_once(ChatCompletion) with []],
+                reduce: [at_least_once(ChatCompletion) with []],
+            }
+        )
     }
 
     #[test]
@@ -190,16 +208,7 @@ mod tests {
         );
         members.insert("out".to_string(), mk_transform("out").into_flow_member());
 
-        let digest =
-            ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
-                .chunker(NoopTransform)
-                .map(NoopAsyncTransform)
-                .collect(obzenflow_runtime::stages::stateful::CollectByInput::new(
-                    TestCollected::default(),
-                    |acc, partial: &TestPartial| acc.values.push(partial.value),
-                ))
-                .finalize(NoopAsyncTransform)
-                .build();
+        let digest = generated_digest();
 
         members.insert("digest".to_string(), digest.into_flow_member());
 
@@ -284,122 +293,95 @@ mod tests {
     }
 
     #[test]
-    fn ai_map_reduce_macro_is_typed_and_lowers_composite() {
-        let digest = crate::ai_map_reduce!(
-            chunk: TestIn -> TestChunk => NoopTransform,
-            map: TestChunk -> TestPartial => NoopAsyncTransform,
-            collect: TestPartial -> TestCollected => obzenflow_runtime::stages::stateful::CollectByInput::new(
-                TestCollected::default(),
-                |acc, partial: &TestPartial| acc.values.push(partial.value),
-            ),
-            reduce: TestCollected -> TestOut => NoopAsyncTransform,
-            [
-                map: TestMiddlewareFactory("test_map_mw"),
-                reduce: TestMiddlewareFactory("test_reduce_mw"),
-            ]
-        );
-
-        // FLOWIP-128a: the macro returns a composite descriptor; boundary
-        // typing lives on the declared ports, validated at member level
-        // post-lowering.
-        assert_eq!(digest.kind(), "ai_map_reduce");
-        assert_eq!(digest.schema_version(), 1);
-
-        let mut members: HashMap<String, FlowMember> = HashMap::new();
-        members.insert(
-            "batch".to_string(),
-            mk_transform("batch").into_flow_member(),
-        );
-        members.insert("out".to_string(), mk_transform("out").into_flow_member());
-        members.insert("digest".to_string(), digest.into_flow_member());
-
-        let mut connections = vec![
-            ("batch".to_string(), "digest".to_string(), EdgeKind::Forward),
-            ("digest".to_string(), "out".to_string(), EdgeKind::Forward),
-        ];
-
-        let (stages, _artifacts) = lower_composites(members, &mut connections)
-            .expect("lowering should succeed for ai_map_reduce composite from ai_map_reduce!()");
-
-        let map_stage = stages
-            .get("digest__map")
-            .expect("map stage should exist after lowering");
-        assert!(
-            map_stage
-                .stage_middleware_names()
-                .contains(&"test_map_mw".to_string()),
-            "map stage should include map-scoped middleware from macro surface"
-        );
-
-        let finalize_stage = stages
-            .get("digest__finalize")
-            .expect("finalize stage should exist after lowering");
-        assert!(
-            finalize_stage
-                .stage_middleware_names()
-                .contains(&"test_reduce_mw".to_string()),
-            "finalise stage should include reduce-scoped middleware from macro surface"
-        );
-    }
-
-    #[test]
-    fn ai_map_reduce_cadillac_macro_is_typed_and_lowers_composite() {
+    fn ai_map_reduce_effect_protocol_syntax_lowers_fixed_generated_roles() {
+        let target = ChatTarget::new("ollama", "test-model");
+        let estimator = test_estimator("test-model");
         let digest = crate::ai_map_reduce!(
             TestSeed -> TestOut => {
-                map: [TestItem] -> TestPartial => NoopAsyncTransform,
-                reduce: (TestSeed, [TestPartial]) -> TestOut => NoopAsyncTransform,
+                map: [TestItem] -> TestPartial => TestMapRole {
+                    target: target.clone(),
+                },
+                reduce: (TestSeed, [TestPartial]) -> TestOut => TestFinaliseRole {
+                    target: target.clone(),
+                },
             },
             chunking: by_budget {
+                estimator: estimator.estimator(),
                 items: |seed: &TestSeed| seed.items.clone(),
                 render: |item: &TestItem, _ctx| format!("{}", item.value),
                 budget: ::obzenflow_core::ai::TokenCount::new(100),
                 max_items: None,
                 oversize: error,
             },
-            middleware: {
-                map: TestMiddlewareFactory("test_map_mw"),
-                reduce: TestMiddlewareFactory("test_reduce_mw"),
+            effects: {
+                chat_target: target,
+                chat_estimator: estimator,
+                map: [at_least_once(ChatCompletion) with []],
+                reduce: [at_least_once(ChatCompletion) with []],
             }
         );
 
         assert_eq!(digest.kind(), "ai_map_reduce");
-        assert_eq!(digest.schema_version(), 1);
+        assert_eq!(digest.schema_version(), 2);
 
         let mut members: HashMap<String, FlowMember> = HashMap::new();
-        members.insert(
-            "batch".to_string(),
-            mk_transform("batch").into_flow_member(),
-        );
-        members.insert("out".to_string(), mk_transform("out").into_flow_member());
         members.insert("digest".to_string(), digest.into_flow_member());
+        let mut connections = Vec::new();
+        let (stages, _) = lower_composites(members, &mut connections)
+            .expect("generated effect protocol should lower");
 
-        let mut connections = vec![
-            ("batch".to_string(), "digest".to_string(), EdgeKind::Forward),
-            ("digest".to_string(), "out".to_string(), EdgeKind::Forward),
-        ];
+        for role in ["map", "finalize"] {
+            let descriptor = stages
+                .get(&format!("digest__{role}"))
+                .expect("generated effectful role");
+            let declarations = descriptor.effect_declarations();
+            assert_eq!(declarations.len(), 1);
+            assert_eq!(declarations[0].effect_type, "obzenflow.ai.chat_completion");
+        }
+    }
 
-        let (stages, _artifacts) = lower_composites(members, &mut connections).expect(
-            "lowering should succeed for ai_map_reduce composite from Cadillac ai_map_reduce!()",
+    #[test]
+    fn ai_map_reduce_rejects_an_estimator_for_a_different_target_model() {
+        let target = ChatTarget::new("ollama", "test-model");
+        let estimator = test_estimator("different-model");
+        let digest = crate::ai_map_reduce!(
+            TestSeed -> TestOut => {
+                map: [TestItem] -> TestPartial => TestMapRole {
+                    target: target.clone(),
+                },
+                reduce: (TestSeed, [TestPartial]) -> TestOut => TestFinaliseRole {
+                    target: target.clone(),
+                },
+            },
+            chunking: by_budget {
+                estimator: estimator.estimator(),
+                items: |seed: &TestSeed| seed.items.clone(),
+                render: |item: &TestItem, _ctx| format!("{}", item.value),
+                budget: ::obzenflow_core::ai::TokenCount::new(100),
+                max_items: None,
+                oversize: error,
+            },
+            effects: {
+                chat_target: target,
+                chat_estimator: estimator,
+                map: [at_least_once(ChatCompletion) with []],
+                reduce: [at_least_once(ChatCompletion) with []],
+            }
         );
 
-        let map_stage = stages
-            .get("digest__map")
-            .expect("map stage should exist after lowering");
+        let mut members: HashMap<String, FlowMember> = HashMap::new();
+        members.insert("digest".to_string(), digest.into_flow_member());
+        let mut connections = Vec::new();
+        let error = match lower_composites(members, &mut connections) {
+            Ok(_) => panic!("the estimator model must agree with effects.chat_target"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
         assert!(
-            map_stage
-                .stage_middleware_names()
-                .contains(&"test_map_mw".to_string()),
-            "map stage should include map-scoped middleware from macro surface"
-        );
-
-        let finalize_stage = stages
-            .get("digest__finalize")
-            .expect("finalize stage should exist after lowering");
-        assert!(
-            finalize_stage
-                .stage_middleware_names()
-                .contains(&"test_reduce_mw".to_string()),
-            "finalise stage should include reduce-scoped middleware from macro surface"
+            message.contains("effects.chat_estimator")
+                && message.contains("different-model")
+                && message.contains("test-model"),
+            "the curated diagnostic must name both binding values: {message}"
         );
     }
 
@@ -411,16 +393,7 @@ mod tests {
     /// boundary mismatch.
     #[test]
     fn ai_map_reduce_outer_boundary_input_and_output_types_match_composite_contract() {
-        let digest =
-            ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
-                .chunker(NoopTransform)
-                .map(NoopAsyncTransform)
-                .collect(obzenflow_runtime::stages::stateful::CollectByInput::new(
-                    TestCollected::default(),
-                    |acc, partial: &TestPartial| acc.values.push(partial.value),
-                ))
-                .finalize(NoopAsyncTransform)
-                .build();
+        let digest = generated_digest();
 
         let mut members: HashMap<String, FlowMember> = HashMap::new();
         members.insert("digest".to_string(), digest.into_flow_member());
@@ -437,18 +410,20 @@ mod tests {
             .expect("entry stage should carry typing metadata");
         assert_eq!(
             entry_meta.input_type,
-            TypeHint::exact_payload::<TestIn>(),
+            TypeHint::exact_payload::<TestSeed>(),
             "entry stage input_type must equal the composite's declared outer input"
         );
         assert_eq!(
             entry_meta.output_type,
-            TypeHint::exact_payload::<TestChunk>(),
-            "entry stage output_type remains the user-facing chunk type"
+            TypeHint::exact_payload::<obzenflow_core::ai::ChunkEnvelope<TestItem>>(),
+            "entry stage output_type is the generated chunk envelope"
         );
         assert!(
             entry_meta
                 .output_contract
-                .contains(&TypeHint::exact_payload::<TestChunk>()),
+                .contains(&TypeHint::exact_payload::<
+                    obzenflow_core::ai::ChunkEnvelope<TestItem>,
+                >()),
             "entry output contract must include chunk envelopes"
         );
         assert!(
@@ -467,8 +442,8 @@ mod tests {
         assert!(
             map_meta
                 .output_contract
-                .contains(&TypeHint::exact_payload::<TestPartial>()),
-            "map output contract keeps the user-facing partial type"
+                .contains(&TypeHint::exact_payload::<ChatCompletionCompleted>()),
+            "map output contract includes the durable effect terminal"
         );
         assert!(
             map_meta
@@ -480,7 +455,7 @@ mod tests {
             map_meta
                 .output_contract
                 .contains(&TypeHint::exact_payload::<
-                    AiMapReduceTaggedPartial<serde_json::Value>,
+                    AiMapReduceTaggedPartial<TestPartial>,
                 >()),
             "map output contract must include tagged partial transport events"
         );
@@ -526,21 +501,12 @@ mod tests {
 
         use crate::dsl::typing::validate_edge_typing;
 
-        let digest =
-            ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
-                .chunker(NoopTransform)
-                .map(NoopAsyncTransform)
-                .collect(obzenflow_runtime::stages::stateful::CollectByInput::new(
-                    TestCollected::default(),
-                    |acc, partial: &TestPartial| acc.values.push(partial.value),
-                ))
-                .finalize(NoopAsyncTransform)
-                .build();
+        let digest = generated_digest();
 
         let mut members: HashMap<String, FlowMember> = HashMap::new();
         members.insert(
             "upstream".to_string(),
-            crate::source!(name: "upstream", TestIn => placeholder!()).into_flow_member(),
+            crate::source!(name: "upstream", TestSeed => placeholder!()).into_flow_member(),
         );
         members.insert(
             "downstream".to_string(),
@@ -646,20 +612,11 @@ mod tests {
         use crate::dsl::error::EdgeTypingMismatchKind;
         use crate::dsl::typing::validate_edge_typing;
 
-        let digest =
-            ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
-                .chunker(NoopTransform)
-                .map(NoopAsyncTransform)
-                .collect(obzenflow_runtime::stages::stateful::CollectByInput::new(
-                    TestCollected::default(),
-                    |acc, partial: &TestPartial| acc.values.push(partial.value),
-                ))
-                .finalize(NoopAsyncTransform)
-                .build();
+        let digest = generated_digest();
 
         let mut members: HashMap<String, FlowMember> = HashMap::new();
         // External upstream emits TestOut, which does NOT match the
-        // composite's declared outer input (TestIn). The skip rule must
+        // composite's declared outer input (TestSeed). The skip rule must
         // not paper over this; the validator must report a SingleEdge
         // mismatch on the upstream -> digest__chunk edge.
         members.insert(
@@ -729,7 +686,7 @@ mod tests {
             validate_edge_typing(&topology, &stages, &name_to_id, &artifacts.internal_feeds)
                 .expect_err(
                     "expected a SingleEdge error on the external upstream -> digest__chunk \
-             boundary edge (TestOut -> TestIn mismatch)",
+             boundary edge (TestOut -> TestSeed mismatch)",
                 );
 
         let boundary_error = errors
@@ -747,7 +704,7 @@ mod tests {
         );
         assert_eq!(
             boundary_error.expected_type,
-            std::any::type_name::<TestIn>()
+            std::any::type_name::<TestSeed>()
         );
     }
 
@@ -764,19 +721,7 @@ mod tests {
         });
         members.insert("digest__chunk".to_string(), existing.into_flow_member());
 
-        members.insert(
-            "digest".to_string(),
-            ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
-                .chunker(NoopTransform)
-                .map(NoopAsyncTransform)
-                .collect(obzenflow_runtime::stages::stateful::CollectByInput::new(
-                    TestCollected::default(),
-                    |acc, partial: &TestPartial| acc.values.push(partial.value),
-                ))
-                .finalize(NoopAsyncTransform)
-                .build()
-                .into_flow_member(),
-        );
+        members.insert("digest".to_string(), generated_digest().into_flow_member());
 
         let mut connections = vec![("digest".to_string(), "out".to_string(), EdgeKind::Forward)];
 
@@ -808,19 +753,7 @@ mod tests {
             mk_transform("batch").into_flow_member(),
         );
         members.insert("out".to_string(), mk_transform("out").into_flow_member());
-        members.insert(
-            "digest".to_string(),
-            ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
-                .chunker(NoopTransform)
-                .map(NoopAsyncTransform)
-                .collect(obzenflow_runtime::stages::stateful::CollectByInput::new(
-                    TestCollected::default(),
-                    |acc, partial: &TestPartial| acc.values.push(partial.value),
-                ))
-                .finalize(NoopAsyncTransform)
-                .build()
-                .into_flow_member(),
-        );
+        members.insert("digest".to_string(), generated_digest().into_flow_member());
 
         let mut connections = vec![
             ("batch".to_string(), "digest".to_string(), EdgeKind::Forward),
@@ -1010,20 +943,24 @@ mod tests {
         plan_text.push_str(&contract_lines.join("\n"));
         plan_text.push('\n');
         insta::assert_snapshot!(plan_text, @r###"
+        feed digest__chunk -> digest__map role=input key=ai.chunk_envelope.v1 visibility=routable
         feed digest__chunk -> digest__map role=input key=ai.map_reduce.planning_manifest.v1 visibility=routable
-        feed digest__chunk -> digest__map role=input key=test.ai_map_reduce.chunk.v1 visibility=routable
-        feed digest__collect -> digest__finalize role=input key=test.ai_map_reduce.collected.v1 visibility=routable
-        feed digest__map -> digest__collect role=input key=ai.map_reduce.chunk_failed.v1 visibility=routable
+        feed digest__collect -> digest__finalize role=input key=ai.map_reduce.reduce_input.v2 visibility=routable
+        feed digest__map -> digest__collect role=input key=ai.map_reduce.chunk_failed.v2 visibility=routable
         feed digest__map -> digest__collect role=input key=ai.map_reduce.planning_manifest.v1 visibility=routable
         feed digest__map -> digest__collect role=input key=ai.map_reduce.tagged_partial.v1 visibility=routable
+        contract digest__chunk key=ai.chunk_envelope.v1 visibility=routable
+        contract digest__chunk key=ai.map_reduce.planning_failed.v1 visibility=unrouted
         contract digest__chunk key=ai.map_reduce.planning_manifest.v1 visibility=routable
-        contract digest__chunk key=test.ai_map_reduce.chunk.v1 visibility=routable
-        contract digest__collect key=test.ai_map_reduce.collected.v1 visibility=routable
+        contract digest__collect key=ai.map_reduce.job_failed.v1 visibility=unrouted
+        contract digest__collect key=ai.map_reduce.reduce_input.v2 visibility=routable
+        contract digest__finalize key=ai.chat_completion.completed.v1 visibility=unrouted
+        contract digest__finalize key=ai.map_reduce.finalise_failed.v1 visibility=unrouted
         contract digest__finalize key=test.ai_map_reduce.out.v1 visibility=unrouted
-        contract digest__map key=ai.map_reduce.chunk_failed.v1 visibility=routable
+        contract digest__map key=ai.chat_completion.completed.v1 visibility=unrouted
+        contract digest__map key=ai.map_reduce.chunk_failed.v2 visibility=routable
         contract digest__map key=ai.map_reduce.planning_manifest.v1 visibility=routable
         contract digest__map key=ai.map_reduce.tagged_partial.v1 visibility=routable
-        contract digest__map key=test.ai_map_reduce.partial.v1 visibility=unrouted
         "###);
     }
 }

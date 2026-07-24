@@ -113,6 +113,83 @@ struct InspectingFailJournal {
     downstream: StageId,
 }
 
+struct FailingStartJournal {
+    id: JournalId,
+    owner: JournalOwner,
+    attempted_event_types: Mutex<Vec<String>>,
+}
+
+impl FailingStartJournal {
+    fn new(owner: JournalOwner) -> Self {
+        Self {
+            id: JournalId::new(),
+            owner,
+            attempted_event_types: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn attempted_event_types(&self) -> Vec<String> {
+        self.attempted_event_types
+            .lock()
+            .expect("attempted event types lock poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl Journal<ChainEvent> for FailingStartJournal {
+    fn id(&self) -> &JournalId {
+        &self.id
+    }
+
+    fn owner(&self) -> Option<&JournalOwner> {
+        Some(&self.owner)
+    }
+
+    async fn append(
+        &self,
+        event: ChainEvent,
+        _parent: Option<&EventEnvelope<ChainEvent>>,
+    ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
+        self.attempted_event_types
+            .lock()
+            .expect("attempted event types lock poisoned")
+            .push(event.event_type());
+        Err(JournalError::Implementation {
+            message: "injected Start append failure".to_string(),
+            source: "test journal rejected Start".into(),
+        })
+    }
+
+    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(Vec::new())
+    }
+
+    async fn read_event(
+        &self,
+        _event_id: &EventId,
+    ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(None)
+    }
+
+    async fn reader_from(
+        &self,
+        _position: u64,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
+        Err(JournalError::Implementation {
+            message: "failing Start journal has no reader".to_string(),
+            source: "test-only journal".into(),
+        })
+    }
+
+    async fn read_last_n(
+        &self,
+        _count: usize,
+    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(Vec::new())
+    }
+}
+
 #[async_trait]
 impl Journal<ChainEvent> for InspectingFailJournal {
     fn id(&self) -> &JournalId {
@@ -225,6 +302,33 @@ impl Effect for CountingEffect {
         Ok(CountingOutput {
             value: self.value + 1,
         })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AffineCountingEffect {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Effect for AffineCountingEffect {
+    const EFFECT_TYPE: &'static str = "test.affine_counting";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+
+    type Outcome = CountingOutput;
+
+    fn label(&self) -> &str {
+        "affine-counting"
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({ "kind": "affine-counting" })
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(CountingOutput { value: 1 })
     }
 }
 
@@ -747,6 +851,7 @@ fn invocation_context_with_mode(
         effect_ports,
         effect_declarations: vec![
             EffectDeclaration::of::<CountingEffect>(),
+            EffectDeclaration::at_least_once::<AffineCountingEffect>(),
             EffectDeclaration::of::<FailingEffect>(),
             EffectDeclaration::of::<MultiFactEffect>(),
             EffectDeclaration::of::<KeylessEffect>(),
@@ -758,6 +863,38 @@ fn invocation_context_with_mode(
         emit_enabled: false,
         effect_boundary: None,
     }
+}
+
+#[tokio::test]
+async fn affine_start_append_failure_authors_no_terminal_and_never_executes() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(FailingStartJournal::new(JournalOwner::stage(stage_id)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut effects = EffectsCore::new(invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    ));
+
+    let error = effects
+        .perform(AffineCountingEffect {
+            calls: calls.clone(),
+        })
+        .await
+        .expect_err("injected Start append failure must escape");
+
+    assert!(matches!(error, EffectError::Journal(_)));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        journal.attempted_event_types(),
+        vec![EffectAttemptStarted::versioned_event_type()],
+        "a failed Start cut must not attempt an effect terminal"
+    );
+    assert!(journal
+        .read_all_unordered()
+        .await
+        .expect("failed journal remains readable")
+        .is_empty());
 }
 
 #[tokio::test]
@@ -2285,13 +2422,15 @@ async fn transactional_effect_uses_registered_port_and_commits_once() {
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut effects = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -2323,12 +2462,14 @@ async fn transactional_effect_live_return_comes_from_committed_record_not_port_r
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let port_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(DivergentTransactionalPort {
-            calls: port_calls.clone(),
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(DivergentTransactionalPort {
+                calls: port_calls.clone(),
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut live = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -2391,13 +2532,15 @@ async fn transactional_effect_replay_does_not_require_port_or_execute() {
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls,
-            commit: true,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls,
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut live = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -2444,13 +2587,15 @@ async fn transactional_effect_missing_commit_fails() {
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: false,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls.clone(),
+                commit: false,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut effects = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -2753,7 +2898,9 @@ impl DemoPort for DemoPortImpl {
 #[test]
 fn effect_context_resolves_typed_trait_object_ports() {
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn DemoPort>("primary", Arc::new(DemoPortImpl));
+    ports
+        .insert::<dyn DemoPort>("primary", Arc::new(DemoPortImpl))
+        .expect("demo test port registration is unique");
     let ctx = EffectContext {
         is_replaying: false,
         flow_id: FlowId::new(),
@@ -3443,13 +3590,15 @@ async fn transactional_boundary_executes_and_commits_the_single_use_operation_on
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let boundary_consults = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut ctx = invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -3490,12 +3639,14 @@ async fn transactional_boundary_committed_failure_overrides_port_return_and_repl
     let port_calls = Arc::new(AtomicUsize::new(0));
     let live_boundary_consults = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(CommittedFailureTransactionalPort {
-            calls: port_calls.clone(),
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(CommittedFailureTransactionalPort {
+                calls: port_calls.clone(),
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut live_ctx = invocation_context_with_mode(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -3567,13 +3718,15 @@ async fn transactional_boundary_foreign_abort_cannot_reclassify_a_committed_oper
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut ctx = invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -3611,13 +3764,15 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let foreign_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut live_ctx = invocation_context_with_mode(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -3659,13 +3814,15 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
     );
     let replay_port_calls = Arc::new(AtomicUsize::new(0));
     let mut replay_ports = EffectPortRegistry::new();
-    replay_ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: replay_port_calls.clone(),
-            commit: true,
-        }),
-    );
+    replay_ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: replay_port_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional replay test port registration is unique");
     let mut replay = EffectsCore::new(invocation_context_with_mode(
         replay_journal,
         parent_envelope(WriterId::from(stage_id)),
@@ -3693,13 +3850,15 @@ async fn transactional_boundary_abort_records_failure_and_replays() {
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut live_ctx = invocation_context_with_mode(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -3744,13 +3903,15 @@ async fn transactional_boundary_abort_records_failure_and_replays() {
     );
     let mut replay_ports = EffectPortRegistry::new();
     let replay_port_calls = Arc::new(AtomicUsize::new(0));
-    replay_ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: replay_port_calls.clone(),
-            commit: true,
-        }),
-    );
+    replay_ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: replay_port_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional replay test port registration is unique");
     let mut replay = EffectsCore::new(invocation_context_with_mode(
         replay_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -3821,13 +3982,15 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
     // Run A: aborted transactional effect, then a counting effect.
     let journal_a = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let mut ports_a = EffectPortRegistry::new();
-    ports_a.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: Arc::new(AtomicUsize::new(0)),
-            commit: true,
-        }),
-    );
+    ports_a
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: Arc::new(AtomicUsize::new(0)),
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut effects_a = EffectsCore::new(make_ctx(
         journal_a.clone(),
         Some(Arc::new(TransactionalOnlyAbortBoundary)),

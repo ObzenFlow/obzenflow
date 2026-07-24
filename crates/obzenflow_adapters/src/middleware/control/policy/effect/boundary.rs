@@ -10,8 +10,9 @@ use async_trait::async_trait;
 use obzenflow_core::event::EffectFailureCause;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use obzenflow_runtime::effects::{
-    EffectAbortReason, EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectIdentity,
-    RepeatableEffectOperation, SingleUseEffectBoundaryReport, SingleUseEffectOperation,
+    AffineEffectBoundaryReport, AffineEffectOperation, EffectAbortReason, EffectBoundary,
+    EffectBoundaryOutcome, EffectBoundaryReport, EffectIdentity, RepeatableEffectOperation,
+    SingleUseEffectBoundaryReport, SingleUseEffectOperation,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -151,6 +152,36 @@ async fn execute_single_use_chain_once(
     execution.into_report(ctx.take_control_events())
 }
 
+async fn execute_affine_chain_once(
+    chain: &[EffectPolicyAttachment],
+    event: &ChainEvent,
+    operation: AffineEffectOperation,
+) -> AffineEffectBoundaryReport {
+    let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+    let mut admitted: Vec<&EffectPolicyAttachment> = Vec::new();
+
+    for policy in chain {
+        match policy.admit(event, &mut ctx).await {
+            PolicyAdmission::Admit => admitted.push(policy),
+            PolicyAdmission::Reject(cause) => {
+                let cause = *cause;
+                let attempt = EffectAttemptOutcome::RejectedBy(&cause);
+                observe_reverse(&admitted, event, &attempt, &mut ctx);
+                return operation.abort(abort_reason_from_cause(cause), ctx.take_control_events());
+            }
+        }
+    }
+
+    let call_started = StdInstant::now();
+    let execution = operation.execute().await;
+    ctx.insert::<crate::middleware::context_keys::EffectCallDurationNanos>(
+        call_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+    );
+    let attempt = EffectAttemptOutcome::Executed(execution.result());
+    observe_reverse(&admitted, event, &attempt, &mut ctx);
+    execution.into_report(ctx.take_control_events())
+}
+
 #[async_trait]
 impl EffectBoundary for PerEffectPolicyBoundary {
     async fn around_repeatable_effect(
@@ -245,6 +276,56 @@ impl EffectBoundary for PerEffectPolicyBoundary {
 
         let mut report = resilience
             .execute_single_use(identity, event, &mut ctx, operation)
+            .await;
+        if let Some(result) = report.execution_result() {
+            let attempt = EffectAttemptOutcome::Executed(result);
+            observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
+        } else if let Some(reason) = report.abort_reason() {
+            let cause = MiddlewareAbortCause {
+                source: reason.cause.source.clone(),
+                code: reason.cause.code.clone(),
+                message: reason.message.clone(),
+                retry: reason.retry,
+                event: None,
+            };
+            let attempt = EffectAttemptOutcome::RejectedBy(&cause);
+            observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
+        }
+        report.extend_control_events(ctx.take_control_events());
+        report
+    }
+
+    async fn around_affine_effect(
+        &self,
+        identity: &EffectIdentity,
+        event: &ChainEvent,
+        operation: AffineEffectOperation,
+    ) -> AffineEffectBoundaryReport {
+        let (outer, resilience) = match self.chains.get(identity.effect_type) {
+            None => return operation.execute().await.into_report(Vec::new()),
+            Some(CompiledEffectChain::Plain(chain)) => {
+                return execute_affine_chain_once(chain, event, operation).await;
+            }
+            Some(CompiledEffectChain::Resilient { outer, resilience }) => (outer, resilience),
+        };
+
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        let mut admitted_outer: Vec<&EffectPolicyAttachment> = Vec::new();
+        for policy in outer {
+            match policy.admit(event, &mut ctx).await {
+                PolicyAdmission::Admit => admitted_outer.push(policy),
+                PolicyAdmission::Reject(cause) => {
+                    let cause = *cause;
+                    let attempt = EffectAttemptOutcome::RejectedBy(&cause);
+                    observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
+                    return operation
+                        .abort(abort_reason_from_cause(cause), ctx.take_control_events());
+                }
+            }
+        }
+
+        let mut report = resilience
+            .execute_affine(identity, event, &mut ctx, operation)
             .await;
         if let Some(result) = report.execution_result() {
             let attempt = EffectAttemptOutcome::Executed(result);
