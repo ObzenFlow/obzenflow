@@ -25,6 +25,8 @@ pub const RUN_MANIFEST_VERSION: &str = "2.0";
 /// allowing a terminal outcome and its opaque evidence to share one physical
 /// commit marker without mixing storage formats inside a journal file.
 pub const JOURNAL_FORMAT_VERSION: u32 = 2;
+pub const EFFECT_ATTEMPT_HISTORY_CAPABILITY: &str = "effect_attempt_history";
+pub const BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY: &str = "bounded_direct_fact_admission";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {
@@ -46,6 +48,20 @@ pub struct RunManifest {
     /// at flow build. Optional + default so pre-010 archives deserialize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_config: Option<crate::config::EffectiveConfigEvidence>,
+    /// Versioned runtime contracts required to interpret this archive.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub capabilities: BTreeMap<String, u32>,
+    /// Descriptor-proved live direct-fact bounds, sorted by stage key and
+    /// exact versioned physical input event type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bounded_direct_fact_admission: Vec<RunManifestDirectFactAdmission>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RunManifestDirectFactAdmission {
+    pub stage_key: String,
+    pub input_event_type: String,
+    pub max_live_data_rows: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

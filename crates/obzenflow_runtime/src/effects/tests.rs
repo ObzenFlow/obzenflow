@@ -5,12 +5,15 @@
 use super::*;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
 use crate::id_conversions::StageIdExt;
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::event_envelope::JournalGroupMember;
 use obzenflow_core::event::{EventEnvelope, JournalEvent};
-use obzenflow_core::journal::{JournalError, JournalReader};
+use obzenflow_core::journal::{ArchiveStatus, JournalError, JournalReader, StatusDerivation};
 use obzenflow_core::{JournalId, JournalOwner, JournalWriterId, TypedPayload};
 use obzenflow_topology::{TopologyBuilder, TypeHintInfo};
 use serde_json::json;
 use std::num::NonZeroU64;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -18,6 +21,7 @@ struct MemoryJournal<T: JournalEvent> {
     id: JournalId,
     owner: Option<JournalOwner>,
     events: Mutex<Vec<EventEnvelope<T>>>,
+    fail_group_prefixes: Mutex<Vec<String>>,
 }
 
 impl<T: JournalEvent> MemoryJournal<T> {
@@ -26,6 +30,16 @@ impl<T: JournalEvent> MemoryJournal<T> {
             id: JournalId::new(),
             owner: Some(owner),
             events: Mutex::new(Vec::new()),
+            fail_group_prefixes: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn failing_group(owner: JournalOwner, prefix: impl Into<String>) -> Self {
+        Self {
+            id: JournalId::new(),
+            owner: Some(owner),
+            events: Mutex::new(Vec::new()),
+            fail_group_prefixes: Mutex::new(vec![prefix.into()]),
         }
     }
 
@@ -77,6 +91,51 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         Ok(envelope)
     }
 
+    async fn append_group(
+        &self,
+        group_id: &str,
+        events: Vec<T>,
+        _parent: Option<&EventEnvelope<T>>,
+    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        let mut failures = self
+            .fail_group_prefixes
+            .lock()
+            .expect("group failures lock poisoned");
+        if failures
+            .first()
+            .is_some_and(|prefix| group_id.starts_with(prefix))
+        {
+            let prefix = failures.remove(0);
+            return Err(JournalError::Implementation {
+                message: format!("injected atomic-group failure for '{group_id}'"),
+                source: format!("test journal rejected group prefix '{prefix}'").into(),
+            });
+        }
+        drop(failures);
+        let size = u32::try_from(events.len()).map_err(|_| JournalError::Implementation {
+            message: format!("test group '{group_id}' exceeds u32 member capacity"),
+            source: "test group too large".into(),
+        })?;
+        let envelopes = events
+            .into_iter()
+            .enumerate()
+            .map(|(index, event)| {
+                let mut envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
+                envelope.journal_group_id = Some(group_id.to_string());
+                envelope.journal_group_member = Some(JournalGroupMember {
+                    index: u32::try_from(index).expect("group size was checked"),
+                    size,
+                });
+                envelope
+            })
+            .collect::<Vec<_>>();
+        self.events
+            .lock()
+            .expect("events lock poisoned")
+            .extend(envelopes.iter().cloned());
+        Ok(envelopes)
+    }
+
     async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         Ok(self.events())
     }
@@ -111,6 +170,83 @@ struct InspectingFailJournal {
     registry: BackpressureRegistry,
     upstream: StageId,
     downstream: StageId,
+}
+
+struct FailingStartJournal {
+    id: JournalId,
+    owner: JournalOwner,
+    attempted_event_types: Mutex<Vec<String>>,
+}
+
+impl FailingStartJournal {
+    fn new(owner: JournalOwner) -> Self {
+        Self {
+            id: JournalId::new(),
+            owner,
+            attempted_event_types: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn attempted_event_types(&self) -> Vec<String> {
+        self.attempted_event_types
+            .lock()
+            .expect("attempted event types lock poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl Journal<ChainEvent> for FailingStartJournal {
+    fn id(&self) -> &JournalId {
+        &self.id
+    }
+
+    fn owner(&self) -> Option<&JournalOwner> {
+        Some(&self.owner)
+    }
+
+    async fn append(
+        &self,
+        event: ChainEvent,
+        _parent: Option<&EventEnvelope<ChainEvent>>,
+    ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
+        self.attempted_event_types
+            .lock()
+            .expect("attempted event types lock poisoned")
+            .push(event.event_type());
+        Err(JournalError::Implementation {
+            message: "injected Start append failure".to_string(),
+            source: "test journal rejected Start".into(),
+        })
+    }
+
+    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(Vec::new())
+    }
+
+    async fn read_event(
+        &self,
+        _event_id: &EventId,
+    ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(None)
+    }
+
+    async fn reader_from(
+        &self,
+        _position: u64,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
+        Err(JournalError::Implementation {
+            message: "failing Start journal has no reader".to_string(),
+            source: "test-only journal".into(),
+        })
+    }
+
+    async fn read_last_n(
+        &self,
+        _count: usize,
+    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(Vec::new())
+    }
 }
 
 #[async_trait]
@@ -224,6 +360,64 @@ impl Effect for CountingEffect {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(CountingOutput {
             value: self.value + 1,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AffineCountingEffect {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Effect for AffineCountingEffect {
+    const EFFECT_TYPE: &'static str = "test.affine_counting";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+
+    type Outcome = CountingOutput;
+
+    fn label(&self) -> &str {
+        "affine-counting"
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({ "kind": "affine-counting" })
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(CountingOutput { value: 1 })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct InvariantAffineEffect {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Effect for InvariantAffineEffect {
+    const EFFECT_TYPE: &'static str = "test.invariant_affine";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+
+    type Outcome = CountingOutput;
+
+    fn label(&self) -> &str {
+        "invariant-affine"
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({ "kind": "invariant-affine" })
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(EffectError::EffectPortBindingInvariantViolation {
+            port: "chat".to_string(),
+            expected: "fixture/expected".to_string(),
+            observed: "fixture/observed".to_string(),
         })
     }
 }
@@ -747,6 +941,8 @@ fn invocation_context_with_mode(
         effect_ports,
         effect_declarations: vec![
             EffectDeclaration::of::<CountingEffect>(),
+            EffectDeclaration::at_least_once::<AffineCountingEffect>(),
+            EffectDeclaration::at_least_once::<InvariantAffineEffect>(),
             EffectDeclaration::of::<FailingEffect>(),
             EffectDeclaration::of::<MultiFactEffect>(),
             EffectDeclaration::of::<KeylessEffect>(),
@@ -758,6 +954,532 @@ fn invocation_context_with_mode(
         emit_enabled: false,
         effect_boundary: None,
     }
+}
+
+/// Metadata-only archive used to exercise the real resume strategy. Effect
+/// history is supplied directly to the invocation context, so none of the
+/// archive reader methods should be reached by these unit fixtures.
+struct ScopeMatrixArchive;
+
+#[async_trait]
+impl crate::replay::ReplayArchive for ScopeMatrixArchive {
+    async fn open_source_reader(
+        &self,
+        _stage_key: &str,
+        _expected_type: StageType,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, crate::replay::ReplayError> {
+        unreachable!("the execution-scope fixture does not open source readers")
+    }
+
+    async fn open_effect_history(
+        &self,
+        _stage_key: &str,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, crate::replay::ReplayError> {
+        unreachable!("the execution-scope fixture supplies effect history directly")
+    }
+
+    fn source_data_journal_path(
+        &self,
+        _stage_key: &str,
+    ) -> Result<PathBuf, crate::replay::ReplayError> {
+        unreachable!("the execution-scope fixture does not resolve archive paths")
+    }
+
+    fn archive_flow_id(&self) -> &str {
+        "scope-matrix-archive"
+    }
+
+    fn archived_stage_id(&self, _stage_key: &str) -> Result<StageId, crate::replay::ReplayError> {
+        unreachable!("the execution-scope fixture does not resolve archived stage ids")
+    }
+
+    fn archive_status(&self) -> ArchiveStatus {
+        ArchiveStatus::Cancelled
+    }
+
+    fn status_derivation(&self) -> StatusDerivation {
+        StatusDerivation {
+            terminal_events_found: 1,
+            chosen: ArchiveStatus::Cancelled,
+            warning: None,
+        }
+    }
+
+    fn allow_incomplete_archive(&self) -> bool {
+        false
+    }
+
+    fn source_stage_keys(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn archive_path(&self) -> &Path {
+        Path::new("scope-matrix-archive")
+    }
+}
+
+fn resume_execution() -> crate::execution::RuntimeExecution {
+    crate::execution::RuntimeExecution::new(
+        crate::execution::RuntimeMode::Resume,
+        Some(Arc::new(ScopeMatrixArchive)),
+    )
+}
+
+#[tokio::test]
+async fn generated_pre_effect_terminal_keeps_reconstruction_track_only() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let admission = crate::backpressure::DirectFactAdmission::new(
+        obzenflow_core::EventType::from("test.generated-terminal"),
+        std::num::NonZeroU64::new(3).expect("non-zero generated bound"),
+    );
+    let mut ctx = invocation_context_with_mode(
+        journal,
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+        EffectRuntimeMode::ReplayStrict,
+        EffectPortRegistry::new(),
+    );
+    ctx.backpressure_writer =
+        BackpressureWriter::disabled().with_direct_fact_admission(admission.clone());
+    let effects = EffectsCore::new(ctx);
+
+    effects
+        .request_generated_live_admission()
+        .await
+        .expect("reconstruction must not cross the live admission barrier");
+
+    assert!(
+        !admission.is_requested(),
+        "a reconstruction-authored pre-effect terminal must remain track-only"
+    );
+    assert_eq!(
+        admission
+            .close()
+            .expect("the reconstruction lease remains closable"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
+    let stage_id = StageId::new();
+    let parent = parent_envelope(WriterId::from(stage_id));
+
+    let fresh_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let fresh = EffectsCore::new(invocation_context_with_mode(
+        fresh_journal.clone(),
+        parent.clone(),
+        None,
+        EffectRuntimeMode::Live,
+        EffectPortRegistry::new(),
+    ));
+    fresh
+        .preflight_next_effect_cursor_is_empty()
+        .await
+        .expect("a fresh live position is a Miss");
+    assert!(fresh_journal.events().is_empty());
+
+    let completed_cursor = EffectCursor::new("archived_flow", "effect_stage", 1_u64, 0_u32);
+    let completed_record = EffectRecord {
+        cursor: completed_cursor,
+        descriptor_hash: EffectDescriptorHash::new("archived-descriptor"),
+        descriptor: EffectDescriptor::new(
+            CountingEffect::EFFECT_TYPE,
+            "archived",
+            CountingEffect::SCHEMA_VERSION,
+            "test-v1",
+            "archived-input",
+        ),
+        outcome: EffectOutcomePayload::Succeeded {
+            output: json!({"value": 10}),
+        },
+        origin: None,
+    };
+    let completed_history = Arc::new(
+        EffectHistory::from_records("archived_flow", vec![completed_record])
+            .expect("completed history indexes"),
+    );
+    let completed_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let completed = EffectsCore::new(invocation_context_with_mode(
+        completed_journal.clone(),
+        parent.clone(),
+        Some(completed_history),
+        EffectRuntimeMode::ResumeIncomplete,
+        EffectPortRegistry::new(),
+    ));
+    let completed_error = completed
+        .preflight_next_effect_cursor_is_empty()
+        .await
+        .expect_err("a pre-effect failure cannot replace an archived completion");
+    assert!(matches!(
+        completed_error,
+        EffectError::EffectProvenanceMismatch(ref message)
+            if message.contains("replace an existing terminal")
+    ));
+    assert!(
+        completed_journal.events().is_empty(),
+        "preflight is read-only and preserves the archived terminal"
+    );
+
+    let in_doubt_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut in_doubt_ctx = invocation_context_with_mode(
+        in_doubt_journal.clone(),
+        parent.clone(),
+        None,
+        EffectRuntimeMode::ResumeIncomplete,
+        EffectPortRegistry::new(),
+    );
+    let cursor = EffectCursor::new(
+        "archived_flow",
+        in_doubt_ctx.stage_key.clone(),
+        in_doubt_ctx.input_seq.0,
+        0_u32,
+    );
+    let affine = AffineCountingEffect {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let descriptor = descriptor_for_effect(
+        &affine,
+        in_doubt_ctx.stage_logic_version.clone(),
+        AffineCountingEffect::EFFECT_TYPE,
+        AffineCountingEffect::SCHEMA_VERSION,
+    )
+    .expect("affine descriptor");
+    let descriptor_hash = descriptor_hash(&descriptor).expect("affine descriptor hash");
+    let started = EffectAttemptStarted {
+        cursor: cursor.clone(),
+        descriptor_hash,
+        effect_type: EffectType::new(AffineCountingEffect::EFFECT_TYPE),
+        attempt: EffectAttemptOrdinal::new(1),
+        outcome_group_id: effect_outcome_group_id(&cursor),
+        causal_input_id: parent.event.id,
+    };
+    let start = build_effect_attempt_started_event(
+        in_doubt_ctx.writer_id,
+        &parent,
+        started,
+        descriptor,
+        in_doubt_ctx.lineage,
+    )
+    .expect("Start event");
+    let archived_start = EffectHistory::from_cursor_history_for_test(
+        "archived_flow",
+        cursor,
+        EffectCursorHistory {
+            attempts: vec![EffectAttemptStarted::try_from_event(&start)
+                .expect("archived Start payload decodes")],
+            attempt_events: std::collections::BTreeMap::from([(
+                EffectAttemptOrdinal::new(1),
+                start,
+            )]),
+            ..EffectCursorHistory::default()
+        },
+    )
+    .expect("archived in-doubt history is valid");
+    in_doubt_ctx.effect_history = Some(Arc::new(archived_start));
+    let in_doubt = EffectsCore::new(in_doubt_ctx);
+    let in_doubt_error = in_doubt
+        .preflight_next_effect_cursor_is_empty()
+        .await
+        .expect_err("a pre-effect failure cannot erase an archived Start");
+    assert!(matches!(
+        in_doubt_error,
+        EffectError::EffectProvenanceMismatch(ref message)
+            if message.contains("erase in-doubt Start(1)")
+    ));
+    assert!(
+        in_doubt_journal.events().is_empty(),
+        "preflight preserves the archived Start without rematerialising or abandoning it"
+    );
+}
+
+async fn affine_scope_matrix_histories(
+    parent: &EventEnvelope<ChainEvent>,
+) -> (Arc<EffectHistory>, Arc<EffectHistory>) {
+    let stage_id = StageId::new();
+    let completed_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut completed = EffectsCore::new(invocation_context(
+        completed_journal.clone(),
+        parent.clone(),
+        None,
+    ));
+    completed
+        .perform(AffineCountingEffect {
+            calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .await
+        .expect("scope-matrix completed archive");
+    let completed_cursor = cursor_started_in(&completed_journal);
+    let completed_history = archive_current_cursor(&completed_journal, &completed_cursor).await;
+
+    let in_doubt_journal = Arc::new(MemoryJournal::failing_group(
+        JournalOwner::stage(stage_id),
+        "effect-outcome:v1:",
+    ));
+    let mut in_doubt = EffectsCore::new(invocation_context(
+        in_doubt_journal.clone(),
+        parent.clone(),
+        None,
+    ));
+    assert!(matches!(
+        in_doubt
+            .perform(AffineCountingEffect {
+                calls: Arc::new(AtomicUsize::new(0)),
+            })
+            .await,
+        Err(EffectError::Journal(_))
+    ));
+    let in_doubt_cursor = cursor_started_in(&in_doubt_journal);
+    let in_doubt_history = archive_current_cursor(&in_doubt_journal, &in_doubt_cursor).await;
+
+    (completed_history, in_doubt_history)
+}
+
+fn direct_fact_scope(
+    runtime_execution: &crate::execution::RuntimeExecution,
+    stage_id: StageId,
+) -> obzenflow_core::MiddlewareExecutionScope {
+    runtime_execution.handler_scope_for(crate::execution::ExecutionPositionSource::Data {
+        stage_id,
+        position: StageInputPosition(1),
+        generation: None,
+    })
+}
+
+async fn assert_scope_matrix_hit(
+    runtime_execution: crate::execution::RuntimeExecution,
+    history: Arc<EffectHistory>,
+    parent: EventEnvelope<ChainEvent>,
+    expected_scope: obzenflow_core::MiddlewareExecutionScope,
+) {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let admission = crate::backpressure::DirectFactAdmission::new(
+        obzenflow_core::EventType::from("test.scope-matrix"),
+        NonZeroU64::new(3).expect("non-zero direct-fact bound"),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut ctx = invocation_context_with_mode(
+        journal.clone(),
+        parent,
+        Some(history),
+        EffectRuntimeMode::ReplayStrict,
+        EffectPortRegistry::new(),
+    );
+    ctx.runtime_execution = runtime_execution.clone();
+    ctx.backpressure_writer =
+        BackpressureWriter::disabled().with_direct_fact_admission(admission.clone());
+    assert_eq!(
+        direct_fact_scope(&runtime_execution, ctx.stage_id),
+        expected_scope
+    );
+
+    let mut effects = EffectsCore::new(ctx);
+    effects
+        .perform(AffineCountingEffect {
+            calls: calls.clone(),
+        })
+        .await
+        .expect("a history Hit reconstructs without live admission");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(!admission.is_requested());
+    assert_eq!(
+        admission.close().expect("reconstruction lease closes"),
+        2,
+        "the archived Start and terminal are reconstructed track-only"
+    );
+    assert_eq!(journal.events().len(), 2);
+}
+
+async fn assert_scope_matrix_executable(
+    runtime_execution: crate::execution::RuntimeExecution,
+    history: Option<Arc<EffectHistory>>,
+    parent: EventEnvelope<ChainEvent>,
+    expected_prefix_rows: usize,
+) {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let admission = crate::backpressure::DirectFactAdmission::new(
+        obzenflow_core::EventType::from("test.scope-matrix"),
+        NonZeroU64::new(3).expect("non-zero direct-fact bound"),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut ctx = invocation_context_with_mode(
+        journal.clone(),
+        parent,
+        history,
+        EffectRuntimeMode::ResumeIncomplete,
+        EffectPortRegistry::new(),
+    );
+    ctx.runtime_execution = runtime_execution.clone();
+    ctx.backpressure_writer =
+        BackpressureWriter::disabled().with_direct_fact_admission(admission.clone());
+    assert_eq!(
+        direct_fact_scope(&runtime_execution, ctx.stage_id),
+        obzenflow_core::MiddlewareExecutionScope::ResumeHandler
+    );
+
+    let effect_calls = calls.clone();
+    let mut effects = EffectsCore::new(ctx);
+    let task = tokio::spawn(async move {
+        effects
+            .perform(AffineCountingEffect {
+                calls: effect_calls,
+            })
+            .await
+    });
+
+    for _ in 0..32 {
+        if admission.is_requested() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        admission.is_requested(),
+        "the executable branch must park at the live admission barrier"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        journal.events().len(),
+        expected_prefix_rows,
+        "only the reconstruction prefix may exist before live admission"
+    );
+
+    let lease = crate::backpressure::DirectFactLease::try_acquire(
+        &BackpressureWriter::disabled(),
+        NonZeroU64::new(3).expect("non-zero direct-fact bound"),
+    )
+    .expect("local-bound admission succeeds")
+    .expect("off mode grants a local affine lease");
+    admission.grant(lease).expect("single live grant");
+    task.await
+        .expect("scope-matrix task joins")
+        .expect("admitted affine execution succeeds");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        direct_fact_scope(&runtime_execution, stage_id),
+        obzenflow_core::MiddlewareExecutionScope::ResumeHandler,
+        "live admission must not mutate the frozen handler observer scope"
+    );
+    assert_eq!(
+        admission.close().expect("admitted lease closes"),
+        expected_prefix_rows as u64 + 2,
+        "one live Start and one terminal settle after any reconstructed prefix"
+    );
+}
+
+#[tokio::test]
+async fn direct_fact_execution_scope_matrix_separates_reconstruction_from_live_admission() {
+    let stage_id = StageId::new();
+    let parent = parent_envelope(WriterId::from(stage_id));
+    let (completed_history, in_doubt_history) = affine_scope_matrix_histories(&parent).await;
+
+    let strict = crate::execution::RuntimeExecution::from_effect_runtime_mode(
+        EffectRuntimeMode::ReplayStrict,
+        None,
+    );
+    assert_scope_matrix_hit(
+        strict.clone(),
+        completed_history.clone(),
+        parent.clone(),
+        obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
+    )
+    .await;
+
+    let strict_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let strict_admission = crate::backpressure::DirectFactAdmission::new(
+        obzenflow_core::EventType::from("test.scope-matrix"),
+        NonZeroU64::new(3).expect("non-zero direct-fact bound"),
+    );
+    let strict_calls = Arc::new(AtomicUsize::new(0));
+    let mut strict_ctx = invocation_context_with_mode(
+        strict_journal.clone(),
+        parent.clone(),
+        Some(in_doubt_history.clone()),
+        EffectRuntimeMode::ReplayStrict,
+        EffectPortRegistry::new(),
+    );
+    strict_ctx.runtime_execution = strict;
+    strict_ctx.backpressure_writer =
+        BackpressureWriter::disabled().with_direct_fact_admission(strict_admission.clone());
+    let mut strict_effects = EffectsCore::new(strict_ctx);
+    assert!(matches!(
+        strict_effects
+            .perform(AffineCountingEffect {
+                calls: strict_calls.clone(),
+            })
+            .await,
+        Err(EffectError::EffectInDoubt { .. })
+    ));
+    assert_eq!(strict_calls.load(Ordering::SeqCst), 0);
+    assert!(!strict_admission.is_requested());
+    assert!(strict_journal.events().is_empty());
+    assert_eq!(
+        strict_admission
+            .close()
+            .expect("strict reconstruction lease closes"),
+        0
+    );
+
+    let incomplete = crate::execution::RuntimeExecution::from_effect_runtime_mode(
+        EffectRuntimeMode::ResumeIncomplete,
+        None,
+    );
+    assert_scope_matrix_hit(
+        incomplete.clone(),
+        completed_history.clone(),
+        parent.clone(),
+        obzenflow_core::MiddlewareExecutionScope::ResumeHandler,
+    )
+    .await;
+    assert_scope_matrix_executable(incomplete, None, parent.clone(), 0).await;
+
+    let resume_hit = resume_execution();
+    assert_scope_matrix_hit(
+        resume_hit,
+        completed_history,
+        parent.clone(),
+        obzenflow_core::MiddlewareExecutionScope::ResumeHandler,
+    )
+    .await;
+    assert_scope_matrix_executable(resume_execution(), None, parent.clone(), 0).await;
+    assert_scope_matrix_executable(resume_execution(), Some(in_doubt_history), parent, 1).await;
+}
+
+#[tokio::test]
+async fn affine_start_append_failure_authors_no_terminal_and_never_executes() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(FailingStartJournal::new(JournalOwner::stage(stage_id)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut effects = EffectsCore::new(invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    ));
+
+    let error = effects
+        .perform(AffineCountingEffect {
+            calls: calls.clone(),
+        })
+        .await
+        .expect_err("injected Start append failure must escape");
+
+    assert!(matches!(error, EffectError::Journal(_)));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        journal.attempted_event_types(),
+        vec![EffectAttemptStarted::versioned_event_type()],
+        "a failed Start cut must not attempt an effect terminal"
+    );
+    assert!(journal
+        .read_all_unordered()
+        .await
+        .expect("failed journal remains readable")
+        .is_empty());
 }
 
 #[tokio::test]
@@ -2285,13 +3007,15 @@ async fn transactional_effect_uses_registered_port_and_commits_once() {
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut effects = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -2323,12 +3047,14 @@ async fn transactional_effect_live_return_comes_from_committed_record_not_port_r
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let port_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(DivergentTransactionalPort {
-            calls: port_calls.clone(),
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(DivergentTransactionalPort {
+                calls: port_calls.clone(),
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut live = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -2391,13 +3117,15 @@ async fn transactional_effect_replay_does_not_require_port_or_execute() {
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls,
-            commit: true,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls,
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut live = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -2444,13 +3172,15 @@ async fn transactional_effect_missing_commit_fails() {
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: false,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls.clone(),
+                commit: false,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut effects = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -2753,7 +3483,9 @@ impl DemoPort for DemoPortImpl {
 #[test]
 fn effect_context_resolves_typed_trait_object_ports() {
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn DemoPort>("primary", Arc::new(DemoPortImpl));
+    ports
+        .insert::<dyn DemoPort>("primary", Arc::new(DemoPortImpl))
+        .expect("demo test port registration is unique");
     let ctx = EffectContext {
         is_replaying: false,
         flow_id: FlowId::new(),
@@ -2880,6 +3612,555 @@ impl EffectBoundary for AbortingBoundary {
             },
             Vec::new(),
         )
+    }
+}
+
+struct RecoveryRejectingBoundary {
+    consults: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EffectBoundary for RecoveryRejectingBoundary {
+    async fn around_repeatable_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _operation: RepeatableEffectOperation,
+    ) -> EffectBoundaryReport {
+        panic!("recovery fixture only supports affine effects")
+    }
+
+    async fn around_single_use_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        panic!("recovery fixture only supports affine effects")
+    }
+
+    async fn around_affine_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: AffineEffectOperation,
+    ) -> AffineEffectBoundaryReport {
+        self.consults.fetch_add(1, Ordering::SeqCst);
+        operation.abort(
+            EffectAbortReason {
+                cause: EffectFailureCause {
+                    source: "circuit_breaker".into(),
+                    code: "circuit_open".into(),
+                },
+                message: "recovery attempt rejected by open boundary".to_string(),
+                retry: RetryDisposition::Retryable,
+            },
+            Vec::new(),
+        )
+    }
+}
+
+struct PanicBoundary;
+
+#[async_trait]
+impl EffectBoundary for PanicBoundary {
+    async fn around_repeatable_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _operation: RepeatableEffectOperation,
+    ) -> EffectBoundaryReport {
+        panic!("replay must not consult the effect boundary")
+    }
+
+    async fn around_single_use_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        panic!("replay must not consult the effect boundary")
+    }
+
+    async fn around_affine_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _operation: AffineEffectOperation,
+    ) -> AffineEffectBoundaryReport {
+        panic!("replay must not consult the effect boundary")
+    }
+}
+
+struct InvariantEvidenceBoundary {
+    include_preterminal: bool,
+    consults: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EffectBoundary for InvariantEvidenceBoundary {
+    async fn around_repeatable_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _operation: RepeatableEffectOperation,
+    ) -> EffectBoundaryReport {
+        panic!("invariant fixture only supports affine effects")
+    }
+
+    async fn around_single_use_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        panic!("invariant fixture only supports affine effects")
+    }
+
+    async fn around_affine_effect(
+        &self,
+        identity: &EffectIdentity,
+        event: &ChainEvent,
+        operation: AffineEffectOperation,
+    ) -> AffineEffectBoundaryReport {
+        use obzenflow_core::event::chain_event::{
+            CircuitBreakerAttemptSettledEventParams, CircuitBreakerRecoveryCompletedEventParams,
+        };
+        use obzenflow_core::event::payloads::observability_payload::CircuitBreakerHealthClassification;
+
+        self.consults.fetch_add(1, Ordering::SeqCst);
+        let execution = operation.execute().await;
+        assert!(matches!(
+            execution.result(),
+            Err(EffectError::EffectPortBindingInvariantViolation { .. })
+        ));
+        let attempt = execution.attempt();
+        let evidence_writer = WriterId::from(StageId::new());
+        let mut controls = Vec::new();
+        if self.include_preterminal {
+            controls.push(ChainEventFactory::circuit_breaker_retry_scheduled(
+                evidence_writer,
+                identity.cursor.clone(),
+                attempt.saturating_add(1),
+                0,
+                event.id,
+            ));
+        }
+        controls.push(ChainEventFactory::circuit_breaker_attempt_settled(
+            evidence_writer,
+            CircuitBreakerAttemptSettledEventParams {
+                cursor: identity.cursor.clone(),
+                attempt,
+                health_classification: CircuitBreakerHealthClassification::Ignored,
+                slow: false,
+                dependency_elapsed_ms: 0,
+                admission_wait_ms: 0,
+            },
+            event.id,
+        ));
+        controls.push(ChainEventFactory::circuit_breaker_recovery_completed(
+            evidence_writer,
+            CircuitBreakerRecoveryCompletedEventParams {
+                cursor: identity.cursor.clone(),
+                total_attempts: attempt,
+                backoff_elapsed_ms: 0,
+                recovery_elapsed_ms: 0,
+            },
+            event.id,
+        ));
+        execution.into_report(controls)
+    }
+}
+
+async fn archive_current_cursor(
+    journal: &Arc<MemoryJournal<ChainEvent>>,
+    cursor: &EffectCursor,
+) -> Arc<EffectHistory> {
+    let erased: Arc<dyn Journal<ChainEvent>> = journal.clone();
+    let history = current_cursor_history(&erased, cursor)
+        .await
+        .expect("current cursor history is valid");
+    Arc::new(
+        EffectHistory::from_cursor_history_for_test(
+            cursor.recorded_flow_id.clone(),
+            cursor.clone(),
+            history,
+        )
+        .expect("cursor history can become the next resume archive"),
+    )
+}
+
+fn cursor_started_in(journal: &MemoryJournal<ChainEvent>) -> EffectCursor {
+    journal
+        .events()
+        .iter()
+        .find_map(|envelope| EffectAttemptStarted::from_event(&envelope.event))
+        .expect("fixture journal contains a Start")
+        .cursor
+}
+
+type ComparableEffectJournalEntry = (
+    EventId,
+    String,
+    Option<String>,
+    Option<JournalGroupMember>,
+    serde_json::Value,
+);
+
+fn comparable_effect_journal(
+    journal: &MemoryJournal<ChainEvent>,
+) -> Vec<ComparableEffectJournalEntry> {
+    journal
+        .events()
+        .into_iter()
+        .map(|envelope| {
+            (
+                envelope.event.id,
+                envelope.event.event_type(),
+                envelope.journal_group_id,
+                envelope.journal_group_member,
+                serde_json::to_value(envelope.event.content)
+                    .expect("effect journal content serialises"),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn invariant_preterminal_and_terminal_group_cuts_are_independently_atomic() {
+    let stage_id = StageId::new();
+    let parent = parent_envelope(WriterId::from(stage_id));
+
+    let preterminal_cut = Arc::new(MemoryJournal::failing_group(
+        JournalOwner::stage(stage_id),
+        "effect-escape-controls:v1:",
+    ));
+    let preterminal_calls = Arc::new(AtomicUsize::new(0));
+    let mut preterminal_ctx = invocation_context(preterminal_cut.clone(), parent.clone(), None);
+    preterminal_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
+        include_preterminal: true,
+        consults: Arc::new(AtomicUsize::new(0)),
+    }));
+    let mut preterminal = EffectsCore::new(preterminal_ctx);
+    let error = preterminal
+        .perform(InvariantAffineEffect {
+            calls: preterminal_calls.clone(),
+        })
+        .await
+        .expect_err("preterminal publication failure is journal-fatal");
+    assert!(matches!(error, EffectError::Journal(_)));
+    assert_eq!(preterminal_calls.load(Ordering::SeqCst), 1);
+    let preterminal_events = preterminal_cut.events();
+    assert_eq!(preterminal_events.len(), 1);
+    assert!(EffectAttemptStarted::event_type_matches(
+        &preterminal_events[0].event.event_type()
+    ));
+    assert!(preterminal_events[0].journal_group_id.is_none());
+
+    let terminal_cut = Arc::new(MemoryJournal::failing_group(
+        JournalOwner::stage(stage_id),
+        "effect-outcome:v1:",
+    ));
+    let terminal_calls = Arc::new(AtomicUsize::new(0));
+    let mut terminal_ctx = invocation_context(terminal_cut.clone(), parent, None);
+    terminal_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
+        include_preterminal: true,
+        consults: Arc::new(AtomicUsize::new(0)),
+    }));
+    let mut terminal = EffectsCore::new(terminal_ctx);
+    let error = terminal
+        .perform(InvariantAffineEffect {
+            calls: terminal_calls.clone(),
+        })
+        .await
+        .expect_err("terminal publication failure is journal-fatal");
+    assert!(matches!(error, EffectError::Journal(_)));
+    assert_eq!(terminal_calls.load(Ordering::SeqCst), 1);
+    let terminal_events = terminal_cut.events();
+    assert_eq!(terminal_events.len(), 2);
+    assert!(EffectAttemptStarted::event_type_matches(
+        &terminal_events[0].event.event_type()
+    ));
+    assert!(terminal_events[1]
+        .journal_group_id
+        .as_deref()
+        .is_some_and(|group| group.starts_with("effect-escape-controls:v1:")));
+    assert!(
+        terminal_events
+            .iter()
+            .all(|envelope| envelope.event.event_type() != EFFECT_RECORD_EVENT_TYPE),
+        "a failed terminal frame exposes no typed invariant terminal"
+    );
+}
+
+#[tokio::test]
+async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
+    let stage_id = StageId::new();
+    let parent = parent_envelope(WriterId::from(stage_id));
+
+    let first = Arc::new(MemoryJournal::failing_group(
+        JournalOwner::stage(stage_id),
+        "effect-outcome:v1:",
+    ));
+    let first_calls = Arc::new(AtomicUsize::new(0));
+    let mut first_ctx = invocation_context(first.clone(), parent.clone(), None);
+    first_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
+        include_preterminal: true,
+        consults: Arc::new(AtomicUsize::new(0)),
+    }));
+    let mut first_run = EffectsCore::new(first_ctx);
+    assert!(matches!(
+        first_run
+            .perform(InvariantAffineEffect {
+                calls: first_calls.clone(),
+            })
+            .await,
+        Err(EffectError::Journal(_))
+    ));
+    let cursor = cursor_started_in(&first);
+    let first_history = archive_current_cursor(&first, &cursor).await;
+
+    let second = Arc::new(MemoryJournal::failing_group(
+        JournalOwner::stage(stage_id),
+        "effect-outcome:v1:",
+    ));
+    let second_calls = Arc::new(AtomicUsize::new(0));
+    let mut second_ctx = invocation_context_with_mode(
+        second.clone(),
+        parent.clone(),
+        Some(first_history),
+        EffectRuntimeMode::ResumeIncomplete,
+        EffectPortRegistry::new(),
+    );
+    second_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
+        include_preterminal: true,
+        consults: Arc::new(AtomicUsize::new(0)),
+    }));
+    let mut second_run = EffectsCore::new(second_ctx);
+    assert!(matches!(
+        second_run
+            .perform(InvariantAffineEffect {
+                calls: second_calls.clone(),
+            })
+            .await,
+        Err(EffectError::Journal(_))
+    ));
+    let second_history = archive_current_cursor(&second, &cursor).await;
+
+    let terminal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let terminal_calls = Arc::new(AtomicUsize::new(0));
+    let terminal_consults = Arc::new(AtomicUsize::new(0));
+    let mut terminal_ctx = invocation_context_with_mode(
+        terminal.clone(),
+        parent.clone(),
+        Some(second_history),
+        EffectRuntimeMode::ResumeIncomplete,
+        EffectPortRegistry::new(),
+    );
+    terminal_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
+        include_preterminal: false,
+        consults: terminal_consults.clone(),
+    }));
+    let mut terminal_run = EffectsCore::new(terminal_ctx);
+    let terminal_error = terminal_run
+        .perform(InvariantAffineEffect {
+            calls: terminal_calls.clone(),
+        })
+        .await
+        .expect_err("the successful terminal retains the typed invariant failure");
+    assert!(matches!(
+        terminal_error,
+        EffectError::EffectPortBindingInvariantViolation { .. }
+    ));
+
+    assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(second_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(terminal_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(terminal_consults.load(Ordering::SeqCst), 1);
+
+    let terminal_history = archive_current_cursor(&terminal, &cursor).await;
+    let selected = terminal_history.cursor_history(&cursor);
+    assert_eq!(
+        selected
+            .attempts
+            .iter()
+            .map(|started| started.attempt.get())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    let escape_attempts = selected
+        .escape_control_batches
+        .keys()
+        .map(|attempt| attempt.get())
+        .collect::<Vec<_>>();
+    assert_eq!(escape_attempts, vec![1, 2]);
+    for attempt in [1_u32, 2] {
+        let expected = effect_escape_controls_group_id(&cursor, EffectAttemptOrdinal::new(attempt));
+        assert!(terminal
+            .events()
+            .iter()
+            .any(|envelope| { envelope.journal_group_id.as_deref() == Some(expected.as_str()) }));
+    }
+    assert_eq!(
+        selected.terminal_attempt,
+        Some(Some(EffectAttemptOrdinal::new(3)))
+    );
+
+    let replay = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_consults = Arc::new(AtomicUsize::new(0));
+    let mut replay_ctx = invocation_context_with_mode(
+        replay.clone(),
+        parent,
+        Some(terminal_history),
+        EffectRuntimeMode::ReplayStrict,
+        EffectPortRegistry::new(),
+    );
+    replay_ctx.effect_boundary = Some(Arc::new(InvariantEvidenceBoundary {
+        include_preterminal: true,
+        consults: replay_consults.clone(),
+    }));
+    let mut replay_run = EffectsCore::new(replay_ctx);
+    let replay_error = replay_run
+        .perform(InvariantAffineEffect {
+            calls: replay_calls.clone(),
+        })
+        .await
+        .expect_err("strict replay returns the archived failure");
+    assert!(matches!(replay_error, EffectError::RecordedFailure { .. }));
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(replay_consults.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        comparable_effect_journal(&terminal),
+        comparable_effect_journal(&replay),
+        "strict replay rematerialises Starts, attempt-scoped escape batches, and terminal byte-for-byte"
+    );
+}
+
+#[tokio::test]
+async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_boundary() {
+    let stage_id = StageId::new();
+    let parent = parent_envelope(WriterId::from(stage_id));
+    let (_, in_doubt_history) = affine_scope_matrix_histories(&parent).await;
+    let recovery_parent = parent_envelope(WriterId::from(stage_id));
+    assert_ne!(
+        parent.event.id, recovery_parent.event.id,
+        "the recovery invocation must not accidentally share the archived input identity"
+    );
+
+    let recovery_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let recovery_calls = Arc::new(AtomicUsize::new(0));
+    let recovery_consults = Arc::new(AtomicUsize::new(0));
+    let mut recovery_ctx = invocation_context_with_mode(
+        recovery_journal.clone(),
+        recovery_parent.clone(),
+        Some(in_doubt_history),
+        EffectRuntimeMode::ResumeIncomplete,
+        EffectPortRegistry::new(),
+    );
+    recovery_ctx.effect_boundary = Some(Arc::new(RecoveryRejectingBoundary {
+        consults: recovery_consults.clone(),
+    }));
+    let mut recovery = EffectsCore::new(recovery_ctx);
+    let recovery_error = recovery
+        .perform(AffineCountingEffect {
+            calls: recovery_calls.clone(),
+        })
+        .await
+        .expect_err("a rejected recovery becomes a typed abandonment");
+    assert!(matches!(
+        recovery_error,
+        EffectError::RecoveryAbandoned {
+            last_started_attempt,
+            ref failure_source,
+            ref code,
+            ..
+        } if last_started_attempt == EffectAttemptOrdinal::new(1)
+            && failure_source.as_str() == "circuit_breaker"
+            && code.as_str() == "circuit_open"
+    ));
+    assert_eq!(recovery_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(recovery_consults.load(Ordering::SeqCst), 1);
+
+    let recovery_events = recovery_journal.events();
+    let starts = recovery_events
+        .iter()
+        .filter_map(|envelope| EffectAttemptStarted::from_event(&envelope.event))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        starts
+            .iter()
+            .map(|started| started.attempt.get())
+            .collect::<Vec<_>>(),
+        vec![1],
+        "recovery rejection must not author Start(2)"
+    );
+    let abandonments = recovery_events
+        .iter()
+        .filter(|envelope| {
+            EffectRecoveryAbandoned::event_type_matches(&envelope.event.event_type())
+        })
+        .map(|envelope| {
+            EffectRecoveryAbandoned::try_from_event(&envelope.event)
+                .expect("abandonment payload decodes")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(abandonments.len(), 1);
+    assert_eq!(
+        abandonments[0].highest_started_attempt,
+        EffectAttemptOrdinal::new(1)
+    );
+    let records = effect_records(&recovery_journal);
+    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        records[0].outcome,
+        EffectOutcomePayload::Failed {
+            ref error_type,
+            ref cause,
+            ..
+        } if error_type.as_str() == "recovery_abandoned"
+            && cause.as_ref().is_some_and(|cause| {
+                cause.source.as_str() == "circuit_breaker"
+                    && cause.code.as_str() == "circuit_open"
+            })
+    ));
+
+    let cursor = cursor_started_in(&recovery_journal);
+    let settled_history = archive_current_cursor(&recovery_journal, &cursor).await;
+    for mode in [
+        EffectRuntimeMode::ReplayStrict,
+        EffectRuntimeMode::ResumeIncomplete,
+    ] {
+        let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+        let replay_calls = Arc::new(AtomicUsize::new(0));
+        let mut replay_ctx = invocation_context_with_mode(
+            replay_journal.clone(),
+            recovery_parent.clone(),
+            Some(settled_history.clone()),
+            mode,
+            EffectPortRegistry::new(),
+        );
+        replay_ctx.effect_boundary = Some(Arc::new(PanicBoundary));
+        let mut replay = EffectsCore::new(replay_ctx);
+        let replay_error = replay
+            .perform(AffineCountingEffect {
+                calls: replay_calls.clone(),
+            })
+            .await
+            .expect_err("abandonment remains the deterministic terminal");
+        assert!(matches!(
+            replay_error,
+            EffectError::RecoveryAbandoned {
+                last_started_attempt,
+                ..
+            } if last_started_attempt == EffectAttemptOrdinal::new(1)
+        ));
+        assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            comparable_effect_journal(&recovery_journal),
+            comparable_effect_journal(&replay_journal),
+            "strict replay and resume-of-resume reproduce the abandonment byte-for-byte"
+        );
     }
 }
 
@@ -3443,13 +4724,15 @@ async fn transactional_boundary_executes_and_commits_the_single_use_operation_on
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let boundary_consults = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut ctx = invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -3490,12 +4773,14 @@ async fn transactional_boundary_committed_failure_overrides_port_return_and_repl
     let port_calls = Arc::new(AtomicUsize::new(0));
     let live_boundary_consults = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(CommittedFailureTransactionalPort {
-            calls: port_calls.clone(),
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(CommittedFailureTransactionalPort {
+                calls: port_calls.clone(),
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut live_ctx = invocation_context_with_mode(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -3567,13 +4852,15 @@ async fn transactional_boundary_foreign_abort_cannot_reclassify_a_committed_oper
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut ctx = invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -3611,13 +4898,15 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let foreign_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut live_ctx = invocation_context_with_mode(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -3659,13 +4948,15 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
     );
     let replay_port_calls = Arc::new(AtomicUsize::new(0));
     let mut replay_ports = EffectPortRegistry::new();
-    replay_ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: replay_port_calls.clone(),
-            commit: true,
-        }),
-    );
+    replay_ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: replay_port_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional replay test port registration is unique");
     let mut replay = EffectsCore::new(invocation_context_with_mode(
         replay_journal,
         parent_envelope(WriterId::from(stage_id)),
@@ -3693,13 +4984,15 @@ async fn transactional_boundary_abort_records_failure_and_replays() {
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let mut ports = EffectPortRegistry::new();
-    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }),
-    );
+    ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: transactional_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut live_ctx = invocation_context_with_mode(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -3744,13 +5037,15 @@ async fn transactional_boundary_abort_records_failure_and_replays() {
     );
     let mut replay_ports = EffectPortRegistry::new();
     let replay_port_calls = Arc::new(AtomicUsize::new(0));
-    replay_ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: replay_port_calls.clone(),
-            commit: true,
-        }),
-    );
+    replay_ports
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: replay_port_calls.clone(),
+                commit: true,
+            }),
+        )
+        .expect("transactional replay test port registration is unique");
     let mut replay = EffectsCore::new(invocation_context_with_mode(
         replay_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -3821,13 +5116,15 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
     // Run A: aborted transactional effect, then a counting effect.
     let journal_a = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let mut ports_a = EffectPortRegistry::new();
-    ports_a.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-        "tx",
-        Arc::new(TransactionalCountingPort {
-            calls: Arc::new(AtomicUsize::new(0)),
-            commit: true,
-        }),
-    );
+    ports_a
+        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(TransactionalCountingPort {
+                calls: Arc::new(AtomicUsize::new(0)),
+                commit: true,
+            }),
+        )
+        .expect("transactional test port registration is unique");
     let mut effects_a = EffectsCore::new(make_ctx(
         journal_a.clone(),
         Some(Arc::new(TransactionalOnlyAbortBoundary)),

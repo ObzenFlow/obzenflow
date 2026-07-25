@@ -25,12 +25,52 @@ use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, EventType, FlowId, StageId, SystemId};
 use obzenflow_topology::Topology;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 /// Registry default for `runtime.heartbeat_interval` (FLOWIP-010): events
 /// between stateful/join heartbeats when the build supplies no value.
 pub const DEFAULT_HEARTBEAT_INTERVAL: u64 = 1000;
+
+/// Runtime-owned descriptor proof for generated bounded direct-fact
+/// continuations. Only exact physical input event types are eligible.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DirectFactPlan {
+    eligible_inputs: BTreeMap<EventType, NonZeroU64>,
+}
+
+impl DirectFactPlan {
+    #[doc(hidden)]
+    pub fn generated<T: obzenflow_core::TypedPayload>(bound: NonZeroU64) -> Self {
+        let mut eligible_inputs = BTreeMap::new();
+        eligible_inputs.insert(EventType::from(T::versioned_event_type()), bound);
+        Self { eligible_inputs }
+    }
+
+    pub(crate) fn bound_for(&self, event_type: &str) -> Option<NonZeroU64> {
+        self.eligible_inputs
+            .get(&EventType::from(event_type))
+            .copied()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.eligible_inputs.is_empty()
+    }
+
+    #[doc(hidden)]
+    pub fn manifest_entries(&self) -> impl Iterator<Item = (&str, u64)> {
+        self.eligible_inputs
+            .iter()
+            .map(|(event_type, bound)| (event_type.as_str(), bound.get()))
+    }
+
+    #[doc(hidden)]
+    pub fn maximum_bound(&self) -> Option<NonZeroU64> {
+        self.eligible_inputs.values().copied().max()
+    }
+}
 
 /// Factory for creating subscriptions with pre-computed metadata
 /// This allows deferred subscription creation with the correct journal subsets
@@ -278,6 +318,10 @@ pub struct StageResources {
     /// Descriptor-owned effect declarations available to replay-safe effect invocation.
     pub effect_declarations: Vec<EffectDeclaration>,
 
+    /// Descriptor-owned exact-input bounds for generated direct-fact
+    /// continuations.
+    pub direct_fact_plan: DirectFactPlan,
+
     /// Whether the flow build marked this stage as a deterministic fan-in
     /// orderer (FLOWIP-095d/095m): a multi-inbound stage with an order-observing
     /// descendant (an effect, a stateful fold, or a live join) whose input
@@ -406,6 +450,10 @@ impl StageResourcesBuilder {
     pub async fn build(self) -> Result<StageResourcesSet, String> {
         // Create shared message bus
         let message_bus = Arc::new(FsmMessageBus::new());
+
+        // Consume authoring recipes once. Every stage clone in this run shares
+        // one resolver verdict, while a subsequent build receives fresh cells.
+        let effect_ports = self.effect_ports.into_run_registry();
 
         // Build backpressure registry once per flow (Phase 1: in-process).
         // The SCC auto-enable runs provenance-aware in the DSL's plan
@@ -725,8 +773,9 @@ impl StageResourcesBuilder {
                 backpressure_registry: backpressure_registry.clone(),
                 liveness_snapshots: liveness_snapshots.clone(),
                 runtime_execution,
-                effect_ports: self.effect_ports.clone(),
+                effect_ports: effect_ports.clone(),
                 effect_declarations: Vec::new(),
+                direct_fact_plan: DirectFactPlan::default(),
                 deterministic_fan_in,
                 seq_ordered_fan_in,
                 lineage_policy: self

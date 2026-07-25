@@ -57,6 +57,7 @@ fn effect_error_kind(error: &EffectError) -> ErrorKind {
         EffectError::Serialization(_)
         | EffectError::Journal(_)
         | EffectError::MissingRecordedEffect { .. }
+        | EffectError::EffectInDoubt { .. }
         | EffectError::DuplicateRecordedEffect { .. }
         | EffectError::DescriptorMismatch { .. }
         | EffectError::BoundaryRejected { .. }
@@ -67,6 +68,11 @@ fn effect_error_kind(error: &EffectError) -> ErrorKind {
         | EffectError::UndeclaredOutput { .. }
         | EffectError::EmitUnsupported { .. }
         | EffectError::MissingEffectPort { .. }
+        | EffectError::EffectPortResolutionFailed { .. }
+        | EffectError::EffectPortBindingMismatch { .. }
+        | EffectError::EffectPortBindingInvariantViolation { .. }
+        | EffectError::DependencyFailed { .. }
+        | EffectError::RecoveryAbandoned { .. }
         | EffectError::TransactionalCommitMissing { .. }
         | EffectError::Execution(_)
         | EffectError::Permanent(_)
@@ -128,6 +134,7 @@ mod tests {
                 error_message: "declined".to_string(),
                 retry: obzenflow_core::event::RetryDisposition::NotRetryable,
                 cause: None,
+                detail: None,
             }),
             ErrorKind::Domain
         );

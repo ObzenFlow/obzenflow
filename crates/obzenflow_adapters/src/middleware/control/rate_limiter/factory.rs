@@ -541,7 +541,6 @@ mod tests {
         let declaration = factory.declaration();
         assert!(declaration.is_control());
         assert!(!declaration.surfaces.is_empty());
-        assert!(!declaration.is_flowip_128g_legacy_shell());
     }
 
     #[test]

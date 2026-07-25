@@ -44,7 +44,7 @@ pub use classifier::FailureHealth;
 pub use config::CircuitBreakerConfigError;
 use config::HalfOpenPolicy;
 pub(in crate::middleware::control) use factory::CircuitBreakerFactory;
-pub use factory::{ai_circuit_breaker, CheckedCircuitBreakerBuilder, CircuitBreaker};
+pub use factory::{CheckedCircuitBreakerBuilder, CircuitBreaker};
 pub use retry::Retry;
 
 use classifier::FailureClassificationClassifier;

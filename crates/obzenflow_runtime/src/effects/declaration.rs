@@ -11,6 +11,9 @@ pub struct IdempotencyKey(pub String);
 pub enum EffectSafety {
     Idempotent,
     NonIdempotentRequiresKey,
+    /// May be repeated only as a new durable attempt after an in-doubt cut.
+    /// One runtime-minted affine capability authorises each attempt.
+    NonIdempotentAtLeastOnce,
     Transactional,
 }
 
@@ -30,6 +33,7 @@ pub enum SinkDeliverySafety {
 pub enum IdempotencyKeyPolicy {
     NotRequired,
     Required,
+    AtLeastOnceAcknowledged,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +59,7 @@ impl EffectDeclaration {
                 IdempotencyKeyPolicy::NotRequired
             }
             EffectSafety::NonIdempotentRequiresKey => IdempotencyKeyPolicy::Required,
+            EffectSafety::NonIdempotentAtLeastOnce => IdempotencyKeyPolicy::NotRequired,
         };
 
         Self {
@@ -65,6 +70,18 @@ impl EffectDeclaration {
             transactional_executor: None,
             outcome_fact_types: E::Outcome::fact_types(),
         }
+    }
+
+    /// Explicit acknowledgement for an effect whose only safe recovery is a
+    /// new at-least-once attempt after durable in-doubt evidence.
+    pub fn at_least_once<E>() -> Self
+    where
+        E: Effect,
+    {
+        let mut declaration = Self::of::<E>();
+        declaration.safety = EffectSafety::NonIdempotentAtLeastOnce;
+        declaration.idempotency_key_policy = IdempotencyKeyPolicy::AtLeastOnceAcknowledged;
+        declaration
     }
 
     pub fn transactional_effect<E>(executor: &'static str) -> Self
@@ -112,6 +129,13 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
     fn canonical_input(&self) -> Value;
 
     async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError>;
+
+    /// Validate metadata on already-resolved required ports before boundary
+    /// admission. Implementations must not perform I/O or resolve another
+    /// port from this hook.
+    fn validate_port_bindings(&self, _ctx: &EffectContext) -> Result<(), EffectError> {
+        Ok(())
+    }
 
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
         None

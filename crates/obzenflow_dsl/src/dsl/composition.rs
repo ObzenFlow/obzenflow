@@ -485,12 +485,48 @@ pub struct CompositeExpansion {
 
 #[derive(Debug)]
 pub struct CompositeBuildError {
+    kind: CompositeBuildErrorKind,
     message: String,
 }
 
+#[derive(Debug)]
+enum CompositeBuildErrorKind {
+    StageResources,
+    BindingConfiguration { binding: String },
+}
+
 impl CompositeBuildError {
-    fn new(message: String) -> Self {
-        Self { message }
+    pub(crate) fn new(message: String) -> Self {
+        Self {
+            kind: CompositeBuildErrorKind::StageResources,
+            message,
+        }
+    }
+
+    pub(crate) fn binding_configuration(
+        binding: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: CompositeBuildErrorKind::BindingConfiguration {
+                binding: binding.into(),
+            },
+            message: detail.into(),
+        }
+    }
+
+    pub(crate) fn into_flow_build_error(self) -> crate::dsl::FlowBuildError {
+        match self.kind {
+            CompositeBuildErrorKind::StageResources => {
+                crate::dsl::FlowBuildError::StageResourcesFailed(self.message)
+            }
+            CompositeBuildErrorKind::BindingConfiguration { binding } => {
+                crate::dsl::FlowBuildError::BindingConfiguration {
+                    binding,
+                    detail: self.message,
+                }
+            }
+        }
     }
 }
 

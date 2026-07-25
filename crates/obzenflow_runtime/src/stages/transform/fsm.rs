@@ -18,10 +18,16 @@ use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
-use crate::backpressure::{BackpressureReader, BackpressureRegistry, BackpressureWriter};
+use crate::backpressure::{
+    BackpressureReader, BackpressureRegistry, BackpressureWriter, DirectFactAdmission,
+};
 use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
@@ -35,6 +41,338 @@ use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
+use crate::stages::resources_builder::DirectFactPlan;
+
+pub(crate) type TransformHandlerFutureResult =
+    Result<Vec<ChainEvent>, Box<dyn std::error::Error + Send + Sync>>;
+
+pub(crate) type SealedGeneratedFuture =
+    Pin<Box<dyn Future<Output = TransformHandlerFutureResult> + Send + 'static>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectFactPollState {
+    FreshUnpolled,
+    DrivingReconstruction,
+    ResumeAtLiveBarrier,
+    LiveLeased,
+}
+
+#[derive(Debug)]
+struct ContinuationWake {
+    ready: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl ContinuationWake {
+    fn new() -> Self {
+        Self {
+            ready: AtomicBool::new(true),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn prepare_poll(&self) {
+        self.ready.store(false, Ordering::Release);
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+
+    async fn wait_one_chunk(&self) {
+        if self.is_ready() {
+            return;
+        }
+        tokio::select! {
+            biased;
+            _ = self.notify.notified() => {}
+            _ = tokio::time::sleep(
+                crate::stages::common::supervision::backpressure_drain::CONTROL_RESPONSIVENESS_CAP
+            ) => {}
+        }
+    }
+}
+
+impl futures::task::ArcWake for ContinuationWake {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.ready.store(true, Ordering::Release);
+        arc_self.notify.notify_one();
+    }
+}
+
+/// One supervisor-owned generated handler invocation suspended across event
+/// loop iterations. It is never serialised and never accepts another input.
+pub(crate) struct DirectFactContinuation {
+    pub envelope: EventEnvelope<ChainEvent>,
+    pub upstream_stage: Option<StageId>,
+    pub input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
+    pub scope: obzenflow_core::MiddlewareExecutionScope,
+    pub admission: DirectFactAdmission,
+    pub poll_state: DirectFactPollState,
+    future: Mutex<Option<SealedGeneratedFuture>>,
+    poll_runner: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    poll_request: Arc<tokio::sync::Notify>,
+    poll_complete: Arc<tokio::sync::Notify>,
+    poll_result: Arc<Mutex<Option<Poll<TransformHandlerFutureResult>>>>,
+    wake: Arc<ContinuationWake>,
+}
+
+pub(crate) struct DirectFactContinuationStart {
+    pub envelope: EventEnvelope<ChainEvent>,
+    pub upstream_stage: Option<StageId>,
+    pub input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
+    pub scope: obzenflow_core::MiddlewareExecutionScope,
+    pub admission: DirectFactAdmission,
+    pub poll_state: DirectFactPollState,
+}
+
+impl std::fmt::Debug for DirectFactContinuation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DirectFactContinuation")
+            .field("event_id", &self.envelope.event.id)
+            .field("input_position", &self.input_position)
+            .field("scope", &self.scope)
+            .field("poll_state", &self.poll_state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DirectFactContinuation {
+    pub(crate) fn new(start: DirectFactContinuationStart, future: SealedGeneratedFuture) -> Self {
+        let DirectFactContinuationStart {
+            envelope,
+            upstream_stage,
+            input_position,
+            scope,
+            admission,
+            poll_state,
+        } = start;
+        Self {
+            envelope,
+            upstream_stage,
+            input_position,
+            scope,
+            admission,
+            poll_state,
+            future: Mutex::new(Some(future)),
+            poll_runner: Mutex::new(None),
+            poll_request: Arc::new(tokio::sync::Notify::new()),
+            poll_complete: Arc::new(tokio::sync::Notify::new()),
+            poll_result: Arc::new(Mutex::new(None)),
+            wake: Arc::new(ContinuationWake::new()),
+        }
+    }
+
+    fn ensure_poll_runner(&self) {
+        let mut runner = self
+            .poll_runner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if runner.is_some() {
+            return;
+        }
+        let mut future = self
+            .future
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .expect("generated continuation future starts exactly once");
+        let request = self.poll_request.clone();
+        let complete = self.poll_complete.clone();
+        let result = self.poll_result.clone();
+        let wake = self.wake.clone();
+        *runner = Some(tokio::spawn(async move {
+            loop {
+                request.notified().await;
+                wake.prepare_poll();
+                let waker = futures::task::waker(wake.clone());
+                let mut cx = Context::from_waker(&waker);
+                let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    future.as_mut().poll(&mut cx)
+                }))
+                .unwrap_or_else(|_| {
+                    Poll::Ready(Err(std::io::Error::other(
+                        "generated handler future panicked",
+                    )
+                    .into()))
+                });
+                let finished = polled.is_ready();
+                *result
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(polled);
+                complete.notify_one();
+                if finished {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Request exactly one poll from the supervisor-owned stack trampoline.
+    ///
+    /// The generated future sees only `ContinuationWake`, so Tokio cannot
+    /// advance it independently. The helper task exists solely to keep the
+    /// large erased handler future off the already-deep FSM dispatch stack.
+    pub(crate) async fn poll_once(&self) -> Poll<TransformHandlerFutureResult> {
+        self.ensure_poll_runner();
+        debug_assert!(
+            self.poll_result
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_none(),
+            "a generated continuation cannot request overlapping polls"
+        );
+        self.poll_request.notify_one();
+        self.poll_complete.notified().await;
+        self.poll_result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .expect("poll runner publishes one result for each request")
+    }
+
+    pub(crate) async fn wait_one_ready_chunk(&self) {
+        self.wake.wait_one_chunk().await;
+    }
+}
+
+impl Drop for DirectFactContinuation {
+    fn drop(&mut self) {
+        if let Some(runner) = self
+            .poll_runner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            runner.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod direct_fact_continuation_tests {
+    use super::*;
+    use crate::backpressure::{
+        BackpressurePlan, BackpressureRegistry, DirectFactAdmission, DirectFactLease,
+    };
+    use crate::id_conversions::StageIdExt;
+    use obzenflow_core::event::JournalWriterId;
+    use obzenflow_core::{EventEnvelope, EventType};
+    use obzenflow_topology::TopologyBuilder;
+    use std::num::NonZeroU64;
+    use std::time::Duration;
+
+    fn enforced_writer() -> (
+        crate::backpressure::BackpressureRegistry,
+        StageId,
+        StageId,
+        crate::backpressure::BackpressureWriter,
+    ) {
+        let mut topology = TopologyBuilder::new();
+        let upstream = topology.add_stage(Some("generated".to_string()));
+        let downstream = topology.add_stage(Some("collector".to_string()));
+        let topology = topology.build_unchecked().expect("fixture topology");
+        let upstream = StageId::from_topology_id(upstream);
+        let downstream = StageId::from_topology_id(downstream);
+        let plan = BackpressurePlan::disabled().with_edge_enforced(
+            upstream,
+            downstream,
+            NonZeroU64::new(3).expect("non-zero window"),
+            Duration::from_secs(1),
+        );
+        let registry = BackpressureRegistry::new(&topology, &plan);
+        let writer = registry.writer(upstream);
+        (registry, upstream, downstream, writer)
+    }
+
+    #[tokio::test]
+    async fn panicking_generated_future_reports_failure_instead_of_hanging_supervision() {
+        let event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test.generated_input.v1",
+            serde_json::json!({}),
+        );
+        let envelope = EventEnvelope::new(JournalWriterId::new(), event);
+        let continuation = DirectFactContinuation::new(
+            DirectFactContinuationStart {
+                envelope,
+                upstream_stage: None,
+                input_position: None,
+                scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+                admission: DirectFactAdmission::new(
+                    EventType::from("test.generated_input.v1"),
+                    NonZeroU64::new(3).expect("non-zero test bound"),
+                ),
+                poll_state: DirectFactPollState::LiveLeased,
+            },
+            Box::pin(async {
+                panic!("fixture panic");
+            }),
+        );
+
+        let Poll::Ready(Err(error)) = continuation.poll_once().await else {
+            panic!("a panicking continuation must become a ready handler failure");
+        };
+        assert!(error.to_string().contains("future panicked"));
+    }
+
+    #[tokio::test]
+    async fn dropping_parked_or_active_continuations_releases_unused_live_capacity() {
+        for poll_before_drop in [false, true] {
+            let (registry, upstream, downstream, writer) = enforced_writer();
+            let admission = DirectFactAdmission::new(
+                EventType::from("test.generated_input.v1"),
+                NonZeroU64::new(3).expect("non-zero test bound"),
+            );
+            admission
+                .grant(
+                    DirectFactLease::try_acquire(
+                        &writer,
+                        NonZeroU64::new(3).expect("non-zero test bound"),
+                    )
+                    .expect("lease calculation succeeds")
+                    .expect("three credits are available"),
+                )
+                .expect("live lease is granted");
+            assert_eq!(registry.edge_in_flight(upstream, downstream), Some(3));
+
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "test.generated_input.v1",
+                serde_json::json!({}),
+            );
+            let envelope = EventEnvelope::new(JournalWriterId::new(), event);
+            let continuation = DirectFactContinuation::new(
+                DirectFactContinuationStart {
+                    envelope,
+                    upstream_stage: None,
+                    input_position: None,
+                    scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+                    admission,
+                    poll_state: DirectFactPollState::LiveLeased,
+                },
+                Box::pin(std::future::pending()),
+            );
+            if poll_before_drop {
+                let mut poll = Box::pin(continuation.poll_once());
+                assert!(
+                    futures::poll!(poll.as_mut()).is_pending(),
+                    "fixture future remains active"
+                );
+            }
+            drop(continuation);
+            tokio::task::yield_now().await;
+
+            assert_eq!(
+                registry.edge_in_flight(upstream, downstream),
+                Some(0),
+                "dropping a {} continuation releases its unused affine reservation",
+                if poll_before_drop { "polled" } else { "parked" }
+            );
+        }
+    }
+}
 
 // ============================================================================
 // FSM States
@@ -295,6 +633,12 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
 
     /// Descriptor-owned effect declarations for replay-safe effect invocation.
     pub effect_declarations: Vec<EffectDeclaration>,
+
+    /// Exact generated-input direct-fact admission bounds.
+    pub direct_fact_plan: DirectFactPlan,
+
+    /// At most one generated map/finalise invocation may be parked or active.
+    pub(crate) direct_fact_continuation: Option<DirectFactContinuation>,
 
     /// Error journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,

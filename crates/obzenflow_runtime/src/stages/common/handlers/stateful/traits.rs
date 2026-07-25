@@ -9,6 +9,7 @@
 use crate::effects::{EffectInvocationContext, Effects};
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::HandlerError;
+use crate::stages::common::handler_error::StageFatal;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::{TypedFact, TypedPayload};
 use obzenflow_core::{ChainEvent, EventEnvelope, OneFactStageOutput, WriterId};
@@ -21,6 +22,24 @@ pub struct StatefulOutputContext<'a> {
     pub recorded_flow_id: &'a str,
     pub stage_key: &'a str,
     pub input_seq: StageInputPosition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatefulTerminationKind {
+    NaturalEof,
+    Drain,
+    BeginDrain,
+    TruncatedEof,
+    PoisonedEof,
+    PipelineAbort,
+    ForceShutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalValidation {
+    Clean,
+    Primary(StageFatal),
+    Secondary(StageFatal),
 }
 
 /// Handler for stateful processing stages
@@ -119,6 +138,18 @@ pub trait StatefulHandler: Send + Sync {
     /// when the FSM transitions to Emitting state.
     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent);
 
+    /// Fallible protocol-facing accumulation seam. Ordinary handlers inherit
+    /// their existing infallible behaviour; sealed collectors override this
+    /// method so integrity failures reach common fatal supervision directly.
+    fn try_accumulate(
+        &mut self,
+        state: &mut Self::State,
+        event: ChainEvent,
+    ) -> std::result::Result<(), HandlerError> {
+        self.accumulate(state, event);
+        Ok(())
+    }
+
     /// Get the initial state for this handler
     fn initial_state(&self) -> Self::State;
 
@@ -172,6 +203,18 @@ pub trait StatefulHandler: Send + Sync {
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         self.create_events(state)
     }
+
+    fn validate_terminal(
+        &self,
+        _state: &Self::State,
+        _kind: StatefulTerminationKind,
+    ) -> TerminalValidation {
+        TerminalValidation::Clean
+    }
+
+    /// Called only after every event returned by the most recent
+    /// `emit`/`drain` invocation is durable.
+    fn outputs_committed(&self, _state: &mut Self::State) {}
 }
 
 #[doc(hidden)]
@@ -235,6 +278,16 @@ pub trait UnifiedStatefulHandler: Send + Sync {
         self.drain(state).await
     }
 
+    fn validate_terminal(
+        &self,
+        _state: &Self::State,
+        _kind: StatefulTerminationKind,
+    ) -> TerminalValidation {
+        TerminalValidation::Clean
+    }
+
+    fn outputs_committed(&self, _state: &mut Self::State) {}
+
     fn stage_logic_version(&self) -> &str {
         "1"
     }
@@ -255,8 +308,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
         _effect_context: Option<EffectInvocationContext>,
         _scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> std::result::Result<(), HandlerError> {
-        StatefulHandler::accumulate(self, state, event);
-        Ok(())
+        StatefulHandler::try_accumulate(self, state, event)
     }
 
     fn initial_state(&self) -> Self::State {
@@ -303,6 +355,18 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
         _output_context: Option<StatefulOutputContext<'_>>,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         StatefulHandler::drain(self, state).await
+    }
+
+    fn validate_terminal(
+        &self,
+        state: &Self::State,
+        kind: StatefulTerminationKind,
+    ) -> TerminalValidation {
+        StatefulHandler::validate_terminal(self, state, kind)
+    }
+
+    fn outputs_committed(&self, state: &mut Self::State) {
+        StatefulHandler::outputs_committed(self, state)
     }
 }
 

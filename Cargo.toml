@@ -153,7 +153,11 @@ futures = { workspace = true }
 console = ["obzenflow_infra/console"]
 http-pull = ["obzenflow_infra/reqwest-client"]
 ai = ["obzenflow_infra/ai-rig", "obzenflow_infra/ai-tiktoken"]
-test-support = ["obzenflow_runtime/test-support", "obzenflow_dsl/test-support"]
+test-support = [
+    "obzenflow_runtime/test-support",
+    "obzenflow_dsl/test-support",
+    "obzenflow_adapters/test-support",
+]
 
 [profile.release]
 lto = true
@@ -202,6 +206,11 @@ path = "examples/payment_gateway_resilience/main.rs"
 name = "hn_ai_digest_demo"
 path = "examples/hn_ai_digest_demo/main.rs"
 required-features = ["http-pull", "ai"]
+
+[[test]]
+name = "hn_ai_digest_effect_replay_journal_test"
+path = "tests/hn_ai_digest_effect_replay_journal_test.rs"
+required-features = ["http-pull", "ai", "test-support"]
 
 [[example]]
 name = "multi_source_ingest_demo"

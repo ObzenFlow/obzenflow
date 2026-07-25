@@ -7,7 +7,6 @@
 //! These keys replace string-based baggage like `"processing_start_nanos"` or
 //! `"circuit_breaker.should_retry"`.
 
-use obzenflow_core::EventId;
 use obzenflow_core::MiddlewareContextKey;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -113,19 +112,4 @@ pub(crate) struct CircuitBreakerTotalRetryWallMs;
 impl MiddlewareContextKey for CircuitBreakerTotalRetryWallMs {
     type Value = u64;
     const LABEL: &'static str = "circuit_breaker.total_retry_wall_ms";
-}
-
-// ---- AI map-reduce --------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct AiMapReduceChunkContext {
-    pub job_key: EventId,
-    pub chunk_index: usize,
-    pub chunk_count: usize,
-}
-
-pub(crate) struct AiMapReduceChunkContextKey;
-impl MiddlewareContextKey for AiMapReduceChunkContextKey {
-    type Value = AiMapReduceChunkContext;
-    const LABEL: &'static str = "ai.map_reduce.chunk_context";
 }

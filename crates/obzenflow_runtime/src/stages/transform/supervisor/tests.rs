@@ -5,7 +5,7 @@
 //! Transform supervisor tests
 
 use super::*;
-use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
+use crate::backpressure::{BackpressurePlan, BackpressureRegistry, DirectFactAdmission};
 use crate::effects::EffectPortRegistry;
 use crate::feed_plan::StageOutputContract;
 use crate::id_conversions::StageIdExt;
@@ -15,6 +15,9 @@ use crate::stages::common::cycle_guard::CycleGuard;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::TransformHandler;
 use crate::stages::resources_builder::SubscriptionFactory;
+use crate::stages::transform::fsm::{
+    DirectFactContinuation, DirectFactContinuationStart, DirectFactPollState,
+};
 use crate::supervised_base::HandlerSupervised;
 use async_trait::async_trait;
 use obzenflow_core::event::event_envelope::EventEnvelope;
@@ -120,6 +123,8 @@ async fn build_cycle_entry_harness<
         ),
         effect_ports: EffectPortRegistry::new(),
         effect_declarations: Vec::new(),
+        direct_fact_plan: crate::stages::resources_builder::DirectFactPlan::default(),
+        direct_fact_continuation: None,
         error_journal,
         system_journal: system_journal.clone(),
         writer_id: None,
@@ -313,6 +318,43 @@ impl TransformHandler for FilterHandler {
     }
 }
 
+fn generated_continuation(
+    poll_state: DirectFactPollState,
+) -> (DirectFactContinuation, Arc<tokio::sync::Notify>) {
+    let event = ChainEventFactory::data_event(
+        WriterId::from(StageId::new()),
+        "test.generated.non_quiescent",
+        json!({}),
+    );
+    let envelope = EventEnvelope::new(JournalWriterId::new(), event);
+    let admission = DirectFactAdmission::new(
+        envelope.event.event_type().into(),
+        NonZeroU64::new(3).expect("non-zero generated bound"),
+    );
+    let release = Arc::new(tokio::sync::Notify::new());
+    let future_release = release.clone();
+    let future = Box::pin(async move {
+        future_release.notified().await;
+        Ok(Vec::new())
+    });
+    (
+        DirectFactContinuation::new(
+            DirectFactContinuationStart {
+                envelope,
+                upstream_stage: None,
+                input_position: Some(crate::messaging::upstream_subscription::StageInputPosition(
+                    1,
+                )),
+                scope: obzenflow_core::MiddlewareExecutionScope::ResumeHandler,
+                admission,
+                poll_state,
+            },
+            future,
+        ),
+        release,
+    )
+}
+
 #[derive(Clone, Debug)]
 struct CountingFilterHandler {
     calls: Arc<AtomicU64>,
@@ -411,6 +453,8 @@ async fn build_transform_harness<
         ),
         effect_ports: EffectPortRegistry::new(),
         effect_declarations: Vec::new(),
+        direct_fact_plan: crate::stages::resources_builder::DirectFactPlan::default(),
+        direct_fact_continuation: None,
         error_journal,
         system_journal: system_journal.clone(),
         writer_id: None,
@@ -1064,4 +1108,106 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
             )
         });
     assert!(forwarded, "expected drain to be forwarded after quiescence");
+}
+
+#[tokio::test]
+async fn generated_continuations_remain_non_quiescent_for_eof_and_drain_completion() {
+    tokio::time::pause();
+
+    let (mut eof_supervisor, mut eof_ctx, registry, s, _t, u, upstream_journal) =
+        build_cycle_entry_harness(|_| FilterHandler).await;
+    let u_writer = registry.writer(u);
+    u_writer.reserve(1).expect("reserve").commit(1);
+    upstream_journal
+        .append(ChainEventFactory::eof_event(WriterId::from(s), true), None)
+        .await
+        .expect("append eof");
+    let running = TransformState::<FilterHandler>::Running;
+    assert!(matches!(
+        eof_supervisor
+            .dispatch_state(&running, &mut eof_ctx)
+            .await
+            .expect("buffer eof"),
+        EventLoopDirective::Continue
+    ));
+    registry.reader(u, eof_ctx.stage_id).ack_consumed(1);
+
+    let (active, release) = generated_continuation(DirectFactPollState::DrivingReconstruction);
+    eof_ctx.direct_fact_continuation = Some(active);
+    let mut active_dispatch = tokio_test::task::spawn(async {
+        eof_supervisor.dispatch_state(&running, &mut eof_ctx).await
+    });
+    assert_pending!(active_dispatch.poll());
+    tokio::task::yield_now().await;
+    assert_pending!(active_dispatch.poll());
+    tokio::time::advance(
+        crate::stages::common::supervision::backpressure_drain::CONTROL_RESPONSIVENESS_CAP
+            + std::time::Duration::from_millis(1),
+    )
+    .await;
+    assert!(matches!(
+        assert_ready!(active_dispatch.poll()),
+        Ok(EventLoopDirective::Continue)
+    ));
+    drop(active_dispatch);
+    assert!(
+        eof_ctx.direct_fact_continuation.is_some(),
+        "an active generated future must prevent clean EOF release"
+    );
+    assert!(
+        eof_ctx.buffered_terminal_envelope.is_some(),
+        "the authored EOF remains buffered while generated work is active"
+    );
+
+    release.notify_one();
+    assert!(matches!(
+        eof_supervisor
+            .dispatch_state(&running, &mut eof_ctx)
+            .await
+            .expect("complete generated continuation"),
+        EventLoopDirective::Continue
+    ));
+    assert!(eof_ctx.direct_fact_continuation.is_none());
+    assert!(matches!(
+        eof_supervisor
+            .dispatch_state(&running, &mut eof_ctx)
+            .await
+            .expect("release buffered eof"),
+        EventLoopDirective::Transition(TransformEvent::ReceivedEOF)
+    ));
+
+    let (mut drain_supervisor, mut drain_ctx, _registry, _s, _t, _k, _, _) =
+        build_transform_harness(|_| FilterHandler, 3, 3).await;
+    drain_supervisor.subscription = None;
+    drain_ctx.subscription = None;
+    drain_ctx
+        .backpressure_writer
+        .reserve(1)
+        .expect("occupy one of three credits")
+        .commit(1);
+    let (parked, _release) = generated_continuation(DirectFactPollState::FreshUnpolled);
+    drain_ctx.direct_fact_continuation = Some(parked);
+    let draining = TransformState::<FilterHandler>::Draining;
+    let mut parked_dispatch = tokio_test::task::spawn(async {
+        drain_supervisor
+            .dispatch_state(&draining, &mut drain_ctx)
+            .await
+    });
+    assert_pending!(parked_dispatch.poll());
+    tokio::task::yield_now().await;
+    assert_pending!(parked_dispatch.poll());
+    tokio::time::advance(
+        crate::stages::common::supervision::backpressure_drain::CONTROL_RESPONSIVENESS_CAP
+            + std::time::Duration::from_millis(1),
+    )
+    .await;
+    assert!(matches!(
+        assert_ready!(parked_dispatch.poll()),
+        Ok(EventLoopDirective::Continue)
+    ));
+    drop(parked_dispatch);
+    assert!(
+        drain_ctx.direct_fact_continuation.is_some(),
+        "a credit-parked admission must prevent DrainComplete"
+    );
 }

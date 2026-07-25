@@ -3,14 +3,15 @@
 // https://obzenflow.dev
 
 use crate::ai::{
-    ChatMessage, ChatParams, ChatRequest, ChatResponseFormat, EmbeddingParams, EmbeddingRequest,
-    ToolDefinition,
+    AiProvider, ChatBindingFingerprint, ChatMessage, ChatParams, ChatRequest, ChatResponseFormat,
+    EmbeddingParams, EmbeddingRequest, ToolDefinition,
 };
 use ring::digest::{digest, SHA256};
 use serde::Serialize;
 use serde_json::Value;
 
 pub const LLM_HASH_VERSION_SHA256_V1: &str = "sha256:v1";
+pub const CHAT_BINDING_FINGERPRINT_VERSION_SHA256_V1: &str = "sha256:v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AiHashError {
@@ -128,6 +129,26 @@ pub fn params_hash_for_embedding(request: &EmbeddingRequest) -> Result<String, A
     };
 
     hash_canonical_json(&canonical)
+}
+
+/// Hash a credential-free, normalised endpoint identity into the durable
+/// chat-binding coordinate. The endpoint itself never enters the returned
+/// value.
+pub fn chat_binding_fingerprint(
+    provider: &AiProvider,
+    model: &str,
+    normalised_endpoint: &str,
+) -> ChatBindingFingerprint {
+    let material = format!(
+        "obzenflow.chat_binding:v1\0{}\0{}\0{}",
+        provider.as_str(),
+        model,
+        normalised_endpoint
+    );
+    ChatBindingFingerprint::new(format!(
+        "{CHAT_BINDING_FINGERPRINT_VERSION_SHA256_V1}:{}",
+        sha256_hex(material.as_bytes())
+    ))
 }
 
 fn canonical_response_format<'a>(

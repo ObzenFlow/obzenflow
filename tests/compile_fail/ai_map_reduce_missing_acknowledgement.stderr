@@ -1,0 +1,13 @@
+error: ai_map_reduce!: role 'map' declares paid non-idempotent effect 'ChatCompletion' without acknowledgement; write `at_least_once(ChatCompletion)`
+  --> tests/compile_fail/ai_map_reduce_missing_acknowledgement.rs:8:13
+   |
+ 8 |       let _ = ai_map_reduce!(
+   |  _____________^
+ 9 | |         Seed -> Out => {
+10 | |             map: [Item] -> Partial => map_role,
+11 | |             reduce: (Seed, [Partial]) -> Out => finalise_role,
+...  |
+20 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_ai_map_reduce_effects_contract` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)

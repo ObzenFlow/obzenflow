@@ -382,6 +382,24 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// EOF event to forward when draining completes
     pub buffered_eof: Option<ChainEvent>,
 
+    /// Original terminal control envelope retained until terminal validation
+    /// has succeeded. This lets protocol-aware stateful handlers reject an
+    /// incomplete drain before the terminal signal becomes visible
+    /// downstream.
+    pub terminal_envelope: Option<EventEnvelope<ChainEvent>>,
+
+    /// Whether the current drain was requested through the stage handle rather
+    /// than by an upstream terminal control row.
+    pub drain_requested_by_handle: bool,
+
+    /// Terminal validation is single-shot even when final output commits park
+    /// the draining dispatcher for backpressure.
+    pub terminal_validated: bool,
+
+    /// The buffered terminal control row is forwarded at most once, after
+    /// successful terminal validation.
+    pub terminal_forwarded: bool,
+
     /// Worst-wins join over the inputs' terminal EOF kinds (FLOWIP-095k).
     pub terminal_eof_kind: Option<EofKind>,
 

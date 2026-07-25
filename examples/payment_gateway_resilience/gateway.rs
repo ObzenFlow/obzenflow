@@ -425,6 +425,7 @@ mod tests {
             error_message: "gateway_timeout_simulated".to_string(),
             retry: RetryDisposition::Retryable,
             cause: None,
+            detail: None,
         });
 
         assert_eq!(live_reason, "gateway_timeout_simulated");

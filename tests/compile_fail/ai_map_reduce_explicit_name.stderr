@@ -1,0 +1,13 @@
+error: ai_map_reduce!: explicit `name:` is not supported; the left-hand `stages:` binding is the durable composite identity
+  --> tests/compile_fail/ai_map_reduce_explicit_name.rs:8:13
+   |
+ 8 |       let _ = ai_map_reduce!(
+   |  _____________^
+ 9 | |         name: "not-the-binding",
+10 | |         Seed -> Out => {
+11 | |             map: [Item] -> Partial => map_role,
+...  |
+21 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)

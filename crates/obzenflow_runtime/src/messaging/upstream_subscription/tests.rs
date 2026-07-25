@@ -2235,6 +2235,8 @@ impl SharedTestJournal {
             journal_writer_id: JournalWriterId::from(self.id),
             vector_clock,
             timestamp: chrono::Utc::now(),
+            journal_group_id: None,
+            journal_group_member: None,
             event,
         };
         self.events.lock().unwrap().push(envelope);

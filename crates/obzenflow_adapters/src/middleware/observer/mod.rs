@@ -142,7 +142,7 @@ macro_rules! observer_surfaces {
 }
 
 observer_surfaces! {
-    control_attachments: [SourcePoll, Effect, SinkDelivery, Ingress, Flowip128gLegacyShell],
+    control_attachments: [SourcePoll, Effect, SinkDelivery, Ingress],
     surfaces: [
         HandlerObserverSurface {
             kind: Handler, port: HandlerObserver, attach: HandlerObserver,

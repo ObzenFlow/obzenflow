@@ -1191,6 +1191,12 @@ impl StageDescriptor for TypedStageDescriptor {
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
         self.inner.effect_declarations()
     }
+
+    fn direct_fact_plan(
+        &self,
+    ) -> Option<&obzenflow_runtime::stages::resources_builder::DirectFactPlan> {
+        self.inner.direct_fact_plan()
+    }
 }
 
 fn select_downstream_input_hint<'a>(
@@ -2291,6 +2297,12 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
         self.inner.effect_declarations()
+    }
+
+    fn direct_fact_plan(
+        &self,
+    ) -> Option<&obzenflow_runtime::stages::resources_builder::DirectFactPlan> {
+        self.inner.direct_fact_plan()
     }
 }
 

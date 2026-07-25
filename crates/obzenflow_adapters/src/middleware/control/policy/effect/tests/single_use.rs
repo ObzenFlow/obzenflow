@@ -221,10 +221,12 @@ fn effect_context_with_boundary(
         ),
     );
     let mut effect_ports = EffectPortRegistry::new();
-    effect_ports.insert::<dyn TransactionalEffectPort<TransactionProbe>>(
-        "tx",
-        Arc::new(TransactionProbePort { calls, trace, mode }),
-    );
+    effect_ports
+        .insert::<dyn TransactionalEffectPort<TransactionProbe>>(
+            "tx",
+            Arc::new(TransactionProbePort { calls, trace, mode }),
+        )
+        .expect("transaction probe port registration is unique");
 
     EffectInvocationContext {
         flow_id: FlowId::new(),
@@ -311,7 +313,7 @@ async fn invoke_with_boundary_mode(
     let context = effect_context_with_boundary(stage_id, boundary, calls, trace, mode);
     let input = context.parent.event.clone();
     let terminal_error = Arc::new(Mutex::new(None));
-    let adapter = EffectfulTransformHandlerAdapter(TransactionProbeHandler {
+    let adapter = EffectfulTransformHandlerAdapter::new(TransactionProbeHandler {
         terminal_error: terminal_error.clone(),
     });
 

@@ -7,9 +7,17 @@
 # collapsed node in Studio (FLOWIP-128a), not four `digest__*` member stages.
 #
 # The HN feed is mocked by default (set HN_LIVE=1 for the real API). The AI
-# provider comes from HN_AI_* environment variables and defaults to a local
-# Ollama at http://localhost:11434 with llama3.1:8b; see the example header
-# in main.rs for the full list.
+# target is resolved from the checked [ai.models] snapshot below. The client
+# and any credential remain deferred until the first executable live effect.
+
+[runtime.backpressure.flow]
+mode = "enforce"
+window = 3
+stall_timeout_ms = 30000
+
+[ai.models]
+provider = "ollama"
+model = "llama3.1:8b"
 
 [server]
 enabled = true

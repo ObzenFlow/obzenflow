@@ -106,6 +106,15 @@ pub enum HeartbeatExecutionPolicy {
     DormantUntilLive,
 }
 
+/// Whether descriptor materialisation requires every declared effect port to
+/// be registered. A sealed strict replay can reconstruct a hit without any
+/// live dependency, so it deliberately permits an empty registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectPortRegistrationPolicy {
+    Required,
+    OptionalStrictReplay,
+}
+
 /// One implementation per run mode. These impls are the only place the
 /// live / replay / resume behaviours differ. Every method is `&self`: the
 /// trait is read-only. Consumers call it; they never match on a mode.
@@ -122,6 +131,11 @@ pub trait ExecutionStrategy: std::fmt::Debug + Send + Sync {
     /// Whether a missing recorded effect outcome at this position is corruption
     /// (fail loud) rather than a live gap (run the effect).
     fn missing_outcome_is_corruption(&self, at: ExecutionPosition) -> bool;
+    /// Whether a durable Start without a terminal must fail instead of
+    /// authorising a new at-least-once attempt.
+    fn in_doubt_effect_is_fatal(&self) -> bool;
+    /// Whether effect-port recipes must exist at materialisation.
+    fn effect_port_registration_policy(&self) -> EffectPortRegistrationPolicy;
     /// Whether a source is reconstructing or polling live.
     fn source_phase_for(&self, stage: StageId) -> SourceExecutionPhase;
     /// What a source does once its recorded input is exhausted.
@@ -143,6 +157,12 @@ impl ExecutionStrategy for Live {
     }
     fn missing_outcome_is_corruption(&self, _at: ExecutionPosition) -> bool {
         false
+    }
+    fn in_doubt_effect_is_fatal(&self) -> bool {
+        false
+    }
+    fn effect_port_registration_policy(&self) -> EffectPortRegistrationPolicy {
+        EffectPortRegistrationPolicy::Required
     }
     fn source_phase_for(&self, _stage: StageId) -> SourceExecutionPhase {
         SourceExecutionPhase::Live
@@ -187,6 +207,16 @@ impl ExecutionStrategy for Replay {
     }
     fn missing_outcome_is_corruption(&self, _at: ExecutionPosition) -> bool {
         !self.incomplete
+    }
+    fn in_doubt_effect_is_fatal(&self) -> bool {
+        !self.incomplete
+    }
+    fn effect_port_registration_policy(&self) -> EffectPortRegistrationPolicy {
+        if self.incomplete {
+            EffectPortRegistrationPolicy::Required
+        } else {
+            EffectPortRegistrationPolicy::OptionalStrictReplay
+        }
     }
     fn source_phase_for(&self, _stage: StageId) -> SourceExecutionPhase {
         SourceExecutionPhase::Replaying
@@ -373,6 +403,12 @@ impl ExecutionStrategy for Resume {
             None => false,
         }
     }
+    fn in_doubt_effect_is_fatal(&self) -> bool {
+        false
+    }
+    fn effect_port_registration_policy(&self) -> EffectPortRegistrationPolicy {
+        EffectPortRegistrationPolicy::Required
+    }
     fn source_phase_for(&self, stage: StageId) -> SourceExecutionPhase {
         if self.state.stage_is_live(stage) {
             SourceExecutionPhase::Live
@@ -421,6 +457,7 @@ fn replay_incomplete(status: ArchiveStatus, allow_incomplete: bool) -> bool {
 pub struct RuntimeExecution {
     strategy: Arc<dyn ExecutionStrategy>,
     archive: Option<Arc<dyn ReplayArchive>>,
+    effect_cursors: Arc<crate::effects::EffectCursorCoordinator>,
     /// Present only under `RuntimeMode::Resume` (FLOWIP-120n).
     resume: Option<ResumeControl>,
 }
@@ -466,6 +503,7 @@ impl RuntimeExecution {
         Self {
             strategy,
             archive,
+            effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
             resume,
         }
     }
@@ -492,6 +530,7 @@ impl RuntimeExecution {
         Self {
             strategy,
             archive,
+            effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
             resume: None,
         }
     }
@@ -565,6 +604,20 @@ impl RuntimeExecution {
     /// Whether a missing recorded effect outcome at this position is corruption.
     pub fn missing_outcome_is_corruption(&self, at: ExecutionPosition) -> bool {
         self.strategy.missing_outcome_is_corruption(at)
+    }
+
+    pub fn in_doubt_effect_is_fatal(&self) -> bool {
+        self.strategy.in_doubt_effect_is_fatal()
+    }
+
+    pub fn effect_port_registration_policy(&self) -> EffectPortRegistrationPolicy {
+        self.strategy.effect_port_registration_policy()
+    }
+
+    pub(crate) fn effect_cursor_coordinator(
+        &self,
+    ) -> &Arc<crate::effects::EffectCursorCoordinator> {
+        &self.effect_cursors
     }
 
     /// Whether a source is reconstructing or polling live.

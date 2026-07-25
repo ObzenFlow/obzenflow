@@ -192,14 +192,14 @@ fn erased_effectful_descriptor<H>(
 where
     H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
-    let descriptor: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor {
-        name: name.to_string(),
+    let descriptor: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor::new(
+        name,
         handler,
         effects,
-        middleware: Vec::new(),
-        effect_policies: Vec::new(),
-        backpressure: None,
-    });
+        Vec::new(),
+        Vec::new(),
+        None,
+    ));
     let metadata = StageTypingMetadata::transform(
         TypeHint::exact_payload::<ContainmentInput>(),
         output_type,

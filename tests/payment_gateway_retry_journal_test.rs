@@ -396,7 +396,7 @@ fn payment_terminal_failures(jsonl: &str) -> Vec<TerminalFailure> {
     failures
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RecoveryCompletion {
     cursor: EffectCursor,
     total_attempts: u32,
@@ -631,8 +631,16 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         data_event_count(&healthy_replay, "payment.authorized.v1"),
         5
     );
-    assert!(attempt_settlements(&healthy_replay).is_empty());
-    assert!(recovery_completions(&healthy_replay).is_empty());
+    assert_eq!(
+        attempt_settlements(&healthy_replay),
+        healthy_attempts,
+        "strict replay must rematerialise archived attempt settlements unchanged"
+    );
+    assert_eq!(
+        recovery_completions(&healthy_replay),
+        healthy_completions,
+        "strict replay must rematerialise archived recovery completions unchanged"
+    );
 
     // The accelerated control remains a supplementary developer regression;
     // it is deliberately not passed through `assert_release_manifest`.
@@ -800,15 +808,20 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&replay), 1);
-    assert_eq!(payment_terminal_group_counters(&replay), (0, 0));
-    assert!(retry_schedules(&replay).is_empty());
-    assert!(retry_successes(&replay).is_empty());
+    assert_eq!(payment_terminal_group_counters(&replay), (1, 0));
+    assert_eq!(retry_schedules(&replay), retry_schedules(&treatment));
+    assert_eq!(retry_successes(&replay), retry_successes(&treatment));
     assert_eq!(retry_terminal_failure_count(&replay), 0);
-    assert!(
-        attempt_settlements(&replay).is_empty(),
-        "strict replay must not emit fresh physical-attempt evidence"
+    assert_eq!(
+        attempt_settlements(&replay),
+        treatment_attempts,
+        "strict replay must rematerialise archived physical-attempt evidence unchanged"
     );
-    assert!(recovery_completions(&replay).is_empty());
+    assert_eq!(
+        recovery_completions(&replay),
+        treatment_completions,
+        "strict replay must rematerialise the archived recovery completion unchanged"
+    );
 
     // Breaker-only release witness: five one-per-second failures satisfy the
     // count window; the sixth logical effect is rejected without a dependency
@@ -929,14 +942,20 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         data_event_count(&open_replay, "payment.authorization_unavailable.v1"),
         6
     );
+    assert_eq!(payment_terminal_group_counters(&open_replay), (6, 0));
     assert!(retry_schedules(&open_replay).is_empty());
     assert!(retry_successes(&open_replay).is_empty());
     assert_eq!(retry_terminal_failure_count(&open_replay), 0);
-    assert!(
-        attempt_settlements(&open_replay).is_empty(),
-        "open-rejection replay must not emit fresh physical-attempt evidence"
+    assert_eq!(
+        attempt_settlements(&open_replay),
+        open_attempts,
+        "open-rejection replay must rematerialise archived physical-attempt evidence unchanged"
     );
-    assert!(recovery_completions(&open_replay).is_empty());
+    assert_eq!(
+        recovery_completions(&open_replay),
+        open_completions,
+        "open-rejection replay must rematerialise archived recovery completions unchanged"
+    );
     assert_eq!(
         payment_terminal_failures(&open_replay),
         open_failures,
@@ -1054,8 +1073,16 @@ fn payment_gateway_half_open_release_witness_uses_the_real_cooldown() {
         data_event_count(&replay, "payment.authorization_unavailable.v1"),
         6
     );
-    assert!(attempt_settlements(&replay).is_empty());
-    assert!(recovery_completions(&replay).is_empty());
+    assert_eq!(
+        attempt_settlements(&replay),
+        attempts,
+        "strict replay must rematerialise the archived half-open attempt evidence unchanged"
+    );
+    assert_eq!(
+        recovery_completions(&replay),
+        completions,
+        "strict replay must rematerialise the archived half-open recovery evidence unchanged"
+    );
     assert_eq!(
         payment_terminal_failures(&replay),
         failures,

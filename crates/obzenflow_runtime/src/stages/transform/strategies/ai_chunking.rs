@@ -201,11 +201,37 @@ where
             config,
         )
         .map_err(|err| match err {
-            ChunkPlanningError::ZeroBudget => HandlerError::Validation(err.to_string()),
-            ChunkPlanningError::OversizeItem { .. }
-            | ChunkPlanningError::OversizeExhausted { .. } => {
-                HandlerError::Validation(err.to_string())
+            ChunkPlanningError::ZeroBudget => {
+                HandlerError::Fatal(crate::stages::common::handler_error::StageFatal::new(
+                    obzenflow_core::event::StageFatalCode::Configuration,
+                    obzenflow_core::event::StageFatalReason::ConfigurationInvariant,
+                    err.to_string(),
+                ))
             }
+            ChunkPlanningError::OversizeItem {
+                item_ordinal,
+                estimated_tokens,
+                budget,
+            } => HandlerError::AiMapReducePlanning(
+                obzenflow_core::ai::AiMapReducePlanningFailure::OversizeItem {
+                    item_ordinal,
+                    estimated_tokens,
+                    budget,
+                },
+            ),
+            ChunkPlanningError::OversizeExhausted {
+                item_ordinal,
+                reason,
+                last_estimated_tokens,
+                budget,
+            } => HandlerError::AiMapReducePlanning(
+                obzenflow_core::ai::AiMapReducePlanningFailure::OversizeExhausted {
+                    item_ordinal,
+                    reason,
+                    last_estimated_tokens,
+                    budget,
+                },
+            ),
         })?;
 
         let excluded_preview = if self.snapshot_excluded_items_limit == 0 {

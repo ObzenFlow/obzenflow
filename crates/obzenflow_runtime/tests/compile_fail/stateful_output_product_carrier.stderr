@@ -12,14 +12,14 @@ help: the trait `TypedPayload` is not implemented for `Product`
    = note: `apply` folds one committed fact per call, so the stateful `Output` must be a per-fact sum (an enum with one fact per variant) or a single `TypedPayload`; a product carrier commits several facts at once and cannot fold one at a time (FLOWIP-120z)
    = help: the following other types implement trait `TypedPayload`:
              AiMapReduceChunkFailed
+             AiMapReduceFinaliseFailed
+             AiMapReduceJobFailed
+             AiMapReducePlanningFailed
              AiMapReducePlanningManifest
              AiMapReduceReduceInput<Seed, Collected>
              AiMapReduceTaggedPartial<T>
-             ChunkEnvelope<T>
-             First
-             Input
-             Many<T>
-             Second
+             ChatCompletionCompleted
+           and $N others
    = note: required for `Product` to implement `OneFactStageOutput`
 note: required by a bound in `obzenflow_runtime::stages::EffectfulStatefulHandler::Output`
   --> src/stages/common/handlers/stateful/traits.rs

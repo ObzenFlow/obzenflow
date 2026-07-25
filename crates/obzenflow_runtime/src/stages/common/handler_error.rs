@@ -12,12 +12,52 @@
 
 use crate::stages::common::stage_handle::StageError;
 use obzenflow_core::event::status::processing_status::ErrorKind;
+use obzenflow_core::event::{StageFatalCode, StageFatalReason};
+use obzenflow_core::EventId;
 use std::fmt;
 use std::time::Duration;
+
+const MAX_FATAL_DETAIL_BYTES: usize = 512;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageFatal {
+    pub code: StageFatalCode,
+    pub reason: StageFatalReason,
+    pub detail: String,
+    pub primary_cause_event_id: Option<EventId>,
+}
+
+impl StageFatal {
+    pub fn new(code: StageFatalCode, reason: StageFatalReason, detail: impl Into<String>) -> Self {
+        let mut detail = detail.into();
+        if detail.len() > MAX_FATAL_DETAIL_BYTES {
+            let mut boundary = MAX_FATAL_DETAIL_BYTES;
+            while !detail.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            detail.truncate(boundary);
+        }
+        Self {
+            code,
+            reason,
+            detail,
+            primary_cause_event_id: None,
+        }
+    }
+
+    pub fn secondary_to(mut self, primary_cause_event_id: EventId) -> Self {
+        self.primary_cause_event_id = Some(primary_cause_event_id);
+        self
+    }
+}
 
 /// Error type for handler-level failures.
 #[derive(Debug, Clone)]
 pub enum HandlerError {
+    /// Trusted runtime/protocol invariant failure. Supervisors must record it
+    /// on the error journal and fail the stage, never convert it into a normal
+    /// error-marked domain input.
+    Fatal(StageFatal),
     /// Timeout talking to a remote dependency.
     Timeout(String),
     /// Remote/transport failures (HTTP 5xx, connection refused, etc.).
@@ -35,6 +75,10 @@ pub enum HandlerError {
     Validation(String),
     /// Broader domain logic failure.
     Domain(String),
+    /// Typed AI chunk-planning failure consumed by the sealed map-reduce
+    /// planning adapter.
+    #[doc(hidden)]
+    AiMapReducePlanning(obzenflow_core::ai::AiMapReducePlanningFailure),
     /// A trusted framework or handler contract was contradicted at runtime.
     ///
     /// A call site enforcing a trusted runtime contract may promote this to a
@@ -55,6 +99,7 @@ impl HandlerError {
     /// Map this handler error to a structured ErrorKind.
     pub fn kind(&self) -> ErrorKind {
         match self {
+            HandlerError::Fatal(_) => ErrorKind::Unknown,
             HandlerError::Timeout(_) => ErrorKind::Timeout,
             HandlerError::Remote(_) => ErrorKind::Remote,
             HandlerError::RateLimited { .. } => ErrorKind::RateLimited,
@@ -62,6 +107,7 @@ impl HandlerError {
             HandlerError::Deserialization(_) => ErrorKind::Deserialization,
             HandlerError::Validation(_) => ErrorKind::Validation,
             HandlerError::Domain(_) => ErrorKind::Domain,
+            HandlerError::AiMapReducePlanning(_) => ErrorKind::Validation,
             // The effectful stateful supervisor intercepts its durable-state
             // contract violations before per-record error routing. `Unknown`
             // is retained for exhaustive callers that still inspect `kind()`.
@@ -75,11 +121,29 @@ impl HandlerError {
     pub fn is_contract_violation(&self) -> bool {
         matches!(self, Self::ContractViolation(_))
     }
+
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, Self::Fatal(_))
+    }
+
+    pub fn as_fatal(&self) -> Option<&StageFatal> {
+        match self {
+            Self::Fatal(fatal) => Some(fatal),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for HandlerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            HandlerError::Fatal(fatal) => {
+                write!(
+                    f,
+                    "Fatal {:?}/{:?}: {}",
+                    fatal.code, fatal.reason, fatal.detail
+                )
+            }
             HandlerError::Timeout(msg) => write!(f, "Timeout: {msg}"),
             HandlerError::Remote(msg) => write!(f, "Remote error: {msg}"),
             HandlerError::RateLimited {
@@ -99,6 +163,9 @@ impl fmt::Display for HandlerError {
             }
             HandlerError::Validation(msg) => write!(f, "Validation error: {msg}"),
             HandlerError::Domain(msg) => write!(f, "Domain error: {msg}"),
+            HandlerError::AiMapReducePlanning(cause) => {
+                write!(f, "AI map-reduce planning failure: {cause:?}")
+            }
             HandlerError::ContractViolation(msg) => {
                 write!(f, "Contract violation: {msg}")
             }

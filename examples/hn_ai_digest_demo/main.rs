@@ -19,7 +19,7 @@
 //! Tutorials: `https://obzenflow.dev/tutorials/`
 //!
 //! Run (default: local mock HN server + Ollama; requires Ollama running):
-//! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"`
+//! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai" -- --config examples/hn_ai_digest_demo/obzenflow.toml`
 //!
 //! Ollama quickstart (macOS):
 //! - Install: `brew install ollama`
@@ -46,15 +46,19 @@
 //! - `HN_SOURCE_RATE_LIMIT=10.0` (default 10.0 events/sec)
 //! - The HN HTTP source also has a fixed source circuit breaker: 3 failures, 2s cooldown.
 //!
-//! Optional env vars (AI):
-//! - `HN_AI_PROVIDER=ollama|openai|openai_compatible` (default `ollama`)
-//! - `HN_AI_MODEL=llama3.1:8b` (default depends on provider)
+//! AI target configuration:
+//! - `[ai.models]` in `obzenflow.toml` supplies provider, model, optional endpoint, and
+//!   the credential-reference name.
+//! - Local binding shape is validated during flow build. Secret lookup and unchecked client
+//!   construction are deferred until the first executable live effect; no provider/model
+//!   preflight occurs.
+//! - Strict replay resolves the same non-secret target but reads no secret and constructs no
+//!   client.
+//!
+//! Optional env vars (AI prompt/chunk policy):
 //! - `HN_AI_INTERESTS="rust, ai, security"` (optional personalization)
 //! - `HN_AI_GROUP_BUDGET_TOKENS=2500` (optional; per-chunk input budget used for map-reduce splitting)
 //! - `HN_AI_GROUP_MAX_STORIES=10` (optional; cap stories per chunk; set `0` for unlimited)
-//! - `OLLAMA_BASE_URL=http://localhost:11434` (optional; default rig provider base)
-//! - `OPENAI_API_KEY=...` (required for `HN_AI_PROVIDER=openai` and `HN_AI_PROVIDER=openai_compatible`)
-//! - `OPENAI_BASE_URL=http://localhost:8080/v1` (required for `HN_AI_PROVIDER=openai_compatible`)
 
 mod config;
 mod decoder;

@@ -35,7 +35,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 struct TestEventSource {
@@ -398,14 +398,12 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
     let handle = harness.into_inner();
     let run = tokio::spawn(handle.run());
 
-    // Drive paused time until the flow terminates.
-    //
-    // The pipeline may wait for metrics drain coordination under paused time;
-    // advance enough virtual time for that bounded wait to elapse.
-    for _ in 0..400 {
-        if run.is_finished() {
-            break;
-        }
+    // Drive paused time until the flow terminates. A fixed number of scheduler
+    // yields races the current-thread executor when nextest is running many
+    // binaries concurrently, so use an unpaused wall-clock deadline for the
+    // harness watchdog while continuing to advance runtime timers virtually.
+    let scheduler_deadline = Instant::now() + Duration::from_secs(10);
+    while !run.is_finished() && Instant::now() < scheduler_deadline {
         clock.advance(Duration::from_millis(50)).await?;
         for _ in 0..16 {
             if run.is_finished() {
@@ -416,7 +414,8 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
     }
     assert!(
         run.is_finished(),
-        "flow did not terminate under paused time (possible data cycle amplification)"
+        "flow did not terminate before the scheduler deadline under paused time \
+         (possible data cycle amplification)"
     );
     run.await
         .expect("join handle")

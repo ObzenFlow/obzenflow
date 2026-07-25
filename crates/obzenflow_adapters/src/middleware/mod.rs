@@ -116,7 +116,6 @@ mod function;
 mod hints;
 
 // Middleware categories
-pub mod ai;
 pub mod control;
 pub mod observability;
 pub mod observer;
@@ -156,15 +155,14 @@ pub use handler::{
 pub use carrier::{
     validate_attachment_request, validate_effect_control_composition,
     CheckedMiddlewareSurfaceAttachment, EffectControlCompositionError, EffectSurface,
-    EffectTypeKey, EffectUnitId, Flowip128gLegacyShellAttachment, HostedIngressTargetKey,
-    IngressEndpointKind, IngressRouteScope, IngressSurface, IngressUnitId, MiddlewareAttachmentId,
-    MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError, MiddlewareAuthorityError,
-    MiddlewareCapability, MiddlewareDeclaration, MiddlewareDeclarationIndex,
-    MiddlewareDeclarationScope, MiddlewareMaterializationContext, MiddlewareOrigin,
-    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit,
-    ProtectedUnitId, SinkConfiguredTargetKey, SinkDeliverySurface, SinkDeliveryTarget,
-    SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface, SourcePollUnitId,
-    SourceStageIngressOwner,
+    EffectTypeKey, EffectUnitId, HostedIngressTargetKey, IngressEndpointKind, IngressRouteScope,
+    IngressSurface, IngressUnitId, MiddlewareAttachmentId, MiddlewareAttachmentRequest,
+    MiddlewareAttachmentValidationError, MiddlewareAuthorityError, MiddlewareCapability,
+    MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareDeclarationScope,
+    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
+    SinkConfiguredTargetKey, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
+    SourcePollAttachment, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
 };
 pub(crate) use carrier::{MaterializationClaim, MiddlewareSurfaceAttachmentKind};
 pub use context::MiddlewareContext;

@@ -27,6 +27,7 @@ ring = { workspace = true }
 
 [features]
 default = []
+test-support = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

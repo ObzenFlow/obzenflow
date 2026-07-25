@@ -105,6 +105,9 @@ pub enum FlowBuildError {
     #[error("{0}")]
     ConfigResolution(#[source] obzenflow_runtime::runtime_config::ConfigResolveError),
 
+    #[error("flow binding '{binding}' configuration failed: {detail}")]
+    BindingConfiguration { binding: String, detail: String },
+
     #[error("Unsupported cycle topology: {0}")]
     UnsupportedCycleTopology(String),
 

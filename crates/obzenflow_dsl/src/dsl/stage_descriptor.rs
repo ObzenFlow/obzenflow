@@ -188,7 +188,7 @@ struct SourceMiddlewareBinding {
 }
 
 struct MiddlewarePlacement {
-    legacy_shell: Vec<Box<dyn Middleware>>,
+    system_middleware: Vec<Box<dyn Middleware>>,
     observers: StageObserverSet,
     expects_circuit_breaker: bool,
     expects_rate_limiter: bool,
@@ -208,7 +208,7 @@ fn plan_stage_middleware(
         spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
     });
 
-    let mut legacy_shell = create_system_middleware(config, stage_type);
+    let system_middleware = create_system_middleware(config, stage_type);
     let mut observers = create_system_observers(config);
     let observer_surfaces = observer_surfaces_for_stage(stage_type);
 
@@ -245,19 +245,6 @@ fn plan_stage_middleware(
             continue;
         }
 
-        if declaration.is_flowip_128g_legacy_shell() {
-            let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
-            legacy_shell.push(crate::dsl::binder::materialize_flowip_128g_legacy_shell(
-                spec.factory.as_ref(),
-                config,
-                stage_type,
-                control_middleware,
-                &origin,
-                MiddlewareDeclarationIndex::resolved(middleware_index),
-            )?);
-            continue;
-        }
-
         return Err(format!(
             "middleware '{}' declares hook surfaces {:?}, but stage '{}' ({stage_type:?}) has no compatible placement",
             declaration.label,
@@ -268,7 +255,7 @@ fn plan_stage_middleware(
     }
 
     Ok(MiddlewarePlacement {
-        legacy_shell,
+        system_middleware,
         observers,
         expects_circuit_breaker,
         expects_rate_limiter,
@@ -283,7 +270,7 @@ fn build_source_middleware_and_register_policies(
     hosted_ingress_slot: Option<obzenflow_core::ingress::HostedIngressBindingSlot>,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
 ) -> StageCreationResult<SourceMiddlewareBinding> {
-    let mut all_middleware = create_system_middleware(config, stage_type);
+    let all_middleware = create_system_middleware(config, stage_type);
     let mut observers = create_system_observers(config);
     let expects_circuit_breaker = resolved
         .middleware
@@ -378,19 +365,6 @@ fn build_source_middleware_and_register_policies(
             if binding.completion_gate.is_some() {
                 completion_gate = binding.completion_gate;
             }
-            continue;
-        }
-
-        if declaration.is_flowip_128g_legacy_shell() {
-            let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
-            all_middleware.push(crate::dsl::binder::materialize_flowip_128g_legacy_shell(
-                spec.factory.as_ref(),
-                config,
-                stage_type,
-                control_middleware,
-                &origin,
-                MiddlewareDeclarationIndex::resolved(middleware_index),
-            )?);
             continue;
         }
 
@@ -626,12 +600,21 @@ pub trait StageDescriptor: Send + Sync {
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
         Vec::new()
     }
+
+    /// Descriptor-owned exact-input proof for generated bounded direct facts.
+    #[doc(hidden)]
+    fn direct_fact_plan(
+        &self,
+    ) -> Option<&obzenflow_runtime::stages::resources_builder::DirectFactPlan> {
+        None
+    }
 }
 
 fn validate_effect_declarations(
     stage_name: &str,
     declarations: &[EffectDeclaration],
     effect_ports: &EffectPortRegistry,
+    port_registration_policy: obzenflow_runtime::execution::EffectPortRegistrationPolicy,
 ) -> Result<(), String> {
     let mut effect_types = std::collections::HashSet::new();
 
@@ -655,6 +638,18 @@ fn validate_effect_declarations(
             ));
         }
 
+        if matches!(declaration.safety, EffectSafety::NonIdempotentAtLeastOnce)
+            && !matches!(
+                declaration.idempotency_key_policy,
+                IdempotencyKeyPolicy::AtLeastOnceAcknowledged
+            )
+        {
+            return Err(format!(
+                "Effectful stage '{stage_name}' declares paid non-idempotent effect '{}' without explicit at_least_once(...) acknowledgement",
+                declaration.effect_type
+            ));
+        }
+
         if matches!(declaration.safety, EffectSafety::Transactional)
             && declaration.transactional_executor.is_none()
         {
@@ -665,7 +660,11 @@ fn validate_effect_declarations(
         }
 
         for requirement in &declaration.required_ports {
-            if !effect_ports.contains_requirement(requirement) {
+            if matches!(
+                port_registration_policy,
+                obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required
+            ) && !effect_ports.contains_requirement(requirement)
+            {
                 return Err(format!(
                     "Effectful stage '{stage_name}' requires effect port '{}' for type '{}' but it is not registered",
                     requirement.name, requirement.type_name
@@ -1334,7 +1333,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
 
         let placement =
             plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
-        let all_middleware = placement.legacy_shell;
+        let all_middleware = placement.system_middleware;
 
         instrumentation
             .bind_control_plane(
@@ -1468,7 +1467,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
         let placement =
             plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
-        let all_middleware = placement.legacy_shell;
+        let all_middleware = placement.system_middleware;
 
         instrumentation
             .bind_control_plane(
@@ -1531,14 +1530,78 @@ pub struct EffectPolicyAttachment {
 
 /// Descriptor for replay-safe effectful async transform stages.
 pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> {
-    pub name: String,
-    pub handler: H,
-    pub effects: Vec<EffectDeclaration>,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    name: String,
+    handler: H,
+    effects: Vec<EffectDeclaration>,
+    middleware: Vec<Box<dyn MiddlewareFactory>>,
     /// Per-effect policy attachments from the `effects:` clause
     /// (FLOWIP-120c H7).
-    pub effect_policies: Vec<EffectPolicyAttachment>,
-    pub backpressure: Option<BackpressureClause>,
+    effect_policies: Vec<EffectPolicyAttachment>,
+    direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan,
+    pass_through_event_type: Option<obzenflow_core::EventType>,
+    backpressure: Option<BackpressureClause>,
+}
+
+impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
+    /// Construct an ordinary effectful transform. Generated direct-fact
+    /// admission and raw physical pass-through are intentionally absent.
+    pub fn new(
+        name: impl Into<String>,
+        handler: H,
+        effects: Vec<EffectDeclaration>,
+        middleware: Vec<Box<dyn MiddlewareFactory>>,
+        effect_policies: Vec<EffectPolicyAttachment>,
+        backpressure: Option<BackpressureClause>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            handler,
+            effects,
+            middleware,
+            effect_policies,
+            direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan::default(
+            ),
+            pass_through_event_type: None,
+            backpressure,
+        }
+    }
+
+    pub(crate) fn generated<Input>(
+        name: impl Into<String>,
+        handler: H,
+        effects: Vec<EffectDeclaration>,
+        effect_policies: Vec<EffectPolicyAttachment>,
+        direct_bound: std::num::NonZeroU64,
+    ) -> Self
+    where
+        Input: obzenflow_core::TypedPayload,
+    {
+        let mut descriptor = Self::new(name, handler, effects, Vec::new(), effect_policies, None);
+        descriptor.direct_fact_plan =
+            obzenflow_runtime::stages::resources_builder::DirectFactPlan::generated::<Input>(
+                direct_bound,
+            );
+        descriptor
+    }
+
+    pub(crate) fn generated_with_pass_through<Input, PassThrough>(
+        name: impl Into<String>,
+        handler: H,
+        effects: Vec<EffectDeclaration>,
+        effect_policies: Vec<EffectPolicyAttachment>,
+        direct_bound: std::num::NonZeroU64,
+    ) -> Self
+    where
+        Input: obzenflow_core::TypedPayload,
+        PassThrough: obzenflow_core::TypedPayload,
+    {
+        let mut descriptor =
+            Self::generated::<Input>(name, handler, effects, effect_policies, direct_bound);
+        descriptor.pass_through_event_type = Some(obzenflow_core::EventType::from(
+            PassThrough::versioned_event_type(),
+        ));
+        descriptor
+    }
 }
 
 #[async_trait]
@@ -1573,6 +1636,12 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         self.effects.clone()
     }
 
+    fn direct_fact_plan(
+        &self,
+    ) -> Option<&obzenflow_runtime::stages::resources_builder::DirectFactPlan> {
+        Some(&self.direct_fact_plan)
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
@@ -1595,9 +1664,23 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
+        if let Some(bound) = self.direct_fact_plan.maximum_bound() {
+            resources
+                .backpressure_writer
+                .validate_generated_direct_bound(bound)
+                .map_err(|message| format!("ai_map_reduce!: {message}"))?;
+        }
         let effect_declarations = self.effects.clone();
-        validate_effect_declarations(&self.name, &effect_declarations, &resources.effect_ports)?;
+        validate_effect_declarations(
+            &self.name,
+            &effect_declarations,
+            &resources.effect_ports,
+            resources
+                .runtime_execution
+                .effect_port_registration_policy(),
+        )?;
         resources.effect_declarations = effect_declarations.clone();
+        resources.direct_fact_plan = self.direct_fact_plan.clone();
 
         for factory in &self.middleware {
             let validation_result =
@@ -1786,7 +1869,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         )?;
         let mut observers = placement.observers;
         observers.extend(effect_observers);
-        let all_middleware = placement.legacy_shell;
+        let all_middleware = placement.system_middleware;
 
         // Stage-level control binding covers shell instances only; per-effect
         // instances register under their effect key and surface through the
@@ -1813,8 +1896,11 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 
         // The middleware execution scope is computed per event by the
         // supervisor at dispatch (FLOWIP-120c H3).
-        let mut handler_with_middleware =
-            UnifiedMiddlewareTransform::new(EffectfulTransformHandlerAdapter(self.handler));
+        let mut effectful_handler = EffectfulTransformHandlerAdapter::new(self.handler);
+        if let Some(event_type) = self.pass_through_event_type {
+            effectful_handler = effectful_handler.with_exact_pass_through_event_type(event_type);
+        }
+        let mut handler_with_middleware = UnifiedMiddlewareTransform::new(effectful_handler);
         for mw in all_middleware {
             handler_with_middleware = handler_with_middleware.with_middleware(mw);
         }
@@ -1925,7 +2011,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             control_middleware.clone();
 
         // Create system middleware with instrumentation
-        let mut all_middleware = create_system_middleware(&config, StageType::Sink);
+        let all_middleware = create_system_middleware(&config, StageType::Sink);
 
         let expects_circuit_breaker = resolved
             .middleware
@@ -1983,16 +2069,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
                     MiddlewareDeclarationIndex::resolved(middleware_index),
                 )?;
                 sink_policies.push(policy);
-            } else if declaration.is_flowip_128g_legacy_shell() {
-                let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
-                all_middleware.push(crate::dsl::binder::materialize_flowip_128g_legacy_shell(
-                    spec.factory.as_ref(),
-                    &config,
-                    StageType::Sink,
-                    &control_middleware,
-                    &origin,
-                    MiddlewareDeclarationIndex::resolved(middleware_index),
-                )?);
             } else {
                 return Err(format!(
                     "middleware '{}' declares capability {:?} and surfaces {:?}, but sink stage '{}' has no matching typed binding",
@@ -2294,7 +2370,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
 
         let placement =
             plan_stage_middleware(&config, StageType::Stateful, resolved, &control_middleware)?;
-        let all_middleware = placement.legacy_shell;
+        let all_middleware = placement.system_middleware;
 
         instrumentation
             .bind_control_plane(
@@ -2442,7 +2518,14 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
         let effect_declarations = self.effects.clone();
-        validate_effect_declarations(&self.name, &effect_declarations, &resources.effect_ports)?;
+        validate_effect_declarations(
+            &self.name,
+            &effect_declarations,
+            &resources.effect_ports,
+            resources
+                .runtime_execution
+                .effect_port_registration_policy(),
+        )?;
         resources.effect_declarations = effect_declarations.clone();
 
         for factory in &self.middleware {
@@ -2677,7 +2760,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 
         let placement =
             plan_stage_middleware(&config, StageType::Join, resolved, &control_middleware)?;
-        let all_middleware = placement.legacy_shell;
+        let all_middleware = placement.system_middleware;
 
         instrumentation
             .bind_control_plane(
@@ -2915,9 +2998,13 @@ mod tests {
             outcome_fact_types: Vec::new(),
         };
 
-        let err =
-            validate_effect_declarations("effectful", &[declaration], &EffectPortRegistry::new())
-                .expect_err("missing key strategy must fail materialisation");
+        let err = validate_effect_declarations(
+            "effectful",
+            &[declaration],
+            &EffectPortRegistry::new(),
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
+        )
+        .expect_err("missing key strategy must fail materialisation");
 
         assert!(err.contains("without an idempotency-key strategy"));
     }
@@ -2977,9 +3064,13 @@ mod tests {
             EffectDeclaration::of::<DemoDuplicateEffect>(),
         ];
 
-        let err =
-            validate_effect_declarations("effectful", &declarations, &EffectPortRegistry::new())
-                .expect_err("duplicate effect type must fail materialisation");
+        let err = validate_effect_declarations(
+            "effectful",
+            &declarations,
+            &EffectPortRegistry::new(),
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
+        )
+        .expect_err("duplicate effect type must fail materialisation");
 
         assert!(err.contains("more than once"));
     }
@@ -2993,15 +3084,23 @@ mod tests {
             "effectful",
             std::slice::from_ref(&declaration),
             &EffectPortRegistry::new(),
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
         )
         .expect_err("missing required port must fail materialisation");
         assert!(missing.contains("requires effect port"));
 
         let mut registry = EffectPortRegistry::new();
-        registry.insert::<dyn DemoEffectPort>("primary", Arc::new(DemoEffectPortImpl));
+        registry
+            .insert::<dyn DemoEffectPort>("primary", Arc::new(DemoEffectPortImpl))
+            .expect("unique effect port");
 
-        validate_effect_declarations("effectful", &[declaration], &registry)
-            .expect("registered required port should pass");
+        validate_effect_declarations(
+            "effectful",
+            &[declaration],
+            &registry,
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
+        )
+        .expect("registered required port should pass");
     }
 
     #[test]
@@ -3012,18 +3111,26 @@ mod tests {
             "effectful",
             std::slice::from_ref(&declaration),
             &EffectPortRegistry::new(),
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
         )
         .expect_err("missing transactional port must fail materialisation");
         assert!(missing.contains("requires effect port"));
 
         let mut registry = EffectPortRegistry::new();
-        registry.insert::<dyn TransactionalEffectPort<DemoTransactionalEffect>>(
-            "tx",
-            Arc::new(DemoTransactionalPort),
-        );
+        registry
+            .insert::<dyn TransactionalEffectPort<DemoTransactionalEffect>>(
+                "tx",
+                Arc::new(DemoTransactionalPort),
+            )
+            .expect("unique transactional port");
 
-        validate_effect_declarations("effectful", &[declaration], &registry)
-            .expect("registered transactional typed port should pass");
+        validate_effect_declarations(
+            "effectful",
+            &[declaration],
+            &registry,
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
+        )
+        .expect("registered transactional typed port should pass");
     }
 
     #[derive(Clone, Debug)]
@@ -3521,6 +3628,8 @@ mod tests {
             ),
             effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
             effect_declarations: Vec::new(),
+            direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan::default(
+            ),
             deterministic_fan_in: false,
             seq_ordered_fan_in: false,
         };
@@ -3785,11 +3894,11 @@ mod observer_placement_negative_tests {
                     panic!("observer placement must succeed for {stage_type:?}: {err}")
                 });
 
-            // The observer never lands in the legacy shell: that bucket holds only
-            // the (now empty) system middleware, never a hook-bound observer.
+            // Hook-bound observers never enter the generic system middleware
+            // stack.
             assert!(
-                placement.legacy_shell.is_empty(),
-                "observer middleware must not be placed in the legacy shell for {stage_type:?}"
+                placement.system_middleware.is_empty(),
+                "observer middleware must not be placed in system middleware for {stage_type:?}"
             );
         }
     }

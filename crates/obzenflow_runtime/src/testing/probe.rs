@@ -693,6 +693,8 @@ mod tests {
             journal_writer_id: obzenflow_core::event::JournalWriterId::from(stage_journal_impl.id),
             vector_clock: VectorClock::new(),
             timestamp: Utc::now(),
+            journal_group_id: None,
+            journal_group_member: None,
             event,
         };
         stage_journal_impl.push_envelope(envelope);
@@ -826,6 +828,8 @@ mod tests {
             journal_writer_id: obzenflow_core::event::JournalWriterId::from(stage_journal_impl.id),
             vector_clock: clock_a,
             timestamp: Utc::now(),
+            journal_group_id: None,
+            journal_group_member: None,
             event: ChainEventFactory::data_event(stage_writer_id, "data.a", serde_json::json!({})),
         };
         stage_journal_impl.push_envelope(env_a);
@@ -836,6 +840,8 @@ mod tests {
             journal_writer_id: obzenflow_core::event::JournalWriterId::from(stage_journal_impl.id),
             vector_clock: clock_b,
             timestamp: Utc::now(),
+            journal_group_id: None,
+            journal_group_member: None,
             event: ChainEventFactory::data_event(stage_writer_id, "data.b", serde_json::json!({})),
         };
         stage_journal_impl.push_envelope(env_b);

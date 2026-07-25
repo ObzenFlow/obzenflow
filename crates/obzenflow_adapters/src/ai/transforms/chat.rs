@@ -272,9 +272,19 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct QueueChatClient {
+        target: obzenflow_core::ai::ChatTarget,
         outcomes: Mutex<VecDeque<Result<ChatResponse, AiClientError>>>,
+    }
+
+    impl Default for QueueChatClient {
+        fn default() -> Self {
+            Self {
+                target: obzenflow_core::ai::ChatTarget::new("ollama", "llama3.1:8b"),
+                outcomes: Mutex::new(VecDeque::new()),
+            }
+        }
     }
 
     impl QueueChatClient {
@@ -292,6 +302,10 @@ mod tests {
 
     #[async_trait]
     impl ChatClient for QueueChatClient {
+        fn target(&self) -> &obzenflow_core::ai::ChatTarget {
+            &self.target
+        }
+
         async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AiClientError> {
             self.outcomes
                 .lock()

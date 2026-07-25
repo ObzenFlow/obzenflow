@@ -9,6 +9,7 @@
 //! - `draining.rs` — Draining state event loop
 //! - `tests.rs`    — All unit tests
 
+mod direct_fact_continuation;
 mod draining;
 mod running;
 #[cfg(test)]

@@ -20,7 +20,6 @@ use super::control::policy::{
     EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy, SinkPolicy, SourcePolicy,
 };
 use super::control::provider::PendingControlRegistration;
-use super::Middleware;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::{IngressBoundaryMiddleware, IngressKey};
 use obzenflow_core::{StageId, StageKey};
@@ -81,7 +80,6 @@ pub struct SinkConfiguredTargetKey(pub String);
 pub enum MiddlewareCapability {
     Control,
     Observer,
-    Structural,
 }
 
 // ---------------------------------------------------------------------------
@@ -603,16 +601,7 @@ pub struct MiddlewareDeclaration {
     /// and ingress); the binder picks the concrete surface per call site and
     /// validates membership. A declaration always names at least one surface.
     pub surfaces: Vec<MiddlewareSurfaceKind>,
-    route: MiddlewareDeclarationRoute,
     materialization_claim: MaterializationClaim,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MiddlewareDeclarationRoute {
-    Typed,
-    /// Sealed migration route for the two AI map-reduce shell adapters owned by
-    /// FLOWIP-128g. External factories cannot construct this declaration.
-    Flowip128gLegacyShell,
 }
 
 /// Sealed semantic identity shared by structural composition validation,
@@ -624,7 +613,6 @@ pub(crate) enum MaterializationClaim {
     CircuitBreaker,
     RateLimiter,
     EffectResilience,
-    Flowip128gLegacyShell,
 }
 
 impl MaterializationClaim {
@@ -634,26 +622,11 @@ impl MaterializationClaim {
             Self::CircuitBreaker => "circuit_breaker",
             Self::RateLimiter => "rate_limiter",
             Self::EffectResilience => "effect_resilience",
-            Self::Flowip128gLegacyShell => "flowip_128g_legacy_shell",
         }
     }
 }
 
 impl MiddlewareDeclaration {
-    pub(crate) fn flowip_128g_legacy_shell(
-        label: &'static str,
-        family_label: &'static str,
-    ) -> Self {
-        Self {
-            label,
-            family_label,
-            capability: MiddlewareCapability::Structural,
-            surfaces: vec![MiddlewareSurfaceKind::Handler],
-            route: MiddlewareDeclarationRoute::Flowip128gLegacyShell,
-            materialization_claim: MaterializationClaim::Flowip128gLegacyShell,
-        }
-    }
-
     /// A hook-bound control declaration spanning the given surfaces.
     pub fn control(label: &'static str, surfaces: Vec<MiddlewareSurfaceKind>) -> Self {
         Self::control_with_family(label, label, surfaces)
@@ -670,7 +643,6 @@ impl MiddlewareDeclaration {
             family_label,
             capability: MiddlewareCapability::Control,
             surfaces,
-            route: MiddlewareDeclarationRoute::Typed,
             materialization_claim: MaterializationClaim::Ordinary,
         }
     }
@@ -685,7 +657,6 @@ impl MiddlewareDeclaration {
             family_label,
             capability: MiddlewareCapability::Control,
             surfaces,
-            route: MiddlewareDeclarationRoute::Typed,
             materialization_claim: MaterializationClaim::CircuitBreaker,
         }
     }
@@ -696,7 +667,6 @@ impl MiddlewareDeclaration {
             family_label,
             capability: MiddlewareCapability::Control,
             surfaces: vec![MiddlewareSurfaceKind::Effect],
-            route: MiddlewareDeclarationRoute::Typed,
             materialization_claim: MaterializationClaim::EffectResilience,
         }
     }
@@ -711,7 +681,6 @@ impl MiddlewareDeclaration {
             family_label,
             capability: MiddlewareCapability::Control,
             surfaces,
-            route: MiddlewareDeclarationRoute::Typed,
             materialization_claim: MaterializationClaim::RateLimiter,
         }
     }
@@ -732,16 +701,8 @@ impl MiddlewareDeclaration {
             family_label,
             capability: MiddlewareCapability::Observer,
             surfaces,
-            route: MiddlewareDeclarationRoute::Typed,
             materialization_claim: MaterializationClaim::Ordinary,
         }
-    }
-
-    /// Whether this is one of the sealed AI map-reduce shell migrations owned
-    /// by FLOWIP-128g. This is binder plumbing, not a public authoring route.
-    #[doc(hidden)]
-    pub fn is_flowip_128g_legacy_shell(&self) -> bool {
-        self.route == MiddlewareDeclarationRoute::Flowip128gLegacyShell
     }
 
     /// Whether this factory declares it can attach to `surface`.
@@ -758,6 +719,14 @@ impl MiddlewareDeclaration {
         matches!(self.capability, MiddlewareCapability::Observer)
     }
 
+    /// Whether this declaration carries the sealed aggregate effect-resilience
+    /// identity. Generated composites use this read-only predicate to require
+    /// their fixed effect protocol without exposing construction authority.
+    #[doc(hidden)]
+    pub fn is_effect_resilience(&self) -> bool {
+        self.materialization_claim == MaterializationClaim::EffectResilience
+    }
+
     pub(crate) fn materialization_claim(&self) -> MaterializationClaim {
         self.materialization_claim
     }
@@ -770,15 +739,6 @@ impl MiddlewareDeclaration {
             return Err(MiddlewareAttachmentValidationError::EmptyDeclaration {
                 label: self.label,
             });
-        }
-        if matches!(self.capability, MiddlewareCapability::Structural)
-            && !self.is_flowip_128g_legacy_shell()
-        {
-            return Err(
-                MiddlewareAttachmentValidationError::UnsupportedStructuralDeclaration {
-                    label: self.label,
-                },
-            );
         }
         Ok(())
     }
@@ -838,7 +798,7 @@ pub fn validate_effect_control_composition(
                 .entry("rate_limiter")
                 .or_default()
                 .push(declaration.label),
-            MaterializationClaim::Ordinary | MaterializationClaim::Flowip128gLegacyShell => {}
+            MaterializationClaim::Ordinary => {}
         }
     }
     if aggregates.len() > 1 {
@@ -875,11 +835,6 @@ pub fn validate_effect_control_composition(
 pub enum MiddlewareAttachmentValidationError {
     #[error("middleware '{label}' declares no typed surfaces")]
     EmptyDeclaration { label: &'static str },
-
-    #[error(
-        "middleware '{label}' declares structural capability outside the sealed FLOWIP-128g migration route"
-    )]
-    UnsupportedStructuralDeclaration { label: &'static str },
 
     #[error("middleware '{label}' does not declare support for surface {surface:?}")]
     UnsupportedSurface {
@@ -951,9 +906,6 @@ pub fn validate_attachment_request(
         // cannot drift from the ports that actually exist.
         MiddlewareCapability::Observer => {
             crate::middleware::observer::OBSERVER_SURFACE_KINDS.contains(&surface)
-        }
-        MiddlewareCapability::Structural => {
-            declaration.is_flowip_128g_legacy_shell() && surface == MiddlewareSurfaceKind::Handler
         }
     };
     if !allowed {
@@ -1254,24 +1206,6 @@ pub struct SourcePollAttachment {
     pub completion_gate: Option<Arc<dyn CompletionGate>>,
 }
 
-/// Sealed carrier for the two structural shell adapters awaiting FLOWIP-128g.
-///
-/// Its constructor is crate-private, so custom factories cannot use this as a
-/// generic handler-shell escape hatch. The DSL consumes it only after validating
-/// the sealed declaration above.
-pub struct Flowip128gLegacyShellAttachment(Box<dyn Middleware>);
-
-impl Flowip128gLegacyShellAttachment {
-    pub(crate) fn new(middleware: Box<dyn Middleware>) -> Self {
-        Self(middleware)
-    }
-
-    #[doc(hidden)]
-    pub fn into_middleware(self) -> Box<dyn Middleware> {
-        self.0
-    }
-}
-
 /// The single typed attachment a factory materializes for one surface.
 ///
 /// Adapter-owned: the DSL binder collects the per-surface policies, composes
@@ -1292,10 +1226,6 @@ pub(crate) enum MiddlewareSurfaceAttachmentKind {
     JoinObserver(Arc<dyn JoinObserver>),
     OutputCommitObserver(Arc<dyn OutputCommitObserver>),
     StageLifecycleObserver(Arc<dyn StageLifecycleObserver>),
-    /// Sealed migration carrier for the two AI map-reduce consumers assigned
-    /// to FLOWIP-128g. It is not constructible by external factories.
-    #[doc(hidden)]
-    Flowip128gLegacyShell(Flowip128gLegacyShellAttachment),
 }
 
 /// One typed attachment plus its sealed semantic claim. Public constructors
@@ -1443,13 +1373,6 @@ impl CheckedMiddlewareSurfaceAttachment {
         }
     }
 
-    pub fn into_flowip_128g_legacy_shell(self) -> Option<Flowip128gLegacyShellAttachment> {
-        match self.kind {
-            MiddlewareSurfaceAttachmentKind::Flowip128gLegacyShell(shell) => Some(shell),
-            _ => None,
-        }
-    }
-
     pub(crate) fn into_kind(self) -> MiddlewareSurfaceAttachmentKind {
         self.kind
     }
@@ -1504,10 +1427,6 @@ fn capability_and_surface(
         MiddlewareSurfaceAttachmentKind::StageLifecycleObserver(_) => (
             MiddlewareCapability::Observer,
             MiddlewareSurfaceKind::StageLifecycle,
-        ),
-        MiddlewareSurfaceAttachmentKind::Flowip128gLegacyShell(_) => (
-            MiddlewareCapability::Structural,
-            MiddlewareSurfaceKind::Handler,
         ),
     }
 }

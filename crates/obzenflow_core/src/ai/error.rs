@@ -4,6 +4,8 @@
 
 use std::time::Duration;
 
+use super::ChatTarget;
+
 /// Provider-agnostic client error taxonomy for AI calls.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum AiClientError {
@@ -28,8 +30,23 @@ pub enum AiClientError {
     #[error("unsupported operation: {message}")]
     Unsupported { message: String },
 
+    #[error("chat target mismatch: requested {requested}, bound {bound}")]
+    TargetMismatch {
+        requested: Box<ChatTarget>,
+        bound: Box<ChatTarget>,
+    },
+
     #[error("other AI client error: {message}")]
     Other { message: String },
+}
+
+impl AiClientError {
+    pub fn target_mismatch(requested: ChatTarget, bound: ChatTarget) -> Self {
+        Self::TargetMismatch {
+            requested: Box::new(requested),
+            bound: Box::new(bound),
+        }
+    }
 }
 
 /// Provider/runtime-agnostic structured-output failure taxonomy.

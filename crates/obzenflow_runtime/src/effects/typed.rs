@@ -134,7 +134,12 @@ where
             + AllowedEffectsAllowEffect<AllowedEffects, EffectAt>
             + EffectOutcomeFitsOutput<Output, OutcomeProof>,
     {
-        self.core.perform(effect).await
+        // `EffectsCore::perform` contains the replay, repeatable,
+        // transactional, and affine state machines. Keep that combined
+        // monomorphised future off the handler's task stack: generated affine
+        // support must not enlarge an ordinary transactional handler future
+        // enough to overflow the executor's default worker stack.
+        Box::pin(self.core.perform(effect)).await
     }
 
     /// Capture deterministic ambient data. Capture records are framework
@@ -167,6 +172,29 @@ where
             });
         }
         Ok(StageCompletion::new(committed, event_types))
+    }
+
+    /// Complete with one deterministic fact before the first effect.
+    ///
+    /// This operation keeps the history preflight, resume-to-live admission,
+    /// emission, and completion ordering indivisible at the authoring
+    /// surface. It is useful when request preparation fails before an effect
+    /// exists, and prevents such a fact from replacing archived or in-doubt
+    /// effect history.
+    #[doc(hidden)]
+    pub async fn complete_with_pre_effect_fact<T, At>(
+        &mut self,
+        fact: T,
+    ) -> Result<StageCompletion<Output>, EffectError>
+    where
+        T: TypedPayload + OutputAllowsFact<Output, At>,
+    {
+        self.core.preflight_next_effect_cursor_is_empty().await?;
+        if !self.core.is_replaying() {
+            self.core.request_generated_live_admission().await?;
+        }
+        self.emit(fact).await?;
+        self.complete()
     }
 
     pub(crate) fn drain_committed_facts(&mut self) -> Vec<ChainEvent> {

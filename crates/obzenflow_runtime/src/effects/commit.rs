@@ -4,6 +4,16 @@
 
 use super::*;
 
+fn composite_monotonic_event_time(parent: &ChainEvent, deterministic: u64) -> u64 {
+    if parent.composite_activations().is_empty() {
+        return deterministic;
+    }
+    parent.composite_activations().iter().fold(
+        parent.processing_info.event_time.max(deterministic),
+        |time, activation| time.max(activation.entered_at_ms),
+    )
+}
+
 pub struct EffectCommitHandle<T> {
     inner: Arc<EffectCommitHandleInner<T>>,
 }
@@ -179,6 +189,7 @@ where
                 error_message: error.error_message(),
                 retry: error.retry_disposition(),
                 cause: error.failure_cause(),
+                detail: error.failure_detail(),
             },
             Some(error),
         )
@@ -318,6 +329,85 @@ fn commit_handle_reuse_error() -> EffectError {
     EffectError::Execution("transactional effect commit handle used more than once".to_string())
 }
 
+pub(super) fn build_effect_attempt_started_event(
+    writer_id: WriterId,
+    parent: &EventEnvelope<ChainEvent>,
+    started: EffectAttemptStarted,
+    descriptor: EffectDescriptor,
+    lineage: obzenflow_core::config::LineagePolicy,
+) -> Result<ChainEvent, EffectError> {
+    let payload = serde_json::to_value(&started)
+        .map_err(|error| EffectError::Serialization(error.to_string()))?;
+    let mut event = ChainEventFactory::derived_data_event(
+        writer_id,
+        &parent.event,
+        EffectAttemptStarted::versioned_event_type(),
+        payload,
+        lineage,
+    );
+    event.id = deterministic_effect_evidence_event_id(
+        &started.cursor,
+        &EffectAttemptStarted::versioned_event_type(),
+        Some(started.attempt),
+    );
+    event.processing_info.event_time = composite_monotonic_event_time(
+        &parent.event,
+        deterministic_effect_record_event_time(&started.cursor)
+            .saturating_add(u64::from(started.attempt.get())),
+    );
+    event = event.with_effect_provenance(EffectProvenance {
+        cursor: started.cursor,
+        descriptor_hash: started.descriptor_hash,
+        descriptor,
+        attempt: Some(started.attempt),
+        outcome_fact_ordinal: None,
+        outcome_fact_count: None,
+        group_id: Some(started.outcome_group_id),
+        fact_owner: EffectFactOwner::Framework,
+        origin: None,
+    });
+    Ok(event)
+}
+
+pub(super) fn build_effect_recovery_abandoned_event(
+    writer_id: WriterId,
+    parent: &EventEnvelope<ChainEvent>,
+    abandoned: EffectRecoveryAbandoned,
+    descriptor: EffectDescriptor,
+    lineage: obzenflow_core::config::LineagePolicy,
+) -> Result<ChainEvent, EffectError> {
+    let payload = serde_json::to_value(&abandoned)
+        .map_err(|error| EffectError::Serialization(error.to_string()))?;
+    let mut event = ChainEventFactory::derived_data_event(
+        writer_id,
+        &parent.event,
+        EffectRecoveryAbandoned::versioned_event_type(),
+        payload,
+        lineage,
+    );
+    event.id = deterministic_effect_evidence_event_id(
+        &abandoned.cursor,
+        &EffectRecoveryAbandoned::versioned_event_type(),
+        None,
+    );
+    event.processing_info.event_time = composite_monotonic_event_time(
+        &parent.event,
+        deterministic_effect_record_event_time(&abandoned.cursor).saturating_add(999),
+    );
+    event = event.with_effect_provenance(EffectProvenance {
+        cursor: abandoned.cursor,
+        descriptor_hash: abandoned.descriptor_hash,
+        descriptor,
+        attempt: None,
+        outcome_fact_ordinal: None,
+        outcome_fact_count: None,
+        group_id: Some(abandoned.outcome_group_id),
+        fact_owner: EffectFactOwner::Framework,
+        origin: None,
+    });
+    Ok(event)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_domain_effect_success_facts(
     writer_id: WriterId,
@@ -376,9 +466,12 @@ pub(super) fn build_domain_effect_success_facts(
             StageInputPosition(record.cursor.input_seq.get()),
             output_ordinal,
         );
-        event.processing_info.event_time = deterministic_event_time(
-            StageInputPosition(record.cursor.input_seq.get()),
-            output_ordinal,
+        event.processing_info.event_time = composite_monotonic_event_time(
+            &parent.event,
+            deterministic_event_time(
+                StageInputPosition(record.cursor.input_seq.get()),
+                output_ordinal,
+            ),
         );
         // `from_record` copies the record's origin (FLOWIP-120m), so the
         // provenance carries it without a separate assignment.
@@ -514,7 +607,10 @@ pub(super) fn build_effect_record_event(
     )
     .with_effect_provenance(provenance);
     event.id = deterministic_effect_record_event_id(&record.cursor, event_type);
-    event.processing_info.event_time = deterministic_effect_record_event_time(&record.cursor);
+    event.processing_info.event_time = composite_monotonic_event_time(
+        &parent.event,
+        deterministic_effect_record_event_time(&record.cursor),
+    );
     if let EffectOutcomePayload::Failed { error_message, .. } = &record.outcome {
         event.processing_info.status =
             obzenflow_core::event::status::processing_status::ProcessingStatus::error_with_kind(

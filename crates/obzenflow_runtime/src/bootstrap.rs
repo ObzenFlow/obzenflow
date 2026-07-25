@@ -145,7 +145,10 @@ impl fmt::Debug for BootstrapConfig {
             .field("shutdown_timeout", &self.shutdown_timeout)
             .field("startup_mode", &self.startup_mode)
             .field("replay", &self.replay)
-            .field("replay_archive", &self.replay_archive.is_some())
+            .field(
+                "replay_archive",
+                &self.replay_archive.as_ref().map(|_| "<present>"),
+            )
             .field("metrics", &self.metrics)
             .finish()
     }

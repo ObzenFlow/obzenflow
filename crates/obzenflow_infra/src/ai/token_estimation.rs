@@ -48,6 +48,9 @@ pub fn resolve_estimator_for_model(model: &str) -> ResolvedTokenEstimator {
                 | obzenflow_core::ai::AiClientError::Timeout { message }
                 | obzenflow_core::ai::AiClientError::Auth { message } => message,
                 obzenflow_core::ai::AiClientError::RateLimited { message, .. } => message,
+                obzenflow_core::ai::AiClientError::TargetMismatch { requested, bound } => {
+                    format!("requested target {requested} does not match bound target {bound}")
+                }
             };
             ResolvedTokenEstimator::new(
                 Arc::new(HeuristicTokenEstimator::default()),

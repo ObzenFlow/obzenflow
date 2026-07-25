@@ -9,13 +9,13 @@ pub mod rate_limiter;
 mod resilience;
 
 // Re-export key types for convenience
-pub use circuit_breaker::{
-    ai_circuit_breaker, CircuitBreaker, CircuitBreakerConfigError, FailureHealth, Retry,
-};
+pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfigError, FailureHealth, Retry};
 pub use provider::ControlMiddlewareAggregator;
 pub use rate_limiter::{
     rate_limit, rate_limit_with_burst, RateLimiter, RateLimiterBuilder, RateLimiterFactory,
     RateLimiterMiddleware,
 };
+#[cfg(feature = "test-support")]
+pub use resilience::ai_recovery_rejecting_resilience_for_test;
 pub(in crate::middleware::control) use resilience::EffectResilienceMiddleware;
-pub use resilience::{EffectResilience, EffectResilienceConfigError};
+pub use resilience::{ai_resilience, EffectResilience, EffectResilienceConfigError};

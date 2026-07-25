@@ -18,8 +18,8 @@
 //!     one scheduled and one succeeded evidence row apiece;
 //!   - fan-in delivers exactly six outputs in deterministic order;
 //!   - strict replay of the same archive reproduces the identical domain outputs
-//!     without re-executing effects and without emitting a single fresh breaker
-//!     or retry row on the source, effect, OR sink stage.
+//!     without re-executing effects; source and sink policies remain suppressed,
+//!     while effect-history settlement rows retain their archived identities.
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, Retry};
@@ -384,6 +384,23 @@ async fn circuit_breaker_events_in_stage(run_dir: &Path, stage_key: &str) -> usi
         .count()
 }
 
+fn circuit_breaker_event_ids(events: &[ChainEvent]) -> Vec<obzenflow_core::EventId> {
+    let mut ids = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.content,
+                ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    MiddlewareLifecycle::CircuitBreaker(_)
+                ))
+            )
+        })
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
 fn data_event_count(events: &[ChainEvent], event_type: &str) -> usize {
     events
         .iter()
@@ -519,6 +536,7 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
     );
     let live_effect_events = read_stage_events(&live_run, "effectful").await;
     assert_retry_evidence_per_cursor(&live_effect_events);
+    let live_effect_breaker_ids = circuit_breaker_event_ids(&live_effect_events);
 
     // --- Strict replay of the same archive --------------------------------
     let replay_calls = Arc::new(Mutex::new(BTreeMap::new()));
@@ -552,15 +570,21 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
         "strict replay must reproduce the identical output order through the composed breakers"
     );
 
-    // FLOWIP-115b AC48: no fresh breaker row on ANY delivered surface during
-    // strict replay. The sink-delivery boundary in particular previously ran on
-    // replay; the dispatch-scope gate now suppresses it like source and effect.
+    // Source and sink policy still remain suppressed during strict replay.
+    // Effect-history hits rematerialise their archived terminal evidence under
+    // FLOWIP-128g, but do not execute policy or author new identities.
     let replay_run = latest_run_dir(&journal_base);
-    for stage in ["inputs", "effectful", "collector"] {
+    for stage in ["inputs", "collector"] {
         let replay_breaker_events = circuit_breaker_events_in_stage(&replay_run, stage).await;
         assert_eq!(
             replay_breaker_events, 0,
             "strict replay must not emit fresh circuit-breaker rows on the '{stage}' stage"
         );
     }
+    let replay_effect_events = read_stage_events(&replay_run, "effectful").await;
+    assert_eq!(
+        circuit_breaker_event_ids(&replay_effect_events),
+        live_effect_breaker_ids,
+        "strict replay must rematerialise effect settlement evidence byte-for-byte without fresh policy work"
+    );
 }

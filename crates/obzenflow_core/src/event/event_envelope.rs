@@ -7,6 +7,19 @@ use crate::event::{JournalEvent, JournalWriterId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Position of one logical event inside the physical atomic journal frame
+/// that committed it.
+///
+/// The zero-based index and total size make a repeated use of one
+/// deterministic group identity observable during replay. Without this
+/// witness, two adjacent physical frames with the same `journal_group_id`
+/// collapse into one indistinguishable list of logical events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalGroupMember {
+    pub index: u32,
+    pub size: u32,
+}
+
 /// Event envelope with vector clock for causal ordering
 ///
 /// This wraps an event with metadata needed for distributed ordering
@@ -22,6 +35,11 @@ where
     pub vector_clock: VectorClock,
     /// Timestamp for wall-clock time (informational only)
     pub timestamp: DateTime<Utc>,
+    /// Deterministic identity of the atomic journal frame that made this
+    /// record visible, when it was committed as a group.
+    pub journal_group_id: Option<String>,
+    /// Physical-frame membership witness for an atomic group.
+    pub journal_group_member: Option<JournalGroupMember>,
     /// The actual event
     pub event: T,
 }
@@ -36,10 +54,12 @@ where
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("EventEnvelope", 4)?;
+        let mut state = serializer.serialize_struct("EventEnvelope", 6)?;
         state.serialize_field("journal_writer_id", &self.journal_writer_id)?;
         state.serialize_field("vector_clock", &self.vector_clock)?;
         state.serialize_field("timestamp", &self.timestamp)?;
+        state.serialize_field("journal_group_id", &self.journal_group_id)?;
+        state.serialize_field("journal_group_member", &self.journal_group_member)?;
         state.serialize_field("event", &self.event)?;
         state.end()
     }
@@ -58,6 +78,10 @@ where
             journal_writer_id: JournalWriterId,
             vector_clock: VectorClock,
             timestamp: DateTime<Utc>,
+            #[serde(default)]
+            journal_group_id: Option<String>,
+            #[serde(default)]
+            journal_group_member: Option<JournalGroupMember>,
             event: T,
         }
 
@@ -66,6 +90,8 @@ where
             journal_writer_id: data.journal_writer_id,
             vector_clock: data.vector_clock,
             timestamp: data.timestamp,
+            journal_group_id: data.journal_group_id,
+            journal_group_member: data.journal_group_member,
             event: data.event,
         })
     }
@@ -80,6 +106,8 @@ where
             journal_writer_id,
             vector_clock: VectorClock::new(),
             timestamp: Utc::now(),
+            journal_group_id: None,
+            journal_group_member: None,
             event,
         }
     }

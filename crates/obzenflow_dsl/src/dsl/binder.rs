@@ -17,7 +17,7 @@ use obzenflow_adapters::middleware::{
     materialize_factory_checked, materialize_factory_checked_with_declaration,
     CheckedMiddlewareSurfaceAttachment, EffectPolicyAttachment, EffectSurface, EffectTypeKey,
     EffectUnitId, HostedIngressTargetKey, IngressRouteScope, IngressSurface, IngressUnitId,
-    Middleware, MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareDeclarationIndex,
+    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareDeclarationIndex,
     MiddlewareFactory, MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceKind, ProtectedUnit,
     ProtectedUnitId, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy,
     SourcePolicy, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
@@ -182,62 +182,6 @@ pub(crate) fn bind_effect_policy(
             declaration.capability,
             declaration.surfaces
         ))
-    }
-}
-
-/// Materialize one of the two sealed AI map-reduce shell adapters awaiting
-/// FLOWIP-128g. This is the only transitional generic-shell binding route.
-pub(crate) fn materialize_flowip_128g_legacy_shell(
-    factory: &dyn MiddlewareFactory,
-    config: &StageConfig,
-    stage_type: StageType,
-    control_middleware: &Arc<ControlMiddlewareAggregator>,
-    origin: &MiddlewareOrigin,
-    declaration_index: MiddlewareDeclarationIndex,
-) -> Result<Box<dyn Middleware>, String> {
-    let declaration = factory.declaration();
-    if !declaration.is_flowip_128g_legacy_shell() {
-        return Err(format!(
-            "middleware '{}' requested the FLOWIP-128g migration route without its sealed declaration",
-            factory.label()
-        ));
-    }
-    if stage_type != StageType::Transform {
-        return Err(format!(
-            "middleware '{}' uses the sealed FLOWIP-128g AI migration route, which is restricted to transform stages; stage '{}' is {stage_type:?}",
-            factory.label(),
-            config.name
-        ));
-    }
-
-    let surface = MiddlewareSurface::Handler {
-        stage_id: config.stage_id,
-    };
-    let protected_unit = ProtectedUnitId {
-        stage_id: config.stage_id,
-        unit: ProtectedUnit::Handler,
-    };
-    let request = MiddlewareAttachmentRequest {
-        surface: &surface,
-        protected_unit: &protected_unit,
-        origin,
-        declaration_index,
-    };
-    tracing::warn!(
-        middleware = factory.label(),
-        stage = %config.name,
-        "FLOWIP-128g transitional AI map-reduce shell is still active"
-    );
-
-    match materialize_factory_checked(factory, request, config, stage_type, control_middleware)
-        .map_err(|error| error.to_string())?
-        .into_flowip_128g_legacy_shell()
-    {
-        Some(shell) => Ok(shell.into_middleware()),
-        None => Err(format!(
-            "FLOWIP-128g migration binder expected a sealed shell attachment from middleware '{}'",
-            factory.label()
-        )),
     }
 }
 

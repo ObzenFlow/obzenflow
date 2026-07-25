@@ -135,6 +135,30 @@ enum ResolvedChatProviderConfig {
 }
 
 impl ResolvedChatProviderConfig {
+    fn target(&self) -> obzenflow_core::ai::ChatTarget {
+        match self {
+            Self::Ollama { model, base_url } => super::endpoint_identity::bound_chat_target(
+                "ollama",
+                model.clone(),
+                &base_url
+                    .clone()
+                    .unwrap_or_else(super::endpoint_identity::default_ollama_base_url),
+            ),
+            Self::OpenAi { model, .. } => super::endpoint_identity::bound_chat_target(
+                "openai",
+                model.clone(),
+                &super::endpoint_identity::default_openai_base_url(),
+            ),
+            Self::OpenAiCompatible {
+                model, base_url, ..
+            } => super::endpoint_identity::bound_chat_target(
+                "openai_compatible",
+                model.clone(),
+                base_url,
+            ),
+        }
+    }
+
     fn build_client(&self) -> Result<RigChatClient, AiClientError> {
         match self {
             ResolvedChatProviderConfig::Ollama { model, base_url } => {
@@ -154,13 +178,16 @@ impl ResolvedChatProviderConfig {
 
 #[derive(Clone)]
 struct LazyRigChatClient {
+    target: obzenflow_core::ai::ChatTarget,
     config: ResolvedChatProviderConfig,
     inner: Arc<OnceLock<Result<RigChatClient, AiClientError>>>,
 }
 
 impl LazyRigChatClient {
     fn new(config: ResolvedChatProviderConfig) -> Self {
+        let target = config.target();
         Self {
+            target,
             config,
             inner: Arc::new(OnceLock::new()),
         }
@@ -193,6 +220,10 @@ impl LazyRigChatClient {
 
 #[async_trait]
 impl ChatClient for LazyRigChatClient {
+    fn target(&self) -> &obzenflow_core::ai::ChatTarget {
+        &self.target
+    }
+
     async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AiClientError> {
         let client = self.get_or_init()?;
         client.chat(req).await
@@ -1559,6 +1590,9 @@ impl HandlerErrorExt for HandlerError {
                 HandlerError::ContractViolation(format!("{prefix}: {msg}"))
             }
             HandlerError::Other(msg) => HandlerError::Other(format!("{prefix}: {msg}")),
+            // Fatal/protocol-only variants carry structured evidence whose
+            // identity must not be rewritten by a legacy chat-builder prefix.
+            other => other,
         }
     }
 }
@@ -2010,9 +2044,19 @@ mod tests {
     use serde_json::json;
     use std::sync::Mutex;
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct RecordingChatClient {
+        target: obzenflow_core::ai::ChatTarget,
         last_request: Mutex<Option<ChatRequest>>,
+    }
+
+    impl Default for RecordingChatClient {
+        fn default() -> Self {
+            Self {
+                target: obzenflow_core::ai::ChatTarget::new("ollama", "llama3.1:8b"),
+                last_request: Mutex::new(None),
+            }
+        }
     }
 
     impl RecordingChatClient {
@@ -2027,6 +2071,10 @@ mod tests {
 
     #[async_trait]
     impl ChatClient for RecordingChatClient {
+        fn target(&self) -> &obzenflow_core::ai::ChatTarget {
+            &self.target
+        }
+
         async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AiClientError> {
             *self.last_request.lock().expect("poisoned") = Some(req);
             Ok(ChatResponse {

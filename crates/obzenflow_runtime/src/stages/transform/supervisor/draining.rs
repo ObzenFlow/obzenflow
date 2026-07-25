@@ -16,6 +16,7 @@ use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
     FrameworkObservabilityCommit,
 };
+use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::observer::dispatch::{
     run_after_handler_observers, run_before_handler_observers,
 };
@@ -103,6 +104,10 @@ async fn dispatch_draining_inner<
         ctx.pending_parent = None;
     }
 
+    if ctx.direct_fact_continuation.is_some() {
+        return super::direct_fact_continuation::service(sup, ctx, flow_context).await;
+    }
+
     if sup.subscription.is_none() {
         return Ok(EventLoopDirective::Transition(
             TransformEvent::DrainComplete,
@@ -180,9 +185,27 @@ async fn dispatch_draining_inner<
             }
 
             // Process data events (or pass through error-marked events).
+            // Generation None: drain follows the stage frontier (FLOWIP-120n).
+            let scope =
+                ctx.runtime_execution
+                    .dispatch_scope(ctx.stage_id, stage_input_position, None);
+            if super::direct_fact_continuation::start_if_eligible(
+                ctx,
+                &envelope,
+                upstream_stage,
+                stage_input_position,
+                scope,
+                flow_context,
+            )
+            .await?
+            {
+                return super::direct_fact_continuation::service(sup, ctx, flow_context).await;
+            }
+
             let envelope_clone = envelope.clone();
             let handler = &ctx.handler;
             let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
+            let handler_heartbeat_state = heartbeat_state.clone();
             let effect_context = stage_input_position.and_then(|input_seq| {
                 ctx.writer_id.map(|writer_id| EffectInvocationContext {
                     flow_id: ctx.flow_id,
@@ -211,10 +234,6 @@ async fn dispatch_draining_inner<
             });
 
             // FLOWIP-120c H3: per-event scope, same as the running path.
-            // Generation None: drain follows the stage frontier (FLOWIP-120n).
-            let scope =
-                ctx.runtime_execution
-                    .dispatch_scope(ctx.stage_id, stage_input_position, None);
             run_before_handler_observers(
                 &ctx.observers,
                 ctx.stage_id,
@@ -228,43 +247,87 @@ async fn dispatch_draining_inner<
                 &envelope,
             )
             .await?;
-            let mut transformed_events =
+            let transformed_result =
                 process_with_instrumentation(&ctx.instrumentation, || async move {
                     let event = envelope_clone.event.clone();
                     let event_id = event.id;
 
                     if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
-                        if let Some(state) = &heartbeat_state {
+                        if let Some(state) = &handler_heartbeat_state {
                             state.record_last_consumed(event_id);
                         }
                         return Ok(vec![event]);
                     }
 
-                    let _processing = heartbeat_state.as_ref().map(|state| {
+                    let _processing = handler_heartbeat_state.as_ref().map(|state| {
                         HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
                     });
 
                     match handler.process(event, effect_context, scope).await {
                         Ok(outputs) => {
-                            if let Some(state) = &heartbeat_state {
+                            if let Some(state) = &handler_heartbeat_state {
                                 state.record_last_consumed(event_id);
                             }
                             Ok(outputs)
                         }
                         Err(err) => {
+                            if err.is_fatal() {
+                                return Err(
+                                    Box::new(err) as Box<dyn std::error::Error + Send + Sync>
+                                );
+                            }
                             let reason = format!("Transform handler error during drain: {err:?}");
                             let error_event = envelope_clone
                                 .event
                                 .clone()
                                 .mark_as_error(reason, err.kind());
-                            if let Some(state) = &heartbeat_state {
+                            if let Some(state) = &handler_heartbeat_state {
                                 state.record_last_consumed(event_id);
                             }
                             Ok(vec![error_event])
                         }
                     }
                 })
-                .await?;
+                .await;
+            let mut transformed_events = match transformed_result {
+                Ok(events) => events,
+                Err(error) => {
+                    if let Some(handler_error) =
+                        error.downcast_ref::<crate::stages::common::handler_error::HandlerError>()
+                    {
+                        if let Some(fatal) = handler_error.as_fatal() {
+                            let writer_id = ctx.writer_id.ok_or_else(|| {
+                                "fatal transform drain input has no stage writer id".to_string()
+                            })?;
+                            record_stage_fatal(
+                                fatal,
+                                StageFatalCommit {
+                                    error_journal: &ctx.error_journal,
+                                    writer_id,
+                                    stage_id: ctx.stage_id,
+                                    stage_key: &ctx.stage_name,
+                                    input_position: stage_input_position,
+                                    parent: Some(&envelope),
+                                    lineage: ctx.lineage_policy,
+                                },
+                            )
+                            .await?;
+                            if let Some(upstream) = upstream_stage {
+                                if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                                    reader.ack_consumed(1);
+                                }
+                            }
+                            if let Some(state) = &heartbeat_state {
+                                state.record_last_consumed(envelope.event.id);
+                            }
+                            return Ok(EventLoopDirective::Transition(TransformEvent::Error(
+                                fatal.detail.clone(),
+                            )));
+                        }
+                    }
+                    return Err(error);
+                }
+            };
             run_after_handler_observers(
                 &ctx.observers,
                 ctx.stage_id,

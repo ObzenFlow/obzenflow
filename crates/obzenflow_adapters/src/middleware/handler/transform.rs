@@ -134,6 +134,9 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         let mut results = match transform_fn(event.clone()) {
             Ok(results) => results,
             Err(err) => {
+                if err.is_fatal() {
+                    return Err(err);
+                }
                 let reason = format!("Transform handler error: {err:?}");
                 vec![event.clone().mark_as_error(reason, err.kind())]
             }
@@ -364,6 +367,9 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
             let mut results = match transform_fn(original.clone()).await {
                 Ok(results) => results,
                 Err(err) => {
+                    if err.is_fatal() {
+                        return Err(err);
+                    }
                     if let HandlerError::RateLimited {
                         retry_after: Some(wait),
                         ..
@@ -601,6 +607,9 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
             {
                 Ok(results) => results,
                 Err(err) => {
+                    if err.is_fatal() {
+                        return Err(err);
+                    }
                     let reason = format!("Transform handler error: {err:?}");
                     vec![event.clone().mark_as_error(reason, err.kind())]
                 }
@@ -667,6 +676,9 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
         {
             Ok(results) => results,
             Err(err) => {
+                if err.is_fatal() {
+                    return Err(err);
+                }
                 let reason = format!("Transform handler error: {err:?}");
                 vec![event.clone().mark_as_error(reason, err.kind())]
             }
