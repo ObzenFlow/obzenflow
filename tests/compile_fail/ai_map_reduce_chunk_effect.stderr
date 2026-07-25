@@ -1,13 +1,13 @@
 error: ai_map_reduce!: role 'chunk' cannot declare effects; expected 'map' or 'reduce'
-  --> tests/compile_fail/ai_map_reduce_chunk_effect.rs:4:13
+  --> tests/compile_fail/ai_map_reduce_chunk_effect.rs:8:13
    |
- 4 |       let _ = ai_map_reduce!(
+ 8 |       let _ = ai_map_reduce!(
    |  _____________^
- 5 | |         Seed -> Out => {
- 6 | |             map: [Item] -> Partial => map_role,
- 7 | |             reduce: (Seed, [Partial]) -> Out => finalise_role,
+ 9 | |         Seed -> Out => {
+10 | |             map: [Item] -> Partial => map_role,
+11 | |             reduce: (Seed, [Partial]) -> Out => finalise_role,
 ...  |
-17 | |     );
+21 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_ai_map_reduce_effects_contract` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)

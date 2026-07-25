@@ -203,6 +203,11 @@ name = "hn_ai_digest_demo"
 path = "examples/hn_ai_digest_demo/main.rs"
 required-features = ["http-pull", "ai"]
 
+[[test]]
+name = "hn_ai_digest_effect_replay_journal_test"
+path = "tests/hn_ai_digest_effect_replay_journal_test.rs"
+required-features = ["http-pull", "ai"]
+
 [[example]]
 name = "multi_source_ingest_demo"
 path = "examples/multi_source_ingest_demo/main.rs"

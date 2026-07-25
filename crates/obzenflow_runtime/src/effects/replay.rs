@@ -450,7 +450,7 @@ where
                 error_message: error_message.clone(),
                 retry: *retry,
                 cause: cause.clone(),
-                detail: detail.clone(),
+                detail: detail.clone().map(Box::new),
             })
         }
     }
@@ -473,7 +473,7 @@ pub(super) fn recorded_failure_from_outcome<T>(
                 error_message: error_message.clone(),
                 retry: *retry,
                 cause: cause.clone(),
-                detail: detail.clone(),
+                detail: detail.clone().map(Box::new),
             })
         }
         _ => Err(EffectError::EffectProvenanceMismatch(

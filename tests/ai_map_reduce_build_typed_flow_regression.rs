@@ -14,10 +14,9 @@
 //! `ai_map_reduce!` composite end-to-end through `flow!`, awaits the build,
 //! and asserts `Ok(_)`.
 //!
-//! The handlers below are stubs: the source emits no events, the transforms
-//! return empty vectors, the sink is a no-op. The test only exercises the
-//! build path (DSL expansion + composite lowering + topology assembly +
-//! validate_edge_typing); it does not drive the runtime.
+//! The source and sink below are stubs for the build-only cases. Those tests
+//! exercise DSL expansion, composite lowering, topology assembly, and edge
+//! validation without driving the runtime.
 
 use async_trait::async_trait;
 use obzenflow_core::ai::{
@@ -34,10 +33,8 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::EffectPortRegistry;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
-use obzenflow_runtime::stages::common::handlers::{
-    AsyncTransformHandler, FiniteSourceHandler, SinkHandler, TransformHandler,
-};
-use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
+use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -59,29 +56,11 @@ struct BuildOnlyItem {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct BuildOnlyChunk {
-    chunk_index: usize,
-    chunk_count: usize,
-    value: u64,
-}
-impl TypedPayload for BuildOnlyChunk {
-    const EVENT_TYPE: &'static str = "regression.amr.chunk";
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 struct BuildOnlyPartial {
     value: u64,
 }
 impl TypedPayload for BuildOnlyPartial {
     const EVENT_TYPE: &'static str = "regression.amr.partial";
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct BuildOnlyCollected {
-    values: Vec<u64>,
-}
-impl TypedPayload for BuildOnlyCollected {
-    const EVENT_TYPE: &'static str = "regression.amr.collected";
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -271,49 +250,6 @@ impl FiniteSourceHandler for NoEventSource {
 }
 
 #[derive(Clone, Debug)]
-struct NoopChunker;
-impl TransformTyping for NoopChunker {
-    type Input = BuildOnlySeed;
-    type Output = BuildOnlyChunk;
-}
-#[async_trait]
-impl TransformHandler for NoopChunker {
-    fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct NoopMap;
-#[async_trait]
-impl AsyncTransformHandler for NoopMap {
-    async fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct NoopFinalize;
-#[async_trait]
-impl AsyncTransformHandler for NoopFinalize {
-    async fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
 struct NoopSink;
 #[async_trait]
 impl SinkHandler for NoopSink {
@@ -402,94 +338,6 @@ impl FiniteSourceHandler for OneSeedSource {
             BuildOnlySeed::versioned_event_type(),
             json!(BuildOnlySeed { n: 5 }),
         )]))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct RuntimeChunker;
-
-impl TransformTyping for RuntimeChunker {
-    type Input = BuildOnlySeed;
-    type Output = BuildOnlyChunk;
-}
-
-#[async_trait]
-impl TransformHandler for RuntimeChunker {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let chunk_count = 5;
-        let mut out = Vec::new();
-        for chunk_index in 0..chunk_count {
-            out.push(ChainEventFactory::derived_data_event(
-                event.writer_id,
-                &event,
-                BuildOnlyChunk::versioned_event_type(),
-                json!(BuildOnlyChunk {
-                    chunk_index,
-                    chunk_count,
-                    value: (chunk_index as u64) + 1,
-                }),
-                obzenflow_core::config::LineagePolicy::default(),
-            ));
-        }
-        Ok(out)
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct RuntimeMap;
-
-#[async_trait]
-impl AsyncTransformHandler for RuntimeMap {
-    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let ChainEventContent::Data { payload, .. } = &event.content else {
-            return Ok(Vec::new());
-        };
-        let chunk: BuildOnlyChunk = serde_json::from_value(payload.clone()).map_err(|err| {
-            HandlerError::Deserialization(format!("runtime map chunk decode failed: {err}"))
-        })?;
-        Ok(vec![ChainEventFactory::derived_data_event(
-            event.writer_id,
-            &event,
-            BuildOnlyPartial::versioned_event_type(),
-            json!(BuildOnlyPartial { value: chunk.value }),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct RuntimeFinalize;
-
-#[async_trait]
-impl AsyncTransformHandler for RuntimeFinalize {
-    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let ChainEventContent::Data { payload, .. } = &event.content else {
-            return Ok(Vec::new());
-        };
-        let collected: BuildOnlyCollected =
-            serde_json::from_value(payload.clone()).map_err(|err| {
-                HandlerError::Deserialization(format!("runtime finalize decode failed: {err}"))
-            })?;
-        let total = collected.values.iter().copied().sum();
-        Ok(vec![ChainEventFactory::derived_data_event(
-            event.writer_id,
-            &event,
-            BuildOnlyOut::versioned_event_type(),
-            json!(BuildOnlyOut { total }),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
     }
 }
 

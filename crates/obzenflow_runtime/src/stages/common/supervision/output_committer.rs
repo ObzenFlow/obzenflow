@@ -663,38 +663,6 @@ fn validate_observer_diagnostics(report: &ObserverReport) -> Result<(), CommitEr
     Ok(())
 }
 
-#[cfg(test)]
-mod observer_diagnostic_tests {
-    use super::*;
-    use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::{StageId, WriterId};
-
-    #[test]
-    fn observer_reports_reject_data_and_flow_control_before_append() {
-        let writer = WriterId::from(StageId::new());
-        let reports = [
-            ObserverReport::empty().with_diagnostic(ChainEventFactory::data_event(
-                writer,
-                "test.rogue",
-                serde_json::json!({ "value": 1 }),
-            )),
-            ObserverReport::empty().with_diagnostic(ChainEventFactory::eof_event(writer, true)),
-        ];
-
-        for report in reports {
-            let diagnostic = &report.diagnostics[0];
-            assert!(
-                diagnostic.is_data() || diagnostic.is_control(),
-                "fixture must exercise a prohibited observer side channel"
-            );
-            assert!(
-                validate_observer_diagnostics(&report).is_err(),
-                "prohibited diagnostics must fail before any journal append"
-            );
-        }
-    }
-}
-
 fn value_preserving_projection(event: &ChainEvent) -> Result<serde_json::Value, CommitError> {
     let mut value = serde_json::to_value(event).map_err(|e| -> CommitError { e.into() })?;
     if let Some(processing) = value
@@ -746,5 +714,37 @@ fn apply_runtime_journey_identity(event: &mut ChainEvent, flow: &FlowContext) {
             stage_name = %flow.stage_name,
             "Non-source derived data event missing correlation_id"
         );
+    }
+}
+
+#[cfg(test)]
+mod observer_diagnostic_tests {
+    use super::*;
+    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::{StageId, WriterId};
+
+    #[test]
+    fn observer_reports_reject_data_and_flow_control_before_append() {
+        let writer = WriterId::from(StageId::new());
+        let reports = [
+            ObserverReport::empty().with_diagnostic(ChainEventFactory::data_event(
+                writer,
+                "test.rogue",
+                serde_json::json!({ "value": 1 }),
+            )),
+            ObserverReport::empty().with_diagnostic(ChainEventFactory::eof_event(writer, true)),
+        ];
+
+        for report in reports {
+            let diagnostic = &report.diagnostics[0];
+            assert!(
+                diagnostic.is_data() || diagnostic.is_control(),
+                "fixture must exercise a prohibited observer side channel"
+            );
+            assert!(
+                validate_observer_diagnostics(&report).is_err(),
+                "prohibited diagnostics must fail before any journal append"
+            );
+        }
     }
 }

@@ -39,7 +39,7 @@ pub enum EffectError {
         error_message: String,
         retry: RetryDisposition,
         cause: Option<EffectFailureCause>,
-        detail: Option<EffectFailureDetail>,
+        detail: Option<Box<EffectFailureDetail>>,
     },
 
     #[error("effect rejected at boundary by {rejected_by}: {code}: {message}")]
@@ -357,7 +357,7 @@ impl EffectError {
                 expected: expected.clone(),
                 observed: observed.clone(),
             }),
-            Self::RecordedFailure { detail, .. } => detail.clone(),
+            Self::RecordedFailure { detail, .. } => detail.as_deref().cloned(),
             _ => None,
         }
     }
@@ -388,7 +388,7 @@ mod tests {
             error_message: live.error_message(),
             retry: live.retry_disposition(),
             cause: live.failure_cause(),
-            detail: live.failure_detail(),
+            detail: live.failure_detail().map(Box::new),
         };
         assert_eq!(replayed.semantic_reason(), live.semantic_reason());
         assert_eq!(

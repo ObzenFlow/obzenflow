@@ -157,20 +157,21 @@ fn fatal_from_effect(error: EffectError) -> HandlerError {
             ),
         ),
         EffectError::RecordedFailure {
-            detail:
-                Some(EffectFailureDetail::PortBindingInvariantViolation {
-                    port,
-                    expected,
-                    observed,
-                }),
+            detail: Some(detail),
             ..
-        } => fatal(
-            StageFatalCode::Configuration,
-            StageFatalReason::EffectPortTargetInvariantViolation,
-            format!(
-                "effect port '{port}' target invariant failed: expected {expected}, observed {observed}"
+        } => match *detail {
+            EffectFailureDetail::PortBindingInvariantViolation {
+                port,
+                expected,
+                observed,
+            } => fatal(
+                StageFatalCode::Configuration,
+                StageFatalReason::EffectPortTargetInvariantViolation,
+                format!(
+                    "effect port '{port}' target invariant failed: expected {expected}, observed {observed}"
+                ),
             ),
-        ),
+        },
         EffectError::Journal(message) => fatal(
             StageFatalCode::Journal,
             StageFatalReason::JournalFailure,

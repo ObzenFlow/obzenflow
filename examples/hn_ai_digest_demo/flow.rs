@@ -314,17 +314,14 @@ fn digest_reduce_parse(
     })
 }
 
-fn resolve_hn_group_budget(
-    budget_override: Option<TokenCount>,
-    target: &ChatTarget,
-) -> Result<TokenCount, FlowBuildError> {
-    Ok(budget_override.unwrap_or_else(|| {
+fn resolve_hn_group_budget(budget_override: Option<TokenCount>, target: &ChatTarget) -> TokenCount {
+    budget_override.unwrap_or_else(|| {
         TokenCount::new(if target.provider.as_str() == "ollama" {
             2_500
         } else {
             6_000
         })
-    }))
+    })
 }
 
 pub(crate) struct HnFlowOptions {
@@ -409,7 +406,7 @@ pub(crate) fn build_flow_definition(
             let resolved_estimator = chat.resolved_estimator().clone();
             let estimator = resolved_estimator.estimator();
             let budget_per_group =
-                resolve_hn_group_budget(budget_per_group_override, &chat_target)?;
+                resolve_hn_group_budget(budget_per_group_override, &chat_target);
             let map_role = HnMapRole::new(
                 chat_target.clone(),
                 system_prompt.clone(),
