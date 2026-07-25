@@ -231,10 +231,7 @@ impl ChatClient for RigChatClient {
 fn validate_request_target(req: &ChatRequest, bound: &ChatTarget) -> Result<(), AiClientError> {
     let requested = req.target();
     if !requested.logically_matches(bound) {
-        return Err(AiClientError::TargetMismatch {
-            requested,
-            bound: bound.clone(),
-        });
+        return Err(AiClientError::target_mismatch(requested, bound.clone()));
     }
 
     Ok(())

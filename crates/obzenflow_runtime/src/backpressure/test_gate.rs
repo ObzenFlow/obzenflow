@@ -6,9 +6,12 @@ use super::{publish_acknowledgements, EdgeState};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+type GateKey = (String, String);
+type GateRegistry = Mutex<HashMap<GateKey, Weak<BackpressureAckGateState>>>;
+
 #[derive(Debug)]
 pub(super) struct BackpressureAckGateState {
-    key: (String, String),
+    key: GateKey,
     counts: Mutex<Counts>,
     edge: Mutex<Option<Weak<EdgeState>>>,
     changed: tokio::sync::Notify,
@@ -179,8 +182,7 @@ pub(super) fn gate_for(upstream: &str, downstream: &str) -> Option<Arc<Backpress
         .and_then(Weak::upgrade)
 }
 
-fn gates() -> &'static Mutex<HashMap<(String, String), Weak<BackpressureAckGateState>>> {
-    static GATES: OnceLock<Mutex<HashMap<(String, String), Weak<BackpressureAckGateState>>>> =
-        OnceLock::new();
+fn gates() -> &'static GateRegistry {
+    static GATES: OnceLock<GateRegistry> = OnceLock::new();
     GATES.get_or_init(|| Mutex::new(HashMap::new()))
 }

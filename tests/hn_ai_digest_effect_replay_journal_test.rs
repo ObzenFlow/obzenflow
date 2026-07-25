@@ -394,10 +394,10 @@ fn post_start_mismatch_port(
                 target: target(),
                 calls,
                 forbidden: false,
-                response_error: Some(AiClientError::TargetMismatch {
-                    requested: ChatTarget::new("fixture", "mutated-after-start"),
-                    bound: target(),
-                }),
+                response_error: Some(AiClientError::target_mismatch(
+                    ChatTarget::new("fixture", "mutated-after-start"),
+                    target(),
+                )),
             }) as Arc<dyn ChatClient>)
         })
     });

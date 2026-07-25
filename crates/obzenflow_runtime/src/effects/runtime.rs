@@ -15,6 +15,16 @@ type ExecutedOutcomeSlot<O> = Arc<Mutex<Option<(O, Vec<TypedFact>)>>>;
 type TransactionalSettleSlot<O> =
     Arc<Mutex<Option<(Result<(), EffectError>, Option<PreparedEffectOutcome<O>>)>>>;
 
+struct RecoveryAbandonment {
+    cursor: EffectCursor,
+    descriptor_hash: EffectDescriptorHash,
+    descriptor: EffectDescriptor,
+    highest_started_attempt: EffectAttemptOrdinal,
+    causal_input_id: EventId,
+    reason: EffectAbortReason,
+    control_events: Vec<ChainEvent>,
+}
+
 fn split_invariant_control_events(
     cursor: &EffectCursor,
     attempt: EffectAttemptOrdinal,
@@ -1045,15 +1055,15 @@ impl EffectsCore {
                         "effect cursor {cursor:?} selected recovery abandonment without an archived Start identity"
                     ))
                 })?;
-                self.record_recovery_abandonment(
+                self.record_recovery_abandonment(RecoveryAbandonment {
                     cursor,
                     descriptor_hash,
                     descriptor,
-                    EffectAttemptOrdinal::new(highest_prior_attempt),
+                    highest_started_attempt: EffectAttemptOrdinal::new(highest_prior_attempt),
                     causal_input_id,
                     reason,
                     control_events,
-                )
+                })
                 .await
             }
         }
@@ -1214,14 +1224,17 @@ impl EffectsCore {
 
     async fn record_recovery_abandonment<T>(
         &self,
-        cursor: EffectCursor,
-        descriptor_hash: EffectDescriptorHash,
-        descriptor: EffectDescriptor,
-        highest_started_attempt: EffectAttemptOrdinal,
-        causal_input_id: EventId,
-        reason: EffectAbortReason,
-        control_events: Vec<ChainEvent>,
+        abandonment: RecoveryAbandonment,
     ) -> Result<T, EffectError> {
+        let RecoveryAbandonment {
+            cursor,
+            descriptor_hash,
+            descriptor,
+            highest_started_attempt,
+            causal_input_id,
+            reason,
+            control_events,
+        } = abandonment;
         let error = EffectError::RecoveryAbandoned {
             last_started_attempt: highest_started_attempt,
             failure_source: reason.cause.source.clone(),

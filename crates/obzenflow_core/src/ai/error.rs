@@ -32,12 +32,21 @@ pub enum AiClientError {
 
     #[error("chat target mismatch: requested {requested}, bound {bound}")]
     TargetMismatch {
-        requested: ChatTarget,
-        bound: ChatTarget,
+        requested: Box<ChatTarget>,
+        bound: Box<ChatTarget>,
     },
 
     #[error("other AI client error: {message}")]
     Other { message: String },
+}
+
+impl AiClientError {
+    pub fn target_mismatch(requested: ChatTarget, bound: ChatTarget) -> Self {
+        Self::TargetMismatch {
+            requested: Box::new(requested),
+            bound: Box::new(bound),
+        }
+    }
 }
 
 /// Provider/runtime-agnostic structured-output failure taxonomy.
