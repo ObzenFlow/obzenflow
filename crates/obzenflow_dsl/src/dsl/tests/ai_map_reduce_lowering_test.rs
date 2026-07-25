@@ -475,16 +475,22 @@ mod tests {
         );
         assert_eq!(
             entry_meta.output_type,
-            TypeHint::exact_payload::<obzenflow_core::ai::ChunkEnvelope<TestItem>>(),
-            "entry stage output_type is the generated chunk envelope"
+            TypeHint::exact_payload::<
+                obzenflow_core::ai::AiMapReduceMapInput<
+                    obzenflow_core::ai::ChunkEnvelope<TestItem>,
+                >,
+            >(),
+            "entry stage output_type is the generated map-input carrier"
         );
         assert!(
             entry_meta
                 .output_contract
                 .contains(&TypeHint::exact_payload::<
-                    obzenflow_core::ai::ChunkEnvelope<TestItem>,
+                    obzenflow_core::ai::AiMapReduceMapInput<
+                        obzenflow_core::ai::ChunkEnvelope<TestItem>,
+                    >,
                 >()),
-            "entry output contract must include chunk envelopes"
+            "entry output contract must include generated map-input carriers"
         );
         assert!(
             entry_meta
@@ -1003,13 +1009,13 @@ mod tests {
         plan_text.push_str(&contract_lines.join("\n"));
         plan_text.push('\n');
         insta::assert_snapshot!(plan_text, @r###"
-        feed digest__chunk -> digest__map role=input key=ai.chunk_envelope.v1 visibility=routable
+        feed digest__chunk -> digest__map role=input key=ai.map_reduce.map_input.v1 visibility=routable
         feed digest__chunk -> digest__map role=input key=ai.map_reduce.planning_manifest.v1 visibility=routable
         feed digest__collect -> digest__finalize role=input key=ai.map_reduce.reduce_input.v2 visibility=routable
         feed digest__map -> digest__collect role=input key=ai.map_reduce.chunk_failed.v2 visibility=routable
         feed digest__map -> digest__collect role=input key=ai.map_reduce.planning_manifest.v1 visibility=routable
         feed digest__map -> digest__collect role=input key=ai.map_reduce.tagged_partial.v1 visibility=routable
-        contract digest__chunk key=ai.chunk_envelope.v1 visibility=routable
+        contract digest__chunk key=ai.map_reduce.map_input.v1 visibility=routable
         contract digest__chunk key=ai.map_reduce.planning_failed.v1 visibility=unrouted
         contract digest__chunk key=ai.map_reduce.planning_manifest.v1 visibility=routable
         contract digest__collect key=ai.map_reduce.job_failed.v1 visibility=unrouted

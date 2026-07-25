@@ -186,20 +186,24 @@ fn test_effect_ports() -> EffectPortRegistry {
         .expect("one deterministic chat port")
 }
 
+fn test_estimator(model: &str) -> ResolvedTokenEstimator {
+    ResolvedTokenEstimator::new(
+        Arc::new(HeuristicTokenEstimator::default()),
+        TokenEstimatorResolutionInfo::heuristic(
+            model,
+            TokenEstimatorFallbackReason::ExplicitHeuristic,
+            None,
+        ),
+    )
+}
+
 macro_rules! generated_digest {
     () => {{
         generated_digest!("deterministic")
     }};
     ($estimator_model:expr) => {{
         let target = test_target();
-        let estimator = ResolvedTokenEstimator::new(
-            Arc::new(HeuristicTokenEstimator::default()),
-            TokenEstimatorResolutionInfo::heuristic(
-                $estimator_model,
-                TokenEstimatorFallbackReason::ExplicitHeuristic,
-                None,
-            ),
-        );
+        let estimator = test_estimator($estimator_model);
         ai_map_reduce!(
             BuildOnlySeed -> BuildOnlyOut => {
                 map: [BuildOnlyItem] -> BuildOnlyPartial => BuildMapRole {
@@ -380,6 +384,134 @@ async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
              {err:?}"
         )
     });
+}
+
+#[tokio::test]
+async fn flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
+    let result = flow! {
+        name: "amr_flow_binding_hygiene",
+        journals: memory_journals(),
+        middleware: [],
+        bindings: |_runtime_config| {
+            let bound_chat_target = test_target();
+            let bound_chat_estimator = test_estimator("deterministic");
+            let bound_map_role = BuildMapRole {
+                target: bound_chat_target.clone(),
+            };
+            let bound_finalise_role = BuildFinaliseRole {
+                target: bound_chat_target.clone(),
+            };
+            let bound_effect_ports = test_effect_ports();
+        },
+        effect_ports: bound_effect_ports,
+
+        stages: {
+            seed = source!(BuildOnlySeed => NoEventSource);
+            digest = ai_map_reduce!(
+                BuildOnlySeed -> BuildOnlyOut => {
+                    map: [BuildOnlyItem] -> BuildOnlyPartial => bound_map_role,
+                    reduce: (BuildOnlySeed, [BuildOnlyPartial]) -> BuildOnlyOut
+                        => bound_finalise_role,
+                },
+                chunking: by_budget {
+                    estimator: bound_chat_estimator.estimator(),
+                    items: |seed: &BuildOnlySeed| {
+                        (1..=seed.n)
+                            .map(|value| BuildOnlyItem { value })
+                            .collect::<Vec<_>>()
+                    },
+                    render: |item: &BuildOnlyItem, _ctx| item.value.to_string(),
+                    budget: TokenCount::new(100),
+                    max_items: Some(1),
+                    oversize: error,
+                },
+                effects: {
+                    chat_target: bound_chat_target,
+                    chat_estimator: bound_chat_estimator,
+                    map: [at_least_once(ChatCompletion) with [
+                        obzenflow_adapters::middleware::control::ai_resilience()
+                    ]],
+                    reduce: [at_least_once(ChatCompletion) with [
+                        obzenflow_adapters::middleware::control::ai_resilience()
+                    ]],
+                }
+            );
+            sink_stage = sink!(BuildOnlyOut => NoopSink);
+        },
+
+        topology: {
+            seed |> digest;
+            digest |> sink_stage;
+        }
+    }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await;
+
+    let _handle = result.expect("flow! bindings must remain visible to later clauses");
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn test_flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
+    let result = obzenflow_dsl::test_flow! {
+        name: "amr_test_flow_binding_hygiene",
+        journals: memory_journals(),
+        middleware: [],
+        bindings: |_runtime_config| {
+            let bound_chat_target = test_target();
+            let bound_chat_estimator = test_estimator("deterministic");
+            let bound_map_role = BuildMapRole {
+                target: bound_chat_target.clone(),
+            };
+            let bound_finalise_role = BuildFinaliseRole {
+                target: bound_chat_target.clone(),
+            };
+            let bound_effect_ports = test_effect_ports();
+        },
+        effect_ports: bound_effect_ports,
+
+        stages: {
+            seed = source!(BuildOnlySeed => NoEventSource);
+            digest = ai_map_reduce!(
+                BuildOnlySeed -> BuildOnlyOut => {
+                    map: [BuildOnlyItem] -> BuildOnlyPartial => bound_map_role,
+                    reduce: (BuildOnlySeed, [BuildOnlyPartial]) -> BuildOnlyOut
+                        => bound_finalise_role,
+                },
+                chunking: by_budget {
+                    estimator: bound_chat_estimator.estimator(),
+                    items: |seed: &BuildOnlySeed| {
+                        (1..=seed.n)
+                            .map(|value| BuildOnlyItem { value })
+                            .collect::<Vec<_>>()
+                    },
+                    render: |item: &BuildOnlyItem, _ctx| item.value.to_string(),
+                    budget: TokenCount::new(100),
+                    max_items: Some(1),
+                    oversize: error,
+                },
+                effects: {
+                    chat_target: bound_chat_target,
+                    chat_estimator: bound_chat_estimator,
+                    map: [at_least_once(ChatCompletion) with [
+                        obzenflow_adapters::middleware::control::ai_resilience()
+                    ]],
+                    reduce: [at_least_once(ChatCompletion) with [
+                        obzenflow_adapters::middleware::control::ai_resilience()
+                    ]],
+                }
+            );
+            sink_stage = sink!(BuildOnlyOut => NoopSink);
+        },
+
+        topology: {
+            seed |> digest;
+            digest |> sink_stage;
+        }
+    }
+    .await;
+
+    let _harness = result.expect("test_flow! bindings must remain visible to later clauses");
 }
 
 #[tokio::test]

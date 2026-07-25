@@ -8,7 +8,7 @@ use obzenflow_topology::TopologyBuilder;
 use std::num::NonZeroU64;
 
 #[test]
-fn backpressure_bypass_env_var_allows_progress_while_credits_are_exhausted() {
+fn backpressure_bypass_env_var_preserves_generic_progress_but_rejects_generated_enforcement() {
     // NOTE: bypass is latched via OnceLock, so this must be set before any call
     // to BackpressureWriter::reserve in this test binary.
     std::env::set_var("OBZENFLOW_BACKPRESSURE_DISABLED", "1");
@@ -30,6 +30,14 @@ fn backpressure_bypass_env_var_allows_progress_while_credits_are_exhausted() {
 
     let writer = registry.writer(s);
     let _reader = registry.reader(s, d);
+
+    let generated_error = writer
+        .validate_generated_direct_bound(NonZeroU64::new(3).expect("generated bound"))
+        .expect_err("the debug bypass must not weaken a generated enforced plan");
+    assert!(
+        generated_error.contains("OBZENFLOW_BACKPRESSURE_DISABLED"),
+        "generated-plan rejection must name the active bypass: {generated_error}"
+    );
 
     // Without bypass, this would block after 1 commit. With bypass enabled, it should
     // continue to reserve/commit even though downstream never acks.
