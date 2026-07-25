@@ -356,7 +356,14 @@ pub(crate) fn build_flow_definition(
     let journal_base = options.journal_base;
     let chat_resolver_override = options.chat_resolver_override;
 
-    let base_url_for_summary = base_url.to_string();
+    // The mock server binds an ephemeral loopback port for each process. Keep
+    // that physical URL on the HTTP source only; durable output names the
+    // logical mock source so strict replay remains byte-stable.
+    let base_url_for_summary = if mode_label_for_summary == "mock" {
+        "mock://hacker-news/".to_string()
+    } else {
+        base_url.to_string()
+    };
 
     let decoder = hn_story_decoder(base_url, max_stories);
     let config = http_pull_config()
