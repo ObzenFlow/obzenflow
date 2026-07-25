@@ -4,6 +4,9 @@
 
 //! Deferred, single-target chat-effect binding.
 
+use super::endpoint_identity::{
+    bound_chat_target, default_ollama_base_url, default_openai_base_url,
+};
 use super::resolve_estimator_for_model;
 use crate::ai::rig::RigChatClient;
 use obzenflow_core::ai::{AiProvider, ChatClient, ChatTarget, ResolvedTokenEstimator};
@@ -65,22 +68,34 @@ impl ChatEffectBinding {
             .map(|resolved| parse_url(&resolved.value))
             .transpose()?;
 
-        let deferred = match provider.as_str() {
-            "ollama" => DeferredProvider::Ollama { base_url },
-            "openai" => DeferredProvider::OpenAi {
-                api_key: config.api_key_env.value.clone(),
-            },
-            "openai_compatible" => DeferredProvider::OpenAiCompatible {
-                api_key: config.api_key_env.value.clone(),
-                base_url: base_url.ok_or(ChatEffectBindingError::MissingBaseUrl)?,
-            },
+        let (deferred, endpoint) = match provider.as_str() {
+            "ollama" => {
+                let endpoint = base_url.clone().unwrap_or_else(default_ollama_base_url);
+                (DeferredProvider::Ollama { base_url }, endpoint)
+            }
+            "openai" => (
+                DeferredProvider::OpenAi {
+                    api_key: config.api_key_env.value.clone(),
+                },
+                default_openai_base_url(),
+            ),
+            "openai_compatible" => {
+                let endpoint = base_url.ok_or(ChatEffectBindingError::MissingBaseUrl)?;
+                (
+                    DeferredProvider::OpenAiCompatible {
+                        api_key: config.api_key_env.value.clone(),
+                        base_url: endpoint.clone(),
+                    },
+                    endpoint,
+                )
+            }
             _ => {
                 return Err(ChatEffectBindingError::UnsupportedProvider {
                     provider: provider.clone(),
                 })
             }
         };
-        let target = ChatTarget::new(AiProvider::new(provider), model.clone());
+        let target = bound_chat_target(AiProvider::new(provider), model.clone(), &endpoint);
         let estimator = resolve_estimator_for_model(&model);
         Ok(Self {
             target,
@@ -202,13 +217,42 @@ mod tests {
         ))
         .expect("local non-secret binding construction succeeds");
 
-        assert_eq!(
-            binding.target(),
-            &ChatTarget::new("openai_compatible", "fixture-model")
-        );
+        assert!(binding
+            .target()
+            .logically_matches(&ChatTarget::new("openai_compatible", "fixture-model")));
+        assert!(binding.target().binding_fingerprint.is_some());
         assert_eq!(
             binding.resolved_estimator().info().model,
             binding.target().model
         );
+    }
+
+    #[test]
+    fn compatible_endpoint_is_part_of_the_non_secret_binding_identity() {
+        let left = ChatEffectBinding::from_config(&config(
+            "openai_compatible",
+            Some("fixture-model"),
+            Some("http://127.0.0.1:12345/v1"),
+        ))
+        .unwrap();
+        let equivalent = ChatEffectBinding::from_config(&config(
+            "openai_compatible",
+            Some("fixture-model"),
+            Some("http://127.0.0.1:12345/v1/"),
+        ))
+        .unwrap();
+        let right = ChatEffectBinding::from_config(&config(
+            "openai_compatible",
+            Some("fixture-model"),
+            Some("http://127.0.0.1:54321/v1"),
+        ))
+        .unwrap();
+
+        assert_eq!(left.target(), equivalent.target());
+        assert_ne!(left.target(), right.target());
+
+        let encoded = serde_json::to_string(left.target()).unwrap();
+        assert!(!encoded.contains("127.0.0.1"));
+        assert!(!encoded.contains("12345"));
     }
 }

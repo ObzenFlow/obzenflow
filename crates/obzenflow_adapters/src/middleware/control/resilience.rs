@@ -27,6 +27,8 @@ use obzenflow_core::event::{
     ChainEventFactory, CircuitBreakerAttemptSettledEventParams,
     CircuitBreakerRecoveryCompletedEventParams, EffectFailureCause,
 };
+#[cfg(feature = "test-support")]
+use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 #[cfg(test)]
 use obzenflow_runtime::effects::EffectCursor;
@@ -62,21 +64,36 @@ pub struct EffectResilienceBuilder {
     rate_limiter: Option<RateLimiter>,
 }
 
+fn fixed_ai_breaker() -> CircuitBreaker {
+    CircuitBreaker::builder()
+        .consecutive_failures(5)
+        .open_for(Duration::from_secs(60))
+        .probes(1)
+        .build()
+        .expect("the fixed AI resilience breaker configuration is valid")
+}
+
 /// Fixed no-retry resilience policy for generated AI chat effects.
 ///
 /// Map and finalise each receive their own instance: five consecutive
 /// unhealthy calls open the breaker for sixty seconds, with one half-open
 /// probe. Transport retries, if any, remain below the chat port contract.
 pub fn ai_resilience() -> Box<dyn MiddlewareFactory> {
-    let breaker = CircuitBreaker::builder()
-        .consecutive_failures(5)
-        .open_for(Duration::from_secs(60))
-        .probes(1)
-        .build()
-        .expect("the fixed AI resilience breaker configuration is valid");
-    EffectResilience::with_breaker(breaker)
+    EffectResilience::with_breaker(fixed_ai_breaker())
         .build()
         .expect("the fixed no-retry AI resilience configuration is valid")
+}
+
+/// Test-only policy with the same durable configuration as
+/// [`ai_resilience`] that rejects an affine recovery before `Start(m+1)`.
+#[cfg(feature = "test-support")]
+pub fn ai_recovery_rejecting_resilience_for_test() -> Box<dyn MiddlewareFactory> {
+    Box::new(EffectResilienceFactory {
+        breaker: fixed_ai_breaker(),
+        retry: None,
+        rate_limiter: None,
+        reject_affine_recovery_for_test: true,
+    })
 }
 
 #[derive(Debug, Error)]
@@ -127,6 +144,8 @@ impl EffectResilienceBuilder {
             breaker: self.breaker,
             retry: self.retry,
             rate_limiter: self.rate_limiter,
+            #[cfg(feature = "test-support")]
+            reject_affine_recovery_for_test: false,
         }))
     }
 }
@@ -151,6 +170,8 @@ struct EffectResilienceFactory {
     breaker: CircuitBreaker,
     retry: Option<Retry>,
     rate_limiter: Option<RateLimiter>,
+    #[cfg(feature = "test-support")]
+    reject_affine_recovery_for_test: bool,
 }
 
 impl EffectResilienceFactory {
@@ -514,6 +535,8 @@ impl MiddlewareFactory for EffectResilienceFactory {
                     breaker,
                     retry,
                     limiter,
+                    #[cfg(feature = "test-support")]
+                    reject_affine_recovery_for_test: self.reject_affine_recovery_for_test,
                     #[cfg(test)]
                     final_admission_test_gate: std::sync::Mutex::new(None),
                 }),
@@ -555,6 +578,8 @@ pub(in crate::middleware::control) struct EffectResilienceMiddleware {
     breaker: Arc<CircuitBreakerMiddleware>,
     retry: Option<Retry>,
     limiter: Option<Arc<RateLimiterMiddleware>>,
+    #[cfg(feature = "test-support")]
+    reject_affine_recovery_for_test: bool,
     #[cfg(test)]
     final_admission_test_gate: std::sync::Mutex<Option<FinalAdmissionTestGate>>,
 }
@@ -1376,6 +1401,21 @@ impl EffectResilienceMiddleware {
         debug_assert!(self.retry.is_none());
         let highest_prior_attempt = operation.highest_prior_attempt();
         let mut recovery = EffectRecoveryController::with_attempt_base(highest_prior_attempt);
+
+        #[cfg(feature = "test-support")]
+        if self.reject_affine_recovery_for_test && highest_prior_attempt > 0 {
+            let decision = recovery.finish_affine_admission(Box::new(
+                crate::middleware::MiddlewareAbortCause {
+                    source: EffectFailureSource::new("circuit_breaker"),
+                    code: EffectFailureCode::new("circuit_open"),
+                    message: "test fixture rejected affine recovery".to_string(),
+                    retry: RetryDisposition::Retryable,
+                    event: None,
+                },
+            ));
+            write_recovery_completed(&mut recovery, self.breaker.as_ref(), identity, event, ctx);
+            return affine_admission_terminal(decision, ctx, operation);
+        }
 
         let reservation_epoch = match self.breaker.effect_precheck(ctx, None) {
             Ok(epoch) => epoch,

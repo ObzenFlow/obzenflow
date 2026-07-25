@@ -33,15 +33,16 @@ pub use chunking::{
 };
 pub use error::{AiClientError, StructuredOutputError};
 pub use hashing::{
-    params_hash_for_chat, params_hash_for_embedding, prompt_hash_for_chat,
-    prompt_hash_for_embedding_inputs, schema_hash_for_response_format, schema_hash_from_json,
-    schema_hash_from_text, AiHashError, LLM_HASH_VERSION_SHA256_V1,
+    chat_binding_fingerprint, params_hash_for_chat, params_hash_for_embedding,
+    prompt_hash_for_chat, prompt_hash_for_embedding_inputs, schema_hash_for_response_format,
+    schema_hash_from_json, schema_hash_from_text, AiHashError,
+    CHAT_BINDING_FINGERPRINT_VERSION_SHA256_V1, LLM_HASH_VERSION_SHA256_V1,
 };
 pub use map_reduce::{
     AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceJobFailed,
-    AiMapReducePlanningFailed, AiMapReducePlanningFailure, AiMapReducePlanningManifest,
-    AiMapReduceReduceInput, AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiMapRole,
-    AiProviderFailureKind, AiRoleLogicFailure, Many,
+    AiMapReduceMapInput, AiMapReducePlanningFailed, AiMapReducePlanningFailure,
+    AiMapReducePlanningManifest, AiMapReduceReduceInput, AiMapReduceRoleFailure,
+    AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind, AiRoleLogicFailure, Many,
 };
 pub use model_profile::{ChatModelProfile, ContextWindowSource};
 pub use observability::{
@@ -56,8 +57,8 @@ pub use token_estimation::{
     TokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 pub use types::{
-    AiProvider, CanonicalizationComponent, ChatCompletionCompleted, ChatMessage, ChatParams,
-    ChatRequest, ChatResponse, ChatResponseFormat, ChatRole, ChatTarget, EmbeddingParams,
-    EmbeddingRequest, EmbeddingResponse, SystemPrompt, ToolCall, ToolDefinition, Usage,
-    UsageSource, UserPrompt,
+    AiProvider, CanonicalizationComponent, ChatBindingFingerprint, ChatCompletionCompleted,
+    ChatMessage, ChatParams, ChatRequest, ChatResponse, ChatResponseFormat, ChatRole, ChatTarget,
+    EmbeddingParams, EmbeddingRequest, EmbeddingResponse, SystemPrompt, ToolCall, ToolDefinition,
+    Usage, UsageSource, UserPrompt,
 };

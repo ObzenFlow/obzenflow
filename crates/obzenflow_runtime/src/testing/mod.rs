@@ -23,6 +23,7 @@ pub mod probe;
 pub mod stage_journal;
 pub mod test_clock;
 
+pub use crate::backpressure::BackpressureAckGate;
 pub use delivered_order::{DeliveredOrderProjection, DeliveredOrderRow};
 pub use flow_test_harness::FlowTestHarness;
 pub use journal_snapshot::{

@@ -8,27 +8,28 @@
 //! `ai_map_reduce!` macro is the only public authoring surface and expands to
 //! the fixed four-stage FLOWIP-128g protocol.
 
+mod chunk;
+mod effects;
+
+use self::chunk::GeneratedAiChunkHandler;
+use self::effects::{GeneratedAiFinaliseHandler, GeneratedAiMapHandler};
 use crate::dsl::composition::{CompositeBuildContext, CompositeBuildError, CompositeDescriptor};
 use crate::dsl::stage_descriptor::{
     EffectPolicyAttachment, EffectfulTransformDescriptor, StatefulDescriptor, TransformDescriptor,
 };
 use crate::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
-use obzenflow_adapters::ai::effects::{
-    ChatCompletion, GeneratedAiFinaliseHandler, GeneratedAiMapHandler,
-};
-use obzenflow_adapters::ai::GeneratedAiChunkHandler;
+use obzenflow_adapters::ai::effects::ChatCompletion;
 use obzenflow_adapters::middleware::MiddlewareFactory;
 use obzenflow_core::ai::{
     AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceJobFailed,
-    AiMapReducePlanningFailed, AiMapReducePlanningManifest, AiMapReduceReduceInput,
-    AiMapReduceTaggedPartial, AiMapRole, ChatCompletionCompleted, ChatTarget, ChunkEnvelope, Many,
-    ResolvedTokenEstimator,
+    AiMapReduceMapInput, AiMapReducePlanningFailed, AiMapReducePlanningManifest,
+    AiMapReduceReduceInput, AiMapReduceTaggedPartial, AiMapRole, ChatCompletionCompleted,
+    ChatTarget, ChunkEnvelope, Many, ResolvedTokenEstimator,
 };
 use obzenflow_core::id::CompositeId;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{Effect, EffectDeclaration};
 use obzenflow_runtime::stages::common::handlers::TransformHandler;
-use obzenflow_runtime::stages::resources_builder::DirectFactPlan;
 use obzenflow_runtime::stages::stateful::SeededCollectByInput;
 use std::fmt;
 use std::marker::PhantomData;
@@ -189,7 +190,7 @@ where
             }),
             StageTypingMetadata::transform(
                 TypeHint::exact_payload::<Seed>(),
-                TypeHint::exact_payload::<ChunkEnvelope<Item>>(),
+                TypeHint::exact_payload::<AiMapReduceMapInput<ChunkEnvelope<Item>>>(),
                 false,
                 None,
             )
@@ -203,23 +204,23 @@ where
             self.map_role,
             self.chat_target.clone(),
             self.chat_estimator.clone(),
-            composite_id.clone(),
         );
         let map_descriptor = wrap_typed_descriptor(
-            Box::new(EffectfulTransformDescriptor {
-                name: "map".to_string(),
-                handler: map_handler,
-                effects: vec![EffectDeclaration::at_least_once::<ChatCompletion>()],
-                middleware: Vec::new(),
-                effect_policies: vec![EffectPolicyAttachment {
+            Box::new(EffectfulTransformDescriptor::generated_with_pass_through::<
+                AiMapReduceMapInput<ChunkEnvelope<Item>>,
+                AiMapReducePlanningManifest,
+            >(
+                "map",
+                map_handler,
+                vec![EffectDeclaration::at_least_once::<ChatCompletion>()],
+                vec![EffectPolicyAttachment {
                     effect_type: ChatCompletion::EFFECT_TYPE,
                     factories: self.map_policies,
                 }],
-                direct_fact_plan: DirectFactPlan::generated::<ChunkEnvelope<Item>>(direct_bound),
-                backpressure: None,
-            }),
+                direct_bound,
+            )),
             StageTypingMetadata::transform(
-                TypeHint::exact_payload::<ChunkEnvelope<Item>>(),
+                TypeHint::exact_payload::<AiMapReduceMapInput<ChunkEnvelope<Item>>>(),
                 TypeHint::exact_payload::<ChatCompletionCompleted>(),
                 false,
                 None,
@@ -264,20 +265,18 @@ where
             self.chat_estimator,
         );
         let finalise_descriptor = wrap_typed_descriptor(
-            Box::new(EffectfulTransformDescriptor {
-                name: "finalize".to_string(),
-                handler: finalise_handler,
-                effects: vec![EffectDeclaration::at_least_once::<ChatCompletion>()],
-                middleware: Vec::new(),
-                effect_policies: vec![EffectPolicyAttachment {
+            Box::new(EffectfulTransformDescriptor::generated::<
+                AiMapReduceReduceInput<Seed, Many<Partial>>,
+            >(
+                "finalize",
+                finalise_handler,
+                vec![EffectDeclaration::at_least_once::<ChatCompletion>()],
+                vec![EffectPolicyAttachment {
                     effect_type: ChatCompletion::EFFECT_TYPE,
                     factories: self.finalise_policies,
                 }],
-                direct_fact_plan: DirectFactPlan::generated::<
-                    AiMapReduceReduceInput<Seed, Many<Partial>>,
-                >(direct_bound),
-                backpressure: None,
-            }),
+                direct_bound,
+            )),
             StageTypingMetadata::transform(
                 TypeHint::exact_payload::<AiMapReduceReduceInput<Seed, Many<Partial>>>(),
                 TypeHint::exact_payload::<Out>(),
@@ -297,7 +296,7 @@ where
 
         ctx.feed("chunk", "map")
             .lane("data")
-            .payload::<ChunkEnvelope<Item>>()
+            .payload::<AiMapReduceMapInput<ChunkEnvelope<Item>>>()
             .payload::<AiMapReducePlanningManifest>();
         ctx.feed("map", "collect")
             .lane("data")

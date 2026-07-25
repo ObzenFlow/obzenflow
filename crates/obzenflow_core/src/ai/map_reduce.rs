@@ -67,6 +67,26 @@ impl TypedPayload for AiMapReducePlanningManifest {
     const SCHEMA_VERSION: u32 = 1;
 }
 
+/// Internal map-stage input carrying the activation-derived job key beside
+/// one chunk.
+///
+/// The generated chunk adapter authors this carrier. User roles continue to
+/// receive only the chunk's items and [`ChunkInfo`](super::ChunkInfo).
+#[doc(hidden)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiMapReduceMapInput<Chunk> {
+    pub job_key: EventId,
+    pub chunk: Chunk,
+}
+
+impl<Chunk> TypedPayload for AiMapReduceMapInput<Chunk>
+where
+    Chunk: Serialize + DeserializeOwned,
+{
+    const EVENT_TYPE: &'static str = "ai.map_reduce.map_input";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
 /// Internal transport payload delivered to the finalise (reduce) stage.
 ///
 /// The key ergonomic constraint is that the user-facing reduce contract is

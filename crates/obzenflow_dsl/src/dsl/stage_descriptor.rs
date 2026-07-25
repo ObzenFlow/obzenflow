@@ -1530,18 +1530,78 @@ pub struct EffectPolicyAttachment {
 
 /// Descriptor for replay-safe effectful async transform stages.
 pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> {
-    pub name: String,
-    pub handler: H,
-    pub effects: Vec<EffectDeclaration>,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    name: String,
+    handler: H,
+    effects: Vec<EffectDeclaration>,
+    middleware: Vec<Box<dyn MiddlewareFactory>>,
     /// Per-effect policy attachments from the `effects:` clause
     /// (FLOWIP-120c H7).
-    pub effect_policies: Vec<EffectPolicyAttachment>,
-    /// Runtime-owned exact-input admission proof. Ordinary effectful stages
-    /// leave this empty; sealed generated adapters provide it.
-    #[doc(hidden)]
-    pub direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan,
-    pub backpressure: Option<BackpressureClause>,
+    effect_policies: Vec<EffectPolicyAttachment>,
+    direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan,
+    pass_through_event_type: Option<obzenflow_core::EventType>,
+    backpressure: Option<BackpressureClause>,
+}
+
+impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
+    /// Construct an ordinary effectful transform. Generated direct-fact
+    /// admission and raw physical pass-through are intentionally absent.
+    pub fn new(
+        name: impl Into<String>,
+        handler: H,
+        effects: Vec<EffectDeclaration>,
+        middleware: Vec<Box<dyn MiddlewareFactory>>,
+        effect_policies: Vec<EffectPolicyAttachment>,
+        backpressure: Option<BackpressureClause>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            handler,
+            effects,
+            middleware,
+            effect_policies,
+            direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan::default(
+            ),
+            pass_through_event_type: None,
+            backpressure,
+        }
+    }
+
+    pub(crate) fn generated<Input>(
+        name: impl Into<String>,
+        handler: H,
+        effects: Vec<EffectDeclaration>,
+        effect_policies: Vec<EffectPolicyAttachment>,
+        direct_bound: std::num::NonZeroU64,
+    ) -> Self
+    where
+        Input: obzenflow_core::TypedPayload,
+    {
+        let mut descriptor = Self::new(name, handler, effects, Vec::new(), effect_policies, None);
+        descriptor.direct_fact_plan =
+            obzenflow_runtime::stages::resources_builder::DirectFactPlan::generated::<Input>(
+                direct_bound,
+            );
+        descriptor
+    }
+
+    pub(crate) fn generated_with_pass_through<Input, PassThrough>(
+        name: impl Into<String>,
+        handler: H,
+        effects: Vec<EffectDeclaration>,
+        effect_policies: Vec<EffectPolicyAttachment>,
+        direct_bound: std::num::NonZeroU64,
+    ) -> Self
+    where
+        Input: obzenflow_core::TypedPayload,
+        PassThrough: obzenflow_core::TypedPayload,
+    {
+        let mut descriptor =
+            Self::generated::<Input>(name, handler, effects, effect_policies, direct_bound);
+        descriptor.pass_through_event_type = Some(obzenflow_core::EventType::from(
+            PassThrough::versioned_event_type(),
+        ));
+        descriptor
+    }
 }
 
 #[async_trait]
@@ -1836,8 +1896,11 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 
         // The middleware execution scope is computed per event by the
         // supervisor at dispatch (FLOWIP-120c H3).
-        let mut handler_with_middleware =
-            UnifiedMiddlewareTransform::new(EffectfulTransformHandlerAdapter(self.handler));
+        let mut effectful_handler = EffectfulTransformHandlerAdapter::new(self.handler);
+        if let Some(event_type) = self.pass_through_event_type {
+            effectful_handler = effectful_handler.with_exact_pass_through_event_type(event_type);
+        }
+        let mut handler_with_middleware = UnifiedMiddlewareTransform::new(effectful_handler);
         for mw in all_middleware {
             handler_with_middleware = handler_with_middleware.with_middleware(mw);
         }

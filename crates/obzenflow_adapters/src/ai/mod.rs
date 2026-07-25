@@ -9,13 +9,10 @@
 
 pub mod effects;
 pub mod error_mapping;
-mod map_reduce_chunk;
 pub mod transforms;
 
 pub use effects::{ChatCompletion, ChatCompletionBuildError};
 pub use error_mapping::{
     ai_client_error_to_handler_error, ai_client_error_to_handler_error_with_context,
 };
-#[doc(hidden)]
-pub use map_reduce_chunk::GeneratedAiChunkHandler;
 pub use transforms::{ChatTransform, EmbeddingTransform};

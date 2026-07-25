@@ -7,6 +7,9 @@
 #[cfg(feature = "ai-rig")]
 pub mod rig;
 
+#[cfg(feature = "ai-rig")]
+mod endpoint_identity;
+
 mod prompt;
 
 #[cfg(feature = "ai-rig")]

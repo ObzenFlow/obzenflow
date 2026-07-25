@@ -2,6 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod chat_completion;
+use obzenflow_adapters::ai::effects::GeneratedAiMapHandler;
 
-pub use chat_completion::{ChatCompletion, ChatCompletionBuildError};
+fn main() {}

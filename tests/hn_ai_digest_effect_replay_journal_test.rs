@@ -23,14 +23,17 @@ mod mock_server;
 mod util;
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::control::ai_resilience;
+use obzenflow_adapters::middleware::control::{
+    ai_recovery_rejecting_resilience_for_test, ai_resilience,
+};
+use obzenflow_adapters::middleware::MiddlewareFactory;
 use obzenflow_core::ai::{
-    AiClientError, AiFinaliseRole, AiMapReduceChunkFailed, AiMapReducePlanningManifest,
-    AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind,
-    AiRoleLogicFailure, ChatClient, ChatCompletionCompleted, ChatMessage, ChatParams, ChatRequest,
-    ChatResponse, ChatTarget, EstimateSource, HeuristicTokenEstimator, Many,
-    ResolvedTokenEstimator, TokenCount, TokenEstimate, TokenEstimator,
-    TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
+    chat_binding_fingerprint, AiClientError, AiFinaliseRole, AiMapReduceChunkFailed,
+    AiMapReduceJobFailed, AiMapReducePlanningManifest, AiMapReduceRoleFailure,
+    AiMapReduceTaggedPartial, AiMapRole, AiProvider, AiProviderFailureKind, AiRoleLogicFailure,
+    ChatClient, ChatCompletionCompleted, ChatMessage, ChatParams, ChatRequest, ChatResponse,
+    ChatTarget, EstimateSource, HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenCount,
+    TokenEstimate, TokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::event_envelope::EventEnvelope;
@@ -41,10 +44,10 @@ use obzenflow_core::event::payloads::observability_payload::{
 };
 use obzenflow_core::event::{
     ChainEventContent, EffectAttemptStarted, EffectFailureDetail, EffectOutcomePayload,
-    EffectRecord,
+    EffectRecord, EffectRecoveryAbandoned, PipelineLifecycleEvent, SystemEvent, SystemEventType,
 };
 use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
-use obzenflow_core::{id::StageId, EventId, TypedPayload, WriterId};
+use obzenflow_core::{id::StageId, EventId, SystemId, TypedPayload, WriterId};
 use obzenflow_dsl::{ai_map_reduce, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
@@ -55,12 +58,15 @@ use obzenflow_runtime::effects::{
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::testing::BackpressureAckGate;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::Notify;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct DigestSeed {
@@ -98,6 +104,7 @@ struct MapRole {
     target: ChatTarget,
     fail_prepare: bool,
     fail_interpret: bool,
+    prepare_calls: Option<Arc<AtomicUsize>>,
 }
 
 impl AiMapRole<DigestItem, DigestPartial> for MapRole {
@@ -108,6 +115,9 @@ impl AiMapRole<DigestItem, DigestPartial> for MapRole {
         items: &[DigestItem],
         _chunk: &obzenflow_core::ai::ChunkInfo,
     ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure> {
+        if let Some(calls) = &self.prepare_calls {
+            calls.fetch_add(1, Ordering::SeqCst);
+        }
         if self.fail_prepare {
             return Err(AiRoleLogicFailure::Prompt {
                 message: "fixture preparation failure".to_string(),
@@ -201,6 +211,25 @@ struct InternallyRetryingChatClient {
     downstream_attempts: Arc<AtomicUsize>,
 }
 
+struct HangingChatClient {
+    target: ChatTarget,
+    calls: Arc<AtomicUsize>,
+    entered: Arc<Notify>,
+}
+
+#[async_trait]
+impl ChatClient for HangingChatClient {
+    fn target(&self) -> &ChatTarget {
+        &self.target
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, AiClientError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+}
+
 #[async_trait]
 impl ChatClient for InternallyRetryingChatClient {
     fn target(&self) -> &ChatTarget {
@@ -245,6 +274,15 @@ impl ChatClient for CountingChatClient {
 
 fn target() -> ChatTarget {
     ChatTarget::new("fixture", "deterministic")
+}
+
+fn bound_fixture_target(endpoint: &str) -> ChatTarget {
+    let provider = AiProvider::new("fixture");
+    ChatTarget::with_binding_fingerprint(
+        provider.clone(),
+        "deterministic",
+        chat_binding_fingerprint(&provider, "deterministic", endpoint),
+    )
 }
 
 fn estimator() -> ResolvedTokenEstimator {
@@ -423,13 +461,19 @@ fn internally_retrying_chat_port(
 #[derive(Clone, Debug)]
 struct OneSeed {
     emitted: bool,
+    count: u64,
     writer: WriterId,
 }
 
 impl OneSeed {
     fn new() -> Self {
+        Self::with_count(5)
+    }
+
+    fn with_count(count: u64) -> Self {
         Self {
             emitted: false,
+            count,
             writer: WriterId::from(StageId::new()),
         }
     }
@@ -444,7 +488,7 @@ impl FiniteSourceHandler for OneSeed {
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer,
             DigestSeed::versioned_event_type(),
-            json!(DigestSeed { n: 5 }),
+            json!(DigestSeed { n: self.count }),
         )]))
     }
 }
@@ -491,6 +535,8 @@ fn build_flow(
         map_prepare_failure,
         map_interpret_failure: false,
         chat_estimator: estimator(),
+        chat_target: target(),
+        map_prepare_calls: None,
     })
 }
 
@@ -503,6 +549,8 @@ struct FlowBehaviour {
     map_prepare_failure: bool,
     map_interpret_failure: bool,
     chat_estimator: ResolvedTokenEstimator,
+    chat_target: ChatTarget,
+    map_prepare_calls: Option<Arc<AtomicUsize>>,
 }
 
 fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
@@ -515,8 +563,9 @@ fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
         map_prepare_failure,
         map_interpret_failure,
         chat_estimator,
+        chat_target,
+        map_prepare_calls,
     } = behaviour;
-    let chat_target = target();
     flow! {
         name: "hn_ai_digest_effect_replay_journal",
         journals: disk_journals(journal_base),
@@ -533,6 +582,7 @@ fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
                         target: map_request_target,
                         fail_prepare: map_prepare_failure,
                         fail_interpret: map_interpret_failure,
+                        prepare_calls: map_prepare_calls,
                     },
                     reduce: (DigestSeed, [DigestPartial]) -> DigestOut => FinaliseRole {
                         target: chat_target.clone(),
@@ -563,6 +613,122 @@ fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
         topology: {
             seed |> digest;
             digest |> collected;
+        }
+    }
+}
+
+fn build_recovery_flow(
+    journal_base: PathBuf,
+    outputs: Arc<Mutex<Vec<DigestOut>>>,
+    effect_ports: EffectPortRegistry,
+    map_policy: Box<dyn MiddlewareFactory>,
+) -> FlowDefinition {
+    let chat_target = target();
+    flow! {
+        name: "hn_ai_digest_recovery_composition",
+        journals: disk_journals(journal_base),
+        middleware: [],
+        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
+            .stall_timeout_ms(5_000),
+        effect_ports: effect_ports,
+
+        stages: {
+            recovery_seed = source!(DigestSeed => OneSeed::with_count(1));
+            recovery_digest = ai_map_reduce!(
+                DigestSeed -> DigestOut => {
+                    map: [DigestItem] -> DigestPartial => MapRole {
+                        target: chat_target.clone(),
+                        fail_prepare: false,
+                        fail_interpret: false,
+                        prepare_calls: None,
+                    },
+                    reduce: (DigestSeed, [DigestPartial]) -> DigestOut => FinaliseRole {
+                        target: chat_target.clone(),
+                    },
+                },
+                chunking: by_budget {
+                    estimator: estimator().estimator(),
+                    items: |seed: &DigestSeed| {
+                        (1..=seed.n)
+                            .map(|value| DigestItem { value })
+                            .collect::<Vec<_>>()
+                    },
+                    render: |item: &DigestItem, _ctx| item.value.to_string(),
+                    budget: TokenCount::new(100),
+                    max_items: Some(1),
+                    oversize: error,
+                },
+                effects: {
+                    chat_target: chat_target,
+                    chat_estimator: estimator(),
+                    map: [at_least_once(ChatCompletion) with [map_policy]],
+                    reduce: [at_least_once(ChatCompletion) with [ai_resilience()]],
+                }
+            );
+            recovery_collected = sink!(DigestOut => CollectOut { outputs });
+        },
+
+        topology: {
+            recovery_seed |> recovery_digest;
+            recovery_digest |> recovery_collected;
+        }
+    }
+}
+
+fn build_credit_flow(
+    journal_base: PathBuf,
+    outputs: Arc<Mutex<Vec<DigestOut>>>,
+    effect_ports: EffectPortRegistry,
+    prepare_calls: Arc<AtomicUsize>,
+) -> FlowDefinition {
+    let chat_target = target();
+    flow! {
+        name: "hn_ai_digest_credit_composition",
+        journals: disk_journals(journal_base),
+        middleware: [],
+        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
+            .stall_timeout_ms(5_000),
+        effect_ports: effect_ports,
+
+        stages: {
+            credit_seed = source!(DigestSeed => OneSeed::with_count(2));
+            credit_digest = ai_map_reduce!(
+                DigestSeed -> DigestOut => {
+                    map: [DigestItem] -> DigestPartial => MapRole {
+                        target: chat_target.clone(),
+                        fail_prepare: false,
+                        fail_interpret: false,
+                        prepare_calls: Some(prepare_calls),
+                    },
+                    reduce: (DigestSeed, [DigestPartial]) -> DigestOut => FinaliseRole {
+                        target: chat_target.clone(),
+                    },
+                },
+                chunking: by_budget {
+                    estimator: estimator().estimator(),
+                    items: |seed: &DigestSeed| {
+                        (1..=seed.n)
+                            .map(|value| DigestItem { value })
+                            .collect::<Vec<_>>()
+                    },
+                    render: |item: &DigestItem, _ctx| item.value.to_string(),
+                    budget: TokenCount::new(100),
+                    max_items: Some(1),
+                    oversize: error,
+                },
+                effects: {
+                    chat_target: chat_target,
+                    chat_estimator: estimator(),
+                    map: [at_least_once(ChatCompletion) with [ai_resilience()]],
+                    reduce: [at_least_once(ChatCompletion) with [ai_resilience()]],
+                }
+            );
+            credit_collected = sink!(DigestOut => CollectOut { outputs });
+        },
+
+        topology: {
+            credit_seed |> credit_digest;
+            credit_digest |> credit_collected;
         }
     }
 }
@@ -599,6 +765,25 @@ async fn stage_envelopes(run_dir: &Path, stage_key: &str) -> Vec<EventEnvelope<C
         .read_causally_ordered()
         .await
         .expect("stage journal is readable")
+}
+
+async fn system_events(run_dir: &Path) -> Vec<SystemEvent> {
+    let manifest = archive_manifest(run_dir);
+    let relative = manifest["system_journal_file"]
+        .as_str()
+        .expect("system journal path");
+    let journal = DiskJournal::<SystemEvent>::with_owner(
+        run_dir.join(relative),
+        JournalOwner::system(SystemId::new()),
+    )
+    .expect("system journal opens");
+    journal
+        .read_causally_ordered()
+        .await
+        .expect("system journal is readable")
+        .into_iter()
+        .map(|envelope| envelope.event)
+        .collect()
 }
 
 async fn assert_archive_contract_rejected_before_port_resolution(
@@ -752,6 +937,13 @@ fn chunk_failures(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<AiMapReduceChu
         .collect()
 }
 
+async fn wait_for_counter(counter: &AtomicUsize, minimum: usize) {
+    while counter.load(Ordering::SeqCst) < minimum {
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 #[test]
 fn hn_witness_source_uses_the_snapshot_binding_and_deferred_port_contract() {
     let _ = config::DEFAULT_HN_MAX_STORIES;
@@ -830,6 +1022,8 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
             map_prepare_failure: true,
             map_interpret_failure: false,
             chat_estimator: estimator(),
+            chat_target: target(),
+            map_prepare_calls: None,
         }))
         .await
         .expect("pure preparation failures close the generated collector job");
@@ -873,6 +1067,8 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
             map_prepare_failure: false,
             map_interpret_failure: true,
             chat_estimator: estimator(),
+            chat_target: target(),
+            map_prepare_calls: None,
         }))
         .await
         .expect("interpretation failures retain their successful completions");
@@ -919,6 +1115,8 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
             map_prepare_failure: false,
             map_interpret_failure: false,
             chat_estimator: estimator(),
+            chat_target: target(),
+            map_prepare_calls: None,
         }))
         .await
         .expect("ordinary provider failures are domain terminals, not stage fatals");
@@ -1186,6 +1384,8 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
             map_prepare_failure: false,
             map_interpret_failure: false,
             chat_estimator: observability_only_estimator(replay_estimator_calls.clone()),
+            chat_target: target(),
+            map_prepare_calls: None,
         }))
         .await
         .expect("strict replay rematerialises the generated effect history");
@@ -1275,6 +1475,293 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
 }
 
 #[tokio::test]
+async fn generated_recovery_abandonment_closes_the_real_composite_without_start_two() {
+    let temp = tempfile::tempdir().expect("temporary recovery-composition journal root");
+    let journal_base = temp.path().join("journals");
+    let hanging_calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Notify::new());
+    let hanging_ports = EffectPortRegistry::new()
+        .with_port::<dyn ChatClient>(
+            "chat",
+            Arc::new(HangingChatClient {
+                target: target(),
+                calls: hanging_calls.clone(),
+                entered: entered.clone(),
+            }),
+        )
+        .expect("hanging chat port is registered");
+
+    let live_task = tokio::spawn({
+        let journal_base = journal_base.clone();
+        async move {
+            FlowApplication::builder()
+                .with_cli_args(["obzenflow"])
+                .run_async(build_recovery_flow(
+                    journal_base,
+                    Arc::new(Mutex::new(Vec::new())),
+                    hanging_ports,
+                    ai_resilience(),
+                ))
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(10), entered.notified())
+        .await
+        .expect("the live map call reaches the hanging client after Start(1)");
+    assert_eq!(hanging_calls.load(Ordering::SeqCst), 1);
+    live_task.abort();
+    let _ = live_task.await;
+
+    let in_doubt_archive = latest_run_dir(&journal_base);
+    let in_doubt_map = stage_envelopes(&in_doubt_archive, "recovery_digest__map").await;
+    assert_eq!(
+        in_doubt_map
+            .iter()
+            .filter(|envelope| {
+                EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
+            })
+            .count(),
+        1
+    );
+    assert!(in_doubt_map.iter().all(|envelope| {
+        envelope.event.event_type() != EFFECT_RECORD_EVENT_TYPE
+            && !ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
+    }));
+
+    let resume_calls = Arc::new(AtomicUsize::new(0));
+    let resume_outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--resume-from"),
+            in_doubt_archive.as_os_str().to_os_string(),
+            OsString::from("--allow-incomplete-archive"),
+        ])
+        .run_async(build_recovery_flow(
+            journal_base.clone(),
+            resume_outputs.clone(),
+            eager_chat_port(resume_calls.clone(), false),
+            ai_recovery_rejecting_resilience_for_test(),
+        ))
+        .await
+        .expect("recovery rejection becomes a generated domain terminal");
+
+    assert_eq!(
+        resume_calls.load(Ordering::SeqCst),
+        0,
+        "the rejecting recovery boundary prevents a second physical chat call"
+    );
+    assert!(resume_outputs
+        .lock()
+        .expect("resume outputs lock")
+        .is_empty());
+
+    let abandonment_archive = latest_run_dir(&journal_base);
+    let map = stage_envelopes(&abandonment_archive, "recovery_digest__map").await;
+    let starts = map
+        .iter()
+        .filter_map(|envelope| EffectAttemptStarted::from_event(&envelope.event))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        starts
+            .iter()
+            .map(|started| started.attempt.get())
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    let abandonments = map
+        .iter()
+        .filter_map(|envelope| EffectRecoveryAbandoned::from_event(&envelope.event))
+        .collect::<Vec<_>>();
+    assert_eq!(abandonments.len(), 1);
+    assert_eq!(abandonments[0].highest_started_attempt.get(), 1);
+    let failures = chunk_failures(&map);
+    assert_eq!(failures.len(), 1);
+    assert!(matches!(
+        &failures[0].cause,
+        AiMapReduceRoleFailure::RecoveryAbandoned {
+            last_started_attempt: 1,
+            ..
+        }
+    ));
+    assert!(!map.iter().any(|envelope| {
+        ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
+    }));
+
+    let collect = stage_envelopes(&abandonment_archive, "recovery_digest__collect").await;
+    assert_eq!(
+        collect
+            .iter()
+            .filter_map(|envelope| AiMapReduceJobFailed::from_event(&envelope.event))
+            .count(),
+        1
+    );
+    let finalise = stage_envelopes(&abandonment_archive, "recovery_digest__finalize").await;
+    assert!(!finalise.iter().any(|envelope| {
+        EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
+            || ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
+    }));
+
+    let strict_outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            abandonment_archive.as_os_str().to_os_string(),
+        ])
+        .run_async(build_recovery_flow(
+            journal_base.clone(),
+            strict_outputs,
+            EffectPortRegistry::new(),
+            ai_resilience(),
+        ))
+        .await
+        .expect("strict replay rematerialises abandonment without a dependency");
+    let strict_archive = latest_run_dir(&journal_base);
+
+    let replay_resolutions = Arc::new(AtomicUsize::new(0));
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--resume-from"),
+            abandonment_archive.as_os_str().to_os_string(),
+        ])
+        .run_async(build_recovery_flow(
+            journal_base.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+            deferred_chat_port(replay_resolutions.clone(), replay_calls.clone(), true),
+            ai_recovery_rejecting_resilience_for_test(),
+        ))
+        .await
+        .expect("resume-of-resume treats abandonment as the settled cursor terminal");
+    assert_eq!(replay_resolutions.load(Ordering::SeqCst), 0);
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    let resumed_again_archive = latest_run_dir(&journal_base);
+
+    for replay_archive in [&strict_archive, &resumed_again_archive] {
+        let replay_map = stage_envelopes(replay_archive, "recovery_digest__map").await;
+        assert_eq!(effect_evidence_ids(&replay_map), effect_evidence_ids(&map));
+        let verification = verify_run_dirs(
+            &abandonment_archive,
+            replay_archive,
+            &VerifyOptions {
+                write_report: false,
+                ..VerifyOptions::default()
+            },
+        )
+        .expect("recovery-composition run verification executes");
+        assert_eq!(
+            verification.exit_code(),
+            0,
+            "{}",
+            obzenflow_infra::verify::render_verdict(&verification)
+        );
+    }
+}
+
+#[tokio::test]
+async fn generated_map_waits_for_all_three_real_edge_credits_before_second_role_call() {
+    let temp = tempfile::tempdir().expect("temporary credit-composition journal root");
+    let journal_base = temp.path().join("journals");
+    let gate = BackpressureAckGate::install("credit_digest__map", "credit_digest__collect", 0)
+        .expect("the generated map-to-collector edge freezes before its first acknowledgement");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let prepare_calls = Arc::new(AtomicUsize::new(0));
+    let outputs = Arc::new(Mutex::new(Vec::new()));
+    let run_task = tokio::spawn({
+        let journal_base = journal_base.clone();
+        let calls = calls.clone();
+        let prepare_calls = prepare_calls.clone();
+        let outputs = outputs.clone();
+        async move {
+            FlowApplication::builder()
+                .with_cli_args(["obzenflow"])
+                .run_async(build_credit_flow(
+                    journal_base,
+                    outputs,
+                    eager_chat_port(calls, false),
+                    prepare_calls,
+                ))
+                .await
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_for_withheld(3))
+        .await
+        .expect("the first generated continuation fills the three-credit edge");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
+
+    let active_archive = latest_run_dir(&journal_base);
+    let active_map = stage_envelopes(&active_archive, "credit_digest__map").await;
+    assert_eq!(
+        active_map
+            .iter()
+            .filter(|envelope| {
+                EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
+            })
+            .count(),
+        1
+    );
+
+    gate.release(1).expect("first credit returns");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), wait_for_counter(&calls, 2))
+            .await
+            .is_err(),
+        "one returned credit cannot admit the second three-row continuation"
+    );
+    assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
+
+    gate.release(1).expect("second credit returns");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), wait_for_counter(&calls, 2))
+            .await
+            .is_err(),
+        "two returned credits still cannot admit the second continuation"
+    );
+    assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
+
+    gate.release(1).expect("third credit returns");
+    tokio::time::timeout(Duration::from_secs(5), wait_for_counter(&calls, 2))
+        .await
+        .expect("all three returned credits admit the second map continuation");
+    assert_eq!(prepare_calls.load(Ordering::SeqCst), 2);
+
+    gate.open();
+    tokio::time::timeout(Duration::from_secs(10), run_task)
+        .await
+        .expect("the unfrozen real flow terminates")
+        .expect("flow task joins")
+        .expect("credit-composition flow succeeds");
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        *outputs.lock().expect("credit outputs lock"),
+        vec![DigestOut { total: 3 }]
+    );
+
+    let archive = latest_run_dir(&journal_base);
+    let map = stage_envelopes(&archive, "credit_digest__map").await;
+    assert_eq!(
+        map.iter()
+            .filter(|envelope| {
+                EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
+            })
+            .count(),
+        2
+    );
+    assert_eq!(
+        map.iter()
+            .filter(|envelope| {
+                ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
+            })
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let temp = tempfile::tempdir().expect("temporary real HN-flow journal root");
     let journal_base = temp.path().join("journals");
@@ -1298,7 +1785,16 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     );
     let config_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/hn_ai_digest_demo/obzenflow.toml");
-    let production_target = ChatTarget::new("ollama", "llama3.1:8b");
+    let production_provider = AiProvider::new("ollama");
+    let production_target = ChatTarget::with_binding_fingerprint(
+        production_provider.clone(),
+        "llama3.1:8b",
+        chat_binding_fingerprint(
+            &production_provider,
+            "llama3.1:8b",
+            "http://localhost:11434",
+        ),
+    );
     let live_resolutions = Arc::new(AtomicUsize::new(0));
     let live_calls = Arc::new(AtomicUsize::new(0));
 
@@ -1645,6 +2141,87 @@ async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
         chunk_failures(&map).is_empty(),
         "configuration fatals are not generated domain failures"
     );
+}
+
+#[tokio::test]
+async fn endpoint_fingerprint_drift_is_rejected_by_effect_history_before_port_resolution() {
+    let temp = tempfile::tempdir().expect("temporary endpoint-drift journal root");
+    let journal_base = temp.path().join("journals");
+    let endpoint_a = bound_fixture_target("http://fixture-a.invalid/v1");
+    let endpoint_b = bound_fixture_target("http://fixture-b.invalid/v1");
+    assert!(endpoint_a.logically_matches(&endpoint_b));
+    assert_ne!(endpoint_a, endpoint_b);
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_flow_with_behaviour(FlowBehaviour {
+            journal_base: journal_base.clone(),
+            outputs: Arc::new(Mutex::new(Vec::new())),
+            effect_ports: eager_chat_port_for_target(live_calls.clone(), false, endpoint_a.clone()),
+            backpressure_window: 3,
+            map_request_target: endpoint_a.clone(),
+            map_prepare_failure: false,
+            map_interpret_failure: false,
+            chat_estimator: estimator(),
+            chat_target: endpoint_a,
+            map_prepare_calls: None,
+        }))
+        .await
+        .expect("the first endpoint-bound run succeeds");
+    assert_eq!(live_calls.load(Ordering::SeqCst), 6);
+    let live_archive = latest_run_dir(&journal_base);
+
+    let replay_resolutions = Arc::new(AtomicUsize::new(0));
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_result = FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            live_archive.as_os_str().to_os_string(),
+        ])
+        .run_async(build_flow_with_behaviour(FlowBehaviour {
+            journal_base: journal_base.clone(),
+            outputs: Arc::new(Mutex::new(Vec::new())),
+            effect_ports: {
+                let resolver = counting_chat_resolver(
+                    endpoint_b.clone(),
+                    replay_resolutions.clone(),
+                    replay_calls.clone(),
+                    true,
+                );
+                EffectPortRegistry::new()
+                    .with_deferred::<dyn ChatClient>("chat", resolver)
+                    .expect("endpoint-B replay resolver is registered")
+            },
+            backpressure_window: 3,
+            map_request_target: endpoint_b.clone(),
+            map_prepare_failure: false,
+            map_interpret_failure: false,
+            chat_estimator: estimator(),
+            chat_target: endpoint_b,
+            map_prepare_calls: None,
+        }))
+        .await;
+
+    let error = replay_result.expect_err("endpoint drift must invalidate the archived descriptor");
+    let failed_archive = latest_run_dir(&journal_base);
+    let failure_reason = system_events(&failed_archive)
+        .await
+        .into_iter()
+        .find_map(|event| match event.event {
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Failed {
+                reason, ..
+            }) => Some(reason),
+            _ => None,
+        })
+        .expect("the failed replay records its pipeline failure reason");
+    assert!(
+        failure_reason.contains("effect descriptor mismatch"),
+        "endpoint drift should surface as replay descriptor divergence: {failure_reason}; application error: {error}"
+    );
+    assert_eq!(replay_resolutions.load(Ordering::SeqCst), 0);
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

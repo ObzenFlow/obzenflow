@@ -174,27 +174,30 @@ where
         Ok(StageCompletion::new(committed, event_types))
     }
 
+    /// Complete with one deterministic fact before the first effect.
+    ///
+    /// This operation keeps the history preflight, resume-to-live admission,
+    /// emission, and completion ordering indivisible at the authoring
+    /// surface. It is useful when request preparation fails before an effect
+    /// exists, and prevents such a fact from replacing archived or in-doubt
+    /// effect history.
+    #[doc(hidden)]
+    pub async fn complete_with_pre_effect_fact<T, At>(
+        &mut self,
+        fact: T,
+    ) -> Result<StageCompletion<Output>, EffectError>
+    where
+        T: TypedPayload + OutputAllowsFact<Output, At>,
+    {
+        self.core.preflight_next_effect_cursor_is_empty().await?;
+        if !self.core.is_replaying() {
+            self.core.request_generated_live_admission().await?;
+        }
+        self.emit(fact).await?;
+        self.complete()
+    }
+
     pub(crate) fn drain_committed_facts(&mut self) -> Vec<ChainEvent> {
         self.core.drain_committed_facts()
-    }
-
-    /// Sealed generated-adapter access to the parent composite identity.
-    #[doc(hidden)]
-    pub fn __generated_parent_composite_activations(
-        &self,
-    ) -> Vec<obzenflow_core::event::context::CompositeActivationContext> {
-        self.core.parent_composite_activations()
-    }
-
-    /// Read-only preflight used before a generated pre-effect domain terminal.
-    #[doc(hidden)]
-    pub async fn __generated_preflight_first_effect_is_empty(&self) -> Result<(), EffectError> {
-        self.core.preflight_next_effect_cursor_is_empty().await
-    }
-
-    /// Yield at the generated resume-to-live admission barrier.
-    #[doc(hidden)]
-    pub async fn __generated_request_live_admission(&self) -> Result<(), EffectError> {
-        self.core.request_generated_live_admission().await
     }
 }

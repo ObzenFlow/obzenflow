@@ -10,7 +10,7 @@ use crate::effects::{EffectInvocationContext, Effects};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::TypedPayload;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::{ChainEvent, EventType};
 
 /// Handler for stateless transform stages
 ///
@@ -248,17 +248,6 @@ pub trait EffectfulTransformHandler: Send + Sync {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> std::result::Result<crate::effects::StageCompletion<Self::Output>, HandlerError>;
 
-    /// Framework-generated physical dispatch seam. Ordinary implementations
-    /// use the default and never receive a raw event.
-    #[doc(hidden)]
-    async fn __generated_raw_dispatch(
-        &self,
-        _event: ChainEvent,
-        _fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Option<std::result::Result<Vec<ChainEvent>, HandlerError>> {
-        None
-    }
-
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
         Ok(())
     }
@@ -270,7 +259,34 @@ pub trait EffectfulTransformHandler: Send + Sync {
 
 #[doc(hidden)]
 #[derive(Clone, Debug)]
-pub struct EffectfulTransformHandlerAdapter<H>(pub H);
+pub struct EffectfulTransformHandlerAdapter<H> {
+    handler: H,
+    pass_through_event_type: Option<EventType>,
+}
+
+impl<H> EffectfulTransformHandlerAdapter<H> {
+    pub fn new(handler: H) -> Self {
+        Self {
+            handler,
+            pass_through_event_type: None,
+        }
+    }
+
+    /// Install one exact, effect-free physical pass-through. The adapter
+    /// performs this classification itself, so handlers never receive raw
+    /// events or an untyped dispatch hook.
+    #[doc(hidden)]
+    pub fn with_exact_pass_through<T: TypedPayload>(mut self) -> Self {
+        self.pass_through_event_type = Some(EventType::from(T::versioned_event_type()));
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_exact_pass_through_event_type(mut self, event_type: EventType) -> Self {
+        self.pass_through_event_type = Some(event_type);
+        self
+    }
+}
 
 impl<H> TransformTyping for EffectfulTransformHandlerAdapter<H>
 where
@@ -291,28 +307,28 @@ where
         effect_context: Option<EffectInvocationContext>,
         _scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        if self
+            .pass_through_event_type
+            .as_ref()
+            .is_some_and(|event_type| event_type.as_str() == event.event_type())
+        {
+            return Ok(vec![event]);
+        }
         let effect_context = effect_context.ok_or_else(|| {
             HandlerError::Other("effectful transform invoked without effect context".to_string())
         })?;
         let mut fx = Effects::<H::Output, H::AllowedEffects>::new(effect_context);
-        if let Some(result) = self
-            .0
-            .__generated_raw_dispatch(event.clone(), &mut fx)
-            .await
-        {
-            return result;
-        }
         let input = H::Input::try_from_event(&event)
             .map_err(|e| HandlerError::Deserialization(e.to_string()))?;
-        let _completion = self.0.process(input, &mut fx).await?;
+        let _completion = self.handler.process(input, &mut fx).await?;
         Ok(Vec::new())
     }
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        self.0.drain().await
+        self.handler.drain().await
     }
 
     fn stage_logic_version(&self) -> &str {
-        self.0.stage_logic_version()
+        self.handler.stage_logic_version()
     }
 }

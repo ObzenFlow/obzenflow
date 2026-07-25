@@ -4,6 +4,9 @@
 
 use super::error_mapping::map_rig_error;
 use super::preflight::{preflight_ollama, preflight_openai_models};
+use crate::ai::endpoint_identity::{
+    bound_chat_target, default_ollama_base_url, default_openai_base_url,
+};
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     AiClientError, AiProvider, ChatClient, ChatMessage, ChatParams, ChatRequest, ChatResponse,
@@ -24,9 +27,6 @@ use url::Url;
 const TOOL_ROLE_UNSUPPORTED_MESSAGE: &str =
     "tool-role messages require tool execution (not supported in P0)";
 
-const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434/";
-const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1/";
-
 #[derive(Clone)]
 enum RigChatBackend {
     Ollama { client: Arc<ollama::Client> },
@@ -46,6 +46,8 @@ pub struct RigChatClient {
 impl RigChatClient {
     /// Create an Ollama-backed client.
     pub fn ollama(model: impl Into<String>, base_url: Option<Url>) -> Result<Self, AiClientError> {
+        let model = model.into();
+        let endpoint = base_url.clone().unwrap_or_else(default_ollama_base_url);
         let client = match base_url {
             None => ollama::Client::new(Nothing).map_err(|err| AiClientError::InvalidRequest {
                 message: err.to_string(),
@@ -63,7 +65,7 @@ impl RigChatClient {
         };
 
         Ok(Self {
-            target: ChatTarget::new("ollama", model),
+            target: bound_chat_target("ollama", model, &endpoint),
             backend: RigChatBackend::Ollama {
                 client: Arc::new(client),
             },
@@ -79,9 +81,7 @@ impl RigChatClient {
         base_url: Option<Url>,
     ) -> Result<Self, AiClientError> {
         let model = model.into();
-        let base_url = base_url.unwrap_or_else(|| {
-            Url::parse(DEFAULT_OLLAMA_BASE_URL).expect("default ollama base url parses")
-        });
+        let base_url = base_url.unwrap_or_else(default_ollama_base_url);
 
         preflight_ollama(&base_url, Some(model.as_str())).await?;
         Self::ollama(model, Some(base_url))
@@ -96,6 +96,8 @@ impl RigChatClient {
         api_key: impl Into<String>,
         base_url: Url,
     ) -> Result<Self, AiClientError> {
+        let model = model.into();
+        let endpoint = base_url.clone();
         let client = openai::Client::builder()
             .api_key(api_key.into())
             // See note in `ollama()` about trailing slashes.
@@ -106,7 +108,7 @@ impl RigChatClient {
             })?;
 
         Ok(Self {
-            target: ChatTarget::new("openai_compatible", model),
+            target: bound_chat_target("openai_compatible", model, &endpoint),
             backend: RigChatBackend::OpenAi {
                 client: Arc::new(client),
             },
@@ -133,13 +135,14 @@ impl RigChatClient {
         model: impl Into<String>,
         api_key: impl Into<String>,
     ) -> Result<Self, AiClientError> {
+        let model = model.into();
         let client =
             openai::Client::new(api_key.into()).map_err(|err| AiClientError::InvalidRequest {
                 message: err.to_string(),
             })?;
 
         Ok(Self {
-            target: ChatTarget::new("openai", model),
+            target: bound_chat_target("openai", model, &default_openai_base_url()),
             backend: RigChatBackend::OpenAi {
                 client: Arc::new(client),
             },
@@ -155,7 +158,7 @@ impl RigChatClient {
     ) -> Result<Self, AiClientError> {
         let model = model.into();
         let api_key = api_key.into();
-        let base_url = Url::parse(DEFAULT_OPENAI_BASE_URL).expect("default openai base url parses");
+        let base_url = default_openai_base_url();
 
         preflight_openai_models(&base_url, api_key.as_str(), Some(model.as_str())).await?;
         Self::openai(model, api_key)
@@ -227,7 +230,7 @@ impl ChatClient for RigChatClient {
 
 fn validate_request_target(req: &ChatRequest, bound: &ChatTarget) -> Result<(), AiClientError> {
     let requested = req.target();
-    if requested != *bound {
+    if !requested.logically_matches(bound) {
         return Err(AiClientError::TargetMismatch {
             requested,
             bound: bound.clone(),

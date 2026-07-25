@@ -137,15 +137,25 @@ enum ResolvedChatProviderConfig {
 impl ResolvedChatProviderConfig {
     fn target(&self) -> obzenflow_core::ai::ChatTarget {
         match self {
-            Self::Ollama { model, .. } => {
-                obzenflow_core::ai::ChatTarget::new("ollama", model.clone())
-            }
-            Self::OpenAi { model, .. } => {
-                obzenflow_core::ai::ChatTarget::new("openai", model.clone())
-            }
-            Self::OpenAiCompatible { model, .. } => {
-                obzenflow_core::ai::ChatTarget::new("openai_compatible", model.clone())
-            }
+            Self::Ollama { model, base_url } => super::endpoint_identity::bound_chat_target(
+                "ollama",
+                model.clone(),
+                &base_url
+                    .clone()
+                    .unwrap_or_else(super::endpoint_identity::default_ollama_base_url),
+            ),
+            Self::OpenAi { model, .. } => super::endpoint_identity::bound_chat_target(
+                "openai",
+                model.clone(),
+                &super::endpoint_identity::default_openai_base_url(),
+            ),
+            Self::OpenAiCompatible {
+                model, base_url, ..
+            } => super::endpoint_identity::bound_chat_target(
+                "openai_compatible",
+                model.clone(),
+                base_url,
+            ),
         }
     }
 

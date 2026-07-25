@@ -44,15 +44,39 @@ impl From<&str> for AiProvider {
     }
 }
 
-/// Credential-free identity of the immutable chat target bound to a flow.
+/// Non-reversible identity of the physical endpoint bound to a chat target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct ChatBindingFingerprint(String);
+
+impl ChatBindingFingerprint {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ChatBindingFingerprint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Credential-free identity of the immutable chat binding used by a flow.
 ///
-/// Endpoint and credential material deliberately remain infrastructure
-/// concerns. This value is safe to place in descriptors, manifests, and
-/// diagnostics.
+/// The optional fingerprint is a non-reversible digest of provider, model,
+/// and normalised endpoint identity. Legacy and provider-agnostic clients may
+/// remain logical-only; infrastructure-created effect bindings always carry
+/// it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ChatTarget {
     pub provider: AiProvider,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_fingerprint: Option<ChatBindingFingerprint>,
 }
 
 /// Component of a chat request that failed deterministic canonicalisation.
@@ -69,13 +93,37 @@ impl ChatTarget {
         Self {
             provider: provider.into(),
             model: model.into(),
+            binding_fingerprint: None,
         }
+    }
+
+    pub fn with_binding_fingerprint(
+        provider: impl Into<AiProvider>,
+        model: impl Into<String>,
+        binding_fingerprint: ChatBindingFingerprint,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+            binding_fingerprint: Some(binding_fingerprint),
+        }
+    }
+
+    /// Whether two targets identify the same provider and model, ignoring
+    /// endpoint binding. Requests carry this logical pair; effect descriptors
+    /// and resolved clients additionally agree on the fingerprint.
+    pub fn logically_matches(&self, other: &Self) -> bool {
+        self.provider == other.provider && self.model == other.model
     }
 }
 
 impl fmt::Display for ChatTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}", self.provider, self.model)
+        write!(f, "{}/{}", self.provider, self.model)?;
+        if let Some(fingerprint) = &self.binding_fingerprint {
+            write!(f, "#{fingerprint}")?;
+        }
+        Ok(())
     }
 }
 
@@ -310,6 +358,7 @@ impl ChatRequest {
         ChatTarget {
             provider: self.provider.clone(),
             model: self.model.clone(),
+            binding_fingerprint: None,
         }
     }
 

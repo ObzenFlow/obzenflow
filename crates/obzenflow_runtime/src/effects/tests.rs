@@ -4042,13 +4042,18 @@ async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_b
     let stage_id = StageId::new();
     let parent = parent_envelope(WriterId::from(stage_id));
     let (_, in_doubt_history) = affine_scope_matrix_histories(&parent).await;
+    let recovery_parent = parent_envelope(WriterId::from(stage_id));
+    assert_ne!(
+        parent.event.id, recovery_parent.event.id,
+        "the recovery invocation must not accidentally share the archived input identity"
+    );
 
     let recovery_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let recovery_calls = Arc::new(AtomicUsize::new(0));
     let recovery_consults = Arc::new(AtomicUsize::new(0));
     let mut recovery_ctx = invocation_context_with_mode(
         recovery_journal.clone(),
-        parent.clone(),
+        recovery_parent.clone(),
         Some(in_doubt_history),
         EffectRuntimeMode::ResumeIncomplete,
         EffectPortRegistry::new(),
@@ -4130,7 +4135,7 @@ async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_b
         let replay_calls = Arc::new(AtomicUsize::new(0));
         let mut replay_ctx = invocation_context_with_mode(
             replay_journal.clone(),
-            parent.clone(),
+            recovery_parent.clone(),
             Some(settled_history.clone()),
             mode,
             EffectPortRegistry::new(),

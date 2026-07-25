@@ -24,6 +24,11 @@ use std::sync::Mutex;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+#[cfg(any(test, feature = "test-support"))]
+mod test_gate;
+#[cfg(any(test, feature = "test-support"))]
+pub use test_gate::BackpressureAckGate;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackpressureEdgeMode {
     Disabled,
@@ -132,6 +137,8 @@ struct EdgeState {
     /// The upstream writer's waker; fired by `ack_consumed` after credit is
     /// published, so a blocked writer wakes on the ack rather than a timer.
     upstream_waker: CreditWaker,
+    #[cfg(any(test, feature = "test-support"))]
+    ack_gate: Option<Arc<test_gate::BackpressureAckGateState>>,
 }
 
 #[derive(Debug)]
@@ -210,7 +217,16 @@ impl BackpressureRegistry {
                     .get(&upstream)
                     .cloned()
                     .expect("edge upstream is a topology stage"),
+                #[cfg(any(test, feature = "test-support"))]
+                ack_gate: topology
+                    .stage_name(edge.from)
+                    .zip(topology.stage_name(edge.to))
+                    .and_then(|(upstream, downstream)| test_gate::gate_for(upstream, downstream)),
             });
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(gate) = &edge_state.ack_gate {
+                gate.attach(&edge_state);
+            }
 
             edges.insert((upstream, downstream), edge_state.clone());
             outgoing.entry(upstream).or_default().push(edge_state);
@@ -1055,14 +1071,23 @@ impl BackpressureReader {
         let Some(state) = &self.state else {
             return;
         };
-        // Publish credit first; the wake is a prompt to re-check, never a grant.
-        state.reader_seq.fetch_add(n, Ordering::AcqRel);
-        state.upstream_waker.notify();
+        #[cfg(any(test, feature = "test-support"))]
+        let n = state.ack_gate.as_ref().map_or(n, |gate| gate.partition(n));
+        publish_acknowledgements(state, n);
     }
 
     pub fn edge_ids(&self) -> Option<(StageId, StageId)> {
         self.state.as_ref().map(|s| (s.upstream, s.downstream))
     }
+}
+
+fn publish_acknowledgements(state: &EdgeState, n: u64) {
+    if n == 0 {
+        return;
+    }
+    // Publish credit first; the wake is a prompt to re-check, never a grant.
+    state.reader_seq.fetch_add(n, Ordering::AcqRel);
+    state.upstream_waker.notify();
 }
 
 impl Default for BackpressureReader {
@@ -1116,6 +1141,7 @@ mod direct_fact_tests {
             stall_timeout: Duration::from_secs(1),
             reader_seq: AtomicU64::new(0),
             upstream_waker: credit_waker.clone(),
+            ack_gate: None,
         });
         let state = Arc::new(StageState {
             effective_writer: AtomicU64::new(0),
@@ -1154,6 +1180,7 @@ mod direct_fact_tests {
             stall_timeout: Duration::from_secs(1),
             reader_seq: AtomicU64::new(0),
             upstream_waker: credit_waker.clone(),
+            ack_gate: None,
         });
         let tracked = Arc::new(EdgeState {
             upstream,
@@ -1162,6 +1189,7 @@ mod direct_fact_tests {
             stall_timeout: Duration::MAX,
             reader_seq: AtomicU64::new(0),
             upstream_waker: credit_waker.clone(),
+            ack_gate: None,
         });
         let state = Arc::new(StageState {
             effective_writer: AtomicU64::new(0),

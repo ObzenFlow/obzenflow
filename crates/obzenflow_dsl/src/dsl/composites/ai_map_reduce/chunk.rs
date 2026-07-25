@@ -4,7 +4,8 @@
 
 use async_trait::async_trait;
 use obzenflow_core::ai::{
-    AiMapReducePlanningFailed, AiMapReducePlanningManifest, ChunkPlanningSummary,
+    AiMapReduceMapInput, AiMapReducePlanningFailed, AiMapReducePlanningManifest,
+    ChunkPlanningSummary,
 };
 use obzenflow_core::event::observability::AiChunkingSnapshot;
 use obzenflow_core::event::payloads::observability_payload::{
@@ -21,7 +22,7 @@ use serde::Deserialize;
 use std::fmt;
 
 #[derive(Clone)]
-pub struct GeneratedAiChunkHandler<Chunk, Inner> {
+pub(super) struct GeneratedAiChunkHandler<Chunk, Inner> {
     inner: Inner,
     composite_id: CompositeId,
     lineage: obzenflow_core::config::LineagePolicy,
@@ -29,7 +30,7 @@ pub struct GeneratedAiChunkHandler<Chunk, Inner> {
 }
 
 impl<Chunk, Inner> GeneratedAiChunkHandler<Chunk, Inner> {
-    pub fn new(inner: Inner, composite_id: CompositeId) -> Self {
+    pub(super) fn new(inner: Inner, composite_id: CompositeId) -> Self {
         Self {
             inner,
             composite_id,
@@ -177,6 +178,33 @@ where
             )
         })?;
         let mut outputs = outputs;
+        for output in &mut outputs {
+            if !Chunk::event_type_matches(&output.event_type()) {
+                continue;
+            }
+            let chunk = Chunk::try_from_event(output).map_err(|error| {
+                fatal(
+                    StageFatalReason::ProtocolInputIntegrity,
+                    format!("generated map chunk decode failed: {error}"),
+                )
+            })?;
+            let map_input = AiMapReduceMapInput { job_key, chunk };
+            let map_payload = serde_json::to_value(map_input).map_err(|error| {
+                fatal(
+                    StageFatalReason::ProtocolInputIntegrity,
+                    format!("generated map input serialization failed: {error}"),
+                )
+            })?;
+            let ChainEventContent::Data {
+                event_type,
+                payload,
+            } = &mut output.content
+            else {
+                unreachable!("a matching typed chunk is Data")
+            };
+            *event_type = AiMapReduceMapInput::<Chunk>::versioned_event_type();
+            *payload = map_payload;
+        }
         outputs.push(ChainEventFactory::derived_data_event(
             event.writer_id,
             &event,

@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     params_hash_for_chat, prompt_hash_for_chat, schema_hash_for_response_format, AiClientError,
-    CanonicalizationComponent, ChatClient, ChatCompletionCompleted, ChatRequest, LlmHashes,
-    LlmObservability, ResolvedTokenEstimator,
+    CanonicalizationComponent, ChatClient, ChatCompletionCompleted, ChatRequest, ChatTarget,
+    LlmHashes, LlmObservability, ResolvedTokenEstimator,
 };
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 use obzenflow_runtime::effects::{
@@ -30,6 +30,7 @@ pub enum ChatCompletionBuildError {
 pub struct ChatCompletion {
     label: String,
     request: ChatRequest,
+    binding_target: ChatTarget,
     hashes: LlmHashes,
     estimator: ResolvedTokenEstimator,
 }
@@ -38,7 +39,7 @@ impl std::fmt::Debug for ChatCompletion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChatCompletion")
             .field("label", &self.label)
-            .field("target", &self.request.target())
+            .field("target", &self.binding_target)
             .field("hashes", &self.hashes)
             .field("estimator", &self.estimator)
             .finish_non_exhaustive()
@@ -49,6 +50,7 @@ impl ChatCompletion {
     pub fn new(
         label: impl Into<String>,
         request: ChatRequest,
+        binding_target: ChatTarget,
         estimator: ResolvedTokenEstimator,
     ) -> Result<Self, ChatCompletionBuildError> {
         let prompt_hash = prompt_hash_for_chat(&request.messages)
@@ -65,6 +67,7 @@ impl ChatCompletion {
         Ok(Self {
             label: label.into(),
             request,
+            binding_target,
             hashes,
             estimator,
         })
@@ -82,7 +85,7 @@ impl ChatCompletion {
 #[async_trait]
 impl Effect for ChatCompletion {
     const EFFECT_TYPE: &'static str = "obzenflow.ai.chat_completion";
-    const SCHEMA_VERSION: u32 = 1;
+    const SCHEMA_VERSION: u32 = 2;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
 
     type Outcome = ChatCompletionCompleted;
@@ -94,8 +97,10 @@ impl Effect for ChatCompletion {
     fn canonical_input(&self) -> serde_json::Value {
         // Construction has already canonicalised every request component.
         // ChatRequest contains only serialisable DTO fields.
-        serde_json::to_value(&self.request)
-            .expect("a constructed ChatCompletion request must serialize")
+        serde_json::json!({
+            "binding_target": &self.binding_target,
+            "request": &self.request,
+        })
     }
 
     fn required_ports() -> Vec<EffectPortRequirement> {
@@ -104,9 +109,9 @@ impl Effect for ChatCompletion {
 
     fn validate_port_bindings(&self, ctx: &EffectContext) -> Result<(), EffectError> {
         let client = ctx.port::<dyn ChatClient>(CHAT_PORT)?;
-        let expected = self.request.target();
+        let expected = &self.binding_target;
         let observed = client.target();
-        if &expected != observed {
+        if expected != observed {
             return Err(EffectError::EffectPortBindingMismatch {
                 port: CHAT_PORT.to_string(),
                 expected: expected.to_string(),

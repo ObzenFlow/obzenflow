@@ -2439,21 +2439,19 @@ macro_rules! __obzenflow_effectful_transform_untyped {
         $crate::__obzenflow_effect_entries!(
             @entry __obzenflow_effects, __obzenflow_attachments, [], $($effects)*
         );
-        Box::new(EffectfulTransformDescriptor {
-            name: $name.to_string(),
-            handler: $handler,
-            effects: __obzenflow_effects,
-            middleware: __middleware,
-            effect_policies: __obzenflow_attachments,
-            direct_fact_plan:
-                ::obzenflow_runtime::stages::resources_builder::DirectFactPlan::default(),
-            backpressure: {
+        Box::new(EffectfulTransformDescriptor::new(
+            $name,
+            $handler,
+            __obzenflow_effects,
+            __middleware,
+            __obzenflow_attachments,
+            {
                 #[allow(unused_mut)]
                 let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
                 $($( __bp = Some($bp); )?)?
                 __bp
             },
-        }) as Box<dyn StageDescriptor>
+        )) as Box<dyn StageDescriptor>
     }};
 }
 
@@ -5249,7 +5247,10 @@ macro_rules! ai_map_reduce {
     };
 
     (name: $name:literal, $($rest:tt)+) => {
-        $crate::__obzenflow_ai_map_reduce_generated_contract!(name = $name, $($rest)+)
+        compile_error!(
+            "ai_map_reduce!: explicit `name:` is not supported; the left-hand `stages:` \
+             binding is the durable composite identity"
+        )
     };
     ($($rest:tt)+) => {
         $crate::__obzenflow_ai_map_reduce_generated_contract!(

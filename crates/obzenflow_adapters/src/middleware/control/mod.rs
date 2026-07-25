@@ -15,5 +15,7 @@ pub use rate_limiter::{
     rate_limit, rate_limit_with_burst, RateLimiter, RateLimiterBuilder, RateLimiterFactory,
     RateLimiterMiddleware,
 };
+#[cfg(feature = "test-support")]
+pub use resilience::ai_recovery_rejecting_resilience_for_test;
 pub(in crate::middleware::control) use resilience::EffectResilienceMiddleware;
 pub use resilience::{ai_resilience, EffectResilience, EffectResilienceConfigError};

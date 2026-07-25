@@ -1,0 +1,21 @@
+error[E0451]: fields `name`, `handler`, `effects`, `middleware`, `effect_policies`, `direct_fact_plan`, `pass_through_event_type` and `backpressure` of struct `EffectfulTransformDescriptor` are private
+  --> tests/compile_fail/ai_map_reduce_generated_descriptor_fields_are_private.rs:14:9
+   |
+13 |     let _ = EffectfulTransformDescriptor {
+   |             ---------------------------- in this type
+14 |         name: "counterfeit-generated-stage".to_string(),
+   |         ^^^^ private field
+15 |         handler: FirstOnly,
+   |         ^^^^^^^ private field
+16 |         effects: Vec::new(),
+   |         ^^^^^^^ private field
+17 |         middleware: Vec::new(),
+   |         ^^^^^^^^^^ private field
+18 |         effect_policies: Vec::new(),
+   |         ^^^^^^^^^^^^^^^ private field
+19 |         direct_fact_plan: DirectFactPlan::default(),
+   |         ^^^^^^^^^^^^^^^^ private field
+20 |         pass_through_event_type: None,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^ private field
+21 |         backpressure: None,
+   |         ^^^^^^^^^^^^ private field

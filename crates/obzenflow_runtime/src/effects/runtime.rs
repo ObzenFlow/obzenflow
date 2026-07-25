@@ -127,12 +127,6 @@ impl EffectsCore {
         std::mem::take(&mut self.committed_facts)
     }
 
-    pub(crate) fn parent_composite_activations(
-        &self,
-    ) -> Vec<obzenflow_core::event::context::CompositeActivationContext> {
-        self.ctx.parent.event.composite_activations().to_vec()
-    }
-
     pub(crate) async fn preflight_next_effect_cursor_is_empty(&self) -> Result<(), EffectError> {
         let recorded_flow_id = self
             .ctx
@@ -850,6 +844,9 @@ impl EffectsCore {
                 "effect attempt history exceeds u32 range".to_string(),
             )
         })?;
+        let recovery_causal_input_id = prior_attempts
+            .first()
+            .map(|started| started.causal_input_id);
         let next_attempt = highest_prior_attempt
             .checked_add(1)
             .ok_or_else(|| EffectError::Execution("effect attempt ordinal overflow".to_string()))?;
@@ -1043,11 +1040,17 @@ impl EffectsCore {
                         )
                         .await;
                 }
+                let causal_input_id = recovery_causal_input_id.ok_or_else(|| {
+                    EffectError::EffectProvenanceMismatch(format!(
+                        "effect cursor {cursor:?} selected recovery abandonment without an archived Start identity"
+                    ))
+                })?;
                 self.record_recovery_abandonment(
                     cursor,
                     descriptor_hash,
                     descriptor,
                     EffectAttemptOrdinal::new(highest_prior_attempt),
+                    causal_input_id,
                     reason,
                     control_events,
                 )
@@ -1215,6 +1218,7 @@ impl EffectsCore {
         descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
         highest_started_attempt: EffectAttemptOrdinal,
+        causal_input_id: EventId,
         reason: EffectAbortReason,
         control_events: Vec<ChainEvent>,
     ) -> Result<T, EffectError> {
@@ -1250,7 +1254,7 @@ impl EffectsCore {
             effect_type: descriptor.effect_type.clone(),
             outcome_group_id: effect_outcome_group_id(&cursor),
             highest_started_attempt,
-            causal_input_id: self.ctx.parent.event.id,
+            causal_input_id,
             cause: reason.cause,
             message: reason.message,
             retry: reason.retry,

@@ -10,4 +10,3 @@ stall_timeout_ms = 30000
 [ai.models]
 provider = "ollama"
 model = "llama3.1:8b"
-

@@ -2,15 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::{ChatCompletion, ChatCompletionBuildError};
 use async_trait::async_trait;
+use obzenflow_adapters::ai::{ChatCompletion, ChatCompletionBuildError};
 use obzenflow_core::ai::{
-    AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceRoleFailure,
-    AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind, ChatTarget, ChunkEnvelope,
-    ResolvedTokenEstimator,
+    AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceMapInput,
+    AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind, ChatTarget,
+    ChunkEnvelope, ResolvedTokenEstimator,
 };
 use obzenflow_core::event::{EffectFailureDetail, StageFatalCode, StageFatalReason};
-use obzenflow_core::id::CompositeId;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::{HandlerError, StageFatal};
@@ -18,16 +17,15 @@ use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use std::fmt;
 use std::sync::Arc;
 
-pub const MAP_CHAT_COMPLETION_LABEL: &str = "ai_map_reduce.map.chat_completion";
-pub const FINALISE_CHAT_COMPLETION_LABEL: &str = "ai_map_reduce.finalise.chat_completion";
+pub(super) const MAP_CHAT_COMPLETION_LABEL: &str = "ai_map_reduce.map.chat_completion";
+pub(super) const FINALISE_CHAT_COMPLETION_LABEL: &str = "ai_map_reduce.finalise.chat_completion";
 
 type GeneratedFinaliseTypes<Seed, Collected, Out> = fn() -> (Seed, Collected, Out);
 
-pub struct GeneratedAiMapHandler<Item, Partial, Role> {
+pub(super) struct GeneratedAiMapHandler<Item, Partial, Role> {
     role: Arc<Role>,
     chat_target: ChatTarget,
     chat_estimator: ResolvedTokenEstimator,
-    composite_id: CompositeId,
     _types: std::marker::PhantomData<fn() -> (Item, Partial)>,
 }
 
@@ -37,24 +35,21 @@ impl<Item, Partial, Role> Clone for GeneratedAiMapHandler<Item, Partial, Role> {
             role: self.role.clone(),
             chat_target: self.chat_target.clone(),
             chat_estimator: self.chat_estimator.clone(),
-            composite_id: self.composite_id.clone(),
             _types: std::marker::PhantomData,
         }
     }
 }
 
 impl<Item, Partial, Role> GeneratedAiMapHandler<Item, Partial, Role> {
-    pub fn new(
+    pub(super) fn new(
         role: Role,
         chat_target: ChatTarget,
         chat_estimator: ResolvedTokenEstimator,
-        composite_id: CompositeId,
     ) -> Self {
         Self {
             role: Arc::new(role),
             chat_target,
             chat_estimator,
-            composite_id,
             _types: std::marker::PhantomData,
         }
     }
@@ -65,12 +60,11 @@ impl<Item, Partial, Role> fmt::Debug for GeneratedAiMapHandler<Item, Partial, Ro
         formatter
             .debug_struct("GeneratedAiMapHandler")
             .field("chat_target", &self.chat_target)
-            .field("composite_id", &self.composite_id)
             .finish_non_exhaustive()
     }
 }
 
-pub struct GeneratedAiFinaliseHandler<Seed, Collected, Out, Role> {
+pub(super) struct GeneratedAiFinaliseHandler<Seed, Collected, Out, Role> {
     role: Arc<Role>,
     chat_target: ChatTarget,
     chat_estimator: ResolvedTokenEstimator,
@@ -89,7 +83,7 @@ impl<Seed, Collected, Out, Role> Clone for GeneratedAiFinaliseHandler<Seed, Coll
 }
 
 impl<Seed, Collected, Out, Role> GeneratedAiFinaliseHandler<Seed, Collected, Out, Role> {
-    pub fn new(
+    pub(super) fn new(
         role: Role,
         chat_target: ChatTarget,
         chat_estimator: ResolvedTokenEstimator,
@@ -294,57 +288,6 @@ fn request_canonicalization_failure(error: ChatCompletionBuildError) -> AiMapRed
     }
 }
 
-fn exact_job_key<Output, EffectsSet>(
-    fx: &Effects<Output, EffectsSet>,
-    composite_id: &CompositeId,
-) -> Result<obzenflow_core::EventId, HandlerError>
-where
-    Output: obzenflow_core::StageFactSet,
-    EffectsSet: obzenflow_runtime::effects::EffectSet,
-{
-    let matching = fx
-        .__generated_parent_composite_activations()
-        .into_iter()
-        .filter(|activation| &activation.composite_id == composite_id)
-        .collect::<Vec<_>>();
-    let [activation] = matching.as_slice() else {
-        return Err(fatal(
-            StageFatalCode::Protocol,
-            StageFatalReason::ProtocolInputIntegrity,
-            format!(
-                "generated AI map input requires exactly one activation for composite '{composite_id}', found {}",
-                matching.len()
-            ),
-        ));
-    };
-    Ok(activation.activation)
-}
-
-async fn prepare_pre_effect_terminal<Output, EffectsSet>(
-    fx: &Effects<Output, EffectsSet>,
-) -> Result<(), HandlerError>
-where
-    Output: obzenflow_core::StageFactSet,
-    EffectsSet: obzenflow_runtime::effects::EffectSet,
-{
-    fx.__generated_preflight_first_effect_is_empty()
-        .await
-        .map_err(|error| {
-            fatal(
-                StageFatalCode::Replay,
-                StageFatalReason::ReplayDivergence,
-                error.to_string(),
-            )
-        })?;
-    if fx.is_replaying() {
-        Ok(())
-    } else {
-        fx.__generated_request_live_admission()
-            .await
-            .map_err(fatal_from_effect)
-    }
-}
-
 fn target_assertion_failure(expected: &ChatTarget, observed: &ChatTarget) -> HandlerError {
     fatal(
         StageFatalCode::Configuration,
@@ -364,7 +307,7 @@ where
     Partial: TypedPayload + Clone + Send + Sync + 'static,
     Role: AiMapRole<Item, Partial>,
 {
-    type Input = ChunkEnvelope<Item>;
+    type Input = AiMapReduceMapInput<ChunkEnvelope<Item>>;
     type Output = obzenflow_core::stage_fact_set![
         obzenflow_core::ai::ChatCompletionCompleted,
         AiMapReduceTaggedPartial<Partial>,
@@ -377,7 +320,8 @@ where
         input: Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
-        let job_key = exact_job_key(fx, &self.composite_id)?;
+        let job_key = input.job_key;
+        let input = input.chunk;
         let chunk_index = input.chunk_index;
         let chunk_count = input.chunk_count;
         if chunk_count == 0 || chunk_index >= chunk_count {
@@ -395,20 +339,19 @@ where
         let (request, prepared) = match self.role.prepare(&items, &info) {
             Ok(prepared) => prepared,
             Err(logic) => {
-                prepare_pre_effect_terminal(fx).await?;
-                fx.emit(AiMapReduceChunkFailed {
-                    job_key,
-                    chunk_index,
-                    chunk_count,
-                    cause: AiMapReduceRoleFailure::Logic { logic },
-                })
-                .await
-                .map_err(emit_failure)?;
-                return fx.complete().map_err(emit_failure);
+                return fx
+                    .complete_with_pre_effect_fact(AiMapReduceChunkFailed {
+                        job_key,
+                        chunk_index,
+                        chunk_count,
+                        cause: AiMapReduceRoleFailure::Logic { logic },
+                    })
+                    .await
+                    .map_err(emit_failure);
             }
         };
         let observed_target = request.target();
-        if observed_target != self.chat_target {
+        if !observed_target.logically_matches(&self.chat_target) {
             return Err(target_assertion_failure(
                 &self.chat_target,
                 &observed_target,
@@ -417,20 +360,20 @@ where
         let effect = match ChatCompletion::new(
             MAP_CHAT_COMPLETION_LABEL,
             request,
+            self.chat_target.clone(),
             self.chat_estimator.clone(),
         ) {
             Ok(effect) => effect,
             Err(error) => {
-                prepare_pre_effect_terminal(fx).await?;
-                fx.emit(AiMapReduceChunkFailed {
-                    job_key,
-                    chunk_index,
-                    chunk_count,
-                    cause: request_canonicalization_failure(error),
-                })
-                .await
-                .map_err(emit_failure)?;
-                return fx.complete().map_err(emit_failure);
+                return fx
+                    .complete_with_pre_effect_fact(AiMapReduceChunkFailed {
+                        job_key,
+                        chunk_index,
+                        chunk_count,
+                        cause: request_canonicalization_failure(error),
+                    })
+                    .await
+                    .map_err(emit_failure);
             }
         };
 
@@ -471,18 +414,6 @@ where
         }
         fx.complete().map_err(emit_failure)
     }
-
-    async fn __generated_raw_dispatch(
-        &self,
-        event: obzenflow_core::ChainEvent,
-        _fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Option<Result<Vec<obzenflow_core::ChainEvent>, HandlerError>> {
-        if obzenflow_core::ai::AiMapReducePlanningManifest::event_type_matches(&event.event_type())
-        {
-            return Some(Ok(vec![event]));
-        }
-        None
-    }
 }
 
 #[async_trait]
@@ -513,18 +444,17 @@ where
         let (request, prepared) = match self.role.prepare(&seed, &collected) {
             Ok(prepared) => prepared,
             Err(logic) => {
-                prepare_pre_effect_terminal(fx).await?;
-                fx.emit(AiMapReduceFinaliseFailed {
-                    job_key,
-                    cause: AiMapReduceRoleFailure::Logic { logic },
-                })
-                .await
-                .map_err(emit_failure)?;
-                return fx.complete().map_err(emit_failure);
+                return fx
+                    .complete_with_pre_effect_fact(AiMapReduceFinaliseFailed {
+                        job_key,
+                        cause: AiMapReduceRoleFailure::Logic { logic },
+                    })
+                    .await
+                    .map_err(emit_failure);
             }
         };
         let observed_target = request.target();
-        if observed_target != self.chat_target {
+        if !observed_target.logically_matches(&self.chat_target) {
             return Err(target_assertion_failure(
                 &self.chat_target,
                 &observed_target,
@@ -533,18 +463,18 @@ where
         let effect = match ChatCompletion::new(
             FINALISE_CHAT_COMPLETION_LABEL,
             request,
+            self.chat_target.clone(),
             self.chat_estimator.clone(),
         ) {
             Ok(effect) => effect,
             Err(error) => {
-                prepare_pre_effect_terminal(fx).await?;
-                fx.emit(AiMapReduceFinaliseFailed {
-                    job_key,
-                    cause: request_canonicalization_failure(error),
-                })
-                .await
-                .map_err(emit_failure)?;
-                return fx.complete().map_err(emit_failure);
+                return fx
+                    .complete_with_pre_effect_fact(AiMapReduceFinaliseFailed {
+                        job_key,
+                        cause: request_canonicalization_failure(error),
+                    })
+                    .await
+                    .map_err(emit_failure);
             }
         };
 
