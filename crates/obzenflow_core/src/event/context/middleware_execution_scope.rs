@@ -2,49 +2,27 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Middleware execution scope (FLOWIP-120a), a transitional bridge under
-//! FLOWIP-120c.
+//! Execution scope for typed policy boundaries and runtime observers.
 //!
-//! Handler-level control middleware (rate limiters, circuit breakers) observe an
-//! unreliable boundary and react to it by sleeping, consuming tokens, mutating
-//! breaker state, and emitting lifecycle records. During deterministic replay a
-//! stage is reconstructed from recorded events and performs no live external
-//! work, so those reactions must be suppressed: a replay that re-paces or
-//! re-trips a breaker would change timing and state without changing recorded
-//! values, and would re-emit records that already exist in the archive.
+//! During deterministic replay a stage is reconstructed from recorded events
+//! and performs no live external work. Replay-sensitive observers receive the
+//! reconstruction variants, while source, effect, and sink policy contexts are
+//! constructed only for the corresponding live boundary variants.
 //!
-//! FLOWIP-120c's placement split makes that suppression structural: policy
-//! middleware attaches to live I/O units only (sources, the effect boundary
-//! per effect, sink delivery), so it cannot run during reconstruction at all,
-//! the way replay bypasses source middleware through the `ReplayDriver`.
-//! This scope remains for the transition, in three roles: it suppresses the
-//! handler-level policy chains that still exist until the split retires them
-//! (the surface FLOWIP-120f deletes), it labels observation emissions during
-//! reconstruction (FLOWIP-120i), and its sink share survives until
-//! FLOWIP-095g settles re-delivery suppression. It is computed per dispatched
-//! event by the supervisors (FLOWIP-120c H3), which is the seam where
-//! FLOWIP-120n's resume phase predicate decides live versus reconstruction
-//! per position.
+//! The placement split makes policy suppression structural: control policy
+//! attaches to live I/O units only, so strict replay bypasses it rather than
+//! asking it to inspect a flag. Runtime supervisors compute stage scope for
+//! observer dispatch and journal evidence; adapter-owned boundaries assign the
+//! live scope to their invocation-local typed policy carrier.
 //!
-//! The scope is the signal the supervisor hands to each per-event
-//! [`MiddlewareContext`](crate) so middleware can tell which of four execution
-//! contexts it is running in. It is deliberately not inferred from
-//! `event.replay_context`: that field is stamped only on re-injected source
-//! events and is nulled across fan-in, so it does not identify handler-level
-//! replay reconstruction at a downstream stage. The authoritative signal is the
-//! stage's replay mode, mapped onto this scope by the runtime.
-//!
-//! Live I/O boundaries are distinguished from handler reconstruction on purpose.
-//! Replay returns recorded source/effect/sink work before a boundary is ever
-//! consulted, so when boundary middleware does run, it is guarding live I/O.
-//! Boundary middleware therefore runs under a live boundary scope and is never
-//! suppressed.
+//! Stage scope is deliberately not inferred from `event.replay_context`: that
+//! field is stamped only on re-injected source events and is nulled across
+//! fan-in. The runtime execution phase remains authoritative.
 
 /// The execution context a piece of middleware is running in for one event.
 ///
-/// Defaults to [`LiveHandler`](MiddlewareExecutionScope::LiveHandler) so any
-/// context that is not explicitly scoped behaves exactly as it did before
-/// FLOWIP-120a (live, no suppression).
+/// Defaults to [`LiveHandler`](MiddlewareExecutionScope::LiveHandler) for
+/// ordinary live stage and observer work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MiddlewareExecutionScope {
     /// Live handler execution. Middleware runs normally.

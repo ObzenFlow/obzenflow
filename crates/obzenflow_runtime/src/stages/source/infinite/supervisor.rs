@@ -650,8 +650,10 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     let report = around_source_boundary(
                         source_boundary,
                         Box::pin(async {
-                            let poll_started_at = Instant::now();
-                            let result = match self.handler.next() {
+                            let poll_started_at = tokio::time::Instant::now();
+                            let raw_result = self.handler.next();
+                            let poll_duration = poll_started_at.elapsed();
+                            let result = match raw_result {
                                 Ok(events) => Ok(SourcePollCompletion::Batch(events)),
                                 Err(error) => Ok(SourcePollCompletion::Batch(vec![
                                     normalise_source_poll_error(
@@ -663,7 +665,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                             };
                             SourcePollReport {
                                 result,
-                                poll_duration: poll_started_at.elapsed(),
+                                poll_duration,
                             }
                         }),
                     )

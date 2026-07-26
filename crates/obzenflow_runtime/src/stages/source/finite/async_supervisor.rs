@@ -608,22 +608,28 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                     let boundary_future = around_source_boundary(
                         source_boundary,
                         Box::pin(async {
-                            let poll_started_at = Instant::now();
-                            let raw_result = match poll_timeout {
+                            let poll_started_at = tokio::time::Instant::now();
+                            let (raw_result, poll_duration) = match poll_timeout {
                                 Some(timeout) => {
                                     match tokio::time::timeout(timeout, self.handler.next()).await {
-                                        Ok(result) => result,
-                                        Err(_) => Err(
-                                            crate::stages::common::handlers::source::SourceError::Timeout(
-                                                format!(
+                                        Ok(result) => (result, poll_started_at.elapsed()),
+                                        Err(_) => {
+                                            let poll_duration = poll_started_at.elapsed();
+                                            let timeout_error =
+                                                crate::stages::common::handlers::source::SourceError::Timeout(
+                                                    format!(
                                                     "poll timeout exceeded ({}s)",
                                                     timeout.as_secs()
                                                 ),
-                                            ),
-                                        ),
+                                                );
+                                            (Err(timeout_error), poll_duration)
+                                        }
                                     }
                                 }
-                                None => self.handler.next().await,
+                                None => {
+                                    let result = self.handler.next().await;
+                                    (result, poll_started_at.elapsed())
+                                }
                             };
                             let result = match raw_result {
                                 Ok(Some(events)) => Ok(SourcePollCompletion::Batch(events)),
@@ -638,7 +644,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                             };
                             SourcePollReport {
                                 result,
-                                poll_duration: poll_started_at.elapsed(),
+                                poll_duration,
                             }
                         }),
                     );

@@ -1,0 +1,5 @@
+error[E0599]: no variant or associated item named `Retry` found for enum `TopologyMiddlewareConfigSlot` in the current scope
+ --> tests/compile_fail/handler_shell_retirement/retry_topology_slot.rs:4:43
+  |
+4 |     let _ = TopologyMiddlewareConfigSlot::Retry;
+  |                                           ^^^^^ variant or associated item not found in `TopologyMiddlewareConfigSlot`

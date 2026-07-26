@@ -22,7 +22,7 @@
 //!     while effect-history settlement rows retain their archived identities.
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, Retry};
+use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, MiddlewareFactory, Retry};
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
@@ -52,6 +52,7 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -88,19 +89,22 @@ impl TypedPayload for CompEffectValue {
 struct CompSource {
     next_value: u64,
     writer_id: WriterId,
+    calls: Arc<AtomicUsize>,
 }
 
 impl CompSource {
-    fn new() -> Self {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
         Self {
             next_value: 1,
             writer_id: WriterId::from(StageId::new()),
+            calls,
         }
     }
 }
 
 impl FiniteSourceHandler for CompSource {
     fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         if self.next_value > 3 {
             return Ok(None);
         }
@@ -278,6 +282,7 @@ impl SinkHandler for CollectSink {
 
 fn build_retry_flow(
     journal_base: PathBuf,
+    source_calls: Arc<AtomicUsize>,
     calls: Arc<Mutex<BTreeMap<u64, usize>>>,
     outputs: Arc<Mutex<Vec<CompOutput>>>,
 ) -> FlowDefinition {
@@ -306,7 +311,7 @@ fn build_retry_flow(
         stages: {
             // Source breaker (stays closed; the scripted source never fails) proves
             // the breaker binds onto the source-poll surface and is replay-safe.
-            inputs = source!(CompInput => CompSource::new(), [source_breaker]);
+            inputs = source!(CompInput => CompSource::new(source_calls), [source_breaker]);
             // Fan-out: one source event becomes two downstream inputs.
             fan_out = transform!(CompInput -> CompInput => FanOutTransform::new());
             // Every derived cursor times out once and then recovers. Intermediate
@@ -433,6 +438,56 @@ fn expected_calls() -> BTreeMap<u64, usize> {
         .collect()
 }
 
+fn assert_retry_is_nested_introspection_without_a_topology_slot() {
+    let factory: Box<dyn MiddlewareFactory> = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(2)
+            .build()
+            .expect("effect breaker configuration"),
+    )
+    .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(2))
+    .build()
+    .expect("effect resilience configuration");
+
+    let snapshot = factory
+        .config_snapshot()
+        .expect("effect resilience keeps aggregate-local introspection");
+    assert_eq!(snapshot["kind"], "effect_resilience");
+    assert!(
+        snapshot["retry"].is_object(),
+        "retry remains nested inside the protected effect aggregate"
+    );
+    assert!(
+        factory.topology_config_slot().is_none(),
+        "effect resilience must not reclaim the retired standalone retry topology slot"
+    );
+}
+
+fn assert_topology_omits_standalone_retry(topology: &obzenflow_topology::Topology) {
+    for stage in topology.stages() {
+        let Some(middleware) = &stage.middleware else {
+            continue;
+        };
+        assert!(
+            middleware.stack.iter().all(|label| label != "retry"),
+            "stage '{}' advertised standalone retry in its middleware stack",
+            stage.name
+        );
+        assert!(
+            middleware.retry.is_none(),
+            "stage '{}' populated the published 0.5.1 retry tombstone",
+            stage.name
+        );
+        let encoded =
+            serde_json::to_value(middleware).expect("stage middleware topology serialises");
+        assert!(
+            encoded.get("retry").is_none(),
+            "stage '{}' emitted a middleware.retry payload",
+            stage.name
+        );
+    }
+}
+
 fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {
     let mut cursors: HashMap<EffectCursor, (usize, usize)> = HashMap::new();
     let mut retry_rows = 0;
@@ -491,17 +546,27 @@ fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {
 async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
+    assert_retry_is_nested_introspection_without_a_topology_slot();
 
     // --- Live run ---------------------------------------------------------
+    let live_source_calls = Arc::new(AtomicUsize::new(0));
     let live_calls = Arc::new(Mutex::new(BTreeMap::new()));
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
-        .with_cli_args(vec![OsString::from("obzenflow")])
-        .run_async(build_retry_flow(
-            journal_base.clone(),
-            live_calls.clone(),
-            live_outputs.clone(),
-        ))
+    let live_handle = build_retry_flow(
+        journal_base.clone(),
+        live_source_calls.clone(),
+        live_calls.clone(),
+        live_outputs.clone(),
+    )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .expect("live composition flow should build");
+    let topology = live_handle
+        .topology()
+        .expect("built flow carries its emitted topology");
+    assert_topology_omits_standalone_retry(&topology);
+    live_handle
+        .run()
         .await
         .expect("live composition flow should complete");
 
@@ -515,6 +580,11 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
         *live_calls.lock().expect("calls lock poisoned"),
         expected_calls(),
         "every derived logical invocation should make exactly two physical calls"
+    );
+    assert_eq!(
+        live_source_calls.load(Ordering::SeqCst),
+        4,
+        "the live finite source performs three data polls and one EOF poll"
     );
 
     let live_run = latest_run_dir(&journal_base);
@@ -539,6 +609,7 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
     let live_effect_breaker_ids = circuit_breaker_event_ids(&live_effect_events);
 
     // --- Strict replay of the same archive --------------------------------
+    let replay_source_calls = Arc::new(AtomicUsize::new(0));
     let replay_calls = Arc::new(Mutex::new(BTreeMap::new()));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
@@ -550,6 +621,7 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
         ])
         .run_async(build_retry_flow(
             journal_base.clone(),
+            replay_source_calls.clone(),
             replay_calls.clone(),
             replay_outputs.clone(),
         ))
@@ -560,6 +632,11 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
     assert!(
         replay_calls.lock().expect("calls lock poisoned").is_empty(),
         "strict replay must not execute effects or move breaker state"
+    );
+    assert_eq!(
+        replay_source_calls.load(Ordering::SeqCst),
+        0,
+        "strict replay must not perform a live source poll, timeout, policy pass, or idle backoff"
     );
     assert_eq!(
         replay_outputs

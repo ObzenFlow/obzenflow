@@ -1,0 +1,7 @@
+error[E0432]: unresolved imports `obzenflow_adapters::middleware::middleware_fn`, `obzenflow_adapters::middleware::FnMiddleware`
+ --> tests/compile_fail/handler_shell_retirement/functional_shell_constructor.rs:1:38
+  |
+1 | use obzenflow_adapters::middleware::{middleware_fn, FnMiddleware};
+  |                                      ^^^^^^^^^^^^^  ^^^^^^^^^^^^ no `FnMiddleware` in `middleware`
+  |                                      |
+  |                                      no `middleware_fn` in `middleware`

@@ -1,0 +1,27 @@
+error[E0432]: unresolved imports `obzenflow_adapters::middleware::AsyncFiniteSourceHandlerExt`, `obzenflow_adapters::middleware::AsyncFiniteSourceMiddlewareBuilder`, `obzenflow_adapters::middleware::AsyncInfiniteSourceHandlerExt`, `obzenflow_adapters::middleware::AsyncInfiniteSourceMiddlewareBuilder`, `obzenflow_adapters::middleware::AsyncTransformHandlerExt`, `obzenflow_adapters::middleware::AsyncTransformMiddlewareBuilder`, `obzenflow_adapters::middleware::FiniteSourceHandlerExt`, `obzenflow_adapters::middleware::FiniteSourceMiddlewareBuilder`, `obzenflow_adapters::middleware::InfiniteSourceHandlerExt`, `obzenflow_adapters::middleware::InfiniteSourceMiddlewareBuilder`, `obzenflow_adapters::middleware::JoinHandlerMiddlewareExt`, `obzenflow_adapters::middleware::JoinMiddlewareBuilder`, `obzenflow_adapters::middleware::SinkHandlerExt`, `obzenflow_adapters::middleware::SinkMiddlewareBuilder`, `obzenflow_adapters::middleware::StatefulHandlerMiddlewareExt`, `obzenflow_adapters::middleware::StatefulMiddlewareBuilder`, `obzenflow_adapters::middleware::TransformHandlerExt`, `obzenflow_adapters::middleware::TransformMiddlewareBuilder`
+ --> tests/compile_fail/handler_shell_retirement/handler_extension_builders.rs:2:5
+  |
+2 |     AsyncFiniteSourceHandlerExt, AsyncFiniteSourceMiddlewareBuilder,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `AsyncFiniteSourceMiddlewareBuilder` in `middleware`
+  |     |
+  |     no `AsyncFiniteSourceHandlerExt` in `middleware`
+3 |     AsyncInfiniteSourceHandlerExt, AsyncInfiniteSourceMiddlewareBuilder,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `AsyncInfiniteSourceMiddlewareBuilder` in `middleware`
+  |     |
+  |     no `AsyncInfiniteSourceHandlerExt` in `middleware`
+4 |     AsyncTransformHandlerExt, AsyncTransformMiddlewareBuilder, FiniteSourceHandlerExt,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^ no `FiniteSourceHandlerExt` in `middleware`
+  |     |                         |
+  |     |                         no `AsyncTransformMiddlewareBuilder` in `middleware`
+  |     no `AsyncTransformHandlerExt` in `middleware`
+5 |     FiniteSourceMiddlewareBuilder, InfiniteSourceHandlerExt, InfiniteSourceMiddlewareBuilder,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `InfiniteSourceMiddlewareBuilder` in `middleware`
+  |     |                              |
+  |     |                              no `InfiniteSourceHandlerExt` in `middleware`
+  |     no `FiniteSourceMiddlewareBuilder` in `middleware`
+6 |     JoinHandlerMiddlewareExt, JoinMiddlewareBuilder, SinkHandlerExt, SinkMiddlewareBuilder,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^
+7 |     StatefulHandlerMiddlewareExt, StatefulMiddlewareBuilder, TransformHandlerExt,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+8 |     TransformMiddlewareBuilder,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^

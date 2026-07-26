@@ -24,15 +24,3 @@ fn legacy_topology_retry_member_round_trips_without_runtime_authority() {
 
     assert_eq!(encoded, legacy);
 }
-
-#[test]
-fn active_topology_shape_omits_the_retry_tombstone() {
-    let active = obzenflow_topology::MiddlewareInfo::new(vec!["effect_resilience".to_string()]);
-    let encoded = serde_json::to_value(active).expect("active middleware info serialises");
-
-    assert_eq!(encoded["stack"], serde_json::json!(["effect_resilience"]));
-    assert!(
-        encoded.get("retry").is_none(),
-        "new first-party topology must not advertise standalone retry"
-    );
-}

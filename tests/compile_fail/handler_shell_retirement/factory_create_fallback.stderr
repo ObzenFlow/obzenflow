@@ -1,0 +1,11 @@
+error[E0599]: no method named `create` found for reference `&dyn MiddlewareFactory` in the current scope
+ --> tests/compile_fail/handler_shell_retirement/factory_create_fallback.rs:8:21
+  |
+8 |     let _ = factory.create(config, control.clone());
+  |                     ^^^^^^ method not found in `&dyn MiddlewareFactory`
+
+error[E0599]: no method named `create_for_effect` found for reference `&dyn MiddlewareFactory` in the current scope
+ --> tests/compile_fail/handler_shell_retirement/factory_create_fallback.rs:9:21
+  |
+9 |     let _ = factory.create_for_effect(config, control, "example.effect");
+  |                     ^^^^^^^^^^^^^^^^^ method not found in `&dyn MiddlewareFactory`
