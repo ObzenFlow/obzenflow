@@ -4,21 +4,20 @@
 
 //! # Middleware System for ObzenFlow
 //!
-//! This module provides a composable middleware system for adding cross-cutting
-//! concerns like monitoring, logging, rate limiting, and retries to your ObzenFlow
-//! pipeline stages without modifying their core logic.
+//! This module provides typed observer and live-I/O policy attachments for
+//! cross-cutting concerns without wrapping stage handlers.
 //!
 //! ## Middleware model
 //!
-//! Middleware weaves a cross-cutting concern at a named stage join point without
-//! touching handler code, and splits by capability:
+//! Attachments bind at named stage join points and split by capability:
 //!
 //! - **Observers** publish journalled evidence (logging and service-level
 //!   indicator samples) and structurally cannot steer control
 //!   flow: their return type only carries evidence. This is the tool for custom
 //!   observability and auditability aspects.
-//! - **Control** middleware (circuit breaker, rate limiter) admits, paces, or
-//!   rejects at a live-I/O boundary.
+//! - **Control** middleware (circuit breaker, rate limiter, and effect
+//!   resilience) admits, paces, or rejects at a live-I/O boundary. Retry exists
+//!   only inside effect resilience; it is not a standalone attachment.
 //!
 //! Built-in observers are constructed with `indicator()` / `latency()` and
 //! `log()`; built-in control middleware with the checked
@@ -43,10 +42,6 @@
 //!
 //! // NEW: Use the runtime metrics surface and external dashboard/query assets
 //! ```
-//!
-//! ## Applying Middleware to Handlers
-//!
-//! Use the handler extension traits to apply middleware (see builder APIs for current syntax).
 //!
 //! ## Common Middleware Utilities
 //!
@@ -95,7 +90,6 @@
 //! implement a control hook rather than an observer.
 
 // Core types
-pub mod handler;
 mod middleware_factory;
 mod middleware_safety;
 
@@ -112,7 +106,6 @@ pub(crate) fn strict_replay_active() -> bool {
 mod carrier;
 mod context;
 mod context_keys;
-mod function;
 mod hints;
 
 // Middleware categories
@@ -126,30 +119,12 @@ mod validation;
 // Application metrics are journal-derived, infrastructure metrics are observed
 // directly, and dashboards/query assets live outside the middleware API.
 
-// Core trait exports
-pub(crate) use handler::observation_short_circuit;
-pub use handler::{
-    ErrorAction, Middleware, MiddlewareAbortCause, MiddlewareAction, SourceMiddlewarePhase,
-};
 pub use middleware_factory::{
     materialize_factory_checked, materialize_factory_checked_with_declaration,
     MiddlewareBindingError, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-    MiddlewareKind, MiddlewareOverrideKey, TopologyMiddlewareConfigSlot,
+    MiddlewareOverrideKey, TopologyMiddlewareConfigSlot,
 };
 pub use middleware_safety::MiddlewareSafety;
-
-// Handler-specific exports
-pub use handler::{
-    AsyncFiniteSourceHandlerExt, AsyncFiniteSourceMiddlewareBuilder, AsyncInfiniteSourceHandlerExt,
-    AsyncInfiniteSourceMiddlewareBuilder, AsyncMiddlewareTransform, AsyncTransformHandlerExt,
-    AsyncTransformMiddlewareBuilder, FiniteSourceHandlerExt, FiniteSourceMiddlewareBuilder,
-    InfiniteSourceHandlerExt, InfiniteSourceMiddlewareBuilder, JoinHandlerMiddlewareExt,
-    JoinMiddlewareBuilder, MiddlewareAsyncFiniteSource, MiddlewareAsyncInfiniteSource,
-    MiddlewareFiniteSource, MiddlewareInfiniteSource, MiddlewareJoin, MiddlewareSink,
-    MiddlewareStateful, MiddlewareTransform, SinkHandlerExt, SinkMiddlewareBuilder,
-    StatefulHandlerMiddlewareExt, StatefulMiddlewareBuilder, TransformHandlerExt,
-    TransformMiddlewareBuilder, UnifiedMiddlewareTransform,
-};
 
 // Common utilities
 pub use carrier::{
@@ -168,13 +143,12 @@ pub(crate) use carrier::{MaterializationClaim, MiddlewareSurfaceAttachmentKind};
 pub use context::MiddlewareContext;
 pub use control::policy::{
     EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy,
-    PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary,
-    PolicyAdmission, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome, SinkPolicy,
-    SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard, SourceAfterPoll, SourceBatchFacts,
-    SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+    MiddlewareAbortCause, PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary,
+    PerSourcePolicyBoundary, PolicyAdmission, SinkAdmission, SinkAdmissionGuard,
+    SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard,
+    SourceAfterPoll, SourceBatchFacts, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
-pub use function::{middleware_fn, FnMiddleware};
-pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
+pub use hints::{BatchingHint, MiddlewareHints};
 pub use observability::indicator::{indicator, latency, IndicatorKind, IndicatorMiddlewareFactory};
 pub use observer::StageObserverSet;
 

@@ -204,9 +204,8 @@ impl TransactionalEffectPort<TransactionProbe> for TransactionProbePort {
     }
 }
 
-fn effect_context_with_boundary(
+fn effect_context(
     stage_id: StageId,
-    boundary: PerEffectPolicyBoundary,
     calls: Arc<AtomicUsize>,
     trace: Arc<Mutex<Vec<String>>>,
     mode: TransactionProbeMode,
@@ -255,7 +254,7 @@ fn effect_context_with_boundary(
         output_contract: StageOutputContract::empty(),
         backpressure_writer: BackpressureWriter::disabled(),
         emit_enabled: false,
-        effect_boundary: Some(Arc::new(boundary)),
+        effect_boundary: None,
     }
 }
 
@@ -310,12 +309,15 @@ async fn invoke_with_boundary_mode(
     trace: Arc<Mutex<Vec<String>>>,
     mode: TransactionProbeMode,
 ) -> EffectError {
-    let context = effect_context_with_boundary(stage_id, boundary, calls, trace, mode);
+    let context = effect_context(stage_id, calls, trace, mode);
     let input = context.parent.event.clone();
     let terminal_error = Arc::new(Mutex::new(None));
-    let adapter = EffectfulTransformHandlerAdapter::new(TransactionProbeHandler {
-        terminal_error: terminal_error.clone(),
-    });
+    let adapter = EffectfulTransformHandlerAdapter::new(
+        TransactionProbeHandler {
+            terminal_error: terminal_error.clone(),
+        },
+        Arc::new(boundary),
+    );
 
     let result = UnifiedTransformHandler::process(
         &adapter,

@@ -6,8 +6,8 @@
 //!
 //! One builder serves every transform shape (FLOWIP-120c H3): sync handlers
 //! arrive through the `TransformHandler` blanket impl of
-//! `UnifiedTransformHandler`, async handlers through their middleware wrapper
-//! or `AsyncTransformHandlerAdapter`, and effectful handlers through
+//! `UnifiedTransformHandler`, async handlers through
+//! `AsyncTransformHandlerAdapter`, and effectful handlers through
 //! `EffectfulTransformHandlerAdapter`.
 
 use std::collections::HashSet;

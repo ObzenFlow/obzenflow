@@ -10,8 +10,8 @@ use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::supervision::{
     around_source_boundary, drain_pending_outputs_sync, emit_batch_to_pending_outputs,
-    observe_source_boundary_rejection, stage_boundary_control_events, stage_source_poll_outputs,
-    SourcePollObservation,
+    normalise_source_poll_error, observe_source_boundary_rejection, stage_boundary_control_events,
+    stage_source_poll_outputs, SourcePollObservation,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
@@ -53,6 +53,9 @@ pub(crate) struct InfiniteSourceSupervisor<
 
     /// Adaptive backoff for synchronous idle polls (FLOWIP-086i).
     pub(crate) idle_backoff: IdleBackoff,
+
+    /// Delay scheduled after the completed poll outputs have drained.
+    pub(crate) pending_idle_delay: Option<Duration>,
 
     /// Replay driver for `--replay-from` mode (FLOWIP-095a).
     pub(crate) replay_driver: Option<ReplayDriver>,
@@ -339,18 +342,21 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         match state {
             InfiniteSourceState::Created => {
                 self.idle_backoff.reset();
+                self.pending_idle_delay = None;
                 // Wait for initialization
                 Ok(EventLoopDirective::Continue)
             }
 
             InfiniteSourceState::Initialized => {
                 self.idle_backoff.reset();
+                self.pending_idle_delay = None;
                 // Wait for ready signal
                 Ok(EventLoopDirective::Continue)
             }
 
             InfiniteSourceState::WaitingForGun => {
                 self.idle_backoff.reset();
+                self.pending_idle_delay = None;
                 // Wait for start signal from pipeline
                 tracing::debug!(
                     stage_name = %ctx.stage_name,
@@ -404,14 +410,23 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     ));
                 }
 
+                let replaying = matches!(
+                    ctx.runtime_execution.source_phase_for(self.stage_id),
+                    crate::execution::SourceExecutionPhase::Replaying
+                );
+                if replaying {
+                    self.idle_backoff.reset();
+                    self.pending_idle_delay = None;
+                } else if let Some(delay) = self.pending_idle_delay.take() {
+                    tokio::time::sleep(delay).await;
+                    return Ok(EventLoopDirective::Continue);
+                }
+
                 ctx.instrumentation
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                if matches!(
-                    ctx.runtime_execution.source_phase_for(self.stage_id),
-                    crate::execution::SourceExecutionPhase::Replaying
-                ) {
+                if replaying {
                     let replay_archive = ctx
                         .runtime_execution
                         .archive_for_io()
@@ -619,6 +634,8 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                     // heartbeat to live; late prefix events stay
                                     // reconstruction-scoped by their in-band generation.
                                     control.record_generation_boundary(self.stage_id, generation);
+                                    self.idle_backoff.reset();
+                                    self.pending_idle_delay = None;
                                     self.replay_driver = None;
                                     Ok(EventLoopDirective::Continue)
                                 }
@@ -634,7 +651,16 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                         source_boundary,
                         Box::pin(async {
                             let poll_started_at = Instant::now();
-                            let result = self.handler.next().map(SourcePollCompletion::Batch);
+                            let result = match self.handler.next() {
+                                Ok(events) => Ok(SourcePollCompletion::Batch(events)),
+                                Err(error) => Ok(SourcePollCompletion::Batch(vec![
+                                    normalise_source_poll_error(
+                                        WriterId::from(self.stage_id),
+                                        "infinite",
+                                        &error,
+                                    ),
+                                ])),
+                            };
                             SourcePollReport {
                                 result,
                                 poll_duration: poll_started_at.elapsed(),
@@ -682,8 +708,11 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                             }
                         }
                         SourceBoundaryOutcome::Polled(poll) => match poll.result {
-                            Ok(SourcePollCompletion::Batch(mut events)) if !events.is_empty() => {
+                            Ok(SourcePollCompletion::Batch(mut events))
+                                if events.iter().any(|event| event.is_data()) =>
+                            {
                                 self.idle_backoff.reset();
+                                self.pending_idle_delay = None;
                                 ctx.instrumentation
                                     .event_loops_with_work_total
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -722,7 +751,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                     source_poll_observation
                                         .observe(
                                             events.as_mut_slice(),
-                                            Duration::from_nanos(0),
+                                            poll.poll_duration,
                                             crate::stages::observer::SourcePollObserverOutcome::Batch {
                                                 events: source_event_count,
                                             },
@@ -732,13 +761,12 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                         events,
                                         &stage_flow_context,
                                         &ctx.instrumentation,
-                                        Duration::from_nanos(0),
+                                        poll.poll_duration,
                                         observer_scope,
                                         &mut ctx.pending_outputs,
                                     );
                                 }
-                                let delay = self.idle_backoff.next_delay();
-                                tokio::time::sleep(delay).await;
+                                self.pending_idle_delay = Some(self.idle_backoff.next_delay());
                                 Ok(EventLoopDirective::Continue)
                             }
                             Ok(SourcePollCompletion::Eof) => {
@@ -824,6 +852,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
             InfiniteSourceState::Draining => {
                 self.idle_backoff.reset();
+                self.pending_idle_delay = None;
                 // Draining state - prepare to send EOF
                 Ok(EventLoopDirective::Transition(
                     InfiniteSourceEvent::Completed,
@@ -832,12 +861,14 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
             InfiniteSourceState::Drained => {
                 self.idle_backoff.reset();
+                self.pending_idle_delay = None;
                 // Terminal state
                 Ok(EventLoopDirective::Terminate)
             }
 
             InfiniteSourceState::Failed(_) => {
                 self.idle_backoff.reset();
+                self.pending_idle_delay = None;
                 // Terminal state
                 Ok(EventLoopDirective::Terminate)
             }

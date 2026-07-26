@@ -376,7 +376,9 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
 
         let handle = std::thread::spawn(move || {
-            let mut ctx = MiddlewareContext::live_handler();
+            let mut ctx = MiddlewareContext::with_scope(
+                obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+            );
             middleware_for_thread.maybe_emit_summary(&mut ctx);
             tx.send(ctx.control_events().len()).unwrap();
         });
@@ -402,7 +404,9 @@ mod tests {
             stats.last_summary = Instant::now() - Duration::from_secs(10);
         }
 
-        let mut ctx = MiddlewareContext::live_handler();
+        let mut ctx = MiddlewareContext::with_scope(
+            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+        );
         middleware.maybe_emit_summary(&mut ctx);
         assert_eq!(ctx.control_events().len(), 2);
 
@@ -444,7 +448,9 @@ mod tests {
             stats.last_summary = Instant::now() - Duration::from_secs(10);
         }
 
-        let mut ctx = MiddlewareContext::live_handler();
+        let mut ctx = MiddlewareContext::with_scope(
+            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+        );
         middleware.maybe_emit_summary(&mut ctx);
         assert_eq!(ctx.control_events().len(), 1);
         match &ctx.control_events()[0].content {
@@ -462,7 +468,9 @@ mod tests {
             stats.last_summary = Instant::now() - Duration::from_secs(10);
         }
 
-        let mut ctx = MiddlewareContext::live_handler();
+        let mut ctx = MiddlewareContext::with_scope(
+            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+        );
         middleware.maybe_emit_summary(&mut ctx);
         assert_eq!(ctx.control_events().len(), 2);
         match &ctx.control_events()[0].content {
@@ -496,7 +504,9 @@ mod tests {
             stats.pulse_delay_ms_max = 200;
         }
 
-        let mut ctx = MiddlewareContext::live_handler();
+        let mut ctx = MiddlewareContext::with_scope(
+            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+        );
         middleware.maybe_emit_activity_pulse(&mut ctx);
         assert_eq!(ctx.control_events().len(), 1);
 

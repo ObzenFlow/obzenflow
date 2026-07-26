@@ -114,6 +114,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
                 Duration::from_millis(1),
                 Duration::from_millis(10),
             ),
+            pending_idle_delay: None,
             replay_driver: None,
             replay_started_at: None,
             replay_completion: ReplayCompletionGuard::default(),

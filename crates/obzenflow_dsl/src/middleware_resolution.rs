@@ -240,9 +240,6 @@ pub fn resolve_middleware(
         resolved.insert(key, MiddlewareSpec { source, factory });
     }
 
-    // Phase 3: Validate final configuration
-    warnings.extend(validate_middleware_combination(&resolved, stage_name));
-
     Ok(ResolvedMiddleware {
         middleware: resolved.into_values().collect(),
         overrides,
@@ -502,34 +499,6 @@ fn check_override_safety(
     }
 
     None
-}
-
-/// Validate the final middleware combination for potential issues
-fn validate_middleware_combination(
-    resolved: &IndexMap<MiddlewareOverrideKey, MiddlewareSpec>,
-    stage_name: &str,
-) -> Vec<ConfigWarning> {
-    let mut warnings = Vec::new();
-
-    // Check for potentially conflicting middleware combinations based on typed hints/roles.
-    let has_retry = resolved
-        .values()
-        .any(|spec| spec.factory.hints().retry.is_some());
-    let has_circuit_breaker = resolved.values().any(|spec| {
-        spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::CircuitBreaker)
-    });
-
-    if has_retry && !has_circuit_breaker {
-        warnings.push(ConfigWarning {
-            level: WarnLevel::Low,
-            message: format!(
-                "Stage '{stage_name}' has retry behaviour without a circuit breaker; this can cause cascading failures"
-            ),
-            suggestion: Some("Consider adding circuit breaker middleware".to_string()),
-        });
-    }
-
-    warnings
 }
 
 /// Log resolved middleware configuration for debugging

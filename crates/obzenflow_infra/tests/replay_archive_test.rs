@@ -8,7 +8,9 @@ use obzenflow_core::build_info::OBZENFLOW_VERSION;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::types::DurationMs;
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
+use obzenflow_core::event::{
+    ChainEvent, ChainEventFactory, PipelineLifecycleEvent, SystemEvent, SystemEventType,
+};
 use obzenflow_core::id::{JournalId, SystemId};
 use obzenflow_core::journal::run_manifest::{
     RunManifest, RunManifestStage, JOURNAL_FORMAT_VERSION, RUN_MANIFEST_FILENAME,
@@ -104,6 +106,52 @@ fn write_framed_log_record(dir: &Path, record: &LogRecord<SystemEvent>) {
     bytes.push(b'\n');
 
     std::fs::write(dir.join("system.log"), bytes).unwrap();
+}
+
+fn write_released_legacy_retry_row(dir: &Path) {
+    let writer_id = WriterId::from(obzenflow_core::StageId::new());
+    let event = ChainEventFactory::data_event(writer_id, "fixture.seed", serde_json::json!({}));
+    let record = LogRecord {
+        event_id: Ulid::new(),
+        writer_id: event.writer_id,
+        journal_id: JournalId::new(),
+        vector_clock: VectorClock::new(),
+        timestamp: Utc::now(),
+        event,
+    };
+    let mut frame = serde_json::json!({
+        "frame_kind": RECORD_FRAME_KIND,
+        "record": record,
+    });
+    frame["record"]["event"]["content"] = serde_json::json!({
+        "content_type": "lifecycle",
+        "observability_type": "middleware",
+        "middleware_event": "retry",
+        "details": {
+            "action": "exhausted",
+            "total_attempts": 3,
+            "last_error": "legacy failure",
+            "total_duration_ms": 250
+        }
+    });
+
+    assert!(
+        serde_json::from_value::<ChainEvent>(frame["record"]["event"].clone()).is_err(),
+        "the fixture must exercise the removed standalone retry vocabulary"
+    );
+
+    let json_body = serde_json::to_vec(&frame).unwrap();
+    let mut hasher = Hasher::new();
+    hasher.update(&json_body);
+    let crc = hasher.finalize();
+    let mut bytes = format!("{}:{}:", json_body.len(), crc).into_bytes();
+    bytes.extend_from_slice(&json_body);
+    bytes.push(b'\n');
+    std::fs::write(
+        dir.join("FiniteSource_returns_stage_01H000000000000000000000000.log"),
+        bytes,
+    )
+    .unwrap();
 }
 
 #[tokio::test]
@@ -352,10 +400,11 @@ async fn open_rejects_previous_manifest_version_before_typed_parse() {
 }
 
 #[tokio::test]
-async fn open_rejects_previous_journal_format_before_reading_records() {
+async fn open_rejects_previous_journal_format_before_parsing_legacy_retry_rows() {
     let dir = tempdir().unwrap();
     write_manifest(dir.path());
     write_system_log_completed(dir.path());
+    write_released_legacy_retry_row(dir.path());
 
     let manifest_path = dir.path().join(RUN_MANIFEST_FILENAME);
     let mut manifest: serde_json::Value =

@@ -20,7 +20,6 @@
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow::typed::joins;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
@@ -33,12 +32,15 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, JoinHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct RefItem {
@@ -71,7 +73,8 @@ impl TypedPayload for JoinedItem {
     const EVENT_TYPE: &'static str = "join_err.joined";
 }
 
-/// Reference source: three catalog rows, keys r1..r3.
+/// Reference source: four catalog rows. The reference validator below marks
+/// the final row as an in-band business error.
 #[derive(Clone, Debug)]
 struct RefSource {
     next_index: usize,
@@ -89,7 +92,7 @@ impl RefSource {
 
 impl FiniteSourceHandler for RefSource {
     fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        if self.next_index >= 3 {
+        if self.next_index >= 4 {
             return Ok(None);
         }
         self.next_index += 1;
@@ -180,6 +183,44 @@ impl TransformHandler for Validator {
 }
 
 #[derive(Clone, Debug)]
+struct RefValidator {
+    writer_id: WriterId,
+}
+
+impl RefValidator {
+    fn new() -> Self {
+        Self {
+            writer_id: WriterId::from(StageId::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl TransformHandler for RefValidator {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        let Some(item) = RefItem::from_event(&event) else {
+            return Ok(Vec::new());
+        };
+        if item.key == "r4" {
+            return Err(HandlerError::Domain(
+                "rejected reference value 4".to_string(),
+            ));
+        }
+        Ok(vec![ChainEventFactory::derived_data_event(
+            self.writer_id,
+            &event,
+            RefItem::EVENT_TYPE,
+            json!(item),
+            obzenflow_core::config::LineagePolicy::default(),
+        )])
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
 struct DropSink;
 
 #[async_trait]
@@ -203,15 +244,74 @@ impl SinkHandler for DropSink {
     }
 }
 
-fn join_fn(reference: RefItem, stream: StreamItem) -> JoinedItem {
-    JoinedItem {
-        key: stream.key,
-        label: reference.label,
-        value: stream.value,
+#[derive(Clone, Debug, Default)]
+struct GuardedJoinState {
+    references: HashMap<String, RefItem>,
+}
+
+#[derive(Clone, Debug)]
+struct GuardedInnerJoin {
+    unexpected_error_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl JoinHandler for GuardedInnerJoin {
+    type State = GuardedJoinState;
+
+    fn initial_state(&self) -> Self::State {
+        GuardedJoinState::default()
+    }
+
+    fn process_event(
+        &self,
+        state: &mut Self::State,
+        event: ChainEvent,
+        _source_id: StageId,
+        writer_id: WriterId,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+            self.unexpected_error_calls.fetch_add(1, Ordering::SeqCst);
+            return Err(HandlerError::Other(
+                "join handler received a pre-error row".to_string(),
+            ));
+        }
+
+        if let Some(reference) = RefItem::from_event(&event) {
+            state.references.insert(reference.key.clone(), reference);
+            return Ok(Vec::new());
+        }
+
+        let Some(stream) = StreamItem::from_event(&event) else {
+            return Ok(Vec::new());
+        };
+        let Some(reference) = state.references.get(&stream.key) else {
+            return Ok(Vec::new());
+        };
+        let joined = JoinedItem {
+            key: stream.key,
+            label: reference.label.clone(),
+            value: stream.value,
+        };
+        Ok(vec![ChainEventFactory::derived_data_event(
+            writer_id,
+            &event,
+            JoinedItem::EVENT_TYPE,
+            json!(joined),
+            obzenflow_core::config::LineagePolicy::default(),
+        )])
+    }
+
+    fn on_source_eof(
+        &self,
+        _state: &mut Self::State,
+        _source_id: StageId,
+        _writer_id: WriterId,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        Ok(Vec::new())
     }
 }
 
-fn build_flow(journal_base: PathBuf) -> FlowDefinition {
+fn build_flow(journal_base: PathBuf, unexpected_error_calls: Arc<AtomicUsize>) -> FlowDefinition {
     flow! {
         name: "join_error_passthrough_identity",
         journals: disk_journals(journal_base),
@@ -219,17 +319,17 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
 
         stages: {
             ref_src = source!(RefItem => RefSource::new());
+            ref_validator = transform!(RefItem -> RefItem => RefValidator::new());
             stream_src = source!(StreamItem => StreamSource::new());
             validator = transform!(StreamItem -> StreamItem => Validator::new());
-            joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joins::inner(
-                |r: &RefItem| r.key.clone(),
-                |s: &StreamItem| s.key.clone(),
-                join_fn
-            ));
+            joined = join!(catalog ref_validator: RefItem, StreamItem -> JoinedItem => GuardedInnerJoin {
+                unexpected_error_calls,
+            });
             collector = sink!(JoinedItem => DropSink);
         },
 
         topology: {
+            ref_src |> ref_validator;
             stream_src |> validator;
             validator |> joined;
             joined |> collector;
@@ -248,12 +348,22 @@ fn is_error_row(envelope: &obzenflow_core::event::EventEnvelope<ChainEvent>) -> 
 async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
+    let unexpected_error_calls = Arc::new(AtomicUsize::new(0));
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_flow(journal_base.clone()))
+        .run_async(build_flow(
+            journal_base.clone(),
+            unexpected_error_calls.clone(),
+        ))
         .await
         .expect("flow with an in-band business error must complete");
+
+    assert_eq!(
+        unexpected_error_calls.load(Ordering::SeqCst),
+        0,
+        "pre-error rows from both join sides must bypass the join handler"
+    );
 
     let run_dir = replay_testkit::latest_run_dir(&journal_base);
 
@@ -310,20 +420,32 @@ async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
 
     // The error row itself is forwarded through the join (business errors
     // stay in the main pipeline as the durable record).
-    let forwarded_errors: Vec<_> = join_rows
+    let forwarded_stream_errors: Vec<_> = join_rows
         .iter()
         .filter(|envelope| envelope.event.is_data() && is_error_row(envelope))
+        .filter(|envelope| StreamItem::from_event(&envelope.event).is_some())
         .collect();
     assert_eq!(
-        forwarded_errors.len(),
+        forwarded_stream_errors.len(),
         1,
         "the join forwards the error-marked row downstream"
     );
     assert_eq!(
-        StreamItem::from_event(&forwarded_errors[0].event)
+        StreamItem::from_event(&forwarded_stream_errors[0].event)
             .expect("forwarded error row keeps its payload")
             .value,
         3,
         "the forwarded error row is the rejected stream item"
+    );
+
+    let forwarded_reference_errors: Vec<_> = join_rows
+        .iter()
+        .filter(|envelope| envelope.event.is_data() && is_error_row(envelope))
+        .filter(|envelope| RefItem::from_event(&envelope.event).is_some())
+        .collect();
+    assert_eq!(
+        forwarded_reference_errors.len(),
+        1,
+        "the join forwards a pre-error reference row without hydrating it"
     );
 }

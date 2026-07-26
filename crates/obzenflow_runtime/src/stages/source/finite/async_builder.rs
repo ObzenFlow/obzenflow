@@ -5,6 +5,7 @@
 //! Builder for async finite source stages
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::AsyncFiniteSourceHandler;
@@ -30,6 +31,7 @@ pub struct AsyncFiniteSourceBuilder<
     config: FiniteSourceConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
+    poll_timeout: Option<Duration>,
 }
 
 impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
@@ -41,7 +43,13 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             config,
             resources,
             instrumentation: None,
+            poll_timeout: Some(Duration::from_secs(30)),
         }
+    }
+
+    pub fn with_poll_timeout(mut self, poll_timeout: Option<Duration>) -> Self {
+        self.poll_timeout = poll_timeout;
+        self
     }
 
     pub fn with_instrumentation(mut self, instrumentation: Arc<StageInstrumentation>) -> Self {
@@ -101,6 +109,12 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             handler,
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
+            poll_timeout: self.poll_timeout,
+            idle_backoff: crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
+                Duration::from_millis(1),
+                Duration::from_millis(50),
+            ),
+            pending_idle_delay: None,
             external_events: event_receiver,
             state_watcher: state_watcher.clone(),
             last_state: None,

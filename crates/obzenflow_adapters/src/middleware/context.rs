@@ -20,7 +20,6 @@ use std::collections::HashMap;
 /// core ChainEvent.
 pub struct MiddlewareContext {
     // NOTE: All fields are private; use helper methods.
-    ephemeral_events: Vec<ChainEvent>,
     control_events: Vec<ChainEvent>,
     slots: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     /// Execution scope for this event (FLOWIP-120a). Defaults to `LiveHandler`,
@@ -31,19 +30,9 @@ pub struct MiddlewareContext {
 }
 
 impl MiddlewareContext {
-    /// Create a new empty context for a live handler path.
-    ///
-    /// There is deliberately no scope-free constructor: replay-sensitive
-    /// runners should use [`with_scope`](Self::with_scope), while truly live
-    /// surfaces should spell that out here.
-    pub fn live_handler() -> Self {
-        Self::with_scope(MiddlewareExecutionScope::LiveHandler)
-    }
-
     /// Create a new empty context bound to an explicit execution scope.
     pub fn with_scope(scope: MiddlewareExecutionScope) -> Self {
         Self {
-            ephemeral_events: Vec::new(),
             control_events: Vec::new(),
             slots: HashMap::new(),
             execution_scope: scope,
@@ -53,24 +42,6 @@ impl MiddlewareContext {
     /// The execution scope for this event (FLOWIP-120a).
     pub fn execution_scope(&self) -> MiddlewareExecutionScope {
         self.execution_scope
-    }
-
-    /// Bind the execution scope for this event (FLOWIP-120a). Called by the
-    /// middleware runners from the stage's replay mode before `pre_handle`.
-    pub fn set_execution_scope(&mut self, scope: MiddlewareExecutionScope) {
-        self.execution_scope = scope;
-    }
-
-    /// Record an ephemeral (in-memory only) event for middleware coordination.
-    ///
-    /// Ephemeral events are never appended to the journal; they are visible only
-    /// within the current middleware pass.
-    pub fn emit_ephemeral_event(&mut self, event: ChainEvent) {
-        self.ephemeral_events.push(event);
-    }
-
-    pub fn ephemeral_events(&self) -> &[ChainEvent] {
-        &self.ephemeral_events
     }
 
     /// Insert a typed slot value.
@@ -113,8 +84,8 @@ impl MiddlewareContext {
     /// Use this for significant state changes, periodic summaries, or anomaly
     /// detection.
     ///
-    /// Note: The control event will be appended to the handler's results by
-    /// MiddlewareTransform after all middleware has run.
+    /// The owning typed boundary returns these events in its report for the
+    /// runtime's existing journal commit path.
     pub fn write_control_event(&mut self, event: ChainEvent) {
         self.control_events.push(event);
     }
@@ -142,7 +113,6 @@ impl MiddlewareContext {
 impl std::fmt::Debug for MiddlewareContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MiddlewareContext")
-            .field("ephemeral_events_len", &self.ephemeral_events.len())
             .field("control_events_len", &self.control_events.len())
             .field("slots_len", &self.slots.len())
             .finish()
@@ -156,10 +126,10 @@ mod tests {
     use obzenflow_core::WriterId;
     use serde_json::json;
 
-    struct RetryCountKey;
-    impl MiddlewareContextKey for RetryCountKey {
+    struct AttemptCountKey;
+    impl MiddlewareContextKey for AttemptCountKey {
         type Value = u32;
-        const LABEL: &'static str = "retry_count";
+        const LABEL: &'static str = "attempt_count";
     }
 
     struct CircuitStateKey;
@@ -169,26 +139,14 @@ mod tests {
     }
 
     #[test]
-    fn test_context_ephemeral_events_round_trip() {
-        let mut ctx = MiddlewareContext::live_handler();
-        let writer_id = WriterId::from(obzenflow_core::StageId::new());
-
-        let event = ChainEventFactory::metrics_state_snapshot(writer_id, json!({ "k": 1 }));
-        ctx.emit_ephemeral_event(event.clone());
-
-        assert_eq!(ctx.ephemeral_events().len(), 1);
-        assert_eq!(ctx.ephemeral_events()[0].id, event.id);
-    }
-
-    #[test]
     fn test_context_typed_slots() {
-        let mut ctx = MiddlewareContext::live_handler();
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
 
-        ctx.insert::<RetryCountKey>(3);
+        ctx.insert::<AttemptCountKey>(3);
         ctx.insert::<CircuitStateKey>("open".to_string());
 
-        assert!(ctx.contains::<RetryCountKey>());
-        assert_eq!(ctx.get::<RetryCountKey>(), Some(&3));
+        assert!(ctx.contains::<AttemptCountKey>());
+        assert_eq!(ctx.get::<AttemptCountKey>(), Some(&3));
 
         let removed = ctx.remove::<CircuitStateKey>();
         assert_eq!(removed.as_deref(), Some("open"));
@@ -197,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_write_control_event() {
-        let mut ctx = MiddlewareContext::live_handler();
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
         let writer_id = WriterId::from(obzenflow_core::StageId::new());
 
         // Write a circuit breaker opened event

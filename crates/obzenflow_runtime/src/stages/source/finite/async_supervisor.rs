@@ -10,13 +10,14 @@ use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::supervision::{
     around_source_boundary, drain_pending_outputs_async, emit_batch_to_pending_outputs,
-    observe_source_boundary_rejection, stage_boundary_control_events, stage_source_poll_outputs,
-    SourcePollObservation,
+    normalise_source_poll_error, observe_source_boundary_rejection, stage_boundary_control_events,
+    stage_source_poll_outputs, SourcePollObservation,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
 };
 use crate::supervised_base::base::Supervisor;
+use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
@@ -47,6 +48,15 @@ pub(crate) struct AsyncFiniteSourceSupervisor<
 
     /// Stage ID
     pub(crate) stage_id: StageId,
+
+    /// Descriptor-selected bound for one raw async source poll.
+    pub(crate) poll_timeout: Option<Duration>,
+
+    /// Adaptive backoff for async polls that deliver no data.
+    pub(crate) idle_backoff: IdleBackoff,
+
+    /// Delay scheduled after the completed poll outputs have drained.
+    pub(crate) pending_idle_delay: Option<Duration>,
 
     /// External control events (Initialize/Ready/Start/BeginDrain).
     pub(crate) external_events: EventReceiver<FiniteSourceEvent<H>>,
@@ -360,12 +370,16 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         match state {
             FiniteSourceState::Created
             | FiniteSourceState::Initialized
-            | FiniteSourceState::WaitingForGun => match self.external_events.recv().await {
-                Some(event) => Ok(EventLoopDirective::Transition(event)),
-                None => Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
-                    "External control channel closed".to_string(),
-                ))),
-            },
+            | FiniteSourceState::WaitingForGun => {
+                self.idle_backoff.reset();
+                self.pending_idle_delay = None;
+                match self.external_events.recv().await {
+                    Some(event) => Ok(EventLoopDirective::Transition(event)),
+                    None => Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                        "External control channel closed".to_string(),
+                    ))),
+                }
+            }
 
             FiniteSourceState::Running => {
                 // Drain any pending outputs first so backpressure doesn't let sources
@@ -416,14 +430,35 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                     return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
                 }
 
+                let replaying = matches!(
+                    ctx.runtime_execution.source_phase_for(self.stage_id),
+                    crate::execution::SourceExecutionPhase::Replaying
+                );
+                if replaying {
+                    self.idle_backoff.reset();
+                    self.pending_idle_delay = None;
+                } else if let Some(delay) = self.pending_idle_delay.take() {
+                    tokio::select! {
+                        biased;
+                        maybe_event = self.external_events.recv() => {
+                            return Ok(EventLoopDirective::Transition(
+                                maybe_event.unwrap_or_else(|| {
+                                    FiniteSourceEvent::Error(
+                                        "External control channel closed".to_string(),
+                                    )
+                                }),
+                            ));
+                        }
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                    return Ok(EventLoopDirective::Continue);
+                }
+
                 ctx.instrumentation
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                if matches!(
-                    ctx.runtime_execution.source_phase_for(self.stage_id),
-                    crate::execution::SourceExecutionPhase::Replaying
-                ) {
+                if replaying {
                     let replay_archive = ctx
                         .runtime_execution
                         .archive_for_io()
@@ -556,6 +591,8 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                                 // FLOWIP-120n: recorded prefix exhausted; drop the replay
                                 // driver and continue from the live handler.
                                 crate::execution::SourceReplayExhaustion::ContinueLive => {
+                                    self.idle_backoff.reset();
+                                    self.pending_idle_delay = None;
                                     self.replay_driver = None;
                                     Ok(EventLoopDirective::Continue)
                                 }
@@ -567,14 +604,38 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                     }
                 } else {
                     let source_boundary = self.source_boundary.clone();
+                    let poll_timeout = self.poll_timeout;
                     let boundary_future = around_source_boundary(
                         source_boundary,
                         Box::pin(async {
                             let poll_started_at = Instant::now();
-                            let result = self.handler.next().await.map(|next| match next {
-                                Some(events) => SourcePollCompletion::Batch(events),
-                                None => SourcePollCompletion::Eof,
-                            });
+                            let raw_result = match poll_timeout {
+                                Some(timeout) => {
+                                    match tokio::time::timeout(timeout, self.handler.next()).await {
+                                        Ok(result) => result,
+                                        Err(_) => Err(
+                                            crate::stages::common::handlers::source::SourceError::Timeout(
+                                                format!(
+                                                    "poll timeout exceeded ({}s)",
+                                                    timeout.as_secs()
+                                                ),
+                                            ),
+                                        ),
+                                    }
+                                }
+                                None => self.handler.next().await,
+                            };
+                            let result = match raw_result {
+                                Ok(Some(events)) => Ok(SourcePollCompletion::Batch(events)),
+                                Ok(None) => Ok(SourcePollCompletion::Eof),
+                                Err(error) => Ok(SourcePollCompletion::Batch(vec![
+                                    normalise_source_poll_error(
+                                        WriterId::from(self.stage_id),
+                                        "async_finite",
+                                        &error,
+                                    ),
+                                ])),
+                            };
                             SourcePollReport {
                                 result,
                                 poll_duration: poll_started_at.elapsed(),
@@ -633,7 +694,11 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                             }
                         }
                         SourceBoundaryOutcome::Polled(poll) => match poll.result {
-                            Ok(SourcePollCompletion::Batch(mut events)) if !events.is_empty() => {
+                            Ok(SourcePollCompletion::Batch(mut events))
+                                if events.iter().any(|event| event.is_data()) =>
+                            {
+                                self.idle_backoff.reset();
+                                self.pending_idle_delay = None;
                                 ctx.instrumentation
                                     .event_loops_with_work_total
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -667,7 +732,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                                     source_poll_observation
                                         .observe(
                                             events.as_mut_slice(),
-                                            Duration::from_nanos(0),
+                                            poll.poll_duration,
                                             crate::stages::observer::SourcePollObserverOutcome::Batch {
                                                 events: source_event_count,
                                             },
@@ -677,11 +742,12 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                                         events,
                                         &stage_flow_context,
                                         &ctx.instrumentation,
-                                        Duration::from_nanos(0),
+                                        poll.poll_duration,
                                         observer_scope,
                                         &mut ctx.pending_outputs,
                                     );
                                 }
+                                self.pending_idle_delay = Some(self.idle_backoff.next_delay());
                                 Ok(EventLoopDirective::Continue)
                             }
                             Ok(SourcePollCompletion::Eof) => {
@@ -762,6 +828,8 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             }
 
             FiniteSourceState::Draining => {
+                self.idle_backoff.reset();
+                self.pending_idle_delay = None;
                 if let Err(e) = self.handler.drain().await {
                     tracing::warn!(
                         stage_name = %ctx.stage_name,
@@ -772,8 +840,16 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                 Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
             }
 
-            FiniteSourceState::Drained => Ok(EventLoopDirective::Terminate),
-            FiniteSourceState::Failed(_) => Ok(EventLoopDirective::Terminate),
+            FiniteSourceState::Drained => {
+                self.idle_backoff.reset();
+                self.pending_idle_delay = None;
+                Ok(EventLoopDirective::Terminate)
+            }
+            FiniteSourceState::Failed(_) => {
+                self.idle_backoff.reset();
+                self.pending_idle_delay = None;
+                Ok(EventLoopDirective::Terminate)
+            }
             FiniteSourceState::_Phantom(_) => {
                 unreachable!("PhantomData variant should never be instantiated")
             }

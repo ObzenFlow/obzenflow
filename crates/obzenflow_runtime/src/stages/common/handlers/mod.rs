@@ -30,6 +30,7 @@ pub use stateful::{
     TerminalValidation, UnifiedStatefulHandler,
 };
 pub use transform::{
-    AsyncTransformHandler, EffectfulTransformHandler, EffectfulTransformHandlerAdapter,
-    TransformHandler, TypedTransformHandler, TypedTransformHandlerAdapter, UnifiedTransformHandler,
+    AsyncTransformHandler, AsyncTransformHandlerAdapter, EffectfulTransformHandler,
+    EffectfulTransformHandlerAdapter, TransformHandler, TypedTransformHandler,
+    TypedTransformHandlerAdapter, UnifiedTransformHandler,
 };

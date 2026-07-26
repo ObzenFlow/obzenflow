@@ -319,6 +319,78 @@ mod tests {
         )
     }
 
+    struct OutcomeRecordingPolicy {
+        delivered: Arc<Mutex<Vec<(SourceBatchFacts, Duration)>>>,
+        failed: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SourcePolicy for OutcomeRecordingPolicy {
+        fn label(&self) -> &'static str {
+            "outcome_recording"
+        }
+
+        async fn admit(&self, _ctx: &mut SourcePolicyCtx) -> SourceAdmission {
+            SourceAdmission::Admit(None)
+        }
+
+        fn observe(&self, outcome: &SourcePollOutcome<'_>, _ctx: &mut SourcePolicyCtx) {
+            match outcome {
+                SourcePollOutcome::Delivered {
+                    batch,
+                    poll_duration,
+                } => self
+                    .delivered
+                    .lock()
+                    .unwrap()
+                    .push((*batch, *poll_duration)),
+                SourcePollOutcome::Failed { .. } => {
+                    self.failed.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn error_marked_source_batch_is_delivered_not_failed() {
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let failed = Arc::new(AtomicUsize::new(0));
+        let boundary = PerSourcePolicyBoundary::new(
+            vec![Arc::new(OutcomeRecordingPolicy {
+                delivered: delivered.clone(),
+                failed: failed.clone(),
+            })],
+            WriterId::from(StageId::new()),
+        );
+        let poll_duration = Duration::from_millis(7);
+        let error_event = test_event().mark_as_error(
+            "source poll failed",
+            obzenflow_core::event::status::processing_status::ErrorKind::Remote,
+        );
+
+        boundary
+            .around_poll(Box::pin(async move {
+                SourcePollReport {
+                    result: Ok(SourcePollCompletion::Batch(vec![error_event])),
+                    poll_duration,
+                }
+            }))
+            .await;
+
+        assert_eq!(failed.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            vec![(
+                SourceBatchFacts {
+                    event_count: 1,
+                    has_error_marked: true,
+                },
+                poll_duration,
+            )]
+        );
+    }
+
     #[tokio::test]
     async fn source_boundary_composes_forward_poll_forward_reverse() {
         let log = Arc::new(Mutex::new(Vec::new()));

@@ -10,11 +10,12 @@ use crate::stages::common::supervision::control_resolution::{
 };
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use super::common;
+use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
 use crate::stages::join::fsm::{JoinContext, JoinEvent, JoinState};
 
@@ -36,6 +37,17 @@ pub(super) async fn dispatch_hydrating<
         loop_iteration = loop_count + 1,
         "Hydrating - checking reference subscription"
     );
+
+    match common::flush_pending_outputs(sup, ctx).await? {
+        FlushOutcome::Blocked => return Ok(EventLoopDirective::Continue),
+        FlushOutcome::DrainCompleteReady => {
+            tracing::warn!(
+                stage_name = %ctx.stage_name,
+                "Join hydrating observed DrainComplete-ready pending transition; ignoring"
+            );
+        }
+        FlushOutcome::Drained => {}
+    }
 
     let Some(subscription) = sup.reference_subscription.as_mut() else {
         tracing::warn!(
@@ -187,6 +199,44 @@ pub(super) async fn dispatch_hydrating<
                         heartbeat.state.record_data_read(upstream, event_id);
                     }
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
+
+                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                        if let Some(state) = &heartbeat_state {
+                            state.record_last_consumed(event_id);
+                        }
+                        ctx.instrumentation
+                            .events_processed_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        ctx.instrumentation
+                            .events_accumulated_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        ctx.events_since_last_heartbeat =
+                            ctx.events_since_last_heartbeat.saturating_add(1);
+                        if let Err(error) =
+                            common::emit_join_heartbeat_if_due(ctx, ctx.stage_id).await
+                        {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                error = ?error,
+                                "Failed to emit join hydration heartbeat"
+                            );
+                        }
+
+                        let scope = ctx.runtime_execution.dispatch_scope(
+                            ctx.stage_id,
+                            subscription.last_delivered_stage_input_position(),
+                            subscription.last_delivered_generation(),
+                        );
+                        ctx.pending_outputs.push_back(
+                            crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                event,
+                                scope,
+                            },
+                        );
+                        ctx.pending_ack_upstream = subscription.last_delivered_upstream_stage();
+                        ctx.pending_parent = Some(envelope);
+                        return Ok(EventLoopDirective::Continue);
+                    }
 
                     ctx.instrumentation
                         .in_flight_count

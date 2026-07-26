@@ -2,10 +2,22 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::middleware::{MiddlewareAbortCause, MiddlewareContext};
+use crate::middleware::MiddlewareContext;
 use async_trait::async_trait;
+use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 use obzenflow_core::ChainEvent;
 use obzenflow_runtime::effects::EffectError;
+
+/// Structured cause returned by a typed policy rejection so the effect
+/// boundary can record it under the protected effect cursor.
+#[derive(Debug, Clone)]
+pub struct MiddlewareAbortCause {
+    pub source: EffectFailureSource,
+    pub code: EffectFailureCode,
+    pub message: String,
+    pub retry: RetryDisposition,
+    pub event: Option<ChainEvent>,
+}
 
 /// Admission decision from one per-effect policy.
 pub enum PolicyAdmission {

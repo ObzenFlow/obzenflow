@@ -20,12 +20,6 @@ pub use obzenflow_core::journal::Journal;
 pub use obzenflow_core::id::StageId;
 pub use obzenflow_topology::{StageInfo, Topology, TopologyBuilder};
 
-// Middleware
-// FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
-pub use obzenflow_adapters::middleware::{
-    FiniteSourceHandlerExt, InfiniteSourceHandlerExt, SinkHandlerExt, TransformHandlerExt,
-};
-
 // Handler traits
 pub use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, InfiniteSourceHandler, SinkHandler, TransformHandler,

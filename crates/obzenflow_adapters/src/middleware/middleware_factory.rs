@@ -2,11 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Middleware factory trait and related types
+//! Typed middleware attachment factory trait and related types
 //!
-//! This module defines the factory pattern for creating middleware instances
-//! with stage context, solving the problem of injecting stage-specific
-//! configuration into middleware at construction time.
+//! Factories materialise one declared observer or live-I/O policy attachment
+//! with the stage-specific context available at flow construction.
 
 use super::{MiddlewareHints, MiddlewareSafety};
 use obzenflow_core::event::context::StageType;
@@ -235,8 +234,8 @@ pub trait MiddlewareFactory: Send + Sync {
 
     /// Static hints about this middleware's behavior
     ///
-    /// Default implementation returns no hints. Override to provide
-    /// information about retry behavior, control event handling, etc.
+    /// Default implementation returns no hints. Override to describe static
+    /// control-event, batching, or rate-limit behaviour.
     fn hints(&self) -> MiddlewareHints {
         MiddlewareHints::default()
     }
@@ -337,30 +336,10 @@ impl Hash for MiddlewareOverrideKey {
     }
 }
 
-/// Runtime shell middleware kind.
-///
-/// Factory placement no longer reads this enum. Typed factory declarations are
-/// the sole build-time capability authority. The enum remains only on the two
-/// FLOWIP-128g runtime shells and the middleware-chain contract that contains
-/// them until that migration completes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MiddlewareKind {
-    /// Reacts to an unreliable dependency by delaying, rejecting, or
-    /// tripping (circuit breaker, rate limiter).
-    Policy,
-    /// Deterministic, value-preserving observation (indicator/logging evidence
-    /// or enrichment). May not short-circuit processing.
-    Observation,
-    /// Framework machinery: build-time plan contributors and transitional
-    /// structural middleware (backpressure, AI map-reduce, type shaping).
-    Structural,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopologyMiddlewareConfigSlot {
     CircuitBreaker,
     RateLimiter,
-    Retry,
 }
 
 #[cfg(test)]

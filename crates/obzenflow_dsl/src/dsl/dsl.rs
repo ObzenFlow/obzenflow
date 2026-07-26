@@ -1959,7 +1959,6 @@ macro_rules! build_typed_flow {
                 // Extract config snapshots from all factories (FLOWIP-059)
                 let mut circuit_breaker_config: Option<(&'static str, serde_json::Value)> = None;
                 let mut rate_limiter_config: Option<(&'static str, serde_json::Value)> = None;
-                let mut retry_config: Option<(&'static str, serde_json::Value)> = None;
 
                 for factory in &resolved_middleware_view {
                     if let Some(snapshot) = factory.config_snapshot() {
@@ -1983,15 +1982,6 @@ macro_rules! build_typed_flow {
                                     }
                                     rate_limiter_config = Some((factory.label(), snapshot))
                                 }
-                                obzenflow_adapters::middleware::TopologyMiddlewareConfigSlot::Retry => {
-                                    if let Some((existing, _)) = &retry_config {
-                                        return Err(FlowBuildError::StageResourcesFailed(format!(
-                                            "Stage '{name}' has multiple middleware claiming the Retry topology config slot: '{existing}' and '{}'",
-                                            factory.label()
-                                        )));
-                                    }
-                                    retry_config = Some((factory.label(), snapshot))
-                                }
                             }
                         }
                     }
@@ -2001,7 +1991,6 @@ macro_rules! build_typed_flow {
                     stack: merged_names,
                     circuit_breaker: circuit_breaker_config.map(|(_, snapshot)| snapshot),
                     rate_limiter: rate_limiter_config.map(|(_, snapshot)| snapshot),
-                    retry: retry_config.map(|(_, snapshot)| snapshot),
                 });
 
                 // Create handle with flow middleware (cycle protection is configured via StageConfig for transforms).
@@ -2051,10 +2040,10 @@ macro_rules! build_typed_flow {
                             .rate_limiter
                             .as_ref()
                             .and_then(|v| serde_json::from_value(v.clone()).ok()),
-                        retry: config
-                            .retry
-                            .as_ref()
-                            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                        // Published topology 0.5.1 retains this producer-dead
+                        // compatibility tombstone. First-party runtime output
+                        // never populates it.
+                        retry: None,
                     },
                 );
             }

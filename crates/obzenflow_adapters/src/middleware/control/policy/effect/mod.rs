@@ -27,4 +27,7 @@ mod tests;
 
 pub use attachment::EffectPolicyAttachment;
 pub use boundary::PerEffectPolicyBoundary;
-pub use contract::{EffectAttemptOutcome, EffectPolicy, EventAwareEffectPolicy, PolicyAdmission};
+pub use contract::{
+    EffectAttemptOutcome, EffectPolicy, EventAwareEffectPolicy, MiddlewareAbortCause,
+    PolicyAdmission,
+};

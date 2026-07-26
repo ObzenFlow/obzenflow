@@ -10,7 +10,7 @@
 
 use crate::middleware::{
     context_keys::{CircuitBreakerIsProbe, CircuitBreakerProbeSlot, CircuitBreakerRetryAfterMs},
-    MiddlewareAbortCause, MiddlewareAction, MiddlewareContext,
+    MiddlewareAbortCause, MiddlewareContext,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
@@ -153,8 +153,6 @@ pub(crate) struct CircuitBreakerMiddleware {
     probe_gate: Arc<Mutex<()>>,
     /// Monotonic epoch for half-open probe outcomes.
     probe_generation: Arc<AtomicU64>,
-    #[cfg(test)]
-    half_open_race_test_hook: Option<HalfOpenRaceTestHook>,
     /// Serialises breaker transitions with recovery admission/continuation
     /// checks. This makes the open epoch and state one logical snapshot for
     /// effect recovery without changing the externally shared state view.
@@ -200,15 +198,6 @@ struct CircuitBreakerStats {
     last_summary: Instant,
 }
 
-/// Deterministic coordination points for the stale half-open waiter
-/// regression. Absent from non-test builds.
-#[cfg(test)]
-struct HalfOpenRaceTestHook {
-    waiter_observed_half_open: Arc<std::sync::Barrier>,
-    settlement_holds_probe_gate: Arc<std::sync::Barrier>,
-    release_settlement: Arc<std::sync::Barrier>,
-}
-
 impl Default for CircuitBreakerStats {
     fn default() -> Self {
         Self {
@@ -224,12 +213,6 @@ impl CircuitBreakerMiddleware {
     #[cfg(test)]
     pub(crate) fn new(threshold: usize) -> Self {
         Self::construct(threshold, Duration::from_secs(60), None, None)
-    }
-
-    /// Create a circuit breaker with custom cooldown duration
-    #[cfg(test)]
-    pub(crate) fn with_cooldown(threshold: usize, cooldown: Duration) -> Self {
-        Self::construct(threshold, cooldown, None, None)
     }
 
     pub(in crate::middleware::control) fn with_cooldown_for_stage(
@@ -264,8 +247,6 @@ impl CircuitBreakerMiddleware {
             probe_in_flight: Arc::new(AtomicU32::new(0)),
             probe_gate: Arc::new(Mutex::new(())),
             probe_generation: Arc::new(AtomicU64::new(0)),
-            #[cfg(test)]
-            half_open_race_test_hook: None,
             effect_recovery_state_gate: Mutex::new(()),
             effect_recovery_open_epoch: AtomicU64::new(0),
             source_pending_probe: Arc::new(Mutex::new(None)),
@@ -295,14 +276,6 @@ impl CircuitBreakerMiddleware {
 
     fn current_state(&self) -> CircuitState {
         CircuitState::from(self.state.load(Ordering::SeqCst))
-    }
-
-    fn effect_closed_admission_is_current(&self) -> bool {
-        let _state_gate = self
-            .effect_recovery_state_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        matches!(self.current_state(), CircuitState::Closed)
     }
 
     pub(in crate::middleware::control) fn effect_recovery_epoch_is_current(
@@ -765,7 +738,8 @@ impl CircuitBreakerMiddleware {
     }
 
     /// FLOWIP-115a: source-boundary admission, reusing the same state machine as
-    /// `pre_handle` without exposing middleware policy details to the runtime.
+    /// the other typed breaker attachments without exposing policy details to
+    /// the runtime.
     /// Reserves a probe slot in HalfOpen and returns an RAII guard that releases
     /// the slot on normal return or cancellation.
     fn source_admit(&self) -> SourceAdmit {
@@ -802,8 +776,8 @@ impl CircuitBreakerMiddleware {
         }
     }
 
-    /// Reserve a half-open probe slot via the same CAS loop as `pre_handle`,
-    /// or back off briefly when all slots are in use.
+    /// Reserve a half-open probe slot via the shared CAS loop, or back off
+    /// briefly when all slots are in use.
     fn source_reserve_probe(&self, event: Option<ChainEvent>) -> SourceAdmit {
         let _probe_gate = self.probe_gate.lock().ok();
         let generation = self.probe_generation.load(Ordering::SeqCst);
@@ -921,11 +895,11 @@ impl CircuitBreakerMiddleware {
     }
 
     /// Reject Open and probe-busy calls with one stable framework cause.
-    fn handle_open_like(
+    fn record_rejection(
         &self,
         ctx: &mut MiddlewareContext,
         reason: CircuitBreakerRejectionReason,
-    ) -> MiddlewareAction {
+    ) -> MiddlewareAbortCause {
         // Track rejection for summaries.
         if let Ok(mut stats) = self.stats.lock() {
             stats.requests_rejected += 1;
@@ -933,9 +907,7 @@ impl CircuitBreakerMiddleware {
         self.rejections_total.fetch_add(1, Ordering::Relaxed);
 
         self.maybe_emit_summary(ctx);
-        MiddlewareAction::Abort {
-            cause: Some(self.rejection_abort_cause(reason)),
-        }
+        self.rejection_abort_cause(reason)
     }
 
     fn rejection_abort_cause(&self, reason: CircuitBreakerRejectionReason) -> MiddlewareAbortCause {
@@ -1039,7 +1011,6 @@ impl CircuitBreakerMiddleware {
 mod tests {
     use super::config::RateThreshold;
     use super::*;
-    use crate::middleware::{Middleware, MiddlewareAction};
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::MiddlewareExecutionScope;
     use serde_json::json;
@@ -1139,13 +1110,11 @@ mod tests {
         *breaker.opened_at.lock().unwrap() = Some(Instant::now());
         let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
 
-        match Middleware::pre_handle(&breaker, &event(), &mut ctx) {
-            MiddlewareAction::Abort { cause: Some(cause) } => {
-                assert_eq!(cause.source.as_str(), CIRCUIT_BREAKER_ABORT_SOURCE);
-                assert_eq!(cause.code.as_str(), "circuit_open");
-            }
-            _ => panic!("open breaker must abort with a typed cause"),
-        }
+        let cause = breaker
+            .effect_precheck(&mut ctx, None)
+            .expect_err("open breaker must reject with a typed cause");
+        assert_eq!(cause.source.as_str(), CIRCUIT_BREAKER_ABORT_SOURCE);
+        assert_eq!(cause.code.as_str(), "circuit_open");
     }
 
     #[test]

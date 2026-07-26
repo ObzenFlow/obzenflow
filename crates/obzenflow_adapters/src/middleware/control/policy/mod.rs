@@ -4,13 +4,9 @@
 
 //! Control-policy authoring contracts for live I/O boundaries.
 //!
-//! These traits are for middleware that can admit, wait, reject, or shed work
-//! around a protected runtime unit. They are intentionally separate
-//! from the generic [`Middleware`](crate::middleware::Middleware) trait, which
-//! remains the handler-chain observation/structural authoring surface. This
-//! module lives under [`control`](crate::middleware::control) because policy is
-//! a control-only authoring contract; built-in control middleware and
-//! third-party control middleware both implement these traits.
+//! These traits admit, wait, reject, or shed work around a protected runtime
+//! unit. They are the control authoring surface; no generic handler-chain
+//! middleware contract exists.
 //!
 //! Ingress is asymmetric because infra hosts the call site. Its neutral
 //! boundary port lives in [`obzenflow_core::ingress`], while adapter factories
@@ -22,7 +18,7 @@ pub mod source;
 
 pub use effect::{
     EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy,
-    PerEffectPolicyBoundary, PolicyAdmission,
+    MiddlewareAbortCause, PerEffectPolicyBoundary, PolicyAdmission,
 };
 pub use sink::{
     PerSinkDeliveryPolicyBoundary, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome,

@@ -10,8 +10,8 @@
 //! the error lane must verify with zero divergences. This fixture is what
 //! freezes the projection's error-journal rule: it demonstrates the
 //! deterministic error path carries no wall-clock-gated row class needing a
-//! named exclusion. (Sink retry middleware lives on the delivery lane, whose
-//! rows the projection already excludes.)
+//! named exclusion. Sink delivery rows are independently excluded by the
+//! projection's receipt-lane rule.
 
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};

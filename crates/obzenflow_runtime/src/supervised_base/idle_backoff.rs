@@ -39,3 +39,24 @@ impl IdleBackoff {
         self.current
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exponential_backoff_caps_and_resets() {
+        let mut backoff =
+            IdleBackoff::exponential_with_cap(Duration::from_millis(1), Duration::from_millis(10));
+
+        assert_eq!(backoff.next_delay(), Duration::from_millis(1));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(2));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(4));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(8));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(10));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(10));
+
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), Duration::from_millis(1));
+    }
+}

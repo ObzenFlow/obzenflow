@@ -15,19 +15,16 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::StageObserverSet;
 use obzenflow_adapters::middleware::{
-    validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncInfiniteSourceHandlerExt,
-    AsyncTransformHandlerExt, CheckedMiddlewareSurfaceAttachment, FiniteSourceHandlerExt,
-    InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareDeclaration,
-    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareSurfaceKind,
-    PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary, SinkHandlerExt, SinkPolicy,
-    StatefulHandlerMiddlewareExt, TopologyMiddlewareConfigSlot, TransformHandlerExt,
-    UnifiedMiddlewareTransform,
+    validate_middleware_safety, CheckedMiddlewareSurfaceAttachment, MiddlewareDeclaration,
+    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareSurfaceKind, PerEffectPolicyBoundary,
+    PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary, SinkPolicy,
+    TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::{
     effects::{
-        EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
+        EffectBoundary, EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
         SinkDeliverySafety,
     },
     metrics::instrumentation::{InstrumentationConfig, StageInstrumentation},
@@ -40,10 +37,10 @@ use obzenflow_runtime::{
             control_strategies::{JonestownSignalStrategy, SignalGate},
             handlers::{
                 AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-                EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
-                EffectfulTransformHandler, EffectfulTransformHandlerAdapter, FiniteSourceHandler,
-                InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
-                UnifiedJoinHandler,
+                AsyncTransformHandlerAdapter, EffectfulStatefulHandler,
+                EffectfulStatefulHandlerAdapter, EffectfulTransformHandler,
+                EffectfulTransformHandlerAdapter, FiniteSourceHandler, InfiniteSourceHandler,
+                JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -85,13 +82,6 @@ fn factory_declares_circuit_breaker(factory: &dyn MiddlewareFactory) -> bool {
 /// binding before any uniqueness checks or topology build steps run.
 #[doc(hidden)]
 pub const BINDING_DERIVED_NAME_SENTINEL: &str = "__obzenflow_binding_derived_name__";
-
-fn create_system_middleware(
-    _config: &StageConfig,
-    _stage_type: StageType,
-) -> Vec<Box<dyn Middleware>> {
-    Vec::new()
-}
 
 fn create_system_observers(_config: &StageConfig) -> StageObserverSet {
     // No built-in observers (FLOWIP-115f): `processing_time` is stamped by the
@@ -176,7 +166,6 @@ fn materialize_effect_observers_for_declarations(
 }
 
 struct SourceMiddlewareBinding {
-    all_middleware: Vec<Box<dyn Middleware>>,
     observers: StageObserverSet,
     source_boundary: Option<Arc<dyn SourceBoundary>>,
     /// FLOWIP-115b: the source completion gate companion supplied by a
@@ -188,7 +177,6 @@ struct SourceMiddlewareBinding {
 }
 
 struct MiddlewarePlacement {
-    system_middleware: Vec<Box<dyn Middleware>>,
     observers: StageObserverSet,
     expects_circuit_breaker: bool,
     expects_rate_limiter: bool,
@@ -208,7 +196,6 @@ fn plan_stage_middleware(
         spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
     });
 
-    let system_middleware = create_system_middleware(config, stage_type);
     let mut observers = create_system_observers(config);
     let observer_surfaces = observer_surfaces_for_stage(stage_type);
 
@@ -255,7 +242,6 @@ fn plan_stage_middleware(
     }
 
     Ok(MiddlewarePlacement {
-        system_middleware,
         observers,
         expects_circuit_breaker,
         expects_rate_limiter,
@@ -270,7 +256,6 @@ fn build_source_middleware_and_register_policies(
     hosted_ingress_slot: Option<obzenflow_core::ingress::HostedIngressBindingSlot>,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
 ) -> StageCreationResult<SourceMiddlewareBinding> {
-    let all_middleware = create_system_middleware(config, stage_type);
     let mut observers = create_system_observers(config);
     let expects_circuit_breaker = resolved
         .middleware
@@ -405,7 +390,6 @@ fn build_source_middleware_and_register_policies(
     };
 
     Ok(SourceMiddlewareBinding {
-        all_middleware,
         observers,
         source_boundary,
         completion_gate,
@@ -759,16 +743,9 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Inject stage writer id into the handler before wrapping with middleware (FLOWIP-081).
+        // Inject the stage writer id before handing the raw source to runtime.
         let mut handler = self.handler;
         handler.bind_writer_id(writer_id);
-
-        // Apply all middleware
-        let mut builder = handler.middleware(writer_id);
-        for mw in source_binding.all_middleware {
-            builder = builder.with_boxed(mw);
-        }
-        let handler_with_middleware = builder.build();
 
         // Create the stage configuration
         let source_config = FiniteSourceConfig {
@@ -781,7 +758,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         };
 
         // Use the builder to create the handle
-        let handle = FiniteSourceBuilder::new(handler_with_middleware, source_config, resources)
+        let handle = FiniteSourceBuilder::new(handler, source_config, resources)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -920,18 +897,9 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Inject stage writer id into the handler before wrapping with middleware (FLOWIP-081).
+        // Inject the stage writer id before handing the raw source to runtime.
         let mut handler = self.handler;
         handler.bind_writer_id(writer_id);
-
-        // Apply all middleware.
-        let mut builder = handler
-            .middleware(writer_id)
-            .with_poll_timeout(poll_timeout);
-        for mw in source_binding.all_middleware {
-            builder = builder.with_boxed(mw);
-        }
-        let handler_with_middleware = builder.build();
 
         // Create the stage configuration
         let source_config = FiniteSourceConfig {
@@ -944,12 +912,12 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         };
 
         // Use the builder to create the handle
-        let handle =
-            AsyncFiniteSourceBuilder::new(handler_with_middleware, source_config, resources)
-                .with_instrumentation(instrumentation)
-                .build()
-                .await
-                .map_err(|e| format!("Failed to build async finite source: {e:?}"))?;
+        let handle = AsyncFiniteSourceBuilder::new(handler, source_config, resources)
+            .with_poll_timeout(poll_timeout)
+            .with_instrumentation(instrumentation)
+            .build()
+            .await
+            .map_err(|e| format!("Failed to build async finite source: {e:?}"))?;
 
         let adapter = StageHandleAdapter::new(
             handle,
@@ -1047,16 +1015,9 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Inject stage writer id into the handler before wrapping with middleware (FLOWIP-081d).
+        // Inject the stage writer id before handing the raw source to runtime.
         let mut handler = self.handler;
         handler.bind_writer_id(writer_id);
-
-        // Apply all middleware
-        let mut builder = handler.middleware(writer_id);
-        for mw in source_binding.all_middleware {
-            builder = builder.with_boxed(mw);
-        }
-        let handler_with_middleware = builder.build();
 
         // Create the stage configuration
         let source_config = InfiniteSourceConfig {
@@ -1069,7 +1030,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         };
 
         // Use the builder to create the handle
-        let handle = InfiniteSourceBuilder::new(handler_with_middleware, source_config, resources)
+        let handle = InfiniteSourceBuilder::new(handler, source_config, resources)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -1212,17 +1173,9 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Inject stage writer id into the handler before wrapping with middleware (FLOWIP-081d).
+        // Inject the stage writer id before handing the raw source to runtime.
         let mut handler = self.handler;
         handler.bind_writer_id(writer_id);
-
-        let mut builder = handler
-            .middleware(writer_id)
-            .with_poll_timeout(poll_timeout);
-        for mw in source_binding.all_middleware {
-            builder = builder.with_boxed(mw);
-        }
-        let handler_with_middleware = builder.build();
 
         let source_config = InfiniteSourceConfig {
             stage_id: config.stage_id,
@@ -1233,12 +1186,12 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             observers: source_binding.observers.build(),
         };
 
-        let handle =
-            AsyncInfiniteSourceBuilder::new(handler_with_middleware, source_config, resources)
-                .with_instrumentation(instrumentation)
-                .build()
-                .await
-                .map_err(|e| format!("Failed to build async infinite source: {e:?}"))?;
+        let handle = AsyncInfiniteSourceBuilder::new(handler, source_config, resources)
+            .with_poll_timeout(poll_timeout)
+            .with_instrumentation(instrumentation)
+            .build()
+            .await
+            .map_err(|e| format!("Failed to build async infinite source: {e:?}"))?;
 
         let adapter = StageHandleAdapter::new(
             handle,
@@ -1333,7 +1286,6 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
 
         let placement =
             plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
-        let all_middleware = placement.system_middleware;
 
         instrumentation
             .bind_control_plane(
@@ -1344,14 +1296,6 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             )
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
-
-        // Apply all middleware. The middleware execution scope is computed
-        // per event by the supervisor at dispatch (FLOWIP-120c H3).
-        let mut builder = self.handler.middleware();
-        for mw in all_middleware {
-            builder = builder.with(mw);
-        }
-        let handler_with_middleware = builder.build();
 
         // Create the stage configuration
         let transform_config = TransformConfig {
@@ -1365,7 +1309,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         };
 
         // Use the builder to create the handle
-        let handle = TransformBuilder::new(handler_with_middleware, transform_config, resources)
+        let handle = TransformBuilder::new(self.handler, transform_config, resources)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -1467,7 +1411,6 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
         let placement =
             plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
-        let all_middleware = placement.system_middleware;
 
         instrumentation
             .bind_control_plane(
@@ -1478,14 +1421,6 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             )
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
-
-        // Apply all middleware. The middleware execution scope is computed
-        // per event by the supervisor at dispatch (FLOWIP-120c H3).
-        let mut builder = self.handler.middleware();
-        for mw in all_middleware {
-            builder = builder.with(mw);
-        }
-        let handler_with_middleware = builder.build();
 
         // Create the stage configuration
         let transform_config = TransformConfig {
@@ -1498,10 +1433,10 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             cycle_guard: config.cycle_guard,
         };
 
-        // Use the builder to create the handle. The async middleware wrapper
-        // implements the unified handler surface directly, so async stages
-        // build through the same TransformBuilder as every other transform.
-        let handle = TransformBuilder::new(handler_with_middleware, transform_config, resources)
+        // Keep the existing temporary async adapter until FLOWIP-120f removes
+        // this handler family. It carries no middleware or policy authority.
+        let handler = AsyncTransformHandlerAdapter(self.handler);
+        let handle = TransformBuilder::new(handler, transform_config, resources)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -1869,7 +1804,6 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         )?;
         let mut observers = placement.observers;
         observers.extend(effect_observers);
-        let all_middleware = placement.system_middleware;
 
         // Stage-level control binding covers shell instances only; per-effect
         // instances register under their effect key and surface through the
@@ -1894,20 +1828,15 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             cycle_guard: config.cycle_guard,
         };
 
-        // The middleware execution scope is computed per event by the
-        // supervisor at dispatch (FLOWIP-120c H3).
-        let mut effectful_handler = EffectfulTransformHandlerAdapter::new(self.handler);
+        let effect_boundary: Arc<dyn EffectBoundary> =
+            Arc::new(PerEffectPolicyBoundary::new(effect_policy_chains));
+        let mut effectful_handler =
+            EffectfulTransformHandlerAdapter::new(self.handler, effect_boundary);
         if let Some(event_type) = self.pass_through_event_type {
             effectful_handler = effectful_handler.with_exact_pass_through_event_type(event_type);
         }
-        let mut handler_with_middleware = UnifiedMiddlewareTransform::new(effectful_handler);
-        for mw in all_middleware {
-            handler_with_middleware = handler_with_middleware.with_middleware(mw);
-        }
-        let handler_with_middleware =
-            handler_with_middleware.with_effect_policies(effect_policy_chains);
 
-        let handle = TransformBuilder::new(handler_with_middleware, transform_config, resources)
+        let handle = TransformBuilder::new(effectful_handler, transform_config, resources)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -2010,9 +1939,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        // Create system middleware with instrumentation
-        let all_middleware = create_system_middleware(&config, StageType::Sink);
-
         let expects_circuit_breaker = resolved
             .middleware
             .iter()
@@ -2100,14 +2026,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // queries the wrapped handler for declaration metadata.
         let delivery_type = self.handler.delivery_type();
 
-        // Apply all middleware. The middleware execution scope is computed
-        // per event by the supervisor at dispatch (FLOWIP-120c H3).
-        let mut builder = self.handler.middleware();
-        for mw in all_middleware {
-            builder = builder.with(mw);
-        }
-        let handler_with_middleware = builder.build();
-
         // Create the stage configuration
         let sink_config = JournalSinkConfig {
             stage_id: config.stage_id,
@@ -2123,7 +2041,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         };
 
         // Use the builder to create the handle
-        let handle = JournalSinkBuilder::new(handler_with_middleware, sink_config, resources)
+        let handle = JournalSinkBuilder::new(self.handler, sink_config, resources)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -2370,7 +2288,6 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
 
         let placement =
             plan_stage_middleware(&config, StageType::Stateful, resolved, &control_middleware)?;
-        let all_middleware = placement.system_middleware;
 
         instrumentation
             .bind_control_plane(
@@ -2381,15 +2298,6 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             )
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
-
-        // Apply all middleware (FLOWIP-080o-part-2: MiddlewareStateful now
-        // exists). The middleware execution scope is computed per event by
-        // the supervisor at dispatch (FLOWIP-120c H3).
-        let mut builder = self.handler.middleware();
-        for mw in all_middleware {
-            builder = builder.with(mw);
-        }
-        let handler_with_middleware = builder.build();
 
         // Create the stage configuration
         let stateful_config = StatefulConfig {
@@ -2403,7 +2311,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         };
 
         // Use the builder to create the handle
-        let handle = StatefulBuilder::new(handler_with_middleware, stateful_config, resources)
+        let handle = StatefulBuilder::new(self.handler, stateful_config, resources)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -2760,7 +2668,6 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 
         let placement =
             plan_stage_middleware(&config, StageType::Join, resolved, &control_middleware)?;
-        let all_middleware = placement.system_middleware;
 
         instrumentation
             .bind_control_plane(
@@ -2772,20 +2679,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Apply all middleware (FLOWIP-080o-part-2: MiddlewareJoin now exists)
-        // Same middleware is applied to both reference and stream sides
-        let mut builder = self.handler.middleware();
-        for mw in all_middleware {
-            builder = builder.with(mw);
-        }
-        // FLOWIP-120n: the execution scope is per-delivery, computed by the
-        // join supervisor at dispatch and passed through the
-        // UnifiedJoinHandler seam.
-        let handler_with_middleware = builder.build();
-
         // Extract join-mode configuration from the handler before moving it into the runtime.
-        let reference_mode = handler_with_middleware.reference_mode();
-        let reference_batch_cap = handler_with_middleware.reference_batch_cap();
+        let reference_mode = self.handler.reference_mode();
+        let reference_batch_cap = self.handler.reference_batch_cap();
 
         // Create the stage configuration
         // reference_stage_id comes from the builder (stored in self)
@@ -2832,7 +2728,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // NOTE: For join stages, the pre-built subscription in resources is stale
         // because DSL mutates upstream_journals AFTER subscription was built
         let handle = JoinBuilder::new(
-            handler_with_middleware,
+            self.handler,
             join_config,
             resources,
             reference_journal,
@@ -3889,17 +3785,9 @@ mod observer_placement_negative_tests {
             )
             .expect("loud observer middleware resolves");
 
-            let placement = plan_stage_middleware(&config, stage_type, resolved, &control)
-                .unwrap_or_else(|err| {
-                    panic!("observer placement must succeed for {stage_type:?}: {err}")
-                });
-
-            // Hook-bound observers never enter the generic system middleware
-            // stack.
-            assert!(
-                placement.system_middleware.is_empty(),
-                "observer middleware must not be placed in system middleware for {stage_type:?}"
-            );
+            plan_stage_middleware(&config, stage_type, resolved, &control).unwrap_or_else(|err| {
+                panic!("observer placement must succeed for {stage_type:?}: {err}")
+            });
         }
     }
 
