@@ -7,16 +7,6 @@ Quick setup for monitoring ObzenFlow metrics with Prometheus and Grafana.
 - Docker and Docker Compose installed
 - ObzenFlow application running with metrics endpoint (port 9090)
 
-### Installing with Brew
-
-```bash
-# 1. Install Docker and Docker Compose with homebrew
-brew install colima docker docker-compose
-
-# 2. Start Colima (Docker runtime for macOS)
-colima start
-```
-
 ## Quick Start
 
 We provide examples that demonstrate how to run ObzenFlow with a pluggable metrics server. The examples expose metrics through your choice of web server (Warp is provided, but you can implement your own). The `setup.sh` script builds a default Grafana installation with pre-configured dashboards.
@@ -77,33 +67,11 @@ The 100k demo includes:
 
 ## Manual Setup
 
-If you prefer to start services manually:
-
-```bash
-# Start containers
-docker-compose up -d
-
-# Stop containers
-docker-compose down
-
-# View logs
-docker-compose logs -f
-```
-
-## Dashboard Access
-
-1. Navigate to [http://localhost:3000](http://localhost:3000)
-2. Login with credentials:
-   - **Username**: `admin`
-   - **Password**: `admin`
-3. Go to **Dashboards** → **Browse**
-4. Select one of the available dashboards:
-   - **ObzenFlow - Flow Overview**
-   - **ObzenFlow - Stage Details**
+If you prefer to skip `setup.sh`: `docker-compose up -d` starts the containers, `docker-compose down` stops them, and `docker-compose logs -f` tails them. Grafana is at [http://localhost:3000](http://localhost:3000) (login `admin`/`admin`), with the two ObzenFlow dashboards under **Dashboards** → **Browse**.
 
 ## Building Your Own Flow with Live Metrics
 
-With the new concurrent metrics API (FLOWIP-058), you can build flows that serve metrics while running:
+The concurrent metrics API (FLOWIP-058) lets a flow serve metrics while it runs:
 
 ```rust
 use obzenflow_dsl::{flow, source, transform, sink};
@@ -133,7 +101,7 @@ async fn main() -> Result<()> {
 ```
 
 This pattern is especially useful for:
-- Long-running data processing pipelines
+- Long-running flows
 - Flows with rate limiting or throttling
 - Debugging performance bottlenecks in real-time
 - Production monitoring scenarios

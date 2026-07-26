@@ -10,17 +10,13 @@ A durable-execution tutorial built around one realistic stage: authorizing a
 payment for a customer order through an unreliable gateway. It teaches four
 ideas, in order.
 
-1. **The flow reacts to upstream events.** `CustomerOrderPlaced` is a fact that
-   already happened outside this flow. The sources journal those events on a
-   live run, and replay reads the archived source events instead of polling the
-   sources again.
-2. **The gateway authorization is an effect command.** Instead of calling the
-   gateway inline, the stage returns `AuthorizePayment` as data. The runtime
-   records one terminal result for the logical invocation and, on replay,
-   returns that result without calling the gateway again. The normal tutorial
-   configuration makes one physical call; the optional acceptance profiles
-   below show `EffectResilience` making bounded additional calls inside that
-   invocation.
+1. **The flow reacts to upstream events.** `CustomerOrderPlaced` is a recorded
+   fact the flow reacts to, and replay reads the archived source events instead
+   of polling the sources again.
+2. **The gateway authorization is an effect command.** The stage returns
+   `AuthorizePayment` as data, the runtime records one terminal result per
+   logical invocation, and replay returns that result without calling the
+   gateway again.
 3. **Fan-in is deterministic where effects demand it.** Two order channels
    merge at `validate_order`, and because the effectful `authorize_payment`
    sits below that fan-in, the runtime orders the merge deterministically
@@ -33,7 +29,9 @@ ideas, in order.
 
 The gateway here is simulated so the behaviour is deterministic, but the shape is
 the real one: a real implementation would issue an HTTP request inside the
-effect's `execute`.
+effect's `execute`. [How ObzenFlow Works](https://obzenflow.dev/product/how-obzenflow-works/)
+covers the first two ideas in full; this example exists to show the last two in
+running code.
 
 ## The Flow
 
@@ -104,14 +102,8 @@ availability-driven scheduling and pays no coupling cost.
 in this flow. In a real deployment it would usually come from HTTP ingestion, a
 Kafka topic, a database outbox, or another flow. In this tutorial it comes from a
 scripted source so the logs, metrics, circuit-breaker state, and replay are easy
-to compare.
-
-The gateway command is `AuthorizePayment`, and that command is represented as an
-`Effect`. The input is not a command; it is a recorded fact the flow reacts to.
-
-On replay, ObzenFlow does not poll the source again. The runtime reads the
-archived source journal and injects the recorded `CustomerOrderPlaced` events
-with replay provenance, so the upstream feed is not re-run.
+to compare. On replay, the runtime reads the archived source journal and injects
+the recorded events with replay provenance instead of polling the source again.
 
 ## 2. The Gateway Command as an Effect
 
@@ -209,17 +201,9 @@ breaker still classifies those unavailable outcomes as dependency failures:
 ValidatedOrder -> authorize_payment -> manual_review
 ```
 
-That is the preferred shape for business errors in ObzenFlow. Do not turn every
-meaningful unhappy path into a framework processing error just because it is not
-the success case. Lean toward typed events first. Shipping subscribes to paid
-orders, customer notification subscribes to cancelled orders wherever the
-cancellation originated, and an operations workflow subscribes to unavailable
-authorizations.
-
-Framework errors are still useful for bugs, deserialization failures, broken
-handlers, exhausted infrastructure that cannot be represented meaningfully, and
-other cases where the flow itself could not correctly process the work. Domain
-outcomes should usually be modeled as typed events.
+The pattern generalizes: domain outcomes are typed events downstream stages can
+subscribe to, and framework errors are reserved for work the flow itself could
+not correctly process.
 
 ## 4. Deterministic Replay
 
@@ -240,13 +224,9 @@ cargo run -p obzenflow --example payment_gateway_resilience -- --replay-from "$R
 ```
 
 On replay the source is **not polled** and the gateway effect is **not
-executed**. The runtime returns the recorded upstream events from the source
-journal and reconstructs the recorded outcome facts (`payment.authorized.v1`,
-`payment.declined.v1`) and recorded failures from the effect history, then
-the handler re-emits the same derived cancellations. Downstream
-paid, cancelled, and unavailable deliveries are reconstructed with the same
-outcomes. That is the durable-execution property: a recorded run replays
-exactly, without re-pulling inputs or re-firing side effects.
+executed**. The recorded upstream events and effect outcomes drive the same
+derived consequences and deliveries. Add `--verify` to assert the
+reconstruction matches the original archive fact-for-fact.
 
 ### Inspecting the run
 
@@ -377,7 +357,7 @@ honestly against order state (a cancel request must be checked against
 picking, packing, shipped). Both belong to the checkout saga capstone
 (FLOWIP-095h), where the order is a state machine. The piggy bank example is
 likewise untouched here: it is the canonical resume scenario (FLOWIP-120n) and
-has its own published tutorial.
+is covered by its own example rather than this one.
 
 ## Files
 
