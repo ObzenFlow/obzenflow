@@ -1,7 +1,7 @@
 error[E0599]: no function or associated item named `legacy_shell` found for struct `MiddlewareDeclaration` in the current scope
- --> tests/compile_fail/handler_shell_retirement/legacy_declaration_fallback.rs:4:46
+ --> tests/compile_fail/handler_shell_retirement/legacy_declaration_fallback.rs:8:46
   |
-4 |     let declaration = MiddlewareDeclaration::legacy_shell("legacy", "legacy");
+8 |     let declaration = MiddlewareDeclaration::legacy_shell("legacy", "legacy");
   |                                              ^^^^^^^^^^^^ function or associated item not found in `MiddlewareDeclaration`
   |
 note: if you're trying to build a new `MiddlewareDeclaration` consider using one of the following associated functions:

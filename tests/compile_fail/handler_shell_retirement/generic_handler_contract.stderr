@@ -1,7 +1,7 @@
 error[E0432]: unresolved imports `obzenflow_adapters::middleware::ErrorAction`, `obzenflow_adapters::middleware::Middleware`, `obzenflow_adapters::middleware::MiddlewareAction`, `obzenflow_adapters::middleware::SourceMiddlewarePhase`
- --> tests/compile_fail/handler_shell_retirement/generic_handler_contract.rs:2:5
+ --> tests/compile_fail/handler_shell_retirement/generic_handler_contract.rs:6:5
   |
-2 |     ErrorAction, Middleware, MiddlewareAction, SourceMiddlewarePhase,
+6 |     ErrorAction, Middleware, MiddlewareAction, SourceMiddlewarePhase,
   |     ^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^ no `SourceMiddlewarePhase` in `middleware`
   |     |            |           |
   |     |            |           no `MiddlewareAction` in `middleware`
