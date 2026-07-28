@@ -232,12 +232,14 @@ pub fn assemble_flow(
                 } => gateway_transform,
                 effects: [AuthorizePayment with [gateway_resilience]],
                 // Record a per-execution service-level-indicator sample for the
-                // authorization operation: the raw wall-clock latency of the live
-                // gateway call. This is observe-only evidence; it never changes
-                // whether the payment succeeds, retries, or routes. The objective
-                // (e.g. "under five seconds"), and aggregation into percentiles and
-                // SLOs, are FLOWIP-115l's job, applied at read time over these
-                // journalled samples rather than baked into the wide event.
+                // authorization handler. This is end-to-end handler wall time, so it
+                // includes effect-boundary admission, dependency execution, recovery,
+                // and rejection routing. Breaker attempt rows separately report raw
+                // dependency and admission-wait time. This sample is observe-only; it
+                // never changes whether the payment succeeds, retries, or routes. The
+                // objective (e.g. "under five seconds"), and aggregation into
+                // percentiles and SLOs, are FLOWIP-115l's job, applied at read time
+                // over these journalled samples rather than baked into the wide event.
                 middleware: [
                     indicator()
                         .operation("payment.authorization")
