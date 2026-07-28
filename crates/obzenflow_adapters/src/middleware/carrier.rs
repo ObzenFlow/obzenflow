@@ -1198,7 +1198,7 @@ impl<'a> MiddlewareMaterializationContext<'a> {
 /// collects every source policy declared for a stage (in resolved order) and
 /// builds one `PerSourcePolicyBoundary` that implements the neutral runtime
 /// `SourceBoundary` seam. A pre-composed per-middleware boundary could not
-/// compose with other source policies (a still-legacy rate limiter, or a second
+/// compose with other source policies (a rate limiter, or a second
 /// control middleware) without breaking the single-context admit-forward /
 /// observe-reverse semantics.
 pub struct SourcePollAttachment {

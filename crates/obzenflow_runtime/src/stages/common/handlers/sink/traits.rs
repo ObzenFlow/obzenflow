@@ -188,7 +188,7 @@ pub trait UnifiedSinkHandler: Send + Sync {
     // Declarations live on `SinkHandler` and are snapshotted by the
     // descriptor from the raw handler before any wrapping; a runtime-side
     // copy would let a wrapper silently attenuate them to undeclared
-    // (FLOWIP-120s, the `MiddlewareSink` finding).
+    // (FLOWIP-120s, the former generic sink-wrapper finding).
 }
 
 #[async_trait]

@@ -1,0 +1,39 @@
+error[E0432]: unresolved imports `obzenflow_adapters::middleware::AsyncMiddlewareTransform`, `obzenflow_adapters::middleware::MiddlewareAsyncFiniteSource`, `obzenflow_adapters::middleware::MiddlewareAsyncInfiniteSource`, `obzenflow_adapters::middleware::MiddlewareFiniteSource`, `obzenflow_adapters::middleware::MiddlewareInfiniteSource`, `obzenflow_adapters::middleware::MiddlewareJoin`, `obzenflow_adapters::middleware::MiddlewareSink`, `obzenflow_adapters::middleware::MiddlewareStateful`, `obzenflow_adapters::middleware::MiddlewareTransform`
+ --> tests/compile_fail/handler_shell_retirement/shell_constructors.rs:6:5
+  |
+6 |     AsyncMiddlewareTransform, MiddlewareAsyncFiniteSource, MiddlewareAsyncInfiniteSource,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `MiddlewareAsyncInfiniteSource` in `middleware`
+  |     |                         |
+  |     |                         no `MiddlewareAsyncFiniteSource` in `middleware`
+  |     no `AsyncMiddlewareTransform` in `middleware`
+7 |     MiddlewareFiniteSource, MiddlewareInfiniteSource, MiddlewareJoin, MiddlewareSink,
+  |     ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^ no `MiddlewareSink` in `middleware`
+  |     |                       |                         |
+  |     |                       |                         no `MiddlewareJoin` in `middleware`
+  |     |                       no `MiddlewareInfiniteSource` in `middleware`
+  |     no `MiddlewareFiniteSource` in `middleware`
+8 |     MiddlewareStateful, MiddlewareTransform,
+  |     ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^ no `MiddlewareTransform` in `middleware`
+  |     |
+  |     no `MiddlewareStateful` in `middleware`
+  |
+help: a similar name exists in the module
+  |
+7 -     MiddlewareFiniteSource, MiddlewareInfiniteSource, MiddlewareJoin, MiddlewareSink,
+7 +     MiddlewareFiniteSource, MiddlewareInfiniteSource, MiddlewareOrigin, MiddlewareSink,
+  |
+help: a similar name exists in the module
+  |
+7 -     MiddlewareFiniteSource, MiddlewareInfiniteSource, MiddlewareJoin, MiddlewareSink,
+7 +     MiddlewareFiniteSource, MiddlewareInfiniteSource, MiddlewareJoin, MiddlewareHints,
+  |
+help: a similar name exists in the module
+  |
+8 -     MiddlewareStateful, MiddlewareTransform,
+8 +     MiddlewareSafety, MiddlewareTransform,
+  |
+help: a similar name exists in the module
+  |
+8 -     MiddlewareStateful, MiddlewareTransform,
+8 +     MiddlewareStateful, MiddlewareFactory,
+  |

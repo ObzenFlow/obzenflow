@@ -48,9 +48,6 @@ pub struct MiddlewareStackConfig {
     /// Rate limiter static config (if present)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limiter: Option<serde_json::Value>,
-    /// Retry policy static config (if present)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry: Option<serde_json::Value>,
 }
 
 impl MiddlewareStackConfig {
@@ -60,7 +57,6 @@ impl MiddlewareStackConfig {
             stack,
             circuit_breaker: None,
             rate_limiter: None,
-            retry: None,
         }
     }
 }

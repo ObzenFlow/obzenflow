@@ -1,20 +1,23 @@
 # ObzenFlow
 
-ObzenFlow is a high-performance event streaming and processing framework for Rust, built around **durable per-stage journals**, **typed events**, and an ergonomics-first DSL for composing pipelines.
+ObzenFlow is a durable execution runtime in Rust for high-consequence systems. Every stage of a flow writes what happened, including the results of outside actions, to an append-only journal. That record lets the runtime rebuild state, verify a replay against the original run, and resume interrupted work without re-firing a committed effect. Out of the box, ObzenFlow is a single binary with no platform, broker, cluster, or database to run.
 
 Status: **pre-1.0**. APIs are still evolving and may change between releases.
 
-## Principles
+Where to go next:
 
-ObzenFlow is built around journal-first execution, wide-event observability, and evidence-based correctness. Every stage reads from upstream append-only journals and writes its outputs to its own journal, making the system’s journaled history both the execution substrate and the primary observability surface.
+- [What is ObzenFlow?](https://obzenflow.dev/product/what-is-obzenflow/) covers the guarantees and the systems they are built for.
+- [How ObzenFlow Works](https://obzenflow.dev/product/how-obzenflow-works/) covers the DSL, effects, journals, and run modes in detail.
+- [Tutorials](https://obzenflow.dev/tutorials/) walk from a first flow to live AI inference.
+- [Philosophy](https://obzenflow.dev/philosophy/) explains the design principles underneath.
 
-For the full design philosophy, see [obzenflow.dev/philosophy](https://obzenflow.dev/philosophy/).
+## The shape of a flow
 
 Every ObzenFlow application follows the same shape:
 
 ```rust,ignore
 FlowApplication::run(flow! {
-    name: "my_pipeline",
+    name: "my_flow",
     journals: disk_journals("target/logs".into()),
     middleware: [rate_limit(100.0)],
 
@@ -33,44 +36,25 @@ FlowApplication::run(flow! {
 
 For runnable versions with real domain types and handlers, see the examples catalog in `examples/README.md`.
 
-## Quickstart: run a real end-to-end demo (HTTP ingestion)
+## Quickstart: durable execution in two commands
 
 Prerequisites:
 - Rust `1.93.0` (pinned in `rust-toolchain.toml`)
 
-Run with localhost-only defaults:
+Run the payment gateway example, a flow that authorizes orders through an unreliable gateway behind a declared effect and a circuit breaker:
 
 ```bash
-cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server
+cargo run -p obzenflow --example payment_gateway_resilience
 ```
 
-The demo uses its checked-in startup config by default. To override the startup file explicitly, pass `-- --config <path>` after the Cargo arguments.
-
-Recommended control-plane auth variant:
+The completion footer prints the run's archive path and the exact replay command. Replay the finished run from its record with verification:
 
 ```bash
-export OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH='Bearer piggy-bank-demo-secret'
-cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml
+cargo run -p obzenflow --example payment_gateway_resilience -- \
+    --replay-from target/payment-gateway-logs/flows/<run_id> --verify
 ```
 
-In another terminal, post a couple of events:
-
-```bash
-curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events \
-  -H 'content-type: application/json' \
-  -d '{"event_type":"bank.account_opened","data":{"account_id":"acct-1","owner":"Alice","initial_balance_cents":1000}}'
-curl -XPOST http://127.0.0.1:9090/api/bank/tx/events \
-  -H 'content-type: application/json' \
-  -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Debit","amount_cents":99,"note":"coffee"}}'
-```
-
-Observe:
-- Metrics (localhost default): `curl http://127.0.0.1:9090/metrics`
-- Topology (localhost default): `curl http://127.0.0.1:9090/api/topology`
-- Metrics (auth variant): `curl http://127.0.0.1:9090/metrics -H 'Authorization: Bearer piggy-bank-demo-secret'`
-- Topology (auth variant): `curl http://127.0.0.1:9090/api/topology -H 'Authorization: Bearer piggy-bank-demo-secret'`
-
-Code: `examples/http_ingestion_piggy_bank_demo/flow.rs`
+Replay reads the archived inputs instead of polling the sources and substitutes committed effect outcomes instead of calling the gateway again. A certified match prints `output matched the original run, 0 differences`. That is the core of durable execution. The record of a run is sufficient to rebuild it, verify it, and continue it.
 
 ## More examples
 
@@ -80,30 +64,27 @@ The full catalog with grouped commands and code pointers is in `examples/README.
 # Framework overview: reference catalogs + joins + stateful summary
 cargo run -p obzenflow --example product_catalog_enrichment
 
-# Resilience: per-effect circuit breaker + retry + rate limiting
-cargo run -p obzenflow --example payment_gateway_resilience
+# End-to-end HTTP service: ingress, joins, projections, /metrics
+cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server
 
-# Middleware inheritance/override (observe /metrics while it runs)
-cargo run -p obzenflow --example flow_middleware_config
+# Live AI inference
+cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"
 ```
 
-No features are enabled by default. `--features obzenflow_infra/warp-server` enables the HTTP server and web endpoints, and `--features http-pull` enables HTTP pull sources. See `crates/obzenflow_infra/README.md` for the full feature matrix.
-
-An optional Prometheus + Grafana monitoring stack is available in `monitoring/` (see `monitoring/README.md`).
+No features are enabled by default. `--features obzenflow_infra/warp-server` enables the HTTP server and web endpoints, and `--features http-pull` enables HTTP pull sources. See `crates/obzenflow_infra/README.md` for the full feature matrix. An optional Prometheus + Grafana monitoring stack lives in `monitoring/`.
 
 ## Project organization
 
-ObzenFlow follows an onion architecture: `obzenflow_core` defines the business domain and “ports” (traits), and outer layers provide implementations, orchestration, wiring, and concrete integrations.
-
-Inner layers are intentionally generic (domain types + traits) and avoid I/O and runtime/framework integration. Outer layers provide concrete implementations (journals, web/HTTP, middleware/exporters) and wire them into runtime services via traits and composition.
+ObzenFlow follows an onion architecture: `obzenflow_core` defines the business domain and ports (traits), and outer layers provide implementations, orchestration, wiring, and concrete integrations.
 
 - `crates/obzenflow_core/README.md`: core domain types + stable interfaces (events, journals, contracts, middleware ports)
+- `crates/obzenflow_derive/README.md`: derive macros for the authoring surface (`EffectOutcomeFacts` for effect outcome carriers)
 - `crates/obzenflow_runtime/README.md`: stage execution + supervisors + runtime orchestration (the engine)
-- `crates/obzenflow_dsl/README.md`: the `flow!` DSL and how it builds a runnable flow graph (including middleware resolution)
-- `crates/obzenflow_infra/README.md`: `FlowApplication` + journaling/web/HTTP implementations + typed env parsing, mostly behind feature flags
-- `crates/obzenflow_adapters/README.md`: middleware + concrete sources/sinks (connectors) intended to be composed into flows
+- `crates/obzenflow_dsl/README.md`: the `flow!` DSL and how it builds a runnable flow graph
+- `crates/obzenflow_infra/README.md`: `FlowApplication` + journaling/web/HTTP implementations, mostly behind feature flags
+- `crates/obzenflow_adapters/README.md`: middleware + concrete sources/sinks composed into flows
 
-The root `obzenflow` crate is a convenience re-export layer for common sources/sinks (`src/sources.rs`, `src/sinks.rs`).
+The root `obzenflow` crate is a convenience re-export layer for common sources/sinks (`src/sources.rs`, `src/sinks.rs`). The remaining workspace crates, `obzenflow_benchmarks` and `obzenflow_sketches`, are internal support crates outside the public surface.
 
 ## Project policies
 

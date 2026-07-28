@@ -28,7 +28,7 @@ No default features are enabled. Opt in as needed:
 - `FlowApplication::run(flow).await` for the common case.
 - `FlowApplication::builder()` for custom log levels, extra web endpoints, or hooks.
 
-CLI flags include `--server`, `--server-port`, `--replay-from`, `--cors-mode`, and others. See `FlowConfig` for the full list.
+CLI flags include `--server`, `--server-port`, `--replay-from`, `--resume-from`, `--verify`, `--cors-mode`, and others. See `FlowConfig` for the full list.
 
 ## License
 

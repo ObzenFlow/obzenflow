@@ -61,8 +61,8 @@ pub struct StageConfig {
     pub name: String,
     pub flow_name: String,
     pub cycle_guard: Option<CycleGuardConfig>,
-    /// FLOWIP-010 §7: build-resolved lineage policy; the existing path into
-    /// middleware construction (`MiddlewareFactory::create` receives this).
+    /// FLOWIP-010 §7: build-resolved lineage policy used when handlers and
+    /// stage-local runtime resources are materialised.
     pub lineage: obzenflow_core::config::LineagePolicy,
     /// Immutable per-flow effective config. Middleware receives only an
     /// exact-point view derived from this carrier at materialisation.

@@ -24,14 +24,6 @@ impl MiddlewareContextKey for EffectCallDurationNanos {
     const LABEL: &'static str = "effect.call_duration_nanos";
 }
 
-// ---- Circuit breaker integrated retry ------------------------------------
-
-pub(crate) struct CircuitBreakerAttempt;
-impl MiddlewareContextKey for CircuitBreakerAttempt {
-    type Value = u32;
-    const LABEL: &'static str = "circuit_breaker.attempt";
-}
-
 pub(crate) struct CircuitBreakerIsProbe;
 impl MiddlewareContextKey for CircuitBreakerIsProbe {
     type Value = bool;
@@ -47,10 +39,9 @@ impl MiddlewareContextKey for CircuitBreakerProbeGeneration {
 /// RAII guard for circuit-breaker half-open probe slots.
 ///
 /// When a half-open probe is admitted, the circuit breaker increments its
-/// `probe_in_flight` counter. In the normal path the slot is released in
-/// `post_handle`, but middleware short-circuiting (`Skip`/`Abort`) can bypass
-/// that call. This guard ensures the slot is released when the per-pass
-/// `MiddlewareContext` is dropped.
+/// `probe_in_flight` counter. Normal reverse-order policy observation settles
+/// the slot; cancellation or a later policy rejection instead drops this
+/// guard with the invocation-local `MiddlewareContext`.
 #[derive(Debug)]
 pub(crate) struct CircuitBreakerProbeSlotGuard {
     probe_in_flight: Arc<AtomicU32>,
@@ -90,26 +81,8 @@ impl MiddlewareContextKey for CircuitBreakerProbeSlot {
     const LABEL: &'static str = "circuit_breaker.probe_slot_guard";
 }
 
-pub(crate) struct CircuitBreakerShouldRetry;
-impl MiddlewareContextKey for CircuitBreakerShouldRetry {
-    type Value = bool;
-    const LABEL: &'static str = "circuit_breaker.should_retry";
-}
-
-pub(crate) struct CircuitBreakerRetryDelayMs;
-impl MiddlewareContextKey for CircuitBreakerRetryDelayMs {
-    type Value = u64;
-    const LABEL: &'static str = "circuit_breaker.retry_delay_ms";
-}
-
 pub(crate) struct CircuitBreakerRetryAfterMs;
 impl MiddlewareContextKey for CircuitBreakerRetryAfterMs {
     type Value = u64;
     const LABEL: &'static str = "circuit_breaker.retry_after_ms";
-}
-
-pub(crate) struct CircuitBreakerTotalRetryWallMs;
-impl MiddlewareContextKey for CircuitBreakerTotalRetryWallMs {
-    type Value = u64;
-    const LABEL: &'static str = "circuit_breaker.total_retry_wall_ms";
 }

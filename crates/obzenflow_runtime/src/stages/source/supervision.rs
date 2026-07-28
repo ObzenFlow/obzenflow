@@ -11,6 +11,7 @@ use crate::backpressure::BackpressureWriter;
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
+use crate::stages::common::handlers::source::traits::SourceError;
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, drain_one_pending_resolve, DrainAttempt, DrainOutcome,
@@ -24,16 +25,59 @@ use crate::stages::source::boundary::{
 };
 use crate::supervised_base::{EventLoopDirective, EventReceiver};
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
+use obzenflow_core::event::payloads::observability_payload::{
+    MetricsLifecycle, ObservabilityPayload,
+};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::{ChainEvent, StageId, WriterId};
+use serde_json::json;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+fn source_error_kind(error: &SourceError) -> ErrorKind {
+    match error {
+        SourceError::Timeout(_) => ErrorKind::Timeout,
+        SourceError::Transport(_) => ErrorKind::Remote,
+        SourceError::Deserialization(_) => ErrorKind::Deserialization,
+        SourceError::Other(_) => ErrorKind::Unknown,
+    }
+}
+
+/// Normalise a source-owned poll failure into the existing routable lifecycle
+/// event. This runs inside `SourcePollExecution`, so source policies observe a
+/// delivered error-marked batch rather than an execution failure.
+pub(crate) fn normalise_source_poll_error(
+    writer_id: WriterId,
+    source_type: &'static str,
+    error: &SourceError,
+) -> ChainEvent {
+    let kind = source_error_kind(error);
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    ChainEventFactory::observability_event(
+        writer_id,
+        ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
+            name: "source.poll_error".to_string(),
+            value: json!({
+                "source_type": source_type,
+                "error_type": format!("{error:?}").split('(').next().unwrap_or("unknown"),
+                "message": error.to_string(),
+                "timestamp_ms": timestamp_ms,
+            }),
+            tags: None,
+        }),
+    )
+    .mark_as_error(error.to_string(), kind)
+}
 
 pub(crate) async fn around_source_boundary<'a>(
     boundary: Option<Arc<dyn SourceBoundary>>,
@@ -566,6 +610,47 @@ mod tests {
     enum TestEvent {
         BeginDrain,
         ChannelClosed,
+    }
+
+    #[test]
+    fn source_poll_errors_normalise_to_existing_error_marked_lifecycle_rows() {
+        let writer_id = WriterId::from(StageId::new());
+        let cases = [
+            (SourceError::Timeout("late".to_string()), ErrorKind::Timeout),
+            (
+                SourceError::Transport("offline".to_string()),
+                ErrorKind::Remote,
+            ),
+            (
+                SourceError::Deserialization("bad json".to_string()),
+                ErrorKind::Deserialization,
+            ),
+            (
+                SourceError::Other("unknown".to_string()),
+                ErrorKind::Unknown,
+            ),
+        ];
+
+        for (error, expected_kind) in cases {
+            let event = normalise_source_poll_error(writer_id, "async_finite", &error);
+            assert!(matches!(
+                event.processing_info.status,
+                ProcessingStatus::Error {
+                    kind: Some(ref kind),
+                    ..
+                } if *kind == expected_kind
+            ));
+            match event.content {
+                obzenflow_core::event::ChainEventContent::Observability(
+                    ObservabilityPayload::Metrics(MetricsLifecycle::Custom { name, value, .. }),
+                ) => {
+                    assert_eq!(name, "source.poll_error");
+                    assert_eq!(value["source_type"], "async_finite");
+                    assert_eq!(value["message"], error.to_string());
+                }
+                other => panic!("expected source.poll_error lifecycle row, got {other:?}"),
+            }
+        }
     }
 
     #[test]

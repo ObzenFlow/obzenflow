@@ -2444,10 +2444,10 @@ async fn source_admission_limiter_replay_suppresses_delay_events_and_effects() {
     );
 
     // FLOWIP-120a regression. The journal-only assertion above is blind to the
-    // admission-middleware replay bug: a replayed deterministic shell runs the limiter's
-    // `pre_handle` on every replayed event but never journals its `Delayed`
-    // lifecycle records, so the limiter can pace the whole replay while the journal
-    // stays silent. The runtime counters embedded in wide events do capture it.
+    // old replay-admission bug: replay could run live limiter admission for
+    // every recorded event without journalling its `Delayed` lifecycle rows,
+    // pacing the whole replay while the journal stayed silent. The runtime
+    // counters embedded in wide events do capture it.
     //
     // The limiter embeds tokens-consumed (`rl_events_total`), delayed-event
     // (`rl_delayed_total`), and delay-seconds (`rl_delay_seconds_total`) totals via

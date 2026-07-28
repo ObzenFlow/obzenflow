@@ -9,7 +9,7 @@
 //! The source is rate-limited so low that the second admission must wait several
 //! seconds. We start the flow, let the source enter that wait, then stop the
 //! flow and assert it terminates far sooner than the wait would have elapsed. On
-//! the pre-FLOWIP-114o blocking `pre_handle` path the source poll has no await
+//! the pre-FLOWIP-114o blocking admission path the source poll has no await
 //! point, so the supervisor's `biased` select could not pre-empt it and this
 //! test would time out.
 

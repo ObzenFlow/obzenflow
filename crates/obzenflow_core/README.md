@@ -13,6 +13,7 @@ The business-domain nucleus of the framework, defining the types and traits the 
 - Ports for outer layers (HTTP client and web server abstractions, control-middleware ports)
 - Strong identifiers and time primitives (typed IDs, `MetricsDuration`)
 - Typed payloads (`TypedPayload`) for compile-time event type resolution and schema versioning
+- Effect outcome carriers (`EffectOutcomeFacts`, `TypedFactSet`) binding an effect's possible outcomes to the exact typed facts a stage may author
 
 This crate intentionally avoids infrastructure concerns (storage, networking, async runtimes, logging). Outer layers implement these interfaces and inject them into runtime services.
 

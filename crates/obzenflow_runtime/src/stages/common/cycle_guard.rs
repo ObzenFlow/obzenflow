@@ -4,7 +4,7 @@
 
 //! Supervisor-level cycle protection
 //!
-//! This guard is intended to live in stage supervisors, not in the middleware chain.
+//! This guard is owned directly by stage supervisors.
 //! It handles both:
 //! - Data events: per-event cycle depth tracking, abort after too many round trips.
 //! - Flow control signals: attenuate amplification in topologies with backflow edges.

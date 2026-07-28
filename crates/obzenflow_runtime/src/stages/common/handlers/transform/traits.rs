@@ -6,11 +6,13 @@
 //!
 //! Examples: Data enrichers, filters, mappers, routers
 
-use crate::effects::{EffectInvocationContext, Effects};
+use crate::effects::{EffectBoundary, EffectInvocationContext, Effects};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::{ChainEvent, EventType};
+use std::fmt;
+use std::sync::Arc;
 
 /// Handler for stateless transform stages
 ///
@@ -258,16 +260,18 @@ pub trait EffectfulTransformHandler: Send + Sync {
 }
 
 #[doc(hidden)]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct EffectfulTransformHandlerAdapter<H> {
     handler: H,
+    effect_boundary: Arc<dyn EffectBoundary>,
     pass_through_event_type: Option<EventType>,
 }
 
 impl<H> EffectfulTransformHandlerAdapter<H> {
-    pub fn new(handler: H) -> Self {
+    pub fn new(handler: H, effect_boundary: Arc<dyn EffectBoundary>) -> Self {
         Self {
             handler,
+            effect_boundary,
             pass_through_event_type: None,
         }
     }
@@ -285,6 +289,31 @@ impl<H> EffectfulTransformHandlerAdapter<H> {
     pub fn with_exact_pass_through_event_type(mut self, event_type: EventType) -> Self {
         self.pass_through_event_type = Some(event_type);
         self
+    }
+
+    fn install_required_effect_boundary(
+        &self,
+        slot: &mut Option<Arc<dyn EffectBoundary>>,
+    ) -> Result<(), HandlerError> {
+        if slot.is_some() {
+            return Err(HandlerError::Other(
+                "effectful transform received an unexpected pre-installed effect boundary"
+                    .to_string(),
+            ));
+        }
+        *slot = Some(self.effect_boundary.clone());
+        Ok(())
+    }
+}
+
+impl<H: fmt::Debug> fmt::Debug for EffectfulTransformHandlerAdapter<H> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EffectfulTransformHandlerAdapter")
+            .field("handler", &self.handler)
+            .field("effect_boundary", &"<required>")
+            .field("pass_through_event_type", &self.pass_through_event_type)
+            .finish()
     }
 }
 
@@ -314,9 +343,10 @@ where
         {
             return Ok(vec![event]);
         }
-        let effect_context = effect_context.ok_or_else(|| {
+        let mut effect_context = effect_context.ok_or_else(|| {
             HandlerError::Other("effectful transform invoked without effect context".to_string())
         })?;
+        self.install_required_effect_boundary(&mut effect_context.effect_boundary)?;
         let mut fx = Effects::<H::Output, H::AllowedEffects>::new(effect_context);
         let input = H::Input::try_from_event(&event)
             .map_err(|e| HandlerError::Deserialization(e.to_string()))?;
@@ -330,5 +360,72 @@ where
 
     fn stage_logic_version(&self) -> &str {
         self.handler.stage_logic_version()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::effects::{
+        EffectBoundaryOutcome, EffectBoundaryReport, EffectIdentity, RepeatableEffectOperation,
+        SingleUseEffectBoundaryReport, SingleUseEffectOperation,
+    };
+
+    struct AdmitAllBoundary;
+
+    #[async_trait]
+    impl EffectBoundary for AdmitAllBoundary {
+        async fn around_repeatable_effect(
+            &self,
+            _identity: &EffectIdentity,
+            _event: &ChainEvent,
+            mut operation: RepeatableEffectOperation,
+        ) -> EffectBoundaryReport {
+            EffectBoundaryReport {
+                outcome: EffectBoundaryOutcome::Executed(operation.execute().await),
+                control_events: Vec::new(),
+            }
+        }
+
+        async fn around_single_use_effect(
+            &self,
+            _identity: &EffectIdentity,
+            _event: &ChainEvent,
+            operation: SingleUseEffectOperation,
+        ) -> SingleUseEffectBoundaryReport {
+            operation.execute().await.into_report(Vec::new())
+        }
+    }
+
+    #[test]
+    fn effectful_adapter_installs_exactly_its_required_boundary() {
+        let required: Arc<dyn EffectBoundary> = Arc::new(AdmitAllBoundary);
+        let adapter = EffectfulTransformHandlerAdapter::new((), required.clone());
+        let mut slot = None;
+
+        adapter
+            .install_required_effect_boundary(&mut slot)
+            .expect("empty runtime slot accepts the adapter-owned boundary");
+
+        let installed = slot.expect("required boundary must be installed");
+        assert!(Arc::ptr_eq(&installed, &required));
+    }
+
+    #[test]
+    fn effectful_adapter_rejects_a_second_boundary_authority() {
+        let required: Arc<dyn EffectBoundary> = Arc::new(AdmitAllBoundary);
+        let unexpected: Arc<dyn EffectBoundary> = Arc::new(AdmitAllBoundary);
+        let adapter = EffectfulTransformHandlerAdapter::new((), required);
+        let mut slot = Some(unexpected.clone());
+
+        let error = adapter
+            .install_required_effect_boundary(&mut slot)
+            .expect_err("a pre-installed boundary must fail closed");
+
+        assert!(error.to_string().contains("unexpected pre-installed"));
+        assert!(Arc::ptr_eq(
+            slot.as_ref().expect("unexpected boundary remains visible"),
+            &unexpected,
+        ));
     }
 }

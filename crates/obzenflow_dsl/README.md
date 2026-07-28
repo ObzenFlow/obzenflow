@@ -7,7 +7,7 @@ This crate is an internal implementation detail of the ObzenFlow project. Most u
 The composition root for flow construction. The `flow!` macro turns a declarative block into a runnable `FlowHandle` by coordinating topology validation, journal allocation, middleware resolution, and stage wiring.
 
 - `flow!` macro and topology parsing helpers
-- Stage descriptor macros (`source!`, `transform!`, `sink!`, `stateful!`, `join!`, and async variants)
+- Stage descriptor macros (`source!`, `transform!`, `sink!`, `stateful!`, `join!`, `effectful_transform!`, `effectful_stateful!`, and async variants)
 - Middleware inheritance and override resolution with audit trail
 - `FlowDefinition` future wrapper (what `flow!` returns)
 - Structured build errors

@@ -32,7 +32,8 @@ pub enum SourcePollCompletion {
 pub struct SourcePollReport {
     /// The poll result.
     pub result: Result<SourcePollCompletion, SourceError>,
-    /// Time spent inside the actual source poll, excluding boundary waits.
+    /// Time spent in the raw source poll or timeout only. Error normalization,
+    /// boundary policy, output staging, and idle delay are excluded.
     pub poll_duration: Duration,
 }
 

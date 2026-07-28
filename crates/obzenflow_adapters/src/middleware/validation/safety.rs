@@ -101,25 +101,7 @@ fn check_dangerous_patterns(
         result.errors.push(message);
     }
 
-    // Pattern 2: Infinite retry on sources
-    if let Some(retry) = &hints.retry {
-        use crate::middleware::Attempts;
-        if matches!(retry.max_attempts, Attempts::Infinite) {
-            match stage_type {
-                StageType::FiniteSource | StageType::InfiniteSource => {
-                    let message = format!(
-                        "❌ CRITICAL: Infinite retry on source '{stage_name}' makes no sense! \
-                         Sources generate data, they don't retry receiving it!"
-                    );
-                    error!("{}", message);
-                    result.errors.push(message);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Pattern 3: Unbounded batching on sinks
+    // Pattern 2: Unbounded batching on sinks
     if let Some(batch) = &hints.batching {
         if !batch.bounded && stage_type == StageType::Sink {
             let message = format!(
@@ -131,7 +113,7 @@ fn check_dangerous_patterns(
         }
     }
 
-    // Pattern 4: Rate limiting on sinks
+    // Pattern 3: Rate limiting on sinks
     if hints.rate_limits && stage_type == StageType::Sink {
         let message = format!(
             "⚠️  WARNING: Rate limiting on sink '{stage_name}' can cause severe backpressure! \
@@ -197,12 +179,10 @@ impl ValidationResult {
 mod tests {
     use super::*;
     use crate::middleware::{
-        Attempts, BackoffKind, BatchingHint, MiddlewareAttachmentRequest, MiddlewareDeclaration,
-        MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareHints,
+        BatchingHint, MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory,
+        MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareHints,
         MiddlewareMaterializationContext, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
-        RetryHint,
     };
-    use std::time::Duration;
 
     macro_rules! safety_only_factory {
         () => {
@@ -252,39 +232,6 @@ mod tests {
         }
     }
 
-    struct MockInfiniteRetryFamily;
-    struct MockInfiniteRetryFactory;
-    impl MiddlewareFactory for MockInfiniteRetryFactory {
-        fn label(&self) -> &'static str {
-            "opaque.infinite_attempts"
-        }
-
-        fn override_key(&self) -> crate::middleware::MiddlewareOverrideKey {
-            crate::middleware::MiddlewareOverrideKey::of::<MockInfiniteRetryFamily>(
-                "infinite_retry",
-            )
-        }
-
-        safety_only_factory!();
-        fn supported_stage_types(&self) -> &[StageType] {
-            &[StageType::FiniteSource, StageType::InfiniteSource]
-        }
-        fn safety_level(&self) -> MiddlewareSafety {
-            MiddlewareSafety::Dangerous
-        }
-        fn hints(&self) -> MiddlewareHints {
-            MiddlewareHints {
-                retry: Some(RetryHint {
-                    max_attempts: Attempts::Infinite,
-                    backoff: BackoffKind::Fixed {
-                        delay: Duration::from_millis(0),
-                    },
-                }),
-                ..Default::default()
-            }
-        }
-    }
-
     #[test]
     fn test_skip_control_on_sink_is_error() {
         let factory = MockSkipControlFactory;
@@ -303,15 +250,6 @@ mod tests {
         assert!(result.is_ok()); // No errors
         assert!(result.has_warnings());
         assert!(result.has_dangerous);
-    }
-
-    #[test]
-    fn test_infinite_retry_on_source_is_error() {
-        let factory = MockInfiniteRetryFactory;
-        let result = validate_middleware_safety(&factory, StageType::FiniteSource, "test_source");
-
-        assert!(!result.is_ok());
-        assert!(result.errors.iter().any(|e| e.contains("makes no sense")));
     }
 
     #[test]

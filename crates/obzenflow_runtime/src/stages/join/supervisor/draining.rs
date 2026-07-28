@@ -8,6 +8,7 @@ use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
@@ -73,7 +74,6 @@ pub(super) async fn dispatch_draining<
                     let event = envelope.event.clone();
                     let event_id = event.id;
                     let reference_stage_id = ctx.reference_stage_id;
-                    let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     if let Some(heartbeat) = &ctx.heartbeat {
                         if event.is_data() {
                             heartbeat
@@ -83,6 +83,27 @@ pub(super) async fn dispatch_draining<
                     }
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
 
+                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                        if let Some(state) = &heartbeat_state {
+                            state.record_last_consumed(event_id);
+                        }
+                        let scope = ctx.runtime_execution.dispatch_scope(
+                            ctx.stage_id,
+                            subscription.last_delivered_stage_input_position(),
+                            None,
+                        );
+                        ctx.pending_outputs.push_back(
+                            crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                event,
+                                scope,
+                            },
+                        );
+                        ctx.pending_ack_upstream = subscription.last_delivered_upstream_stage();
+                        ctx.pending_parent = Some(envelope);
+                        return Ok(EventLoopDirective::Continue);
+                    }
+
+                    let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     ctx.instrumentation
                         .in_flight_count
                         .fetch_add(1, Ordering::Relaxed);
@@ -221,7 +242,6 @@ pub(super) async fn dispatch_draining<
                     .fetch_add(1, Ordering::Relaxed);
 
                 if !envelope.event.is_control() {
-                    let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     let event = envelope.event.clone();
                     let event_id = event.id;
                     // Edge identity comes from the reader slot that delivered
@@ -246,6 +266,27 @@ pub(super) async fn dispatch_draining<
                     }
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
 
+                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                        if let Some(state) = &heartbeat_state {
+                            state.record_last_consumed(event_id);
+                        }
+                        let scope = ctx.runtime_execution.dispatch_scope(
+                            ctx.stage_id,
+                            subscription.last_delivered_stage_input_position(),
+                            None,
+                        );
+                        ctx.pending_outputs.push_back(
+                            crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                event,
+                                scope,
+                            },
+                        );
+                        ctx.pending_ack_upstream = subscription.last_delivered_upstream_stage();
+                        ctx.pending_parent = Some(envelope);
+                        return Ok(EventLoopDirective::Continue);
+                    }
+
+                    let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     let mut merged_parent = envelope.clone();
                     CausalOrderingService::update_with_parent(
                         &mut merged_parent.vector_clock,

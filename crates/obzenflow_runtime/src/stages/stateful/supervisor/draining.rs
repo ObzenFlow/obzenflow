@@ -27,6 +27,7 @@ use crate::stages::observer::StatefulObserverContext;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::StageId;
@@ -204,33 +205,6 @@ pub(super) async fn dispatch_draining<
                     let event = envelope.event.clone();
                     let event_id = event.id;
                     let upstream_stage = subscription.last_delivered_upstream_stage();
-                    let mut handler = (*ctx.handler).clone();
-                    let effect_context = stage_input_position.and_then(|input_seq| {
-                        ctx.writer_id.map(|writer_id| EffectInvocationContext {
-                            flow_id: ctx.flow_id,
-                            stage_id: ctx.stage_id,
-                            stage_key: ctx.stage_name.clone(),
-                            writer_id,
-                            input_seq,
-                            lineage: ctx.lineage_policy,
-                            stage_logic_version: handler.stage_logic_version().to_string(),
-                            data_journal: ctx.data_journal.clone(),
-                            flow_context: Some(flow_context.clone()),
-                            observers: Some(ctx.observers.clone()),
-                            system_journal: Some(ctx.system_journal.clone()),
-                            instrumentation: Some(ctx.instrumentation.clone()),
-                            heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
-                            parent: envelope.clone(),
-                            effect_history: ctx.effect_history.clone(),
-                            runtime_execution: ctx.runtime_execution.clone(),
-                            effect_ports: ctx.effect_ports.clone(),
-                            effect_declarations: ctx.effect_declarations.clone(),
-                            output_contract: ctx.output_contract.clone(),
-                            backpressure_writer: ctx.backpressure_writer.clone(),
-                            emit_enabled: true,
-                            effect_boundary: None,
-                        })
-                    });
 
                     if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
                         if event.is_data() {
@@ -272,6 +246,76 @@ pub(super) async fn dispatch_draining<
                         Some(&envelope),
                     )
                     .await?;
+
+                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                        run_stateful_after_accumulate_observers(
+                            &ctx.observers,
+                            &observer_ctx,
+                            &ctx.data_journal,
+                            &ctx.instrumentation,
+                            Some(&envelope),
+                        )
+                        .await?;
+
+                        if let Some(state) = &heartbeat_state {
+                            state.record_last_consumed(event_id);
+                        }
+                        let duration = start.elapsed();
+                        ctx.instrumentation
+                            .in_flight_count
+                            .fetch_sub(1, Ordering::Relaxed);
+                        ctx.instrumentation.record_processing_time(duration);
+                        if ctx.instrumentation.check_anomaly(duration) {
+                            ctx.instrumentation
+                                .anomalies_total
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        ctx.instrumentation
+                            .events_processed_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        ctx.instrumentation
+                            .events_accumulated_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        ctx.events_since_last_heartbeat =
+                            ctx.events_since_last_heartbeat.saturating_add(1);
+                        if let Err(error) = sup.emit_stateful_heartbeat_if_due(ctx, false).await {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                error = ?error,
+                                "Failed to emit stateful accumulator heartbeat during draining"
+                            );
+                        }
+                        acknowledge_consumed_drain_input(&ctx.backpressure_readers, upstream_stage);
+                        return Ok(EventLoopDirective::Continue);
+                    }
+
+                    let mut handler = (*ctx.handler).clone();
+                    let effect_context = stage_input_position.and_then(|input_seq| {
+                        ctx.writer_id.map(|writer_id| EffectInvocationContext {
+                            flow_id: ctx.flow_id,
+                            stage_id: ctx.stage_id,
+                            stage_key: ctx.stage_name.clone(),
+                            writer_id,
+                            input_seq,
+                            lineage: ctx.lineage_policy,
+                            stage_logic_version: handler.stage_logic_version().to_string(),
+                            data_journal: ctx.data_journal.clone(),
+                            flow_context: Some(flow_context.clone()),
+                            observers: Some(ctx.observers.clone()),
+                            system_journal: Some(ctx.system_journal.clone()),
+                            instrumentation: Some(ctx.instrumentation.clone()),
+                            heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
+                            parent: envelope.clone(),
+                            effect_history: ctx.effect_history.clone(),
+                            runtime_execution: ctx.runtime_execution.clone(),
+                            effect_ports: ctx.effect_ports.clone(),
+                            effect_declarations: ctx.effect_declarations.clone(),
+                            output_contract: ctx.output_contract.clone(),
+                            backpressure_writer: ctx.backpressure_writer.clone(),
+                            emit_enabled: true,
+                            effect_boundary: None,
+                        })
+                    });
                     let accumulate_result = handler
                         .accumulate(&mut ctx.current_state, event.clone(), effect_context, scope)
                         .await;

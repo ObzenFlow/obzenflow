@@ -9,16 +9,13 @@ use crate::middleware::context_keys::{
     CircuitBreakerIsProbe, CircuitBreakerProbeGeneration, CircuitBreakerProbeSlot,
     CircuitBreakerProbeSlotGuard,
 };
-use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase};
+use crate::middleware::MiddlewareContext;
 use crate::middleware::{
     SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx,
     SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, CircuitBreakerRejectionReason, MiddlewareLifecycle, ObservabilityPayload,
-};
-use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::event::payloads::observability_payload::CircuitBreakerRejectionReason;
 use obzenflow_runtime::control_plane::CircuitBreakerStateView;
 use obzenflow_runtime::stages::source::strategies::{
     CompletionContext, CompletionDecision, CompletionGate,
@@ -99,7 +96,7 @@ pub(super) struct CircuitBreakerSourcePolicy {
 #[async_trait::async_trait]
 impl SourcePolicy for CircuitBreakerSourcePolicy {
     fn label(&self) -> &'static str {
-        Middleware::label(self.breaker.as_ref())
+        "circuit_breaker"
     }
 
     async fn admit(&self, ctx: &mut SourcePolicyCtx) -> SourceAdmission {
@@ -192,7 +189,7 @@ pub(super) struct CircuitBreakerSinkPolicy {
 #[async_trait::async_trait]
 impl SinkPolicy for CircuitBreakerSinkPolicy {
     fn label(&self) -> &'static str {
-        Middleware::label(self.breaker.as_ref())
+        "circuit_breaker"
     }
 
     async fn admit(&self, ctx: &mut SinkPolicyCtx) -> SinkAdmission {
@@ -226,176 +223,6 @@ impl SinkPolicy for CircuitBreakerSinkPolicy {
         }
         self.breaker
             .maybe_emit_summary(ctx.middleware_context_mut());
-    }
-}
-
-impl Middleware for CircuitBreakerMiddleware {
-    fn label(&self) -> &'static str {
-        "circuit_breaker"
-    }
-
-    fn kind(&self) -> crate::middleware::MiddlewareKind {
-        crate::middleware::MiddlewareKind::Policy
-    }
-
-    // FLOWIP-115b Phase 6: placement is carrier-driven (the breaker materializes
-    // onto the SourcePoll/Effect/SinkDelivery surfaces), so it no longer claims
-    // a special source-ordering phase. `source_phase` is a required trait
-    // method, so it returns the neutral `Ordinary`. Effect breakers materialize
-    // only through the privileged `EffectResilience` aggregate.
-    fn source_phase(&self) -> SourceMiddlewarePhase {
-        SourceMiddlewarePhase::Ordinary
-    }
-
-    fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
-        // FLOWIP-120a: during deterministic replay the stage is reconstructed
-        // from recorded events. The guarded effect is suppressed (its recorded
-        // outcome is returned before the effect boundary is consulted), so this
-        // handler-level breaker must not reject, reserve a probe slot, transition
-        // state, or emit. The live run already recorded the breaker's decisions.
-        // Live effect execution runs through the effect boundary under
-        // `LiveEffectBoundary`, which is not deterministic replay, so this never
-        // disables protection of a live effect.
-        if ctx.execution_scope().is_deterministic_replay() {
-            return MiddlewareAction::Continue;
-        }
-
-        match self.current_state() {
-            CircuitState::Closed => {
-                // Linearise generic Closed admission with transitions into
-                // Open. Effect recovery uses its stronger explicit epoch
-                // fence below instead of mutable middleware context.
-                if self.effect_closed_admission_is_current() {
-                    MiddlewareAction::Continue
-                } else {
-                    self.pre_handle(_event, ctx)
-                }
-            }
-
-            CircuitState::Open => {
-                // Check if we should transition to half-open
-                if self.should_attempt_reset() {
-                    {
-                        let _probe_gate = self
-                            .probe_gate
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        let transitioned = self.transition_to(CircuitState::HalfOpen, ctx);
-                        if transitioned {
-                            // Start a new half-open epoch. Do not reset
-                            // probe_in_flight here: probes from the previous
-                            // epoch may still be running and must release
-                            // their own slots instead of racing with a bulk
-                            // counter reset.
-                            self.probe_generation.fetch_add(1, Ordering::SeqCst);
-                            self.success_count.store(0, Ordering::Relaxed);
-                        }
-                    }
-                    // Continue to half-open handling (or whatever state
-                    // we're now in if another thread won the transition).
-                    self.pre_handle(_event, ctx)
-                } else {
-                    // Reject the request and emit event
-                    let cooldown_remaining = if let Ok(opened_at_guard) = self.opened_at.lock() {
-                        if let Some(opened_at) = *opened_at_guard {
-                            self.cooldown.saturating_sub(opened_at.elapsed())
-                        } else {
-                            self.cooldown
-                        }
-                    } else {
-                        self.cooldown
-                    };
-
-                    ctx.emit_ephemeral_event(ChainEventFactory::observability_event(
-                        self.writer_id,
-                        ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                            CircuitBreakerEvent::Rejected {
-                                reason: CircuitBreakerRejectionReason::CircuitOpen,
-                                cooldown_remaining_ms: Some(cooldown_remaining.as_millis() as u64),
-                                circuit_open_duration_ms: None,
-                            },
-                        )),
-                    ));
-
-                    self.handle_open_like(ctx, CircuitBreakerRejectionReason::CircuitOpen)
-                }
-            }
-
-            CircuitState::HalfOpen => {
-                // Allow up to `permitted_probes` concurrent probe requests.
-                #[cfg(test)]
-                if let Some(hook) = &self.half_open_race_test_hook {
-                    hook.waiter_observed_half_open.wait();
-                }
-                let _probe_gate = self
-                    .probe_gate
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                // The state read that selected this branch can become stale
-                // while waiting for a settling probe. Never reserve from that
-                // stale observation: release the gate and re-enter the current
-                // state path instead.
-                if !matches!(self.current_state(), CircuitState::HalfOpen) {
-                    drop(_probe_gate);
-                    return self.pre_handle(_event, ctx);
-                }
-                let probe_generation = self.probe_generation.load(Ordering::SeqCst);
-                let permitted = self.half_open_policy.permitted_probes.get();
-                let mut current = self.probe_in_flight.load(Ordering::SeqCst);
-
-                loop {
-                    if current >= permitted {
-                        // All probe slots are in use; treat this call
-                        // according to the HalfOpen on_rejected policy.
-                        ctx.emit_ephemeral_event(ChainEventFactory::observability_event(
-                            self.writer_id,
-                            ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                                CircuitBreakerEvent::Rejected {
-                                    reason: CircuitBreakerRejectionReason::ProbeInProgress,
-                                    cooldown_remaining_ms: None,
-                                    circuit_open_duration_ms: None,
-                                },
-                            )),
-                        ));
-                        return self
-                            .handle_open_like(ctx, CircuitBreakerRejectionReason::ProbeInProgress);
-                    }
-
-                    match self.probe_in_flight.compare_exchange(
-                        current,
-                        current + 1,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
-                        Ok(_) => {
-                            // This call successfully reserved a probe slot.
-                            ctx.insert::<CircuitBreakerIsProbe>(true);
-                            ctx.insert::<CircuitBreakerProbeGeneration>(probe_generation);
-                            ctx.insert::<CircuitBreakerProbeSlot>(
-                                CircuitBreakerProbeSlotGuard::new(self.probe_in_flight.clone()),
-                            );
-                            return MiddlewareAction::Continue;
-                        }
-                        Err(actual) => {
-                            current = actual;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn post_handle(&self, event: &ChainEvent, outputs: &[ChainEvent], ctx: &mut MiddlewareContext) {
-        // FLOWIP-120a: replay reconstruction observes recorded outputs, not a live
-        // call, so the breaker must not classify the outcome, count successes or
-        // failures, push to the rate window, transition state, run retry logic, or
-        // emit lifecycle/summary records. All of that was recorded by the live run.
-        if ctx.execution_scope().is_deterministic_replay() {
-            return;
-        }
-
-        let (classification, _error_kind, _error_message) = self.classify_call(event, outputs, ctx);
-        self.settle_classified_call(&classification, ctx);
     }
 }
 
@@ -577,27 +404,9 @@ impl CircuitBreakerMiddleware {
         &self,
         ctx: &mut MiddlewareContext,
         reason: CircuitBreakerRejectionReason,
-        cooldown_remaining: Option<Duration>,
+        _cooldown_remaining: Option<Duration>,
     ) -> Box<crate::middleware::MiddlewareAbortCause> {
-        ctx.emit_ephemeral_event(ChainEventFactory::observability_event(
-            self.writer_id,
-            ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                CircuitBreakerEvent::Rejected {
-                    reason,
-                    cooldown_remaining_ms: cooldown_remaining
-                        .map(|duration| duration.as_millis() as u64),
-                    circuit_open_duration_ms: None,
-                },
-            )),
-        ));
-        match self.handle_open_like(ctx, reason) {
-            MiddlewareAction::Abort { cause } | MiddlewareAction::Skip { cause, .. } => {
-                Box::new(cause.unwrap_or_else(|| self.rejection_abort_cause(reason)))
-            }
-            MiddlewareAction::Continue => {
-                unreachable!("circuit breaker rejection must abort or skip")
-            }
-        }
+        Box::new(self.record_rejection(ctx, reason))
     }
 
     /// Settle breaker health from an already final classification. Recovery
@@ -645,11 +454,6 @@ impl CircuitBreakerMiddleware {
                 .probe_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            #[cfg(test)]
-            if let Some(hook) = &self.half_open_race_test_hook {
-                hook.settlement_holds_probe_gate.wait();
-                hook.release_settlement.wait();
-            }
             drop(ctx.remove::<CircuitBreakerProbeSlot>());
 
             if contributes_health

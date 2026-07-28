@@ -384,7 +384,6 @@ impl ChainEvent {
                     MiddlewareLifecycle::RateLimiter(_) => {
                         "lifecycle.middleware.rate_limiter".into()
                     }
-                    MiddlewareLifecycle::Retry(_) => "lifecycle.middleware.retry".into(),
                     MiddlewareLifecycle::Indicator(_) => "lifecycle.middleware.indicator".into(),
                     MiddlewareLifecycle::User(_) => "lifecycle.middleware.user".into(),
                 },
