@@ -40,6 +40,7 @@ impl Effect for FirstEffect {
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
     type Outcome = First;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "first"

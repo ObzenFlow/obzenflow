@@ -70,6 +70,7 @@ impl Effect for ValueEffect {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
     type Outcome = ContainmentEffectValue;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "containment_value"
@@ -363,6 +364,7 @@ impl Effect for CollidingEffect {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
     type Outcome = CollidingOutcome;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "colliding"

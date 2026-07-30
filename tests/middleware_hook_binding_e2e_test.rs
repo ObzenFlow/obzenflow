@@ -383,6 +383,7 @@ impl RuntimeEffect for HookEffect {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
     type Outcome = HookEffectValue;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "hook_effect"

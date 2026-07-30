@@ -84,7 +84,8 @@ impl<E, Output, Proof> EffectOutcomeFitsOutput<Output, Proof> for E
 where
     E: Effect,
     Output: StageFactSet,
-    <<E as Effect>::Outcome as StageFactSet>::Members: SubsetOf<Output::Members, Proof>,
+    <<E::OutcomeSemantics as super::EffectOutcomeSemantics<E::Outcome>>::PublicFacts as StageFactSet>::Members:
+        SubsetOf<Output::Members, Proof>,
 {
 }
 

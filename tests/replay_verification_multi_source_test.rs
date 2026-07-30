@@ -102,6 +102,7 @@ impl Effect for ChargeEffect {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
     type Outcome = Charged;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "charge"

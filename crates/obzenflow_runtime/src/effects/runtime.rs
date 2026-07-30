@@ -8,12 +8,35 @@ use super::*;
 
 /// Slot a guarded execution future fills with the real typed outcome, so
 /// `perform` records from its own state rather than boundary-returned events.
-type ExecutedOutcomeSlot<O> = Arc<Mutex<Option<(O, Vec<TypedFact>)>>>;
+type ExecutedOutcomeSlot<O> = Arc<Mutex<Option<(O, PreparedEffectSuccess)>>>;
 
 /// Slot the guarded transactional future fills for settlement: the port's
 /// result and the outcome committed through the handle, if any.
 type TransactionalSettleSlot<O> =
     Arc<Mutex<Option<(Result<(), EffectError>, Option<PreparedEffectOutcome<O>>)>>>;
+
+fn success_observation_events(
+    success: &PreparedEffectSuccess,
+    writer_id: WriterId,
+    parent: &ChainEvent,
+    lineage: obzenflow_core::config::LineagePolicy,
+) -> Vec<ChainEvent> {
+    match success {
+        PreparedEffectSuccess::DomainFacts(facts) => facts
+            .iter()
+            .map(|fact| {
+                ChainEventFactory::derived_data_event(
+                    writer_id,
+                    parent,
+                    fact.event_type.as_str(),
+                    fact.payload.clone(),
+                    lineage,
+                )
+            })
+            .collect(),
+        PreparedEffectSuccess::RecordedReply(_) => Vec::new(),
+    }
+}
 
 struct RecoveryAbandonment {
     cursor: EffectCursor,
@@ -478,7 +501,7 @@ impl EffectsCore {
                     }
                 }
                 let record_refs = records.iter().collect::<Vec<_>>();
-                let output_result = self.replay_records_output::<E::Outcome>(
+                let output_result = self.replay_records_output::<E>(
                     &record_refs,
                     cursor.clone(),
                     descriptor_hash.clone(),
@@ -655,13 +678,13 @@ impl EffectsCore {
         let Some(boundary) = self.ctx.effect_boundary.clone() else {
             // Unguarded path: execute directly and record the outcome.
             let mut effect_ctx = self.live_effect_context();
-            return match Self::execute_into_facts(effect, &mut effect_ctx).await {
-                Ok((output, facts)) => {
-                    self.append_success_facts(
+            return match Self::execute_into_success(effect, &mut effect_ctx).await {
+                Ok((output, success)) => {
+                    self.append_success(
                         cursor,
                         descriptor_hash,
                         descriptor,
-                        facts,
+                        success,
                         Some(EffectFactOrigin::Effect),
                     )
                     .await?;
@@ -715,26 +738,11 @@ impl EffectsCore {
                             return Err(err);
                         }
                     };
-                    let facts = output.clone().into_facts().map_err(effect_fact_set_error)?;
-                    if facts.is_empty() {
-                        return Err(EffectError::Execution(
-                            "effect success output must author at least one fact".to_string(),
-                        ));
-                    }
-                    let observation = facts
-                        .iter()
-                        .map(|fact| {
-                            ChainEventFactory::derived_data_event(
-                                writer_id,
-                                &parent_event,
-                                fact.event_type.as_str(),
-                                fact.payload.clone(),
-                                lineage,
-                            )
-                        })
-                        .collect();
+                    let success = E::OutcomeSemantics::prepare_success(&output)?;
+                    let observation =
+                        success_observation_events(&success, writer_id, &parent_event, lineage);
                     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                        Some((output, facts));
+                        Some((output, success));
                     Ok(observation)
                 }
             })
@@ -747,7 +755,7 @@ impl EffectsCore {
 
         match report.outcome {
             EffectBoundaryOutcome::Executed(Ok(_observation)) => {
-                let (output, facts) = outcome_slot
+                let (output, success) = outcome_slot
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .take()
@@ -757,11 +765,11 @@ impl EffectsCore {
                                 .to_string(),
                         )
                     })?;
-                self.append_success_facts_with_control_events(
+                self.append_success_with_control_events(
                     cursor,
                     descriptor_hash,
                     descriptor,
-                    facts,
+                    success,
                     Some(EffectFactOrigin::Effect),
                     control_events,
                 )
@@ -815,26 +823,21 @@ impl EffectsCore {
         }
     }
 
-    /// Execute an effect and decompose its outcome into authored facts.
+    /// Execute an effect and prepare its mode-specific durable success.
     ///
     /// Both the empty-outcome and decomposition failures depend on the live
     /// external result, so callers record them under the effect cursor like
     /// any other execution failure and strict replay reproduces them.
-    async fn execute_into_facts<E>(
+    async fn execute_into_success<E>(
         effect: E,
         effect_ctx: &mut EffectContext,
-    ) -> Result<(E::Outcome, Vec<TypedFact>), EffectError>
+    ) -> Result<(E::Outcome, PreparedEffectSuccess), EffectError>
     where
         E: Effect,
     {
         let output = effect.execute(effect_ctx).await?;
-        let facts = output.clone().into_facts().map_err(effect_fact_set_error)?;
-        if facts.is_empty() {
-            return Err(EffectError::Execution(
-                "effect success output must author at least one fact".to_string(),
-            ));
-        }
-        Ok((output, facts))
+        let success = E::OutcomeSemantics::prepare_success(&output)?;
+        Ok((output, success))
     }
 
     async fn perform_affine<E>(
@@ -932,26 +935,11 @@ impl EffectsCore {
                             return Err(error);
                         }
                     };
-                    let facts = output.clone().into_facts().map_err(effect_fact_set_error)?;
-                    if facts.is_empty() {
-                        return Err(EffectError::Execution(
-                            "effect success output must author at least one fact".to_string(),
-                        ));
-                    }
-                    let observation = facts
-                        .iter()
-                        .map(|fact| {
-                            ChainEventFactory::derived_data_event(
-                                writer_id,
-                                &parent_event,
-                                fact.event_type.as_str(),
-                                fact.payload.clone(),
-                                lineage,
-                            )
-                        })
-                        .collect();
+                    let success = E::OutcomeSemantics::prepare_success(&output)?;
+                    let observation =
+                        success_observation_events(&success, writer_id, &parent_event, lineage);
                     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                        Some((output, facts));
+                        Some((output, success));
                     Ok(observation)
                 },
             )
@@ -991,7 +979,7 @@ impl EffectsCore {
 
                 match result {
                     Ok(_) => {
-                        let (output, facts) = outcome_slot
+                        let (output, success) = outcome_slot
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .take()
@@ -1001,11 +989,11 @@ impl EffectsCore {
                                         .to_string(),
                                 )
                             })?;
-                        self.append_affine_success_facts(
+                        self.append_affine_success(
                             cursor,
                             descriptor_hash,
                             descriptor,
-                            facts,
+                            success,
                             attempt,
                             control_events,
                         )
@@ -1105,15 +1093,53 @@ impl EffectsCore {
         Ok(())
     }
 
-    async fn append_affine_success_facts(
+    async fn append_affine_success(
         &mut self,
         cursor: EffectCursor,
         descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
-        facts: Vec<TypedFact>,
+        success: PreparedEffectSuccess,
         attempt: EffectAttemptOrdinal,
         control_events: Vec<ChainEvent>,
     ) -> Result<(), EffectError> {
+        let facts = match success {
+            PreparedEffectSuccess::DomainFacts(facts) => facts,
+            PreparedEffectSuccess::RecordedReply(output) => {
+                let record = EffectRecord {
+                    cursor: cursor.clone(),
+                    descriptor_hash,
+                    descriptor,
+                    outcome: EffectOutcomePayload::Succeeded { output },
+                    origin: None,
+                };
+                let mut event = build_effect_record_event(
+                    self.ctx.writer_id,
+                    &self.ctx.parent,
+                    record,
+                    self.ctx.lineage,
+                )?;
+                event
+                    .effect_provenance
+                    .as_mut()
+                    .ok_or_else(|| {
+                        EffectError::EffectProvenanceMismatch(
+                            "affine recorded reply is missing effect provenance".to_string(),
+                        )
+                    })?
+                    .attempt = Some(attempt);
+                return self
+                    .commit_terminal_group(
+                        &cursor,
+                        vec![AtomicCommitEntry {
+                            event,
+                            options: CommitOptions::default(),
+                            intent: StageAppendIntent::NonDataStageFact,
+                        }],
+                        control_events,
+                    )
+                    .await;
+            }
+        };
         let routed_fact_count = self.count_routed_facts(&facts);
         self.ensure_routed_fanout_capacity(routed_fact_count)?;
         let output_ordinal = self.reserve_output_ordinals(facts.len())?;
@@ -1533,24 +1559,28 @@ impl EffectsCore {
             })?;
 
         let mut effect_ctx = self.live_effect_context();
-        let output_ordinal = self.reserve_output_ordinal()?;
-        let commit = EffectCommitHandle::new(EffectCommitHandleParams {
-            writer_id: self.ctx.writer_id,
-            data_journal: self.ctx.data_journal.clone(),
-            flow_context: self.ctx.flow_context.clone(),
-            system_journal: self.ctx.system_journal.clone(),
-            instrumentation: self.ctx.instrumentation.clone(),
-            heartbeat_state: self.ctx.heartbeat_state.clone(),
-            output_contract: self.ctx.output_contract.clone(),
-            backpressure_writer: self.ctx.backpressure_writer.clone(),
-            parent: self.ctx.parent.clone(),
-            cursor: cursor.clone(),
-            descriptor_hash: descriptor_hash.clone(),
-            descriptor: descriptor.clone(),
-            output_ordinal,
-            lineage: self.ctx.lineage,
-            defer_persistence: self.ctx.effect_boundary.is_some(),
-        });
+        let output_ordinal = match E::OutcomeSemantics::KIND {
+            EffectOutcomeKind::DomainFacts => Some(self.reserve_output_ordinal()?),
+            EffectOutcomeKind::RecordedReply => None,
+        };
+        let commit: EffectCommitHandle<E::Outcome, E::OutcomeSemantics> =
+            EffectCommitHandle::new(EffectCommitHandleParams {
+                writer_id: self.ctx.writer_id,
+                data_journal: self.ctx.data_journal.clone(),
+                flow_context: self.ctx.flow_context.clone(),
+                system_journal: self.ctx.system_journal.clone(),
+                instrumentation: self.ctx.instrumentation.clone(),
+                heartbeat_state: self.ctx.heartbeat_state.clone(),
+                output_contract: self.ctx.output_contract.clone(),
+                backpressure_writer: self.ctx.backpressure_writer.clone(),
+                parent: self.ctx.parent.clone(),
+                cursor: cursor.clone(),
+                descriptor_hash: descriptor_hash.clone(),
+                descriptor: descriptor.clone(),
+                output_ordinal,
+                lineage: self.ctx.lineage,
+                defer_persistence: self.ctx.effect_boundary.is_some(),
+            });
         let commit_observer = commit.clone();
 
         let Some(boundary) = self.ctx.effect_boundary.clone() else {
@@ -1603,9 +1633,12 @@ impl EffectsCore {
                     // operation ended; the precise error the caller sees is settled
                     // from the slot, never from this observation result.
                     let observation = match (&port_result, &outcome) {
-                        (_, Some(PreparedEffectOutcome::Success { events, .. })) => {
-                            Ok(events.clone())
-                        }
+                        (
+                            _,
+                            Some(PreparedEffectOutcome::Success {
+                                observation_events, ..
+                            }),
+                        ) => Ok(observation_events.clone()),
                         (_, Some(PreparedEffectOutcome::Failure { outcome, .. })) => {
                             Err(match recorded_failure_from_outcome::<E::Outcome>(outcome) {
                                 Err(err) => err,
@@ -1661,7 +1694,9 @@ impl EffectsCore {
 
                 // No transaction ran. Record the fail-closed provenance error
                 // under this cursor so strict replay reproduces the rejection.
-                self.restore_output_ordinal(output_ordinal);
+                if let Some(output_ordinal) = output_ordinal {
+                    self.restore_output_ordinal(output_ordinal);
+                }
                 self.append_failed_record(cursor, descriptor_hash, descriptor, &err)
                     .await?;
                 let result: Result<E::Outcome, EffectError> = Err(err);
@@ -1682,7 +1717,9 @@ impl EffectsCore {
                         )
                     })?;
                 let Some(prepared) = outcome.as_ref() else {
-                    self.restore_output_ordinal(output_ordinal);
+                    if let Some(output_ordinal) = output_ordinal {
+                        self.restore_output_ordinal(output_ordinal);
+                    }
                     let err = match port_result {
                         Err(err) => err,
                         Ok(()) => EffectError::TransactionalCommitMissing {
@@ -1710,7 +1747,9 @@ impl EffectsCore {
                 result
             }
             SingleUseEffectBoundaryOutcome::Aborted(reason) => {
-                self.restore_output_ordinal(output_ordinal);
+                if let Some(output_ordinal) = output_ordinal {
+                    self.restore_output_ordinal(output_ordinal);
+                }
                 let result = self
                     .record_boundary_abort_with_control_events(
                         cursor,
@@ -1733,11 +1772,14 @@ impl EffectsCore {
         control_events: Vec<ChainEvent>,
     ) -> Result<(), EffectError>
     where
-        T: TypedFactSet + Clone + Send + Sync + 'static,
+        T: Clone + Send + Sync + 'static,
     {
         let entries = match outcome {
             PreparedEffectOutcome::Success {
-                events, persisted, ..
+                kind,
+                events,
+                persisted,
+                ..
             } => {
                 if *persisted {
                     if control_events.is_empty() {
@@ -1753,11 +1795,17 @@ impl EffectsCore {
                     .cloned()
                     .map(|event| AtomicCommitEntry {
                         event,
-                        options: CommitOptions {
-                            count_output: true,
-                            validate_output_contract: true,
+                        options: match kind {
+                            EffectOutcomeKind::DomainFacts => CommitOptions {
+                                count_output: true,
+                                validate_output_contract: true,
+                            },
+                            EffectOutcomeKind::RecordedReply => CommitOptions::default(),
                         },
-                        intent: StageAppendIntent::NormalStageData,
+                        intent: match kind {
+                            EffectOutcomeKind::DomainFacts => StageAppendIntent::NormalStageData,
+                            EffectOutcomeKind::RecordedReply => StageAppendIntent::NonDataStageFact,
+                        },
                     })
                     .collect()
             }
@@ -1789,7 +1837,7 @@ impl EffectsCore {
     fn settle_transactional<E>(
         &mut self,
         executor: &'static str,
-        output_ordinal: EffectOutputOrdinal,
+        output_ordinal: Option<EffectOutputOrdinal>,
         port_result: Result<(), EffectError>,
         outcome: Option<PreparedEffectOutcome<E::Outcome>>,
     ) -> Result<E::Outcome, EffectError>
@@ -1799,7 +1847,9 @@ impl EffectsCore {
         let Some(outcome) = outcome else {
             // No commit through the handle. Surface the port's own error if it produced
             // one, otherwise the contract-violation error.
-            self.restore_output_ordinal(output_ordinal);
+            if let Some(output_ordinal) = output_ordinal {
+                self.restore_output_ordinal(output_ordinal);
+            }
             return Err(match port_result {
                 Err(err) => err,
                 Ok(()) => EffectError::TransactionalCommitMissing {
@@ -1812,16 +1862,38 @@ impl EffectsCore {
         match outcome {
             PreparedEffectOutcome::Success {
                 output,
-                fact_count,
+                kind,
+                public_fact_count,
                 events,
                 ..
             } => {
-                self.advance_output_ordinals_after_reserved_base(output_ordinal, fact_count)?;
-                self.committed_facts.extend(events);
+                match (kind, output_ordinal) {
+                    (EffectOutcomeKind::DomainFacts, Some(output_ordinal)) => {
+                        self.advance_output_ordinals_after_reserved_base(
+                            output_ordinal,
+                            public_fact_count,
+                        )?;
+                        self.committed_facts.extend(events);
+                    }
+                    (EffectOutcomeKind::RecordedReply, None) => {}
+                    (EffectOutcomeKind::DomainFacts, None) => {
+                        return Err(EffectError::Execution(
+                            "domain-fact transactional success has no output ordinal".to_string(),
+                        ));
+                    }
+                    (EffectOutcomeKind::RecordedReply, Some(_)) => {
+                        return Err(EffectError::Execution(
+                            "recorded-reply transactional success reserved an output ordinal"
+                                .to_string(),
+                        ));
+                    }
+                }
                 Ok(output)
             }
             PreparedEffectOutcome::Failure { outcome, .. } => {
-                self.restore_output_ordinal(output_ordinal);
+                if let Some(output_ordinal) = output_ordinal {
+                    self.restore_output_ordinal(output_ordinal);
+                }
                 recorded_failure_from_outcome(&outcome)
             }
         }
@@ -1842,14 +1914,14 @@ impl EffectsCore {
         }
     }
 
-    fn replay_records_output<T>(
+    fn replay_records_output<E>(
         &self,
         records: &[&EffectRecord],
         cursor: EffectCursor,
         descriptor_hash: EffectDescriptorHash,
-    ) -> Result<T, EffectError>
+    ) -> Result<E::Outcome, EffectError>
     where
-        T: TypedFactSet,
+        E: Effect,
     {
         for record in records {
             if record.descriptor_hash != descriptor_hash {
@@ -1861,7 +1933,7 @@ impl EffectsCore {
             }
         }
 
-        decode_effect_outcome_group::<T>(records)
+        E::OutcomeSemantics::decode_success(records)
     }
 
     fn replay_capture_output<T>(
@@ -1910,6 +1982,81 @@ impl EffectsCore {
             &self.ctx.backpressure_writer,
         )
         .await
+    }
+
+    async fn append_success(
+        &mut self,
+        cursor: EffectCursor,
+        descriptor_hash: EffectDescriptorHash,
+        descriptor: EffectDescriptor,
+        success: PreparedEffectSuccess,
+        origin: Option<EffectFactOrigin>,
+    ) -> Result<(), EffectError> {
+        match success {
+            PreparedEffectSuccess::DomainFacts(facts) => {
+                self.append_success_facts(cursor, descriptor_hash, descriptor, facts, origin)
+                    .await
+            }
+            PreparedEffectSuccess::RecordedReply(output) => {
+                self.append_record(EffectRecord {
+                    cursor,
+                    descriptor_hash,
+                    descriptor,
+                    outcome: EffectOutcomePayload::Succeeded { output },
+                    origin: None,
+                })
+                .await
+            }
+        }
+    }
+
+    async fn append_success_with_control_events(
+        &mut self,
+        cursor: EffectCursor,
+        descriptor_hash: EffectDescriptorHash,
+        descriptor: EffectDescriptor,
+        success: PreparedEffectSuccess,
+        origin: Option<EffectFactOrigin>,
+        control_events: Vec<ChainEvent>,
+    ) -> Result<(), EffectError> {
+        match success {
+            PreparedEffectSuccess::DomainFacts(facts) => {
+                self.append_success_facts_with_control_events(
+                    cursor,
+                    descriptor_hash,
+                    descriptor,
+                    facts,
+                    origin,
+                    control_events,
+                )
+                .await
+            }
+            PreparedEffectSuccess::RecordedReply(output) => {
+                let record = EffectRecord {
+                    cursor: cursor.clone(),
+                    descriptor_hash,
+                    descriptor,
+                    outcome: EffectOutcomePayload::Succeeded { output },
+                    origin: None,
+                };
+                let event = build_effect_record_event(
+                    self.ctx.writer_id,
+                    &self.ctx.parent,
+                    record,
+                    self.ctx.lineage,
+                )?;
+                self.commit_terminal_group(
+                    &cursor,
+                    vec![AtomicCommitEntry {
+                        event,
+                        options: CommitOptions::default(),
+                        intent: StageAppendIntent::NonDataStageFact,
+                    }],
+                    control_events,
+                )
+                .await
+            }
+        }
     }
 
     async fn append_success_facts(

@@ -89,6 +89,7 @@ impl Effect for ChatCompletion {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
 
     type Outcome = ChatCompletionCompleted;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         &self.label

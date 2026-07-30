@@ -109,9 +109,9 @@ pub mod prelude {
 
     // Event flow
     pub use crate::effects::{
-        Effect, EffectCommitHandle, EffectContext, EffectDeclaration, EffectError,
-        EffectOutcomePayload, EffectSafety, Effects, IdempotencyKey, SinkDeliverySafety,
-        TransactionalEffectPort,
+        DomainFacts, Effect, EffectCommitHandle, EffectContext, EffectDeclaration, EffectError,
+        EffectOutcomeKind, EffectOutcomePayload, EffectSafety, Effects, IdempotencyKey,
+        RecordedReply, SinkDeliverySafety, TransactionalEffectPort,
     };
     pub use crate::messaging::UpstreamSubscription;
 

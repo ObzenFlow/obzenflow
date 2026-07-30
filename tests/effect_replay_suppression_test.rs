@@ -200,6 +200,7 @@ impl Effect for CountingEffect {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
     type Outcome = ReplayEffectValue;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "counting"
@@ -258,6 +259,7 @@ impl Effect for BlockingEffect {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
     type Outcome = ReplayEffectValue;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "blocking"
@@ -443,6 +445,7 @@ impl Effect for AlwaysFailingEffect {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
     type Outcome = ReplayEffectValue;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "always_failing"
@@ -793,6 +796,7 @@ impl Effect for ProductEffect {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
     type Outcome = ProductOutcome;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "product"
@@ -3361,6 +3365,7 @@ impl Effect for PortedEffect {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
     type Outcome = ReplayEffectValue;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "ported"
@@ -3547,6 +3552,7 @@ impl Effect for LedgerEffect {
     const SAFETY: EffectSafety = EffectSafety::Transactional;
 
     type Outcome = ReplayEffectValue;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "ledger"

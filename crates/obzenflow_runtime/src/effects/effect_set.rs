@@ -178,6 +178,7 @@ mod tests {
         const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
         type Outcome = PingValue;
+        type OutcomeSemantics = crate::effects::DomainFacts;
 
         fn label(&self) -> &str {
             "ping"
@@ -202,6 +203,7 @@ mod tests {
         const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
         type Outcome = PingValue;
+        type OutcomeSemantics = crate::effects::DomainFacts;
 
         fn label(&self) -> &str {
             "pong"

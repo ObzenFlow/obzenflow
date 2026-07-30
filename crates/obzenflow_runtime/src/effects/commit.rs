@@ -14,11 +14,11 @@ fn composite_monotonic_event_time(parent: &ChainEvent, deterministic: u64) -> u6
     )
 }
 
-pub struct EffectCommitHandle<T> {
-    inner: Arc<EffectCommitHandleInner<T>>,
+pub struct EffectCommitHandle<T, S = DomainFacts> {
+    inner: Arc<EffectCommitHandleInner<T, S>>,
 }
 
-impl<T> Clone for EffectCommitHandle<T> {
+impl<T, S> Clone for EffectCommitHandle<T, S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -26,7 +26,7 @@ impl<T> Clone for EffectCommitHandle<T> {
     }
 }
 
-struct EffectCommitHandleInner<T> {
+struct EffectCommitHandleInner<T, S> {
     writer_id: WriterId,
     data_journal: Arc<dyn Journal<ChainEvent>>,
     flow_context: Option<FlowContext>,
@@ -39,11 +39,11 @@ struct EffectCommitHandleInner<T> {
     cursor: EffectCursor,
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
-    output_ordinal: EffectOutputOrdinal,
+    output_ordinal: Option<EffectOutputOrdinal>,
     lineage: obzenflow_core::config::LineagePolicy,
     defer_persistence: bool,
     state: Mutex<EffectCommitState<T>>,
-    _marker: PhantomData<T>,
+    _marker: PhantomData<fn() -> (T, S)>,
 }
 
 pub(super) struct EffectCommitHandleParams {
@@ -59,7 +59,7 @@ pub(super) struct EffectCommitHandleParams {
     pub(super) cursor: EffectCursor,
     pub(super) descriptor_hash: EffectDescriptorHash,
     pub(super) descriptor: EffectDescriptor,
-    pub(super) output_ordinal: EffectOutputOrdinal,
+    pub(super) output_ordinal: Option<EffectOutputOrdinal>,
     pub(super) lineage: obzenflow_core::config::LineagePolicy,
     pub(super) defer_persistence: bool,
 }
@@ -68,8 +68,10 @@ pub(super) struct EffectCommitHandleParams {
 pub(super) enum PreparedEffectOutcome<T> {
     Success {
         output: T,
-        fact_count: usize,
+        kind: EffectOutcomeKind,
+        public_fact_count: usize,
         events: Vec<ChainEvent>,
+        observation_events: Vec<ChainEvent>,
         persisted: bool,
     },
     Failure {
@@ -85,9 +87,10 @@ enum EffectCommitState<T> {
     Settled(Box<PreparedEffectOutcome<T>>),
 }
 
-impl<T> EffectCommitHandle<T>
+impl<T, S> EffectCommitHandle<T, S>
 where
-    T: TypedFactSet + Clone + Send + Sync + 'static,
+    T: Clone + Send + Sync + 'static,
+    S: EffectOutcomeSemantics<T>,
 {
     pub(super) fn new(params: EffectCommitHandleParams) -> Self {
         Self {
@@ -116,24 +119,57 @@ where
     pub async fn commit_success(&self, output: &T) -> Result<(), EffectError> {
         self.ensure_available()?;
 
-        let facts = output.clone().into_facts().map_err(effect_fact_set_error)?;
-        if facts.is_empty() {
-            return Err(EffectError::Execution(
-                "effect success output must author at least one fact".to_string(),
-            ));
-        }
-        let fact_count = facts.len();
-        let events = build_domain_effect_success_facts(
-            self.inner.writer_id,
-            &self.inner.parent,
-            self.inner.cursor.clone(),
-            self.inner.descriptor_hash.clone(),
-            self.inner.descriptor.clone(),
-            facts,
-            self.inner.output_ordinal,
-            Some(EffectFactOrigin::Effect),
-            self.inner.lineage,
-        )?;
+        let (kind, public_fact_count, events, observation_events) =
+            match S::prepare_success(output)? {
+                PreparedEffectSuccess::DomainFacts(facts) => {
+                    let output_ordinal = self.inner.output_ordinal.ok_or_else(|| {
+                        EffectError::Execution(
+                            "domain-fact transactional effect has no reserved output ordinal"
+                                .to_string(),
+                        )
+                    })?;
+                    let public_fact_count = facts.len();
+                    let events = build_domain_effect_success_facts(
+                        self.inner.writer_id,
+                        &self.inner.parent,
+                        self.inner.cursor.clone(),
+                        self.inner.descriptor_hash.clone(),
+                        self.inner.descriptor.clone(),
+                        facts,
+                        output_ordinal,
+                        Some(EffectFactOrigin::Effect),
+                        self.inner.lineage,
+                    )?;
+                    (
+                        EffectOutcomeKind::DomainFacts,
+                        public_fact_count,
+                        events.clone(),
+                        events,
+                    )
+                }
+                PreparedEffectSuccess::RecordedReply(output) => {
+                    if self.inner.output_ordinal.is_some() {
+                        return Err(EffectError::Execution(
+                            "recorded-reply transactional effect reserved a user output ordinal"
+                                .to_string(),
+                        ));
+                    }
+                    let record = EffectRecord {
+                        cursor: self.inner.cursor.clone(),
+                        descriptor_hash: self.inner.descriptor_hash.clone(),
+                        descriptor: self.inner.descriptor.clone(),
+                        outcome: EffectOutcomePayload::Succeeded { output },
+                        origin: None,
+                    };
+                    let event = build_effect_record_event(
+                        self.inner.writer_id,
+                        &self.inner.parent,
+                        record,
+                        self.inner.lineage,
+                    )?;
+                    (EffectOutcomeKind::RecordedReply, 0, vec![event], Vec::new())
+                }
+            };
         self.begin_commit()?;
         let persisted = !self.inner.defer_persistence;
         if persisted {
@@ -153,11 +189,17 @@ where
                 .cloned()
                 .map(|event| AtomicCommitEntry {
                     event,
-                    options: CommitOptions {
-                        count_output: true,
-                        validate_output_contract: true,
+                    options: match kind {
+                        EffectOutcomeKind::DomainFacts => CommitOptions {
+                            count_output: true,
+                            validate_output_contract: true,
+                        },
+                        EffectOutcomeKind::RecordedReply => CommitOptions::default(),
                     },
-                    intent: StageAppendIntent::NormalStageData,
+                    intent: match kind {
+                        EffectOutcomeKind::DomainFacts => StageAppendIntent::NormalStageData,
+                        EffectOutcomeKind::RecordedReply => StageAppendIntent::NonDataStageFact,
+                    },
                 })
                 .collect();
             if let Err(error) = committer
@@ -175,8 +217,10 @@ where
 
         self.finish_commit(PreparedEffectOutcome::Success {
             output: output.clone(),
-            fact_count,
+            kind,
+            public_fact_count,
             events,
+            observation_events,
             persisted,
         })?;
         Ok(())
@@ -204,7 +248,7 @@ where
         self.ensure_available()?;
         if source_error.is_none() {
             return Err(EffectError::Execution(
-                "domain success outcomes must be committed through commit_success".to_string(),
+                "successful outcomes must be committed through commit_success".to_string(),
             ));
         }
         let record = EffectRecord {

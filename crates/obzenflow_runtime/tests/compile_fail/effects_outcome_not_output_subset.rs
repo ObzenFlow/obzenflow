@@ -28,6 +28,7 @@ impl Effect for AllowedEffect {
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
     type Outcome = EffectOutcome;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str { "allowed" }
     fn canonical_input(&self) -> serde_json::Value { serde_json::Value::Null }

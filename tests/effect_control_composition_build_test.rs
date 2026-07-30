@@ -51,6 +51,7 @@ impl Effect for EffectA {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
     type Outcome = CompositionFact;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "effect-a"
@@ -75,6 +76,7 @@ impl Effect for EffectB {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
     type Outcome = CompositionFact;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "effect-b"

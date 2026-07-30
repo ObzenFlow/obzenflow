@@ -98,6 +98,7 @@ impl Effect for AuthorizePayment {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
     type Outcome = PaymentEffectFact;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "authorize-payment"
@@ -124,6 +125,7 @@ impl Effect for RefundPayment {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
     type Outcome = PaymentEffectFact;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "refund-payment"

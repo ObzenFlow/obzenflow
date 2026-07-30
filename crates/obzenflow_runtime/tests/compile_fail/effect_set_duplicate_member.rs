@@ -32,6 +32,7 @@ impl Effect for PingEffect {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
     type Outcome = PingOutput;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "ping"

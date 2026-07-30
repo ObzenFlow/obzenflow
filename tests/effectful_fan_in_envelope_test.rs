@@ -121,6 +121,7 @@ impl Effect for CountingEffect {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
     type Outcome = EnvelopeEffectValue;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "counting"

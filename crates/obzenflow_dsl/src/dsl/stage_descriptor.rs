@@ -2853,6 +2853,7 @@ mod tests {
         const SAFETY: EffectSafety = EffectSafety::Transactional;
 
         type Outcome = DemoTransactionalOutput;
+        type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
         fn label(&self) -> &str {
             "declared"
@@ -2891,7 +2892,8 @@ mod tests {
             idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
             required_ports: Vec::new(),
             transactional_executor: None,
-            outcome_fact_types: Vec::new(),
+            outcome_kind: obzenflow_runtime::effects::EffectOutcomeKind::DomainFacts,
+            public_outcome_fact_types: Vec::new(),
         };
 
         let err = validate_effect_declarations(
@@ -2915,6 +2917,7 @@ mod tests {
         const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
         type Outcome = DemoTransactionalOutput;
+        type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
         fn label(&self) -> &str {
             "duplicate"
@@ -2939,6 +2942,7 @@ mod tests {
         const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
         type Outcome = DemoTransactionalOutput;
+        type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
         fn label(&self) -> &str {
             "ported"

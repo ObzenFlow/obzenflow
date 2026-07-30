@@ -223,6 +223,7 @@ mod tests {
         const SAFETY: EffectSafety = EffectSafety::Transactional;
 
         type Outcome = Out;
+        type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
         fn label(&self) -> &str {
             "tx_effect"
