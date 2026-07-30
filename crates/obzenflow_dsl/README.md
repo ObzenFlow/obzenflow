@@ -7,7 +7,7 @@ This crate is an internal implementation detail of the ObzenFlow project. Most u
 The composition root for flow construction. The `flow!` macro turns a declarative block into a runnable `FlowHandle` by coordinating topology validation, journal allocation, middleware resolution, and stage wiring.
 
 - `flow!` macro and topology parsing helpers
-- Stage descriptor macros (`source!`, `transform!`, `sink!`, `stateful!`, `join!`, `effectful_transform!`, `effectful_stateful!`, and async variants)
+- Stage descriptor macros (`source!`, `transform!`, `sink!`, `stateful!`, `join!`, `effectful_transform!`, `effectful_stateful!`, `inference!`, `ai_map_reduce!`, and async variants)
 - Middleware inheritance and override resolution with audit trail
 - `FlowDefinition` future wrapper (what `flow!` returns)
 - Structured build errors
@@ -42,6 +42,24 @@ FlowApplication::run(flow! {
 ```
 
 The DSL has five sections: `name` (flow identifier), `journals` (persistence backend), `middleware` (flow-level defaults), `stages` (let-bindings producing stage descriptors), and `topology` (edges connecting stages with `|>` and `<|` operators).
+
+## AI stage shapes
+
+Use `inference!` when each input is already bounded and needs exactly one model decision:
+
+```rust,ignore
+brief = inference!(
+    ReducedEvidence ->{
+        at_least_once(ChatCompletion)
+            via chat
+            with { ai_resilience() }
+    } DecisionBrief => brief_role
+);
+```
+
+Use `ai_map_reduce!` when the input must be token-budgeted, fanned out, collected, and finalised. Its map and reduce roles use the same effect row shown above. The lexical `via chat` operand is a `ChatBindingContract`, not a registry name; normal configuration creates the contract and its consuming live registration together with `ChatEffectBinding::from_config(...).into_parts()`.
+
+AI roles prepare a target-free `ChatRequestSpec`. The generated handler retains that exact value, binds the configured target only at the effect boundary, records `ChatCompletionReply` as framework replay evidence, and passes the retained spec plus reply to interpretation. The reply is not a selectable stage output.
 
 ## License
 

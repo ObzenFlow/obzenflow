@@ -1474,6 +1474,8 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     effect_policies: Vec<EffectPolicyAttachment>,
     direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan,
     pass_through_event_type: Option<obzenflow_core::EventType>,
+    generated_surface: Option<&'static str>,
+    generated_owner_kind: &'static str,
     backpressure: Option<BackpressureClause>,
 }
 
@@ -1497,6 +1499,8 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
             direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan::default(
             ),
             pass_through_event_type: None,
+            generated_surface: None,
+            generated_owner_kind: "role",
             backpressure,
         }
     }
@@ -1516,6 +1520,26 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
             obzenflow_runtime::stages::resources_builder::DirectFactPlan::generated::<Input>(
                 direct_bound,
             );
+        descriptor.generated_surface = Some("ai_map_reduce!");
+        descriptor
+    }
+
+    pub(crate) fn generated_for_surface<Input>(
+        surface: &'static str,
+        owner_kind: &'static str,
+        name: impl Into<String>,
+        handler: H,
+        effects: Vec<EffectDeclaration>,
+        effect_policies: Vec<EffectPolicyAttachment>,
+        direct_bound: std::num::NonZeroU64,
+    ) -> Self
+    where
+        Input: obzenflow_core::TypedPayload,
+    {
+        let mut descriptor =
+            Self::generated::<Input>(name, handler, effects, effect_policies, direct_bound);
+        descriptor.generated_surface = Some(surface);
+        descriptor.generated_owner_kind = owner_kind;
         descriptor
     }
 
@@ -1600,10 +1624,15 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
         if let Some(bound) = self.direct_fact_plan.maximum_bound() {
+            let surface = self.generated_surface.unwrap_or("generated stage");
             resources
                 .backpressure_writer
-                .validate_generated_direct_bound(bound)
-                .map_err(|message| format!("ai_map_reduce!: {message}"))?;
+                .validate_generated_direct_bound_for(
+                    bound,
+                    self.generated_owner_kind,
+                    Some(&self.name),
+                )
+                .map_err(|message| format!("{surface}: {message}"))?;
         }
         let effect_declarations = self.effects.clone();
         validate_effect_declarations(

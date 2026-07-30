@@ -6,8 +6,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
-use crate::TypedPayload;
+use super::ResolvedTokenEstimator;
+
+/// The sealed runtime coordinate for ObzenFlow's concrete chat capability.
+///
+/// User-facing AI syntax selects a [`ChatBindingContract`] lexically. It does
+/// not select or manufacture a runtime registry coordinate.
+pub const CHAT_CLIENT_PORT: &str = "chat";
 
 /// Provider identifier for AI requests.
 ///
@@ -367,6 +374,82 @@ impl ChatRequest {
     }
 }
 
+/// Target-free request material prepared by an AI role.
+///
+/// Provider, model, and endpoint identity belong to the selected
+/// [`ChatBindingContract`], not to role logic. Binding a spec reproduces the
+/// pre-FLOWIP-120j `ChatRequest` wire shape exactly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatRequestSpec {
+    pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub params: ChatParams,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDefinition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ChatResponseFormat>,
+}
+
+impl ChatRequestSpec {
+    pub fn bind_target(&self, target: &ChatTarget) -> ChatRequest {
+        ChatRequest {
+            provider: target.provider.clone(),
+            model: target.model.clone(),
+            messages: self.messages.clone(),
+            params: self.params.clone(),
+            tools: self.tools.clone(),
+            response_format: self.response_format.clone(),
+        }
+    }
+}
+
+struct ChatBindingContractInner {
+    target: ChatTarget,
+    estimator: ResolvedTokenEstimator,
+}
+
+/// Credential-free, immutable evidence for one concrete chat binding.
+///
+/// Clones share a construction family. That process-local relationship is
+/// used only while building an AI map-reduce composite and is never
+/// serialised, hashed, journalled, or used as live registration authority.
+#[derive(Clone)]
+pub struct ChatBindingContract(Arc<ChatBindingContractInner>);
+
+impl ChatBindingContract {
+    /// Infrastructure-only construction seam. This creates no client or live
+    /// invocation authority.
+    #[doc(hidden)]
+    pub fn from_resolved(target: ChatTarget, estimator: ResolvedTokenEstimator) -> Self {
+        Self(Arc::new(ChatBindingContractInner { target, estimator }))
+    }
+
+    pub fn target(&self) -> &ChatTarget {
+        &self.0.target
+    }
+
+    pub fn estimator(&self) -> &ResolvedTokenEstimator {
+        &self.0.estimator
+    }
+
+    /// Build-local proof that two values are clones or aliases of the same
+    /// immutable target-and-estimator decision.
+    #[doc(hidden)]
+    pub fn shares_construction_origin(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl fmt::Debug for ChatBindingContract {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChatBindingContract")
+            .field("target", &self.0.target)
+            .field("estimator_resolution", self.0.estimator.info())
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageSource {
@@ -393,16 +476,14 @@ pub struct ChatResponse {
     pub raw: Option<Value>,
 }
 
-/// Durable successful outcome of the replay-safe chat-completion effect.
+/// Durable framework-owned reply of the replay-safe chat-completion effect.
+///
+/// This is deliberately not a `TypedPayload`: persistence makes the value
+/// replay evidence, not a public stage fact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ChatCompletionCompleted {
+pub struct ChatCompletionReply {
     pub response: ChatResponse,
     pub observability: super::LlmObservability,
-}
-
-impl TypedPayload for ChatCompletionCompleted {
-    const EVENT_TYPE: &'static str = "ai.chat_completion.completed";
-    const SCHEMA_VERSION: u32 = 1;
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -461,5 +542,37 @@ mod tests {
 
         assert_eq!(req.resolved_response_format(), ChatResponseFormat::Text);
         assert_eq!(req.target(), ChatTarget::new("ollama", "llama3.1:8b"));
+    }
+
+    #[test]
+    fn target_free_request_binding_preserves_the_existing_request_shape() {
+        let spec = ChatRequestSpec {
+            messages: vec![ChatMessage::user("hello")],
+            params: ChatParams::default(),
+            tools: vec![],
+            response_format: Some(ChatResponseFormat::JsonObject),
+        };
+        let target = ChatTarget::with_binding_fingerprint(
+            "openai",
+            "gpt-test",
+            ChatBindingFingerprint::new("sha256:test"),
+        );
+
+        let bound = spec.bind_target(&target);
+
+        assert_eq!(bound.provider, target.provider);
+        assert_eq!(bound.model, target.model);
+        assert_eq!(bound.messages, spec.messages);
+        assert_eq!(bound.response_format, spec.response_format);
+        assert_eq!(
+            serde_json::to_value(&bound).unwrap(),
+            serde_json::json!({
+                "provider": "openai",
+                "model": "gpt-test",
+                "messages": [{"role": "user", "content": "hello"}],
+                "params": {},
+                "response_format": {"kind": "json_object"}
+            })
+        );
     }
 }

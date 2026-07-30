@@ -346,6 +346,29 @@ pub(super) enum EffectRecordMaterialization {
         origin: Option<EffectFactOrigin>,
     },
     FrameworkRecords(Vec<EffectRecord>),
+    /// One effect-owned, explicitly grandfathered domain-fact envelope that
+    /// now represents framework reply evidence. Reconstruction preserves its
+    /// archived physical shape and historical output-ordinal occupancy while
+    /// keeping it out of routing, folding, and output evidence.
+    LegacyRecordedReply(Vec<EffectRecord>),
+}
+
+pub(super) fn legacy_recorded_reply_materialization(
+    records: &[&EffectRecord],
+) -> Result<EffectRecordMaterialization, EffectError> {
+    validate_effect_outcome_group(records)?;
+    if records.is_empty()
+        || records
+            .iter()
+            .any(|record| !matches!(record.outcome, EffectOutcomePayload::SucceededFact { .. }))
+    {
+        return Err(EffectError::EffectProvenanceMismatch(
+            "legacy recorded reply must contain only historical SucceededFact rows".to_string(),
+        ));
+    }
+    Ok(EffectRecordMaterialization::LegacyRecordedReply(
+        records.iter().map(|record| (*record).clone()).collect(),
+    ))
 }
 
 /// The commit path stamps one origin per outcome group, so records inside a

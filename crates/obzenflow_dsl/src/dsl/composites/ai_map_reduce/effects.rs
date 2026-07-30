@@ -3,11 +3,12 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
+use crate::dsl::ai_effect::{invoke_generated_chat, GeneratedChatInvocationError};
 use obzenflow_adapters::ai::{ChatCompletion, ChatCompletionBuildError};
 use obzenflow_core::ai::{
     AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceMapInput,
-    AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind, ChatTarget,
-    ChunkEnvelope, ResolvedTokenEstimator,
+    AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind,
+    ChatBindingContract, ChunkEnvelope,
 };
 use obzenflow_core::event::{EffectFailureDetail, StageFatalCode, StageFatalReason};
 use obzenflow_core::TypedPayload;
@@ -24,8 +25,7 @@ type GeneratedFinaliseTypes<Seed, Collected, Out> = fn() -> (Seed, Collected, Ou
 
 pub(super) struct GeneratedAiMapHandler<Item, Partial, Role> {
     role: Arc<Role>,
-    chat_target: ChatTarget,
-    chat_estimator: ResolvedTokenEstimator,
+    chat_binding: ChatBindingContract,
     _types: std::marker::PhantomData<fn() -> (Item, Partial)>,
 }
 
@@ -33,23 +33,17 @@ impl<Item, Partial, Role> Clone for GeneratedAiMapHandler<Item, Partial, Role> {
     fn clone(&self) -> Self {
         Self {
             role: self.role.clone(),
-            chat_target: self.chat_target.clone(),
-            chat_estimator: self.chat_estimator.clone(),
+            chat_binding: self.chat_binding.clone(),
             _types: std::marker::PhantomData,
         }
     }
 }
 
 impl<Item, Partial, Role> GeneratedAiMapHandler<Item, Partial, Role> {
-    pub(super) fn new(
-        role: Role,
-        chat_target: ChatTarget,
-        chat_estimator: ResolvedTokenEstimator,
-    ) -> Self {
+    pub(super) fn new(role: Role, chat_binding: ChatBindingContract) -> Self {
         Self {
             role: Arc::new(role),
-            chat_target,
-            chat_estimator,
+            chat_binding,
             _types: std::marker::PhantomData,
         }
     }
@@ -59,15 +53,14 @@ impl<Item, Partial, Role> fmt::Debug for GeneratedAiMapHandler<Item, Partial, Ro
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GeneratedAiMapHandler")
-            .field("chat_target", &self.chat_target)
+            .field("chat_binding", &self.chat_binding)
             .finish_non_exhaustive()
     }
 }
 
 pub(super) struct GeneratedAiFinaliseHandler<Seed, Collected, Out, Role> {
     role: Arc<Role>,
-    chat_target: ChatTarget,
-    chat_estimator: ResolvedTokenEstimator,
+    chat_binding: ChatBindingContract,
     _types: std::marker::PhantomData<GeneratedFinaliseTypes<Seed, Collected, Out>>,
 }
 
@@ -75,23 +68,17 @@ impl<Seed, Collected, Out, Role> Clone for GeneratedAiFinaliseHandler<Seed, Coll
     fn clone(&self) -> Self {
         Self {
             role: self.role.clone(),
-            chat_target: self.chat_target.clone(),
-            chat_estimator: self.chat_estimator.clone(),
+            chat_binding: self.chat_binding.clone(),
             _types: std::marker::PhantomData,
         }
     }
 }
 
 impl<Seed, Collected, Out, Role> GeneratedAiFinaliseHandler<Seed, Collected, Out, Role> {
-    pub(super) fn new(
-        role: Role,
-        chat_target: ChatTarget,
-        chat_estimator: ResolvedTokenEstimator,
-    ) -> Self {
+    pub(super) fn new(role: Role, chat_binding: ChatBindingContract) -> Self {
         Self {
             role: Arc::new(role),
-            chat_target,
-            chat_estimator,
+            chat_binding,
             _types: std::marker::PhantomData,
         }
     }
@@ -103,7 +90,7 @@ impl<Seed, Collected, Out, Role> fmt::Debug
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GeneratedAiFinaliseHandler")
-            .field("chat_target", &self.chat_target)
+            .field("chat_binding", &self.chat_binding)
             .finish_non_exhaustive()
     }
 }
@@ -288,14 +275,6 @@ fn request_canonicalization_failure(error: ChatCompletionBuildError) -> AiMapRed
     }
 }
 
-fn target_assertion_failure(expected: &ChatTarget, observed: &ChatTarget) -> HandlerError {
-    fatal(
-        StageFatalCode::Configuration,
-        StageFatalReason::EffectTargetAssertionMismatch,
-        format!("prepared chat target {observed} does not match declared target {expected}"),
-    )
-}
-
 fn emit_failure(error: EffectError) -> HandlerError {
     fatal_from_effect(error)
 }
@@ -309,7 +288,6 @@ where
 {
     type Input = AiMapReduceMapInput<ChunkEnvelope<Item>>;
     type Output = obzenflow_core::stage_fact_set![
-        obzenflow_core::ai::ChatCompletionCompleted,
         AiMapReduceTaggedPartial<Partial>,
         AiMapReduceChunkFailed,
     ];
@@ -336,8 +314,8 @@ where
         let info = input.chunk_info();
         let items = input.items;
 
-        let (request, prepared) = match self.role.prepare(&items, &info) {
-            Ok(prepared) => prepared,
+        let request = match self.role.prepare(&items, &info) {
+            Ok(request) => request,
             Err(logic) => {
                 return fx
                     .complete_with_pre_effect_fact(AiMapReduceChunkFailed {
@@ -350,21 +328,16 @@ where
                     .map_err(emit_failure);
             }
         };
-        let observed_target = request.target();
-        if !observed_target.logically_matches(&self.chat_target) {
-            return Err(target_assertion_failure(
-                &self.chat_target,
-                &observed_target,
-            ));
-        }
-        let effect = match ChatCompletion::new(
+        let reply = match invoke_generated_chat(
+            fx,
+            &self.chat_binding,
+            &request,
             MAP_CHAT_COMPLETION_LABEL,
-            request,
-            self.chat_target.clone(),
-            self.chat_estimator.clone(),
-        ) {
-            Ok(effect) => effect,
-            Err(error) => {
+        )
+        .await
+        {
+            Ok(reply) => reply,
+            Err(GeneratedChatInvocationError::Build(error)) => {
                 return fx
                     .complete_with_pre_effect_fact(AiMapReduceChunkFailed {
                         job_key,
@@ -375,32 +348,7 @@ where
                     .await
                     .map_err(emit_failure);
             }
-        };
-
-        match fx.perform(effect).await {
-            Ok(completion) => {
-                let terminal = match self.role.interpret(items, prepared, completion) {
-                    Ok(partial) => AiMapReduceTaggedPartial {
-                        job_key,
-                        chunk_index,
-                        chunk_count,
-                        partial,
-                    },
-                    Err(logic) => {
-                        fx.emit(AiMapReduceChunkFailed {
-                            job_key,
-                            chunk_index,
-                            chunk_count,
-                            cause: AiMapReduceRoleFailure::Logic { logic },
-                        })
-                        .await
-                        .map_err(emit_failure)?;
-                        return fx.complete().map_err(emit_failure);
-                    }
-                };
-                fx.emit(terminal).await.map_err(emit_failure)?;
-            }
-            Err(error) => {
+            Err(GeneratedChatInvocationError::Effect(error)) => {
                 let cause = role_failure_from_effect(error)?;
                 fx.emit(AiMapReduceChunkFailed {
                     job_key,
@@ -410,9 +358,35 @@ where
                 })
                 .await
                 .map_err(emit_failure)?;
+                return fx.complete().map_err(emit_failure);
             }
-        }
+        };
+
+        let terminal = match self.role.interpret(items, info, request, reply) {
+            Ok(partial) => AiMapReduceTaggedPartial {
+                job_key,
+                chunk_index,
+                chunk_count,
+                partial,
+            },
+            Err(logic) => {
+                fx.emit(AiMapReduceChunkFailed {
+                    job_key,
+                    chunk_index,
+                    chunk_count,
+                    cause: AiMapReduceRoleFailure::Logic { logic },
+                })
+                .await
+                .map_err(emit_failure)?;
+                return fx.complete().map_err(emit_failure);
+            }
+        };
+        fx.emit(terminal).await.map_err(emit_failure)?;
         fx.complete().map_err(emit_failure)
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        Role::LOGIC_VERSION
     }
 }
 
@@ -427,7 +401,6 @@ where
 {
     type Input = obzenflow_core::ai::AiMapReduceReduceInput<Seed, Collected>;
     type Output = obzenflow_core::stage_fact_set![
-        obzenflow_core::ai::ChatCompletionCompleted,
         Out,
         AiMapReduceFinaliseFailed,
     ];
@@ -441,8 +414,8 @@ where
         let job_key = input.job_key;
         let seed = input.seed;
         let collected = input.collected;
-        let (request, prepared) = match self.role.prepare(&seed, &collected) {
-            Ok(prepared) => prepared,
+        let request = match self.role.prepare(&seed, &collected) {
+            Ok(request) => request,
             Err(logic) => {
                 return fx
                     .complete_with_pre_effect_fact(AiMapReduceFinaliseFailed {
@@ -453,21 +426,16 @@ where
                     .map_err(emit_failure);
             }
         };
-        let observed_target = request.target();
-        if !observed_target.logically_matches(&self.chat_target) {
-            return Err(target_assertion_failure(
-                &self.chat_target,
-                &observed_target,
-            ));
-        }
-        let effect = match ChatCompletion::new(
+        let reply = match invoke_generated_chat(
+            fx,
+            &self.chat_binding,
+            &request,
             FINALISE_CHAT_COMPLETION_LABEL,
-            request,
-            self.chat_target.clone(),
-            self.chat_estimator.clone(),
-        ) {
-            Ok(effect) => effect,
-            Err(error) => {
+        )
+        .await
+        {
+            Ok(reply) => reply,
+            Err(GeneratedChatInvocationError::Build(error)) => {
                 return fx
                     .complete_with_pre_effect_fact(AiMapReduceFinaliseFailed {
                         job_key,
@@ -476,28 +444,31 @@ where
                     .await
                     .map_err(emit_failure);
             }
-        };
-
-        match fx.perform(effect).await {
-            Ok(completion) => match self.role.interpret(seed, collected, prepared, completion) {
-                Ok(output) => fx.emit(output).await.map_err(emit_failure)?,
-                Err(logic) => {
-                    fx.emit(AiMapReduceFinaliseFailed {
-                        job_key,
-                        cause: AiMapReduceRoleFailure::Logic { logic },
-                    })
-                    .await
-                    .map_err(emit_failure)?;
-                }
-            },
-            Err(error) => {
+            Err(GeneratedChatInvocationError::Effect(error)) => {
                 let cause = role_failure_from_effect(error)?;
                 fx.emit(AiMapReduceFinaliseFailed { job_key, cause })
                     .await
                     .map_err(emit_failure)?;
+                return fx.complete().map_err(emit_failure);
+            }
+        };
+
+        match self.role.interpret(seed, collected, request, reply) {
+            Ok(output) => fx.emit(output).await.map_err(emit_failure)?,
+            Err(logic) => {
+                fx.emit(AiMapReduceFinaliseFailed {
+                    job_key,
+                    cause: AiMapReduceRoleFailure::Logic { logic },
+                })
+                .await
+                .map_err(emit_failure)?;
             }
         }
         fx.complete().map_err(emit_failure)
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        Role::LOGIC_VERSION
     }
 }
 

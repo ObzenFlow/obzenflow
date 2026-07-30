@@ -1,0 +1,12 @@
+error: inference!: paid non-idempotent ChatCompletion requires `at_least_once(ChatCompletion)` acknowledgement
+  --> tests/compile_fail/inference_missing_acknowledgement.rs:15:13
+   |
+15 |       let _ = inference!(
+   |  _____________^
+16 | |         Input ->{
+17 | |             ChatCompletion via chat with { policy }
+18 | |         } Output => role
+19 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_ai_chat_effect_row` which comes from the expansion of the macro `inference` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -68,6 +68,10 @@ cargo run -p obzenflow --example product_catalog_enrichment
 cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server
 
 # Live AI inference
+cargo run -p obzenflow --example one_shot_inference_demo --features ai -- \
+    --config examples/one_shot_inference_demo/obzenflow.toml
+
+# Chunked AI map-reduce over a live HTTP source
 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"
 ```
 

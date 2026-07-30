@@ -1,21 +1,73 @@
-error[E0451]: fields `name`, `handler`, `effects`, `middleware`, `effect_policies`, `direct_fact_plan`, `pass_through_event_type` and `backpressure` of struct `EffectfulTransformDescriptor` are private
-  --> tests/compile_fail/ai_map_reduce_generated_descriptor_fields_are_private.rs:14:9
+error: cannot construct `EffectfulTransformDescriptor<_>` with struct literal syntax due to private fields
+  --> tests/compile_fail/ai_map_reduce_generated_descriptor_fields_are_private.rs:13:13
    |
 13 |     let _ = EffectfulTransformDescriptor {
-   |             ---------------------------- in this type
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 14 |         name: "counterfeit-generated-stage".to_string(),
-   |         ^^^^ private field
+   |         ----------------------------------------------- private field
 15 |         handler: FirstOnly,
-   |         ^^^^^^^ private field
+   |         ------------------ private field
 16 |         effects: Vec::new(),
-   |         ^^^^^^^ private field
+   |         ------------------- private field
 17 |         middleware: Vec::new(),
-   |         ^^^^^^^^^^ private field
+   |         ---------------------- private field
 18 |         effect_policies: Vec::new(),
-   |         ^^^^^^^^^^^^^^^ private field
+   |         --------------------------- private field
 19 |         direct_fact_plan: DirectFactPlan::default(),
-   |         ^^^^^^^^^^^^^^^^ private field
+   |         ------------------------------------------- private field
 20 |         pass_through_event_type: None,
-   |         ^^^^^^^^^^^^^^^^^^^^^^^ private field
+   |         ----------------------------- private field
 21 |         backpressure: None,
-   |         ^^^^^^^^^^^^ private field
+   |         ------------------ private field
+   |
+   = note: ...and other private fields `generated_surface` and `generated_owner_kind` that were not provided
+help: you might have meant to use an associated function to build this type
+   |
+13 -     let _ = EffectfulTransformDescriptor {
+14 -         name: "counterfeit-generated-stage".to_string(),
+15 -         handler: FirstOnly,
+16 -         effects: Vec::new(),
+17 -         middleware: Vec::new(),
+18 -         effect_policies: Vec::new(),
+19 -         direct_fact_plan: DirectFactPlan::default(),
+20 -         pass_through_event_type: None,
+21 -         backpressure: None,
+22 -     };
+13 +     let _ = EffectfulTransformDescriptor::new(_, _, _, _, _, _);
+   |
+13 -     let _ = EffectfulTransformDescriptor {
+14 -         name: "counterfeit-generated-stage".to_string(),
+15 -         handler: FirstOnly,
+16 -         effects: Vec::new(),
+17 -         middleware: Vec::new(),
+18 -         effect_policies: Vec::new(),
+19 -         direct_fact_plan: DirectFactPlan::default(),
+20 -         pass_through_event_type: None,
+21 -         backpressure: None,
+22 -     };
+13 +     let _ = EffectfulTransformDescriptor::generated(_, _, _, _, _);
+   |
+13 -     let _ = EffectfulTransformDescriptor {
+14 -         name: "counterfeit-generated-stage".to_string(),
+15 -         handler: FirstOnly,
+16 -         effects: Vec::new(),
+17 -         middleware: Vec::new(),
+18 -         effect_policies: Vec::new(),
+19 -         direct_fact_plan: DirectFactPlan::default(),
+20 -         pass_through_event_type: None,
+21 -         backpressure: None,
+22 -     };
+13 +     let _ = EffectfulTransformDescriptor::generated_for_surface(_, _, _, _, _, _, _);
+   |
+13 -     let _ = EffectfulTransformDescriptor {
+14 -         name: "counterfeit-generated-stage".to_string(),
+15 -         handler: FirstOnly,
+16 -         effects: Vec::new(),
+17 -         middleware: Vec::new(),
+18 -         effect_policies: Vec::new(),
+19 -         direct_fact_plan: DirectFactPlan::default(),
+20 -         pass_through_event_type: None,
+21 -         backpressure: None,
+22 -     };
+13 +     let _ = EffectfulTransformDescriptor::generated_with_pass_through(_, _, _, _, _);
+   |

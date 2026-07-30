@@ -1,0 +1,12 @@
+error: AI effect rows accept exactly one EffectResilience policy; multi-policy composition belongs to FLOWIP-132b
+  --> tests/compile_fail/inference_multiple_policies.rs:16:13
+   |
+16 |       let _ = inference!(
+   |  _____________^
+17 | |         Input ->{
+18 | |             at_least_once(ChatCompletion) via chat with { first, second }
+19 | |         } Output => role
+20 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_ai_chat_effect_row` which comes from the expansion of the macro `inference` (in Nightly builds, run with -Z macro-backtrace for more info)

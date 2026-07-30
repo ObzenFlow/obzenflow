@@ -408,6 +408,86 @@ impl Effect for RecordedReplyEffect {
             provider_trace: "integration-material".to_string(),
         })
     }
+
+    fn decode_legacy_recorded_reply(
+        records: &[&EffectRecord],
+    ) -> Result<Option<Self::Outcome>, EffectError> {
+        let [record] = records else {
+            return Ok(None);
+        };
+        let EffectOutcomePayload::SucceededFact {
+            event_type,
+            output,
+            outcome_fact_ordinal,
+            outcome_fact_count,
+        } = &record.outcome
+        else {
+            return Ok(None);
+        };
+        if event_type.as_str() != "test.legacy_recorded_reply.v1" {
+            return Ok(None);
+        }
+        if outcome_fact_ordinal.get() != 0 || outcome_fact_count.get() != 1 {
+            return Err(EffectError::EffectProvenanceMismatch(
+                "test legacy reply is not one complete row".to_string(),
+            ));
+        }
+        serde_json::from_value(output.clone())
+            .map(Some)
+            .map_err(|error| EffectError::Serialization(error.to_string()))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AdapterFailure {
+    Nonfatal,
+    Fatal,
+}
+
+#[derive(Clone, Debug)]
+struct ConsumeOneEffectThenFail {
+    calls: Arc<AtomicUsize>,
+    failure: AdapterFailure,
+}
+
+#[async_trait]
+impl crate::stages::common::handlers::EffectfulTransformHandler for ConsumeOneEffectThenFail {
+    type Input = FirstOutput;
+    type Output = CountingOutput;
+    type AllowedEffects = crate::effect_set![CountingEffect];
+
+    async fn process(
+        &self,
+        input: Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
+    {
+        fx.perform(CountingEffect {
+            value: input.value,
+            label: "first",
+            calls: self.calls.clone(),
+        })
+        .await
+        .map_err(|error| {
+            crate::stages::common::handler_error::HandlerError::Other(error.to_string())
+        })?;
+        match self.failure {
+            AdapterFailure::Nonfatal => {
+                Err(crate::stages::common::handler_error::HandlerError::Domain(
+                    "failed between effect cursors".to_string(),
+                ))
+            }
+            AdapterFailure::Fatal => Err(
+                crate::stages::common::handler_error::HandlerError::Fatal(
+                    crate::stages::common::handler_error::StageFatal::new(
+                        obzenflow_core::event::StageFatalCode::Protocol,
+                        obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
+                        "original fatal wins",
+                    ),
+                ),
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2310,6 +2390,237 @@ async fn recorded_reply_is_replay_authority_but_not_a_public_output_fact() {
     assert_eq!(replay_events[0].event.id, live_events[0].event.id);
     assert_eq!(replay_events[1].event.id, live_events[1].event.id);
     assert_eq!(replay.committed_fact_evidence().0, 1);
+}
+
+#[tokio::test]
+async fn legacy_recorded_reply_preserves_physical_identity_and_historical_output_ordinal() {
+    let stage_id = StageId::new();
+    let parent = parent_envelope(WriterId::from(stage_id));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let effect = RecordedReplyEffect {
+        value: 41,
+        calls: calls.clone(),
+    };
+    let cursor = EffectCursor::new("archived_flow", "effect_stage", 1_u64, 0_u32);
+    let descriptor = descriptor_for_effect(
+        &effect,
+        "test-v1".to_string(),
+        RecordedReplyEffect::EFFECT_TYPE,
+        RecordedReplyEffect::SCHEMA_VERSION,
+    )
+    .expect("legacy descriptor");
+    let descriptor_hash = descriptor_hash(&descriptor).expect("legacy descriptor hash");
+    let reply = RecordedReplyValue {
+        value: 42,
+        provider_trace: "legacy-integration-material".to_string(),
+    };
+    let record = EffectRecord {
+        cursor: cursor.clone(),
+        descriptor_hash: descriptor_hash.clone(),
+        descriptor: descriptor.clone(),
+        outcome: EffectOutcomePayload::SucceededFact {
+            event_type: obzenflow_core::EventType::from("test.legacy_recorded_reply.v1"),
+            output: serde_json::to_value(&reply).expect("legacy reply serialises"),
+            outcome_fact_ordinal: OutcomeFactOrdinal::new(0),
+            outcome_fact_count: OutcomeFactCount::new(1),
+        },
+        origin: Some(EffectFactOrigin::Effect),
+    };
+    let archived_reply = build_domain_effect_success_facts(
+        WriterId::from(stage_id),
+        &parent,
+        cursor.clone(),
+        descriptor_hash,
+        descriptor,
+        vec![TypedFact {
+            event_type: obzenflow_core::EventType::from("test.legacy_recorded_reply.v1"),
+            payload: serde_json::to_value(&reply).expect("legacy reply serialises"),
+        }],
+        EffectOutputOrdinal::new(0),
+        Some(EffectFactOrigin::Effect),
+        obzenflow_core::config::LineagePolicy::default(),
+    )
+    .expect("legacy reply event builds")
+    .pop()
+    .expect("one legacy reply event");
+    let archived_reply_id = archived_reply.id;
+    let history = Arc::new(
+        EffectHistory::from_cursor_history_for_test(
+            "archived_flow",
+            cursor,
+            EffectCursorHistory {
+                records: vec![record],
+                terminal_attempt: Some(None),
+                terminal_group_events: vec![archived_reply],
+                ..EffectCursorHistory::default()
+            },
+        )
+        .expect("legacy physical history validates"),
+    );
+
+    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut replay_ctx = invocation_context(replay_journal.clone(), parent, Some(history));
+    replay_ctx.emit_enabled = true;
+    replay_ctx.output_contract =
+        output_contract_for_many(vec![output_descriptor_for::<CountingOutput>()]);
+    let mut replay = EffectsCore::new(replay_ctx);
+
+    let reconstructed = replay
+        .perform(effect)
+        .await
+        .expect("the effect-owned legacy decoder reconstructs the reply");
+    assert_eq!(reconstructed, reply);
+    replay
+        .emit(CountingOutput {
+            value: reconstructed.value,
+        })
+        .await
+        .expect("post-reply business fact emits");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        replay.committed_fact_evidence().0,
+        1,
+        "the legacy reply is not a current user output"
+    );
+    let replay_events = replay_journal.events();
+    assert_eq!(replay_events.len(), 2);
+    assert_eq!(replay_events[0].event.id, archived_reply_id);
+    assert_eq!(
+        replay_events[0].event.event_type(),
+        "test.legacy_recorded_reply.v1"
+    );
+    assert_eq!(
+        replay_events[1].event.id,
+        deterministic_event_id(
+            "archived_flow",
+            "effect_stage",
+            StageInputPosition(1),
+            EffectOutputOrdinal::new(1),
+        ),
+        "the business fact retains the ordinal after the historical reply"
+    );
+}
+
+async fn adapter_history_fixture(
+    effect_count: usize,
+) -> (EventEnvelope<ChainEvent>, Arc<EffectHistory>) {
+    let stage_id = StageId::new();
+    let input = ChainEventFactory::data_event(
+        WriterId::from(stage_id),
+        FirstOutput::versioned_event_type(),
+        json!({ "value": 9 }),
+    );
+    let parent = EventEnvelope::new(JournalWriterId::new(), input);
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let live_ctx = invocation_context(journal.clone(), parent.clone(), None);
+    let recorded_flow_id = live_ctx.flow_id.to_string();
+    let mut live = EffectsCore::new(live_ctx);
+    live.perform(CountingEffect {
+        value: 9,
+        label: "first",
+        calls: Arc::new(AtomicUsize::new(0)),
+    })
+    .await
+    .expect("first archived effect");
+    live.perform(CountingEffect {
+        value: 10,
+        label: "second",
+        calls: Arc::new(AtomicUsize::new(0)),
+    })
+    .await
+    .expect("second archived effect");
+    let mut records = effect_records(&journal);
+    records.truncate(effect_count);
+    (
+        parent,
+        Arc::new(
+            EffectHistory::from_records(recorded_flow_id, records)
+                .expect("adapter history indexes"),
+        ),
+    )
+}
+
+async fn run_consume_one_adapter(
+    parent: EventEnvelope<ChainEvent>,
+    history: Arc<EffectHistory>,
+    failure: AdapterFailure,
+    calls: Arc<AtomicUsize>,
+) -> crate::stages::common::handler_error::HandlerError {
+    use crate::stages::common::handlers::{
+        EffectfulTransformHandlerAdapter, UnifiedTransformHandler,
+    };
+
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let mut context = invocation_context(journal, parent.clone(), Some(history));
+    context.output_contract = output_contract_for::<CountingOutput>();
+    let adapter = EffectfulTransformHandlerAdapter::new(
+        ConsumeOneEffectThenFail { calls, failure },
+        Arc::new(AbortingBoundary),
+    );
+    UnifiedTransformHandler::process(
+        &adapter,
+        parent.event,
+        Some(context),
+        obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
+    )
+    .await
+    .expect_err("the fixture handler always fails after its first cursor")
+}
+
+#[tokio::test]
+async fn effectful_transform_nonfatal_error_checks_the_next_unused_cursor() {
+    let (parent, one_cursor) = adapter_history_fixture(1).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let miss = run_consume_one_adapter(
+        parent.clone(),
+        one_cursor,
+        AdapterFailure::Nonfatal,
+        calls.clone(),
+    )
+    .await;
+    assert!(matches!(
+        miss,
+        crate::stages::common::handler_error::HandlerError::Domain(ref message)
+            if message == "failed between effect cursors"
+    ));
+
+    let (parent, two_cursors) = adapter_history_fixture(2).await;
+    let hit = run_consume_one_adapter(
+        parent.clone(),
+        two_cursors.clone(),
+        AdapterFailure::Nonfatal,
+        calls.clone(),
+    )
+    .await;
+    assert!(matches!(
+        hit,
+        crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
+            if fatal.code == obzenflow_core::event::StageFatalCode::Replay
+                && fatal.reason == obzenflow_core::event::StageFatalReason::ReplayDivergence
+                && fatal.detail.contains("would replace an existing terminal")
+    ));
+
+    let fatal = run_consume_one_adapter(
+        parent,
+        two_cursors,
+        AdapterFailure::Fatal,
+        calls.clone(),
+    )
+    .await;
+    assert!(matches!(
+        fatal,
+        crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
+            if fatal.code == obzenflow_core::event::StageFatalCode::Protocol
+                && fatal.reason
+                    == obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity
+                && fatal.detail == "original fatal wins"
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "history selection and error settlement resolve no live authority"
+    );
 }
 
 #[tokio::test]

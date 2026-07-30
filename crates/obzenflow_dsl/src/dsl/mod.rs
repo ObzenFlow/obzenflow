@@ -208,6 +208,10 @@
 //! ```
 
 pub mod backpressure_clause;
+#[doc(hidden)]
+pub mod ai_effect;
+#[doc(hidden)]
+pub mod inference;
 mod binder;
 pub mod composites;
 /// FLOWIP-128a composite substrate. Public for macro reachability only;

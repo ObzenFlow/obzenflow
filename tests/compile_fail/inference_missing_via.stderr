@@ -1,0 +1,12 @@
+error: inference!: expected `at_least_once(ChatCompletion) via <chat binding> with { <EffectResilience> }`
+  --> tests/compile_fail/inference_missing_via.rs:14:13
+   |
+14 |       let _ = inference!(
+   |  _____________^
+15 | |         Input ->{
+16 | |             at_least_once(ChatCompletion) with { policy }
+17 | |         } Output => role
+18 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_ai_chat_effect_row` which comes from the expansion of the macro `inference` (in Nightly builds, run with -Z macro-backtrace for more info)

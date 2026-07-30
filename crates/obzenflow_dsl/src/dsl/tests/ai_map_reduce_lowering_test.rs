@@ -20,10 +20,11 @@ mod tests {
     use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
     use crate::dsl::typing::TypeHint;
     use obzenflow_core::ai::{
-        AiFinaliseRole, AiMapReduceChunkFailed, AiMapReducePlanningManifest,
-        AiMapReduceTaggedPartial, AiMapRole, AiRoleLogicFailure, ChatCompletionCompleted,
-        ChatMessage, ChatParams, ChatRequest, ChatTarget, HeuristicTokenEstimator, Many,
-        ResolvedTokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
+        AiFinaliseRole, AiInferenceRole, AiMapReduceChunkFailed, AiMapReducePlanningManifest,
+        AiMapReduceTaggedPartial, AiMapRole, AiRoleLogicFailure, ChatBindingContract,
+        ChatCompletionReply, ChatMessage, ChatParams, ChatRequestSpec, ChatTarget,
+        HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenEstimatorFallbackReason,
+        TokenEstimatorResolutionInfo,
     };
 
     #[derive(Debug, Clone)]
@@ -73,36 +74,50 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.ai_map_reduce.partial";
     }
 
-    struct TestMapRole {
-        target: ChatTarget,
+    struct TestMapRole;
+
+    struct TestInferenceRole;
+
+    impl AiInferenceRole<TestSeed, TestOut> for TestInferenceRole {
+        fn prepare(&self, _input: &TestSeed) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+            Ok(ChatRequestSpec {
+                messages: vec![ChatMessage::user("one shot")],
+                params: ChatParams::default(),
+                tools: Vec::new(),
+                response_format: None,
+            })
+        }
+
+        fn interpret(
+            &self,
+            _input: TestSeed,
+            _request: ChatRequestSpec,
+            _reply: ChatCompletionReply,
+        ) -> Result<TestOut, AiRoleLogicFailure> {
+            Ok(TestOut)
+        }
     }
 
     impl AiMapRole<TestItem, TestPartial> for TestMapRole {
-        type Prepared = ();
-
         fn prepare(
             &self,
             items: &[TestItem],
             _chunk: &obzenflow_core::ai::ChunkInfo,
-        ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure> {
-            Ok((
-                ChatRequest {
-                    provider: self.target.provider.clone(),
-                    model: self.target.model.clone(),
-                    messages: vec![ChatMessage::user(format!("{} items", items.len()))],
-                    params: ChatParams::default(),
-                    tools: Vec::new(),
-                    response_format: None,
-                },
-                (),
-            ))
+        ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+            Ok(ChatRequestSpec {
+                messages: vec![ChatMessage::user(format!("{} items", items.len()))],
+                params: ChatParams::default(),
+                tools: Vec::new(),
+                response_format: None,
+            })
         }
 
         fn interpret(
             &self,
             items: Vec<TestItem>,
-            _prepared: Self::Prepared,
-            _completion: ChatCompletionCompleted,
+            _chunk: obzenflow_core::ai::ChunkInfo,
+            _request: ChatRequestSpec,
+            _reply: ChatCompletionReply,
         ) -> Result<TestPartial, AiRoleLogicFailure> {
             Ok(TestPartial {
                 value: items.iter().map(|item| item.value).sum(),
@@ -110,40 +125,31 @@ mod tests {
         }
     }
 
-    struct TestFinaliseRole {
-        target: ChatTarget,
-    }
+    struct TestFinaliseRole;
 
     impl AiFinaliseRole<TestSeed, Many<TestPartial>, TestOut> for TestFinaliseRole {
-        type Prepared = ();
-
         fn prepare(
             &self,
             _seed: &TestSeed,
             collected: &Many<TestPartial>,
-        ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure> {
-            Ok((
-                ChatRequest {
-                    provider: self.target.provider.clone(),
-                    model: self.target.model.clone(),
-                    messages: vec![ChatMessage::user(format!(
-                        "{} partials",
-                        collected.items.len()
-                    ))],
-                    params: ChatParams::default(),
-                    tools: Vec::new(),
-                    response_format: None,
-                },
-                (),
-            ))
+        ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+            Ok(ChatRequestSpec {
+                messages: vec![ChatMessage::user(format!(
+                    "{} partials",
+                    collected.items.len()
+                ))],
+                params: ChatParams::default(),
+                tools: Vec::new(),
+                response_format: None,
+            })
         }
 
         fn interpret(
             &self,
             _seed: TestSeed,
             _collected: Many<TestPartial>,
-            _prepared: Self::Prepared,
-            _completion: ChatCompletionCompleted,
+            _request: ChatRequestSpec,
+            _reply: ChatCompletionReply,
         ) -> Result<TestOut, AiRoleLogicFailure> {
             Ok(TestOut)
         }
@@ -160,6 +166,13 @@ mod tests {
         )
     }
 
+    fn test_chat_contract(target_model: &str, estimator_model: &str) -> ChatBindingContract {
+        ChatBindingContract::from_resolved(
+            ChatTarget::new("ollama", target_model),
+            test_estimator(estimator_model),
+        )
+    }
+
     fn mk_transform(name: &str) -> Box<dyn StageDescriptor> {
         Box::new(TransformDescriptor {
             name: name.to_string(),
@@ -170,36 +183,80 @@ mod tests {
     }
 
     fn generated_digest() -> Box<dyn crate::dsl::composition::CompositeDescriptor> {
-        let target = ChatTarget::new("ollama", "test-model");
-        let estimator = test_estimator("test-model");
+        let chat = test_chat_contract("test-model", "test-model");
         crate::ai_map_reduce!(
             TestSeed -> TestOut => {
-                map: [TestItem] -> TestPartial => TestMapRole {
-                    target: target.clone(),
-                },
-                reduce: (TestSeed, [TestPartial]) -> TestOut => TestFinaliseRole {
-                    target: target.clone(),
-                },
+                map: [TestItem] ->{
+                    at_least_once(ChatCompletion)
+                        via chat
+                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                } TestPartial => TestMapRole,
+                reduce: (TestSeed, [TestPartial]) ->{
+                    at_least_once(ChatCompletion)
+                        via chat
+                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                } TestOut => TestFinaliseRole,
             },
             chunking: by_budget {
-                estimator: estimator.estimator(),
                 items: |seed: &TestSeed| seed.items.clone(),
                 render: |item: &TestItem, _ctx| format!("{}", item.value),
                 budget: ::obzenflow_core::ai::TokenCount::new(100),
                 max_items: None,
                 oversize: error,
-            },
-            effects: {
-                chat_target: target,
-                chat_estimator: estimator,
-                map: [at_least_once(ChatCompletion) with [
-                    obzenflow_adapters::middleware::control::ai_resilience()
-                ]],
-                reduce: [at_least_once(ChatCompletion) with [
-                    obzenflow_adapters::middleware::control::ai_resilience()
-                ]],
             }
         )
+    }
+
+    #[test]
+    fn inference_lowers_to_one_generated_transform_with_the_exact_three_row_plan() {
+        let chat = test_chat_contract("test-model", "test-model");
+        let mut inference = crate::inference!(
+            TestSeed ->{
+                at_least_once(ChatCompletion)
+                    via chat
+                    with { obzenflow_adapters::middleware::control::ai_resilience() }
+            } TestOut => TestInferenceRole
+        );
+        inference.set_name("brief".to_string());
+
+        assert_eq!(inference.name(), "brief");
+        assert_eq!(
+            inference.stage_type(),
+            obzenflow_core::event::context::StageType::Transform
+        );
+        assert!(inference.is_effectful());
+        assert_eq!(inference.stage_logic_version(), "1");
+
+        let declarations = inference.effect_declarations();
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(
+            declarations[0].effect_type,
+            "obzenflow.ai.chat_completion"
+        );
+        let policies = inference.effect_policy_attachments();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].effect_type, "obzenflow.ai.chat_completion");
+        assert_eq!(policies[0].factories.len(), 1);
+
+        let direct_plan = inference
+            .direct_fact_plan()
+            .expect("inference uses the generated direct-fact continuation");
+        let input_event_type = TestSeed::versioned_event_type();
+        assert_eq!(
+            direct_plan.manifest_entries().collect::<Vec<_>>(),
+            vec![(input_event_type.as_str(), 3)]
+        );
+
+        let typing = inference
+            .typing_metadata()
+            .expect("inference carries exact scalar typing");
+        assert_eq!(typing.input_type, TypeHint::exact_payload::<TestSeed>());
+        assert_eq!(typing.output_type, TypeHint::exact_payload::<TestOut>());
+        assert_eq!(
+            typing.output_contract,
+            vec![TypeHint::exact_payload::<TestOut>()],
+            "the recorded reply is not a selectable stage output"
+        );
     }
 
     #[test]
@@ -298,34 +355,26 @@ mod tests {
 
     #[test]
     fn ai_map_reduce_effect_protocol_syntax_lowers_fixed_generated_roles() {
-        let target = ChatTarget::new("ollama", "test-model");
-        let estimator = test_estimator("test-model");
+        let chat = test_chat_contract("test-model", "test-model");
         let digest = crate::ai_map_reduce!(
             TestSeed -> TestOut => {
-                map: [TestItem] -> TestPartial => TestMapRole {
-                    target: target.clone(),
-                },
-                reduce: (TestSeed, [TestPartial]) -> TestOut => TestFinaliseRole {
-                    target: target.clone(),
-                },
+                map: [TestItem] ->{
+                    at_least_once(ChatCompletion)
+                        via chat
+                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                } TestPartial => TestMapRole,
+                reduce: (TestSeed, [TestPartial]) ->{
+                    at_least_once(ChatCompletion)
+                        via chat
+                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                } TestOut => TestFinaliseRole,
             },
             chunking: by_budget {
-                estimator: estimator.estimator(),
                 items: |seed: &TestSeed| seed.items.clone(),
                 render: |item: &TestItem, _ctx| format!("{}", item.value),
                 budget: ::obzenflow_core::ai::TokenCount::new(100),
                 max_items: None,
                 oversize: error,
-            },
-            effects: {
-                chat_target: target,
-                chat_estimator: estimator,
-                map: [at_least_once(ChatCompletion) with [
-                    obzenflow_adapters::middleware::control::ai_resilience()
-                ]],
-                reduce: [at_least_once(ChatCompletion) with [
-                    obzenflow_adapters::middleware::control::ai_resilience()
-                ]],
             }
         );
 
@@ -350,30 +399,34 @@ mod tests {
 
     #[test]
     fn ai_map_reduce_rejects_generated_roles_without_effect_resilience() {
-        let target = ChatTarget::new("ollama", "test-model");
-        let estimator = test_estimator("test-model");
+        let chat = test_chat_contract("test-model", "test-model");
         let digest = crate::ai_map_reduce!(
             TestSeed -> TestOut => {
-                map: [TestItem] -> TestPartial => TestMapRole {
-                    target: target.clone(),
-                },
-                reduce: (TestSeed, [TestPartial]) -> TestOut => TestFinaliseRole {
-                    target: target.clone(),
-                },
+                map: [TestItem] ->{
+                    at_least_once(ChatCompletion)
+                        via chat
+                        with {
+                            Box::new(
+                                obzenflow_adapters::middleware::LoggingMiddlewareFactory::new()
+                            )
+                        }
+                } TestPartial => TestMapRole,
+                reduce: (TestSeed, [TestPartial]) ->{
+                    at_least_once(ChatCompletion)
+                        via chat
+                        with {
+                            Box::new(
+                                obzenflow_adapters::middleware::LoggingMiddlewareFactory::new()
+                            )
+                        }
+                } TestOut => TestFinaliseRole,
             },
             chunking: by_budget {
-                estimator: estimator.estimator(),
                 items: |seed: &TestSeed| seed.items.clone(),
                 render: |item: &TestItem, _ctx| format!("{}", item.value),
                 budget: ::obzenflow_core::ai::TokenCount::new(100),
                 max_items: None,
                 oversize: error,
-            },
-            effects: {
-                chat_target: target,
-                chat_estimator: estimator,
-                map: [at_least_once(ChatCompletion) with []],
-                reduce: [at_least_once(ChatCompletion) with []],
             }
         );
 
@@ -394,34 +447,26 @@ mod tests {
 
     #[test]
     fn ai_map_reduce_rejects_an_estimator_for_a_different_target_model() {
-        let target = ChatTarget::new("ollama", "test-model");
-        let estimator = test_estimator("different-model");
+        let chat = test_chat_contract("test-model", "different-model");
         let digest = crate::ai_map_reduce!(
             TestSeed -> TestOut => {
-                map: [TestItem] -> TestPartial => TestMapRole {
-                    target: target.clone(),
-                },
-                reduce: (TestSeed, [TestPartial]) -> TestOut => TestFinaliseRole {
-                    target: target.clone(),
-                },
+                map: [TestItem] ->{
+                    at_least_once(ChatCompletion)
+                        via chat
+                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                } TestPartial => TestMapRole,
+                reduce: (TestSeed, [TestPartial]) ->{
+                    at_least_once(ChatCompletion)
+                        via chat
+                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                } TestOut => TestFinaliseRole,
             },
             chunking: by_budget {
-                estimator: estimator.estimator(),
                 items: |seed: &TestSeed| seed.items.clone(),
                 render: |item: &TestItem, _ctx| format!("{}", item.value),
                 budget: ::obzenflow_core::ai::TokenCount::new(100),
                 max_items: None,
                 oversize: error,
-            },
-            effects: {
-                chat_target: target,
-                chat_estimator: estimator,
-                map: [at_least_once(ChatCompletion) with [
-                    obzenflow_adapters::middleware::control::ai_resilience()
-                ]],
-                reduce: [at_least_once(ChatCompletion) with [
-                    obzenflow_adapters::middleware::control::ai_resilience()
-                ]],
             }
         );
 
@@ -434,15 +479,59 @@ mod tests {
         };
         match error {
             crate::dsl::FlowBuildError::BindingConfiguration { binding, detail } => {
-                assert_eq!(binding, "chat_estimator");
-                assert!(detail.contains("effects.chat_estimator"));
-                assert!(detail.contains("different-model"));
-                assert!(detail.contains("test-model"));
+                assert_eq!(binding, "chat");
+                assert!(detail.contains("estimator model"));
             }
             other => panic!(
                 "estimator mismatch must be a typed pre-substrate binding error, got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn ai_map_reduce_rejects_equal_but_separately_constructed_chat_contracts() {
+        let map_chat = test_chat_contract("test-model", "test-model");
+        let finalise_chat = test_chat_contract("test-model", "test-model");
+        assert_eq!(map_chat.target(), finalise_chat.target());
+        assert!(
+            !map_chat.shares_construction_origin(&finalise_chat),
+            "the witness needs equal metadata from distinct construction decisions"
+        );
+        let digest = crate::ai_map_reduce!(
+            TestSeed -> TestOut => {
+                map: [TestItem] ->{
+                    at_least_once(ChatCompletion)
+                        via map_chat
+                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                } TestPartial => TestMapRole,
+                reduce: (TestSeed, [TestPartial]) ->{
+                    at_least_once(ChatCompletion)
+                        via finalise_chat
+                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                } TestOut => TestFinaliseRole,
+            },
+            chunking: by_budget {
+                items: |seed: &TestSeed| seed.items.clone(),
+                render: |item: &TestItem, _ctx| format!("{}", item.value),
+                budget: ::obzenflow_core::ai::TokenCount::new(100),
+                max_items: None,
+                oversize: error,
+            }
+        );
+
+        let mut members: HashMap<String, FlowMember> = HashMap::new();
+        members.insert("digest".to_string(), digest.into_flow_member());
+        let error = match lower_composites(members, &mut Vec::new()) {
+            Ok(_) => panic!("equal-valued independent contracts must fail closed"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            crate::dsl::FlowBuildError::BindingConfiguration { binding, detail }
+                if binding == "chat"
+                    && detail.contains("must be clones of one ChatBindingContract")
+                    && detail.contains("equal target metadata does not prove")
+        ));
     }
 
     /// FLOWIP-114c Acceptance #20: composite outer-boundary invariant.
@@ -505,12 +594,6 @@ mod tests {
         let map_meta = map
             .typing_metadata()
             .expect("map stage should carry typing metadata");
-        assert!(
-            map_meta
-                .output_contract
-                .contains(&TypeHint::exact_payload::<ChatCompletionCompleted>()),
-            "map output contract includes the durable effect terminal"
-        );
         assert!(
             map_meta
                 .output_contract
@@ -1020,10 +1103,8 @@ mod tests {
         contract digest__chunk key=ai.map_reduce.planning_manifest.v1 visibility=routable
         contract digest__collect key=ai.map_reduce.job_failed.v1 visibility=unrouted
         contract digest__collect key=ai.map_reduce.reduce_input.v2 visibility=routable
-        contract digest__finalize key=ai.chat_completion.completed.v1 visibility=unrouted
         contract digest__finalize key=ai.map_reduce.finalise_failed.v1 visibility=unrouted
         contract digest__finalize key=test.ai_map_reduce.out.v1 visibility=unrouted
-        contract digest__map key=ai.chat_completion.completed.v1 visibility=unrouted
         contract digest__map key=ai.map_reduce.chunk_failed.v2 visibility=routable
         contract digest__map key=ai.map_reduce.planning_manifest.v1 visibility=routable
         contract digest__map key=ai.map_reduce.tagged_partial.v1 visibility=routable

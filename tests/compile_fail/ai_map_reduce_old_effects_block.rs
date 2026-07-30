@@ -13,6 +13,7 @@ fn main() {
         chunking: by_budget { placeholder },
         effects: {
             chat_target: target,
+            chat_estimator: estimator,
             map: [at_least_once(ChatCompletion) with []],
             reduce: [at_least_once(ChatCompletion) with []],
         }

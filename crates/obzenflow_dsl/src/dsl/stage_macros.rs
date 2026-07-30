@@ -4913,6 +4913,155 @@ macro_rules! __obzenflow_ai_map_reduce_chunker_by_budget {
 
 #[doc(hidden)]
 #[macro_export]
+macro_rules! __obzenflow_ai_chat_effect_row {
+    (
+        surface = $surface:literal,
+        row = {
+            at_least_once(ChatCompletion)
+                via $binding:ident
+                with { retry($($retry:tt)*) $(,)? }
+            $(,)?
+        }
+    ) => {
+        compile_error!(concat!(
+            $surface,
+            ": ChatCompletion is NonIdempotentAtLeastOnce; retry is forbidden"
+        ))
+    };
+    (
+        surface = $surface:literal,
+        row = {
+            at_least_once(ChatCompletion)
+                via $binding:ident
+                with { $first:expr, $($rest:expr),+ $(,)? }
+            $(,)?
+        }
+    ) => {
+        compile_error!(
+            "AI effect rows accept exactly one EffectResilience policy; \
+             multi-policy composition belongs to FLOWIP-132b"
+        )
+    };
+    (
+        surface = $surface:literal,
+        row = {
+            at_least_once(ChatCompletion)
+                via $binding:ident
+                with { $policy:expr $(,)? }
+            $(,)?
+        }
+    ) => {{
+        let __chat_binding: ::obzenflow_core::ai::ChatBindingContract =
+            $crate::dsl::ai_effect::clone_chat_contract(&$binding);
+        let __chat_policy: Box<
+            dyn ::obzenflow_adapters::middleware::MiddlewareFactory,
+        > = $policy;
+        (__chat_binding, __chat_policy)
+    }};
+    (
+        surface = $surface:literal,
+        row = { ChatCompletion $($rest:tt)* }
+    ) => {
+        compile_error!(concat!(
+            $surface,
+            ": paid non-idempotent ChatCompletion requires \
+             `at_least_once(ChatCompletion)` acknowledgement"
+        ))
+    };
+    (
+        surface = $surface:literal,
+        row = { transactional(ChatCompletion) $($rest:tt)* }
+    ) => {
+        compile_error!(concat!(
+            $surface,
+            ": ChatCompletion accepts only `at_least_once(ChatCompletion)`"
+        ))
+    };
+    (
+        surface = $surface:literal,
+        row = { $($invalid:tt)* }
+    ) => {
+        compile_error!(concat!(
+            $surface,
+            ": expected `at_least_once(ChatCompletion) via <chat binding> \
+             with { <EffectResilience> }`"
+        ))
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_inference_contract {
+    (
+        name = $name:literal,
+        input = ($($input:tt)+),
+        -> { $($row:tt)* } $out:ty => $role:expr
+        $(,)?
+    ) => {{
+        let (__chat_binding, __chat_policy) =
+            $crate::__obzenflow_ai_chat_effect_row!(
+                surface = "inference!",
+                row = { $($row)* }
+            );
+        $crate::dsl::inference::generated_inference::<$($input)+, $out, _>(
+            $name,
+            $role,
+            __chat_binding,
+            __chat_policy,
+        )
+    }};
+    (
+        name = $name:literal,
+        input = ($($input:tt)+),
+        -> { $($row:tt)* } $out:ty => $role:expr,
+        chunking: $($chunking:tt)*
+    ) => {
+        compile_error!(
+            "inference!: `chunking` is not supported; use `ai_map!` or `ai_map_reduce!`"
+        )
+    };
+    (
+        name = $name:literal,
+        input = ($($input:tt)*),
+        -> $($rest:tt)+
+    ) => {
+        compile_error!(
+            "inference!: expected `Input ->{ at_least_once(ChatCompletion) \
+             via <chat binding> with { <EffectResilience> } } Output => role`"
+        )
+    };
+    (
+        name = $name:literal,
+        input = ($($input:tt)*),
+        $token:tt $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_inference_contract!(
+            name = $name,
+            input = ($($input)* $token),
+            $($rest)+
+        )
+    };
+}
+
+/// Create one generated replay-safe scalar AI inference stage.
+#[macro_export]
+macro_rules! inference {
+    ([$item:ty] $($rest:tt)*) => {
+        compile_error!(
+            "inference!: batch input `[T]` is not supported; use `ai_map!` or `ai_map_reduce!`"
+        )
+    };
+    ($($rest:tt)+) => {
+        $crate::__obzenflow_inference_contract!(
+            name = "__obzenflow_binding_derived_name__",
+            input = (),
+            $($rest)+
+        )
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
 macro_rules! __obzenflow_ai_map_reduce_generated_typed {
     (
         name = $name:literal,
@@ -4923,34 +5072,11 @@ macro_rules! __obzenflow_ai_map_reduce_generated_typed {
         chunker = ($chunker:expr),
         map_role = ($map_role:expr),
         finalise_role = ($finalise_role:expr),
-        chat_target = ($chat_target:expr),
-        chat_estimator = ($chat_estimator:expr),
-        map_policies = [$($map_policy:expr),* $(,)?],
-        finalise_policies = [$($finalise_policy:expr),* $(,)?]
+        map_chat = ($map_chat:expr),
+        finalise_chat = ($finalise_chat:expr),
+        map_policy = ($map_policy:expr),
+        finalise_policy = ($finalise_policy:expr)
     ) => {{
-        let mut __map_policies: Vec<
-            Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>,
-        > = Vec::new();
-        $(
-            {
-                let __policy: Box<
-                    dyn ::obzenflow_adapters::middleware::MiddlewareFactory,
-                > = $map_policy;
-                __map_policies.push(__policy);
-            }
-        )*
-        let mut __finalise_policies: Vec<
-            Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>,
-        > = Vec::new();
-        $(
-            {
-                let __policy: Box<
-                    dyn ::obzenflow_adapters::middleware::MiddlewareFactory,
-                > = $finalise_policy;
-                __finalise_policies.push(__policy);
-            }
-        )*
-
         $crate::dsl::composites::ai_map_reduce::generated_map_reduce::<
             $($seed_ty)+,
             $item_ty,
@@ -4962,200 +5088,16 @@ macro_rules! __obzenflow_ai_map_reduce_generated_typed {
         >(
             $name,
             ($chunker, $map_role, $finalise_role),
-            ($chat_target, $chat_estimator),
-            (__map_policies, __finalise_policies),
+            ($map_chat, $finalise_chat),
+            (vec![$map_policy], vec![$finalise_policy]),
         )
     }};
 }
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_ai_map_reduce_effects_contract {
+macro_rules! __obzenflow_ai_map_reduce_build {
     (
-        effects = {
-            chat_target: $chat_target:expr,
-            chat_estimator: $chat_estimator:expr,
-            map: [at_least_once(ChatCompletion) with [
-                retry($($retry:tt)*) $(, $map_rest:expr)* $(,)?
-            ]],
-            $($rest:tt)*
-        },
-        build = { $($build:tt)* }
-    ) => {
-        compile_error!(
-            "ai_map_reduce!: effect 'ChatCompletion' on role 'map' is \
-             NonIdempotentAtLeastOnce; retry is forbidden"
-        )
-    };
-    (
-        effects = {
-            chat_target: $chat_target:expr,
-            chat_estimator: $chat_estimator:expr,
-            map: [at_least_once(ChatCompletion) with [
-                ai_circuit_breaker($($breaker:tt)*) $(, $map_rest:expr)* $(,)?
-            ]],
-            $($rest:tt)*
-        },
-        build = { $($build:tt)* }
-    ) => {
-        compile_error!(
-            "ai_map_reduce!: role 'map' middleware 'ai_circuit_breaker' is control-capable; \
-             attach `ai_resilience()` to `ChatCompletion` in `effects:`"
-        )
-    };
-    (
-        effects = {
-            chat_target: $chat_target:expr,
-            chat_estimator: $chat_estimator:expr,
-            map: [at_least_once(ChatCompletion) with [$($map_policy:expr),* $(,)?]],
-            reduce: [at_least_once(ChatCompletion) with [$($finalise_policy:expr),* $(,)?]]
-            $(,)?
-        },
-        build = { $($build:tt)* }
-    ) => {
-        $crate::__obzenflow_ai_map_reduce_generated_contract!(
-            @build
-            $($build)*
-            chat_target = ($chat_target),
-            chat_estimator = ($chat_estimator),
-            map_policies = [$($map_policy),*],
-            finalise_policies = [$($finalise_policy),*]
-        )
-    };
-
-    (
-        effects = {
-            chat_estimator: $chat_estimator:expr,
-            $($rest:tt)*
-        },
-        build = { $($build:tt)* }
-    ) => {
-        compile_error!(
-            "ai_map_reduce!: missing mandatory `chat_target` in `effects:`; \
-             declare the one ChatTarget shared by map, reduce, and the flow-level 'chat' port"
-        )
-    };
-    (
-        effects = {
-            chat_target: $chat_target:expr,
-            map: $map:tt,
-            $($rest:tt)*
-        },
-        build = { $($build:tt)* }
-    ) => {
-        compile_error!(
-            "ai_map_reduce!: missing mandatory `chat_estimator` in `effects:`; \
-             declare the ResolvedTokenEstimator selected with the flow-level 'chat' binding"
-        )
-    };
-    (
-        effects = {
-            chat_target: $chat_target:expr,
-            chat_estimator: $chat_estimator:expr,
-            reduce: $reduce:tt
-            $(,)?
-        },
-        build = { $($build:tt)* }
-    ) => {
-        compile_error!(
-            "ai_map_reduce!: missing mandatory effects entry for role 'map'; \
-             add `map: [at_least_once(ChatCompletion) ...]`"
-        )
-    };
-    (
-        effects = {
-            chat_target: $chat_target:expr,
-            chat_estimator: $chat_estimator:expr,
-            map: $map:tt
-            $(,)?
-        },
-        build = { $($build:tt)* }
-    ) => {
-        compile_error!(
-            "ai_map_reduce!: missing mandatory effects entry for role 'reduce'; \
-             add `reduce: [at_least_once(ChatCompletion) ...]`"
-        )
-    };
-    (
-        effects = {
-            chat_target: $chat_target:expr,
-            chat_estimator: $chat_estimator:expr,
-            chunk: $chunk:tt,
-            $($rest:tt)*
-        },
-        build = { $($build:tt)* }
-    ) => {
-        compile_error!(
-            "ai_map_reduce!: role 'chunk' cannot declare effects; expected 'map' or 'reduce'"
-        )
-    };
-    (
-        effects = {
-            chat_target: $chat_target:expr,
-            chat_estimator: $chat_estimator:expr,
-            map: [ChatCompletion $($map_rest:tt)*],
-            $($rest:tt)*
-        },
-        build = { $($build:tt)* }
-    ) => {
-        compile_error!(
-            "ai_map_reduce!: role 'map' declares paid non-idempotent effect \
-             'ChatCompletion' without acknowledgement; write `at_least_once(ChatCompletion)`"
-        )
-    };
-    (
-        effects = { $($effects:tt)* },
-        build = { $($build:tt)* }
-    ) => {
-        compile_error!(
-            "ai_map_reduce!: invalid `effects:` contract; expected mandatory `chat_target`, \
-             `chat_estimator`, and map/reduce `at_least_once(ChatCompletion)` entries"
-        )
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_ai_map_reduce_generated_contract {
-    (
-        name = $name:literal,
-        $($rest:tt)+
-    ) => {
-        $crate::__obzenflow_ai_map_reduce_generated_contract!(@seed name = $name, seed = (), $($rest)+)
-    };
-
-    // ── FLOWIP-128g generated effectful protocol ──
-    (@seed
-        name = $name:literal,
-        seed = ($($seed_ty:tt)+),
-        -> $out_ty:ty => {
-            map: [$item_ty:ty] -> $partial_ty:ty => $map_role:expr,
-            reduce: ($reduce_seed_ty:ty, [$reduce_partial_ty:ty]) -> $reduce_out_ty:ty
-                => $finalise_role:expr $(,)?
-        },
-        chunking: by_budget { $($chunking:tt)+ },
-        effects: { $($effects:tt)* }
-        $(,)?
-    ) => {
-        $crate::__obzenflow_ai_map_reduce_effects_contract!(
-            effects = { $($effects)* },
-            build = {
-                name = $name,
-                seed_type = ($($seed_ty)+),
-                item_type = ($item_ty),
-                partial_type = ($partial_ty),
-                out_type = ($out_ty),
-                reduce_seed_type = ($reduce_seed_ty),
-                reduce_partial_type = ($reduce_partial_ty),
-                reduce_out_type = ($reduce_out_ty),
-                chunking = { $($chunking)+ },
-                map_role = ($map_role),
-                finalise_role = ($finalise_role),
-            }
-        )
-    };
-
-    (@build
         name = $name:literal,
         seed_type = ($($seed_ty:tt)+),
         item_type = ($item_ty:ty),
@@ -5164,14 +5106,50 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
         reduce_seed_type = ($reduce_seed_ty:ty),
         reduce_partial_type = ($reduce_partial_ty:ty),
         reduce_out_type = ($reduce_out_ty:ty),
-        chunking = { $($chunking:tt)+ },
         map_role = ($map_role:expr),
         finalise_role = ($finalise_role:expr),
-        chat_target = ($chat_target:expr),
-        chat_estimator = ($chat_estimator:expr),
-        map_policies = [$($map_policy:expr),* $(,)?],
-        finalise_policies = [$($finalise_policy:expr),* $(,)?]
+        map_row = { $($map_row:tt)* },
+        finalise_row = { $($finalise_row:tt)* },
+        chunking = {
+            estimator: $estimator:expr,
+            $($chunking:tt)*
+        }
+    ) => {
+        compile_error!(
+            "ai_map_reduce!: `chunking.estimator` is supplied by `via chat`"
+        )
+    };
+    (
+        name = $name:literal,
+        seed_type = ($($seed_ty:tt)+),
+        item_type = ($item_ty:ty),
+        partial_type = ($partial_ty:ty),
+        out_type = ($out_ty:ty),
+        reduce_seed_type = ($reduce_seed_ty:ty),
+        reduce_partial_type = ($reduce_partial_ty:ty),
+        reduce_out_type = ($reduce_out_ty:ty),
+        map_role = ($map_role:expr),
+        finalise_role = ($finalise_role:expr),
+        map_row = { $($map_row:tt)* },
+        finalise_row = { $($finalise_row:tt)* },
+        chunking = { $($chunking:tt)+ }
     ) => {{
+        let (__map_chat, __map_policy) =
+            $crate::__obzenflow_ai_chat_effect_row!(
+                surface = "ai_map_reduce!",
+                row = { $($map_row)* }
+            );
+        let (__finalise_chat, __finalise_policy) =
+            $crate::__obzenflow_ai_chat_effect_row!(
+                surface = "ai_map_reduce!",
+                row = { $($finalise_row)* }
+            );
+        let __chunker = $crate::__obzenflow_ai_map_reduce_chunker_by_budget!(
+            seed_type = ($($seed_ty)+),
+            item_type = ($item_ty),
+            estimator: __map_chat.estimator().estimator(),
+            $($chunking)+
+        );
         let _: ::core::marker::PhantomData<$($seed_ty)+> =
             ::core::marker::PhantomData::<$reduce_seed_ty>;
         let _: ::core::marker::PhantomData<$partial_ty> =
@@ -5179,11 +5157,6 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
         let _: ::core::marker::PhantomData<$out_ty> =
             ::core::marker::PhantomData::<$reduce_out_ty>;
 
-        let __chunker = $crate::__obzenflow_ai_map_reduce_chunker_by_budget!(
-            seed_type = ($($seed_ty)+),
-            item_type = ($item_ty),
-            $($chunking)+
-        );
         $crate::__obzenflow_ai_map_reduce_generated_typed!(
             name = $name,
             seed_type = ($($seed_ty)+),
@@ -5193,39 +5166,75 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
             chunker = (__chunker),
             map_role = ($map_role),
             finalise_role = ($finalise_role),
-            chat_target = ($chat_target),
-            chat_estimator = ($chat_estimator),
-            map_policies = [$($map_policy),*],
-            finalise_policies = [$($finalise_policy),*]
+            map_chat = (__map_chat),
+            finalise_chat = (__finalise_chat),
+            map_policy = (__map_policy),
+            finalise_policy = (__finalise_policy)
         )
     }};
+}
 
-    (@seed
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_ai_map_reduce_generated_contract {
+    (
         name = $name:literal,
         seed = ($($seed_ty:tt)+),
+        -> $out_ty:ty => {
+            map: [$item_ty:ty] -> { $($map_row:tt)* } $partial_ty:ty => $map_role:expr,
+            reduce: ($reduce_seed_ty:ty, [$reduce_partial_ty:ty])
+                -> { $($finalise_row:tt)* } $reduce_out_ty:ty => $finalise_role:expr
+                $(,)?
+        },
+        chunking: by_budget { $($chunking:tt)+ }
+        $(,)?
+    ) => {
+        $crate::__obzenflow_ai_map_reduce_build!(
+            name = $name,
+            seed_type = ($($seed_ty)+),
+            item_type = ($item_ty),
+            partial_type = ($partial_ty),
+            out_type = ($out_ty),
+            reduce_seed_type = ($reduce_seed_ty),
+            reduce_partial_type = ($reduce_partial_ty),
+            reduce_out_type = ($reduce_out_ty),
+            map_role = ($map_role),
+            finalise_role = ($finalise_role),
+            map_row = { $($map_row)* },
+            finalise_row = { $($finalise_row)* },
+            chunking = { $($chunking)+ }
+        )
+    };
+    (
+        name = $name:literal,
+        seed = ($($seed_ty:tt)+),
+        -> $out_ty:ty => { $($roles:tt)* },
+        chunking: by_budget { $($chunking:tt)* },
+        effects: { $($effects:tt)* }
+        $(,)?
+    ) => {
+        compile_error!(
+            "ai_map_reduce!: `effects: { ... }` was replaced by role-local effect rows"
+        )
+    };
+    (
+        name = $name:literal,
+        seed = ($($seed:tt)*),
         -> $($rest:tt)+
     ) => {
         compile_error!(
-            "ai_map_reduce!: generated AI roles require `effects: { chat_target: ..., \
-             chat_estimator: ..., map: [at_least_once(ChatCompletion) with [...]], \
-             reduce: [at_least_once(ChatCompletion) with [...]] }`"
-        );
-    };
-
-    // ── seed type accumulator ──
-    (@seed name = $name:literal, seed = ($($seed:tt)*), -> $($rest:tt)+) => {
-        $crate::__obzenflow_ai_map_reduce_generated_contract!(
-            @seed
-            name = $name,
-            seed = ($($seed)+),
-            -> $($rest)+
+            "ai_map_reduce!: expected role-local `->{ at_least_once(ChatCompletion) \
+             via <chat binding> with { <EffectResilience> } }` rows on map and reduce"
         )
     };
-    (@seed name = $name:literal, seed = ($($seed:tt)*), $tok:tt $($rest:tt)+) => {
+    (
+        name = $name:literal,
+        seed = ($($seed:tt)*),
+        $token:tt $($rest:tt)+
+    ) => {
         $crate::__obzenflow_ai_map_reduce_generated_contract!(
-            @seed
             name = $name,
-            seed = ($($seed)* $tok),
+            seed = ($($seed)* $token),
             $($rest)+
         )
     };
@@ -5255,6 +5264,7 @@ macro_rules! ai_map_reduce {
     ($($rest:tt)+) => {
         $crate::__obzenflow_ai_map_reduce_generated_contract!(
             name = "__obzenflow_binding_derived_name__",
+            seed = (),
             $($rest)+
         )
     };

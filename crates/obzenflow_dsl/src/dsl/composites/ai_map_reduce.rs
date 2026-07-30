@@ -23,8 +23,8 @@ use obzenflow_adapters::middleware::MiddlewareFactory;
 use obzenflow_core::ai::{
     AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceJobFailed,
     AiMapReduceMapInput, AiMapReducePlanningFailed, AiMapReducePlanningManifest,
-    AiMapReduceReduceInput, AiMapReduceTaggedPartial, AiMapRole, ChatCompletionCompleted,
-    ChatTarget, ChunkEnvelope, Many, ResolvedTokenEstimator,
+    AiMapReduceReduceInput, AiMapReduceTaggedPartial, AiMapRole, ChatBindingContract,
+    ChunkEnvelope, Many,
 };
 use obzenflow_core::id::CompositeId;
 use obzenflow_core::TypedPayload;
@@ -49,7 +49,7 @@ type GeneratedMapReduceTypes<Seed, Item, Partial, Out> = fn() -> (Seed, Item, Pa
 pub fn generated_map_reduce<Seed, Item, Partial, Out, Chunker, MapRole, FinaliseRole>(
     name: impl Into<String>,
     roles: (Chunker, MapRole, FinaliseRole),
-    chat_binding: (ChatTarget, ResolvedTokenEstimator),
+    chat_bindings: (ChatBindingContract, ChatBindingContract),
     policies: GeneratedEffectPolicies,
 ) -> Box<dyn CompositeDescriptor>
 where
@@ -75,15 +75,15 @@ where
     FinaliseRole: AiFinaliseRole<Seed, Many<Partial>, Out>,
 {
     let (chunker, map_role, finalise_role) = roles;
-    let (chat_target, chat_estimator) = chat_binding;
+    let (map_chat_binding, finalise_chat_binding) = chat_bindings;
     let (map_policies, finalise_policies) = policies;
     Box::new(GeneratedAiMapReduceCompositeDescriptor {
         name: name.into(),
         chunker,
         map_role,
         finalise_role,
-        chat_target,
-        chat_estimator,
+        map_chat_binding,
+        finalise_chat_binding,
         map_policies,
         finalise_policies,
         _types: PhantomData,
@@ -103,8 +103,8 @@ struct GeneratedAiMapReduceCompositeDescriptor<
     chunker: Chunker,
     map_role: MapRole,
     finalise_role: FinaliseRole,
-    chat_target: ChatTarget,
-    chat_estimator: ResolvedTokenEstimator,
+    map_chat_binding: ChatBindingContract,
+    finalise_chat_binding: ChatBindingContract,
     map_policies: Vec<Box<dyn MiddlewareFactory>>,
     finalise_policies: Vec<Box<dyn MiddlewareFactory>>,
     _types: PhantomData<GeneratedMapReduceTypes<Seed, Item, Partial, Out>>,
@@ -159,15 +159,23 @@ where
     }
 
     fn expand(self: Box<Self>, ctx: &mut CompositeBuildContext) -> Result<(), CompositeBuildError> {
-        if self.chat_estimator.info().model != self.chat_target.model {
+        if !self
+            .map_chat_binding
+            .shares_construction_origin(&self.finalise_chat_binding)
+        {
             return Err(CompositeBuildError::binding_configuration(
-                "chat_estimator",
-                format!(
-                    "ai_map_reduce!: `effects.chat_estimator` model '{}' does not match \
-                 `effects.chat_target` model '{}'",
-                    self.chat_estimator.info().model,
-                    self.chat_target.model
-                ),
+                "chat",
+                "ai_map_reduce!: map binding `map_chat` and reduce binding `reduce_chat` \
+                 must be clones of one ChatBindingContract; equal target metadata does not \
+                 prove one estimator/configuration decision",
+            ));
+        }
+        if self.map_chat_binding.estimator().info().model
+            != self.map_chat_binding.target().model
+        {
+            return Err(CompositeBuildError::binding_configuration(
+                "chat",
+                "ai_map_reduce!: ChatBindingContract estimator model does not match its chat target",
             ));
         }
 
@@ -202,8 +210,7 @@ where
 
         let map_handler = GeneratedAiMapHandler::<Item, Partial, _>::new(
             self.map_role,
-            self.chat_target.clone(),
-            self.chat_estimator.clone(),
+            self.map_chat_binding,
         );
         let map_descriptor = wrap_typed_descriptor(
             Box::new(EffectfulTransformDescriptor::generated_with_pass_through::<
@@ -221,13 +228,12 @@ where
             )),
             StageTypingMetadata::transform(
                 TypeHint::exact_payload::<AiMapReduceMapInput<ChunkEnvelope<Item>>>(),
-                TypeHint::exact_payload::<ChatCompletionCompleted>(),
+                TypeHint::exact_payload::<AiMapReduceTaggedPartial<Partial>>(),
                 false,
                 None,
             )
             .with_additional_output_contract(vec![
                 TypeHint::exact_payload::<AiMapReducePlanningManifest>(),
-                TypeHint::exact_payload::<AiMapReduceTaggedPartial<Partial>>(),
                 TypeHint::exact_payload::<AiMapReduceChunkFailed>(),
             ]),
         );
@@ -261,8 +267,7 @@ where
 
         let finalise_handler = GeneratedAiFinaliseHandler::<Seed, Many<Partial>, Out, _>::new(
             self.finalise_role,
-            self.chat_target,
-            self.chat_estimator,
+            self.finalise_chat_binding,
         );
         let finalise_descriptor = wrap_typed_descriptor(
             Box::new(EffectfulTransformDescriptor::generated::<
@@ -283,10 +288,9 @@ where
                 false,
                 None,
             )
-            .with_additional_output_contract(vec![
-                TypeHint::exact_payload::<ChatCompletionCompleted>(),
-                TypeHint::exact_payload::<AiMapReduceFinaliseFailed>(),
-            ]),
+            .with_additional_output_contract(vec![TypeHint::exact_payload::<
+                AiMapReduceFinaliseFailed,
+            >()]),
         );
 
         ctx.member("chunk").descriptor(chunk_descriptor);
@@ -332,6 +336,7 @@ fn require_generated_resilience(
 
     Err(CompositeBuildError::new(format!(
         "ai_map_reduce!: generated role '{role}' requires exactly one EffectResilience \
-         policy on 'ChatCompletion'; attach `ai_resilience()` in `effects:` (found {count})"
+         policy on 'ChatCompletion'; attach `with {{ ai_resilience() }}` to the role row \
+         (found {count})"
     )))
 }

@@ -21,8 +21,9 @@
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     AiClientError, AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatClient,
-    ChatCompletionCompleted, ChatMessage, ChatParams, ChatRequest, ChatResponse, ChatTarget,
-    HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenCount,
+    ChatBindingContract, ChatCompletionReply, ChatMessage, ChatParams, ChatRequest,
+    ChatRequestSpec, ChatResponse, ChatTarget, HeuristicTokenEstimator, Many,
+    ResolvedTokenEstimator, TokenCount,
     TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
@@ -75,36 +76,28 @@ fn test_target() -> ChatTarget {
     ChatTarget::new("test", "deterministic")
 }
 
-struct BuildMapRole {
-    target: ChatTarget,
-}
+struct BuildMapRole;
 
 impl AiMapRole<BuildOnlyItem, BuildOnlyPartial> for BuildMapRole {
-    type Prepared = ();
-
     fn prepare(
         &self,
         items: &[BuildOnlyItem],
         _chunk: &obzenflow_core::ai::ChunkInfo,
-    ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure> {
-        Ok((
-            ChatRequest {
-                provider: self.target.provider.clone(),
-                model: self.target.model.clone(),
-                messages: vec![ChatMessage::user(format!("{} items", items.len()))],
-                params: ChatParams::default(),
-                tools: Vec::new(),
-                response_format: None,
-            },
-            (),
-        ))
+    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+        Ok(ChatRequestSpec {
+            messages: vec![ChatMessage::user(format!("{} items", items.len()))],
+            params: ChatParams::default(),
+            tools: Vec::new(),
+            response_format: None,
+        })
     }
 
     fn interpret(
         &self,
         items: Vec<BuildOnlyItem>,
-        _prepared: Self::Prepared,
-        _completion: ChatCompletionCompleted,
+        _chunk: obzenflow_core::ai::ChunkInfo,
+        _request: ChatRequestSpec,
+        _reply: ChatCompletionReply,
     ) -> Result<BuildOnlyPartial, AiRoleLogicFailure> {
         Ok(BuildOnlyPartial {
             value: items.into_iter().map(|item| item.value).sum(),
@@ -112,40 +105,31 @@ impl AiMapRole<BuildOnlyItem, BuildOnlyPartial> for BuildMapRole {
     }
 }
 
-struct BuildFinaliseRole {
-    target: ChatTarget,
-}
+struct BuildFinaliseRole;
 
 impl AiFinaliseRole<BuildOnlySeed, Many<BuildOnlyPartial>, BuildOnlyOut> for BuildFinaliseRole {
-    type Prepared = ();
-
     fn prepare(
         &self,
         _seed: &BuildOnlySeed,
         collected: &Many<BuildOnlyPartial>,
-    ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure> {
-        Ok((
-            ChatRequest {
-                provider: self.target.provider.clone(),
-                model: self.target.model.clone(),
-                messages: vec![ChatMessage::user(format!(
-                    "{} partials",
-                    collected.items.len()
-                ))],
-                params: ChatParams::default(),
-                tools: Vec::new(),
-                response_format: None,
-            },
-            (),
-        ))
+    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+        Ok(ChatRequestSpec {
+            messages: vec![ChatMessage::user(format!(
+                "{} partials",
+                collected.items.len()
+            ))],
+            params: ChatParams::default(),
+            tools: Vec::new(),
+            response_format: None,
+        })
     }
 
     fn interpret(
         &self,
         _seed: BuildOnlySeed,
         collected: Many<BuildOnlyPartial>,
-        _prepared: Self::Prepared,
-        _completion: ChatCompletionCompleted,
+        _request: ChatRequestSpec,
+        _reply: ChatCompletionReply,
     ) -> Result<BuildOnlyOut, AiRoleLogicFailure> {
         Ok(BuildOnlyOut {
             total: collected
@@ -202,20 +186,22 @@ macro_rules! generated_digest {
         generated_digest!("deterministic")
     }};
     ($estimator_model:expr) => {{
-        let target = test_target();
-        let estimator = test_estimator($estimator_model);
+        let chat =
+            ChatBindingContract::from_resolved(test_target(), test_estimator($estimator_model));
         ai_map_reduce!(
             BuildOnlySeed -> BuildOnlyOut => {
-                map: [BuildOnlyItem] -> BuildOnlyPartial => BuildMapRole {
-                    target: target.clone(),
-                },
-                reduce: (BuildOnlySeed, [BuildOnlyPartial]) -> BuildOnlyOut
-                    => BuildFinaliseRole {
-                        target: target.clone(),
-                    },
+                map: [BuildOnlyItem] ->{
+                    at_least_once(ChatCompletion)
+                        via chat
+                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                } BuildOnlyPartial => BuildMapRole,
+                reduce: (BuildOnlySeed, [BuildOnlyPartial]) ->{
+                    at_least_once(ChatCompletion)
+                        via chat
+                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                } BuildOnlyOut => BuildFinaliseRole,
             },
             chunking: by_budget {
-                estimator: estimator.estimator(),
                 items: |seed: &BuildOnlySeed| {
                     (1..=seed.n)
                         .map(|value| BuildOnlyItem { value })
@@ -225,16 +211,6 @@ macro_rules! generated_digest {
                 budget: TokenCount::new(100),
                 max_items: Some(1),
                 oversize: error,
-            },
-            effects: {
-                chat_target: target,
-                chat_estimator: estimator,
-                map: [at_least_once(ChatCompletion) with [
-                    obzenflow_adapters::middleware::control::ai_resilience()
-                ]],
-                reduce: [at_least_once(ChatCompletion) with [
-                    obzenflow_adapters::middleware::control::ai_resilience()
-                ]],
             }
         )
     }};
@@ -393,14 +369,12 @@ async fn flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
         journals: memory_journals(),
         middleware: [],
         bindings: |_runtime_config| {
-            let bound_chat_target = test_target();
-            let bound_chat_estimator = test_estimator("deterministic");
-            let bound_map_role = BuildMapRole {
-                target: bound_chat_target.clone(),
-            };
-            let bound_finalise_role = BuildFinaliseRole {
-                target: bound_chat_target.clone(),
-            };
+            let chat = ChatBindingContract::from_resolved(
+                test_target(),
+                test_estimator("deterministic"),
+            );
+            let bound_map_role = BuildMapRole;
+            let bound_finalise_role = BuildFinaliseRole;
             let bound_effect_ports = test_effect_ports();
         },
         effect_ports: bound_effect_ports,
@@ -409,12 +383,18 @@ async fn flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
             seed = source!(BuildOnlySeed => NoEventSource);
             digest = ai_map_reduce!(
                 BuildOnlySeed -> BuildOnlyOut => {
-                    map: [BuildOnlyItem] -> BuildOnlyPartial => bound_map_role,
-                    reduce: (BuildOnlySeed, [BuildOnlyPartial]) -> BuildOnlyOut
-                        => bound_finalise_role,
+                    map: [BuildOnlyItem] ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { obzenflow_adapters::middleware::control::ai_resilience() }
+                    } BuildOnlyPartial => bound_map_role,
+                    reduce: (BuildOnlySeed, [BuildOnlyPartial]) ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { obzenflow_adapters::middleware::control::ai_resilience() }
+                    } BuildOnlyOut => bound_finalise_role,
                 },
                 chunking: by_budget {
-                    estimator: bound_chat_estimator.estimator(),
                     items: |seed: &BuildOnlySeed| {
                         (1..=seed.n)
                             .map(|value| BuildOnlyItem { value })
@@ -424,16 +404,6 @@ async fn flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
                     budget: TokenCount::new(100),
                     max_items: Some(1),
                     oversize: error,
-                },
-                effects: {
-                    chat_target: bound_chat_target,
-                    chat_estimator: bound_chat_estimator,
-                    map: [at_least_once(ChatCompletion) with [
-                        obzenflow_adapters::middleware::control::ai_resilience()
-                    ]],
-                    reduce: [at_least_once(ChatCompletion) with [
-                        obzenflow_adapters::middleware::control::ai_resilience()
-                    ]],
                 }
             );
             sink_stage = sink!(BuildOnlyOut => NoopSink);
@@ -458,14 +428,12 @@ async fn test_flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
         journals: memory_journals(),
         middleware: [],
         bindings: |_runtime_config| {
-            let bound_chat_target = test_target();
-            let bound_chat_estimator = test_estimator("deterministic");
-            let bound_map_role = BuildMapRole {
-                target: bound_chat_target.clone(),
-            };
-            let bound_finalise_role = BuildFinaliseRole {
-                target: bound_chat_target.clone(),
-            };
+            let chat = ChatBindingContract::from_resolved(
+                test_target(),
+                test_estimator("deterministic"),
+            );
+            let bound_map_role = BuildMapRole;
+            let bound_finalise_role = BuildFinaliseRole;
             let bound_effect_ports = test_effect_ports();
         },
         effect_ports: bound_effect_ports,
@@ -474,12 +442,18 @@ async fn test_flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
             seed = source!(BuildOnlySeed => NoEventSource);
             digest = ai_map_reduce!(
                 BuildOnlySeed -> BuildOnlyOut => {
-                    map: [BuildOnlyItem] -> BuildOnlyPartial => bound_map_role,
-                    reduce: (BuildOnlySeed, [BuildOnlyPartial]) -> BuildOnlyOut
-                        => bound_finalise_role,
+                    map: [BuildOnlyItem] ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { obzenflow_adapters::middleware::control::ai_resilience() }
+                    } BuildOnlyPartial => bound_map_role,
+                    reduce: (BuildOnlySeed, [BuildOnlyPartial]) ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { obzenflow_adapters::middleware::control::ai_resilience() }
+                    } BuildOnlyOut => bound_finalise_role,
                 },
                 chunking: by_budget {
-                    estimator: bound_chat_estimator.estimator(),
                     items: |seed: &BuildOnlySeed| {
                         (1..=seed.n)
                             .map(|value| BuildOnlyItem { value })
@@ -489,16 +463,6 @@ async fn test_flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
                     budget: TokenCount::new(100),
                     max_items: Some(1),
                     oversize: error,
-                },
-                effects: {
-                    chat_target: bound_chat_target,
-                    chat_estimator: bound_chat_estimator,
-                    map: [at_least_once(ChatCompletion) with [
-                        obzenflow_adapters::middleware::control::ai_resilience()
-                    ]],
-                    reduce: [at_least_once(ChatCompletion) with [
-                        obzenflow_adapters::middleware::control::ai_resilience()
-                    ]],
                 }
             );
             sink_stage = sink!(BuildOnlyOut => NoopSink);
@@ -553,11 +517,11 @@ async fn estimator_mismatch_fails_before_journal_or_effect_port_evaluation() {
 
     match failure.error {
         obzenflow_dsl::dsl::FlowBuildError::BindingConfiguration { binding, detail } => {
-            assert_eq!(binding, "chat_estimator");
-            assert!(detail.contains("different-model"));
-            assert!(detail.contains("deterministic"));
+            assert_eq!(binding, "chat");
+            assert!(detail.contains("estimator model"));
+            assert!(detail.contains("chat target"));
         }
-        other => panic!("expected typed chat_estimator binding failure, got {other:?}"),
+        other => panic!("expected typed chat binding failure, got {other:?}"),
     }
     assert!(
         !journals_evaluated.load(Ordering::SeqCst),

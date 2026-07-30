@@ -15,8 +15,8 @@ use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_tr
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_adapters::middleware::{CircuitBreaker, RateLimiterBuilder};
 use obzenflow_core::ai::{
-    AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatClient, ChatCompletionCompleted,
-    ChatMessage, ChatParams, ChatRequest, ChatResponse, ChatTarget, Many,
+    AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply, ChatMessage,
+    ChatParams, ChatRequestSpec, ChatResponse, ChatTarget, Many, CHAT_CLIENT_PORT,
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::error::FlowBuildError;
@@ -76,15 +76,13 @@ struct DigestMapCtx {
 }
 
 struct HnMapRole {
-    target: ChatTarget,
     system_prompt: SystemPrompt,
     context: DigestMapCtx,
 }
 
 impl HnMapRole {
-    fn new(target: ChatTarget, system_prompt: SystemPrompt, context: DigestMapCtx) -> Self {
+    fn new(system_prompt: SystemPrompt, context: DigestMapCtx) -> Self {
         Self {
-            target,
             system_prompt,
             context,
         }
@@ -92,21 +90,17 @@ impl HnMapRole {
 }
 
 impl AiMapRole<FormattedStory, HnDigestGroupSummary> for HnMapRole {
-    type Prepared = UserPrompt;
-
     fn prepare(
         &self,
         items: &[FormattedStory],
         chunk: &ChunkInfo,
-    ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure> {
+    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
         let user_prompt = digest_map_prompt(&self.context, items, chunk).map_err(|error| {
             AiRoleLogicFailure::Prompt {
                 message: error.to_string(),
             }
         })?;
-        let request = ChatRequest {
-            provider: self.target.provider.clone(),
-            model: self.target.model.clone(),
+        Ok(ChatRequestSpec {
             messages: vec![
                 ChatMessage::system(self.system_prompt.as_str()),
                 ChatMessage::user(user_prompt.as_str()),
@@ -118,17 +112,17 @@ impl AiMapRole<FormattedStory, HnDigestGroupSummary> for HnMapRole {
             },
             tools: Vec::new(),
             response_format: None,
-        };
-        Ok((request, user_prompt))
+        })
     }
 
     fn interpret(
         &self,
         _items: Vec<FormattedStory>,
-        _prepared: Self::Prepared,
-        completion: ChatCompletionCompleted,
+        _chunk: ChunkInfo,
+        _request: ChatRequestSpec,
+        reply: ChatCompletionReply,
     ) -> Result<HnDigestGroupSummary, AiRoleLogicFailure> {
-        digest_map_parse(&self.context, completion.response).map_err(|error| {
+        digest_map_parse(&self.context, reply.response).map_err(|error| {
             AiRoleLogicFailure::Parse {
                 message: error.to_string(),
             }
@@ -198,33 +192,28 @@ struct DigestReduceCtx {
 }
 
 struct HnFinaliseRole {
-    target: ChatTarget,
     context: DigestReduceCtx,
 }
 
 impl HnFinaliseRole {
-    fn new(target: ChatTarget, context: DigestReduceCtx) -> Self {
-        Self { target, context }
+    fn new(context: DigestReduceCtx) -> Self {
+        Self { context }
     }
 }
 
 impl AiFinaliseRole<HnTopStories, Many<HnDigestGroupSummary>, HnDigestSummary> for HnFinaliseRole {
-    type Prepared = UserPrompt;
-
     fn prepare(
         &self,
         seed: &HnTopStories,
         collected: &Many<HnDigestGroupSummary>,
-    ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure> {
+    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
         let user_prompt =
             digest_reduce_prompt(&self.context, seed, &collected.items).map_err(|error| {
                 AiRoleLogicFailure::Prompt {
                     message: error.to_string(),
                 }
             })?;
-        let request = ChatRequest {
-            provider: self.target.provider.clone(),
-            model: self.target.model.clone(),
+        Ok(ChatRequestSpec {
             messages: vec![
                 ChatMessage::system(self.context.chat_prompt_system.as_str()),
                 ChatMessage::user(user_prompt.as_str()),
@@ -236,23 +225,31 @@ impl AiFinaliseRole<HnTopStories, Many<HnDigestGroupSummary>, HnDigestSummary> f
             },
             tools: Vec::new(),
             response_format: None,
-        };
-        Ok((request, user_prompt))
+        })
     }
 
     fn interpret(
         &self,
         seed: HnTopStories,
         collected: Many<HnDigestGroupSummary>,
-        prepared: Self::Prepared,
-        completion: ChatCompletionCompleted,
+        request: ChatRequestSpec,
+        reply: ChatCompletionReply,
     ) -> Result<HnDigestSummary, AiRoleLogicFailure> {
+        let user_prompt = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role.as_str() == "user")
+            .map(|message| UserPrompt::raw(message.content.clone()))
+            .ok_or_else(|| AiRoleLogicFailure::Prompt {
+                message: "retained request has no user message".to_string(),
+            })?;
         digest_reduce_parse(
             &self.context,
             seed,
             collected.items,
-            prepared,
-            completion.response,
+            user_prompt,
+            reply.response,
         )
         .map_err(|error| AiRoleLogicFailure::Parse {
             message: error.to_string(),
@@ -396,30 +393,27 @@ pub(crate) fn build_flow_definition(
         middleware: [],
         bindings: |runtime_config| {
             let ai_models = runtime_config.ai_models();
-            let chat = ChatEffectBinding::from_config(&ai_models).map_err(|error|
+            let (chat, chat_registration) =
+                ChatEffectBinding::from_config(&ai_models).map_err(|error|
                 FlowBuildError::BindingConfiguration {
                     binding: "chat".to_string(),
                     detail: error.to_string(),
                 }
-            )?;
+            )?.into_parts();
             let chat_target = chat.target().clone();
-            let resolved_estimator = chat.resolved_estimator().clone();
-            let estimator = resolved_estimator.estimator();
             let budget_per_group =
                 resolve_hn_group_budget(budget_per_group_override, &chat_target);
             let map_role = HnMapRole::new(
-                chat_target.clone(),
                 system_prompt.clone(),
                 map_role_config,
             );
             let finalise_role = HnFinaliseRole::new(
-                chat_target.clone(),
                 DigestReduceCtx {
                     mode_label: mode_label_for_summary,
                     base_url: base_url_for_summary,
                     ai_provider: chat_target.provider.to_string(),
                     ai_model: chat_target.model.clone(),
-                    token_estimator: resolved_estimator.source(),
+                    token_estimator: chat.estimator().source(),
                     budget_per_group,
                     interests: finalise_interests,
                     chat_prompt_system: system_prompt,
@@ -427,10 +421,9 @@ pub(crate) fn build_flow_definition(
             );
             let effect_ports = if let Some(resolver) = chat_resolver_override {
                 EffectPortRegistry::new()
-                    .with_deferred::<dyn ChatClient>("chat", resolver)
+                    .with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)
             } else {
-                EffectPortRegistry::new()
-                    .with_deferred::<dyn ChatClient>("chat", chat.into_resolver())
+                chat_registration.install_into(EffectPortRegistry::new())
             }
                 .map_err(|error| FlowBuildError::BindingConfiguration {
                     binding: "chat".to_string(),
@@ -457,23 +450,24 @@ pub(crate) fn build_flow_definition(
             // - reduce's `[HnDigestGroupSummary]` is collected in chunk-index order.
             digest = ai_map_reduce!(
                 HnTopStories -> HnDigestSummary => {
-                    map: [FormattedStory] -> HnDigestGroupSummary => map_role,
-                    reduce: (HnTopStories, [HnDigestGroupSummary]) -> HnDigestSummary => finalise_role,
+                    map: [FormattedStory] ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { ai_resilience() }
+                    } HnDigestGroupSummary => map_role,
+                    reduce: (HnTopStories, [HnDigestGroupSummary]) ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { ai_resilience() }
+                    } HnDigestSummary => finalise_role,
                 },
                 chunking: by_budget {
-                    estimator: estimator.clone(),
                     items: |seed: &HnTopStories| seed.stories.clone(),
                     render: |story: &FormattedStory, ctx| render_story_line(ctx.item_ordinal + 1, story),
                     budget: budget_per_group,
                     max_items: max_stories_per_group,
                     oversize: decompose { max_depth: 5, exhaustion: fail },
                     snapshot_excluded_items_limit: 25,
-                },
-                effects: {
-                    chat_target: chat_target,
-                    chat_estimator: resolved_estimator.clone(),
-                    map: [at_least_once(ChatCompletion) with [ai_resilience()]],
-                    reduce: [at_least_once(ChatCompletion) with [ai_resilience()]],
                 }
             );
             digest_summary = sink!(HnDigestSummary => sinks::console(format_digest_summary_for_console));

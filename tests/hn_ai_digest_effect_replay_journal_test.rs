@@ -31,9 +31,10 @@ use obzenflow_core::ai::{
     chat_binding_fingerprint, AiClientError, AiFinaliseRole, AiMapReduceChunkFailed,
     AiMapReduceJobFailed, AiMapReducePlanningManifest, AiMapReduceRoleFailure,
     AiMapReduceTaggedPartial, AiMapRole, AiProvider, AiProviderFailureKind, AiRoleLogicFailure,
-    ChatClient, ChatCompletionCompleted, ChatMessage, ChatParams, ChatRequest, ChatResponse,
-    ChatTarget, EstimateSource, HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenCount,
-    TokenEstimate, TokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
+    ChatBindingContract, ChatClient, ChatCompletionReply, ChatMessage, ChatParams, ChatRequest,
+    ChatRequestSpec, ChatResponse, ChatTarget, EstimateSource, HeuristicTokenEstimator, Many,
+    ResolvedTokenEstimator, TokenCount, TokenEstimate, TokenEstimator,
+    TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo, CHAT_CLIENT_PORT,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::event_envelope::EventEnvelope;
@@ -101,20 +102,17 @@ impl TypedPayload for DigestOut {
 }
 
 struct MapRole {
-    target: ChatTarget,
     fail_prepare: bool,
     fail_interpret: bool,
     prepare_calls: Option<Arc<AtomicUsize>>,
 }
 
 impl AiMapRole<DigestItem, DigestPartial> for MapRole {
-    type Prepared = ();
-
     fn prepare(
         &self,
         items: &[DigestItem],
         _chunk: &obzenflow_core::ai::ChunkInfo,
-    ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure> {
+    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
         if let Some(calls) = &self.prepare_calls {
             calls.fetch_add(1, Ordering::SeqCst);
         }
@@ -123,24 +121,20 @@ impl AiMapRole<DigestItem, DigestPartial> for MapRole {
                 message: "fixture preparation failure".to_string(),
             });
         }
-        Ok((
-            ChatRequest {
-                provider: self.target.provider.clone(),
-                model: self.target.model.clone(),
-                messages: vec![ChatMessage::user(format!("{} items", items.len()))],
-                params: ChatParams::default(),
-                tools: Vec::new(),
-                response_format: None,
-            },
-            (),
-        ))
+        Ok(ChatRequestSpec {
+            messages: vec![ChatMessage::user(format!("{} items", items.len()))],
+            params: ChatParams::default(),
+            tools: Vec::new(),
+            response_format: None,
+        })
     }
 
     fn interpret(
         &self,
         items: Vec<DigestItem>,
-        _prepared: Self::Prepared,
-        _completion: ChatCompletionCompleted,
+        _chunk: obzenflow_core::ai::ChunkInfo,
+        _request: ChatRequestSpec,
+        _reply: ChatCompletionReply,
     ) -> Result<DigestPartial, AiRoleLogicFailure> {
         if self.fail_interpret {
             return Err(AiRoleLogicFailure::Parse {
@@ -153,40 +147,31 @@ impl AiMapRole<DigestItem, DigestPartial> for MapRole {
     }
 }
 
-struct FinaliseRole {
-    target: ChatTarget,
-}
+struct FinaliseRole;
 
 impl AiFinaliseRole<DigestSeed, Many<DigestPartial>, DigestOut> for FinaliseRole {
-    type Prepared = ();
-
     fn prepare(
         &self,
         _seed: &DigestSeed,
         collected: &Many<DigestPartial>,
-    ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure> {
-        Ok((
-            ChatRequest {
-                provider: self.target.provider.clone(),
-                model: self.target.model.clone(),
-                messages: vec![ChatMessage::user(format!(
-                    "{} partials",
-                    collected.items.len()
-                ))],
-                params: ChatParams::default(),
-                tools: Vec::new(),
-                response_format: None,
-            },
-            (),
-        ))
+    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+        Ok(ChatRequestSpec {
+            messages: vec![ChatMessage::user(format!(
+                "{} partials",
+                collected.items.len()
+            ))],
+            params: ChatParams::default(),
+            tools: Vec::new(),
+            response_format: None,
+        })
     }
 
     fn interpret(
         &self,
         _seed: DigestSeed,
         collected: Many<DigestPartial>,
-        _prepared: Self::Prepared,
-        _completion: ChatCompletionCompleted,
+        _request: ChatRequestSpec,
+        _reply: ChatCompletionReply,
     ) -> Result<DigestOut, AiRoleLogicFailure> {
         Ok(DigestOut {
             total: collected
@@ -302,20 +287,14 @@ struct ObservabilityOnlyEstimator {
 }
 
 impl TokenEstimator for ObservabilityOnlyEstimator {
-    fn estimate_text(&self, _text: &str) -> TokenEstimate {
+    fn estimate_text(&self, text: &str) -> TokenEstimate {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        TokenEstimate {
-            tokens: TokenCount::new(91_337),
-            source: EstimateSource::Heuristic,
-        }
+        HeuristicTokenEstimator::default().estimate_text(text)
     }
 
-    fn estimate_chat_request(&self, _request: &ChatRequest) -> TokenEstimate {
+    fn estimate_chat_request(&self, request: &ChatRequest) -> TokenEstimate {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        TokenEstimate {
-            tokens: TokenCount::new(91_337),
-            source: EstimateSource::Heuristic,
-        }
+        HeuristicTokenEstimator::default().estimate_chat_request(request)
     }
 
     fn source(&self) -> EstimateSource {
@@ -354,7 +333,7 @@ fn deferred_chat_port(
         })
     });
     EffectPortRegistry::new()
-        .with_deferred::<dyn ChatClient>("chat", resolver)
+        .with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)
         .expect("one chat resolver is registered")
 }
 
@@ -402,7 +381,7 @@ fn post_start_mismatch_port(
         })
     });
     EffectPortRegistry::new()
-        .with_deferred::<dyn ChatClient>("chat", resolver)
+        .with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)
         .expect("one mismatching chat resolver is registered")
 }
 
@@ -417,7 +396,7 @@ fn eager_chat_port_for_target(
 ) -> EffectPortRegistry {
     EffectPortRegistry::new()
         .with_port::<dyn ChatClient>(
-            "chat",
+            CHAT_CLIENT_PORT,
             Arc::new(CountingChatClient {
                 target: client_target,
                 calls,
@@ -431,7 +410,7 @@ fn eager_chat_port_for_target(
 fn error_chat_port(calls: Arc<AtomicUsize>, error: AiClientError) -> EffectPortRegistry {
     EffectPortRegistry::new()
         .with_port::<dyn ChatClient>(
-            "chat",
+            CHAT_CLIENT_PORT,
             Arc::new(CountingChatClient {
                 target: target(),
                 calls,
@@ -448,7 +427,7 @@ fn internally_retrying_chat_port(
 ) -> EffectPortRegistry {
     EffectPortRegistry::new()
         .with_port::<dyn ChatClient>(
-            "chat",
+            CHAT_CLIENT_PORT,
             Arc::new(InternallyRetryingChatClient {
                 target: target(),
                 calls,
@@ -563,9 +542,10 @@ fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
         map_prepare_failure,
         map_interpret_failure,
         chat_estimator,
-        chat_target,
+        chat_target: _chat_target,
         map_prepare_calls,
     } = behaviour;
+    let chat = ChatBindingContract::from_resolved(map_request_target, chat_estimator);
     flow! {
         name: "hn_ai_digest_effect_replay_journal",
         journals: disk_journals(journal_base),
@@ -578,18 +558,22 @@ fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
             seed = source!(DigestSeed => OneSeed::new());
             digest = ai_map_reduce!(
                 DigestSeed -> DigestOut => {
-                    map: [DigestItem] -> DigestPartial => MapRole {
-                        target: map_request_target,
+                    map: [DigestItem] ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { ai_resilience() }
+                    } DigestPartial => MapRole {
                         fail_prepare: map_prepare_failure,
                         fail_interpret: map_interpret_failure,
                         prepare_calls: map_prepare_calls,
                     },
-                    reduce: (DigestSeed, [DigestPartial]) -> DigestOut => FinaliseRole {
-                        target: chat_target.clone(),
-                    },
+                    reduce: (DigestSeed, [DigestPartial]) ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { ai_resilience() }
+                    } DigestOut => FinaliseRole,
                 },
                 chunking: by_budget {
-                    estimator: estimator().estimator(),
                     items: |seed: &DigestSeed| {
                         (1..=seed.n)
                             .map(|value| DigestItem { value })
@@ -599,12 +583,6 @@ fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
                     budget: TokenCount::new(100),
                     max_items: Some(1),
                     oversize: error,
-                },
-                effects: {
-                    chat_target: chat_target,
-                    chat_estimator: chat_estimator,
-                    map: [at_least_once(ChatCompletion) with [ai_resilience()]],
-                    reduce: [at_least_once(ChatCompletion) with [ai_resilience()]],
                 }
             );
             collected = sink!(DigestOut => CollectOut { outputs });
@@ -623,7 +601,8 @@ fn build_recovery_flow(
     effect_ports: EffectPortRegistry,
     map_policy: Box<dyn MiddlewareFactory>,
 ) -> FlowDefinition {
-    let chat_target = target();
+    let chat =
+        ChatBindingContract::from_resolved(target(), estimator());
     flow! {
         name: "hn_ai_digest_recovery_composition",
         journals: disk_journals(journal_base),
@@ -636,18 +615,22 @@ fn build_recovery_flow(
             recovery_seed = source!(DigestSeed => OneSeed::with_count(1));
             recovery_digest = ai_map_reduce!(
                 DigestSeed -> DigestOut => {
-                    map: [DigestItem] -> DigestPartial => MapRole {
-                        target: chat_target.clone(),
+                    map: [DigestItem] ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { map_policy }
+                    } DigestPartial => MapRole {
                         fail_prepare: false,
                         fail_interpret: false,
                         prepare_calls: None,
                     },
-                    reduce: (DigestSeed, [DigestPartial]) -> DigestOut => FinaliseRole {
-                        target: chat_target.clone(),
-                    },
+                    reduce: (DigestSeed, [DigestPartial]) ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { ai_resilience() }
+                    } DigestOut => FinaliseRole,
                 },
                 chunking: by_budget {
-                    estimator: estimator().estimator(),
                     items: |seed: &DigestSeed| {
                         (1..=seed.n)
                             .map(|value| DigestItem { value })
@@ -657,12 +640,6 @@ fn build_recovery_flow(
                     budget: TokenCount::new(100),
                     max_items: Some(1),
                     oversize: error,
-                },
-                effects: {
-                    chat_target: chat_target,
-                    chat_estimator: estimator(),
-                    map: [at_least_once(ChatCompletion) with [map_policy]],
-                    reduce: [at_least_once(ChatCompletion) with [ai_resilience()]],
                 }
             );
             recovery_collected = sink!(DigestOut => CollectOut { outputs });
@@ -681,7 +658,8 @@ fn build_credit_flow(
     effect_ports: EffectPortRegistry,
     prepare_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
-    let chat_target = target();
+    let chat =
+        ChatBindingContract::from_resolved(target(), estimator());
     flow! {
         name: "hn_ai_digest_credit_composition",
         journals: disk_journals(journal_base),
@@ -694,18 +672,22 @@ fn build_credit_flow(
             credit_seed = source!(DigestSeed => OneSeed::with_count(2));
             credit_digest = ai_map_reduce!(
                 DigestSeed -> DigestOut => {
-                    map: [DigestItem] -> DigestPartial => MapRole {
-                        target: chat_target.clone(),
+                    map: [DigestItem] ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { ai_resilience() }
+                    } DigestPartial => MapRole {
                         fail_prepare: false,
                         fail_interpret: false,
                         prepare_calls: Some(prepare_calls),
                     },
-                    reduce: (DigestSeed, [DigestPartial]) -> DigestOut => FinaliseRole {
-                        target: chat_target.clone(),
-                    },
+                    reduce: (DigestSeed, [DigestPartial]) ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { ai_resilience() }
+                    } DigestOut => FinaliseRole,
                 },
                 chunking: by_budget {
-                    estimator: estimator().estimator(),
                     items: |seed: &DigestSeed| {
                         (1..=seed.n)
                             .map(|value| DigestItem { value })
@@ -715,12 +697,6 @@ fn build_credit_flow(
                     budget: TokenCount::new(100),
                     max_items: Some(1),
                     oversize: error,
-                },
-                effects: {
-                    chat_target: chat_target,
-                    chat_estimator: estimator(),
-                    map: [at_least_once(ChatCompletion) with [ai_resilience()]],
-                    reduce: [at_least_once(ChatCompletion) with [ai_resilience()]],
                 }
             );
             credit_collected = sink!(DigestOut => CollectOut { outputs });
@@ -823,7 +799,7 @@ fn effect_evidence_ids(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<EventId> 
         .iter()
         .filter(|envelope| {
             EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-                || ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
+                || chat_completion_reply(&envelope.event).is_some()
         })
         .map(|envelope| envelope.event.id)
         .collect::<Vec<_>>();
@@ -831,12 +807,47 @@ fn effect_evidence_ids(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<EventId> 
     ids
 }
 
+const CHAT_COMPLETION_EFFECT_TYPE: &str = "obzenflow.ai.chat_completion";
+const LEGACY_CHAT_COMPLETION_EVENT_TYPE: &str = "ai.chat_completion.completed";
+const LEGACY_CHAT_COMPLETION_EVENT_TYPE_V1: &str = "ai.chat_completion.completed.v1";
+
+fn is_legacy_chat_completion_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        LEGACY_CHAT_COMPLETION_EVENT_TYPE | LEGACY_CHAT_COMPLETION_EVENT_TYPE_V1
+    )
+}
+
+fn chat_completion_reply(event: &ChainEvent) -> Option<ChatCompletionReply> {
+    let ChainEventContent::Data {
+        event_type,
+        payload,
+    } = &event.content
+    else {
+        return None;
+    };
+
+    if is_legacy_chat_completion_event_type(event_type) {
+        return serde_json::from_value(payload.clone()).ok();
+    }
+    if event_type != EFFECT_RECORD_EVENT_TYPE {
+        return None;
+    }
+
+    let record: EffectRecord = serde_json::from_value(payload.clone()).ok()?;
+    if record.descriptor.effect_type.as_str() != CHAT_COMPLETION_EFFECT_TYPE {
+        return None;
+    }
+    match record.outcome {
+        EffectOutcomePayload::Succeeded { output } => serde_json::from_value(output).ok(),
+        EffectOutcomePayload::SucceededFact { .. } | EffectOutcomePayload::Failed { .. } => None,
+    }
+}
+
 fn assert_atomic_completion_groups(envelopes: &[EventEnvelope<ChainEvent>], expected: usize) {
     let completions = envelopes
         .iter()
-        .filter(|envelope| {
-            ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
-        })
+        .filter(|envelope| chat_completion_reply(&envelope.event).is_some())
         .collect::<Vec<_>>();
     assert_eq!(completions.len(), expected);
     for completion in completions {
@@ -863,10 +874,7 @@ fn assert_completion_contract(
 ) {
     let completions = envelopes
         .iter()
-        .filter_map(|envelope| {
-            ChatCompletionCompleted::from_event(&envelope.event)
-                .map(|completion| (envelope, completion))
-        })
+        .filter_map(|envelope| chat_completion_reply(&envelope.event).map(|reply| (envelope, reply)))
         .collect::<Vec<_>>();
     assert_eq!(completions.len(), expected);
     for (envelope, completion) in completions {
@@ -909,7 +917,7 @@ fn assert_completion_contract(
                 .and_then(serde_json::Value::as_object)
                 .is_none_or(|custom| !custom.contains_key("llm"))
         }),
-        "128g keeps LLM observation on the completion payload and does not copy custom[\"llm\"] onto generated facts"
+        "120j keeps LLM observation in framework reply evidence and does not copy custom[\"llm\"] onto generated facts"
     );
 }
 
@@ -965,12 +973,14 @@ fn hn_witness_source_uses_the_snapshot_binding_and_deferred_port_contract() {
         "bindings: |runtime_config| {",
         "let ai_models = runtime_config.ai_models();",
         "ChatEffectBinding::from_config(&ai_models)",
-        ".with_deferred::<dyn ChatClient>(\"chat\", chat.into_resolver())",
+        "let (chat, chat_registration) =",
+        "?.into_parts();",
+        "chat_registration.install_into(EffectPortRegistry::new())",
         "effect_ports: effect_ports,",
-        "chat_target: chat_target,",
-        "chat_estimator: resolved_estimator.clone(),",
-        "map: [at_least_once(ChatCompletion) with [ai_resilience()]],",
-        "reduce: [at_least_once(ChatCompletion) with [ai_resilience()]],",
+        "map: [FormattedStory] ->{",
+        "reduce: (HnTopStories, [HnDigestGroupSummary]) ->{",
+        "via chat",
+        "with { ai_resilience() }",
     ] {
         assert!(
             flow_source.contains(required),
@@ -1040,7 +1050,7 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
     assert_eq!(prepare_calls.load(Ordering::SeqCst), 0);
     assert!(prepare_map.iter().all(|envelope| {
         !EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-            && !ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
+            && chat_completion_reply(&envelope.event).is_none()
     }));
     assert!(prepare_outputs
         .lock()
@@ -1148,7 +1158,7 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
         MAP_CHUNKS
     );
     assert!(provider_map.iter().all(|envelope| {
-        !ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
+        chat_completion_reply(&envelope.event).is_none()
     }));
     assert!(provider_outputs
         .lock()
@@ -1394,17 +1404,27 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         replay_estimator_calls.load(Ordering::SeqCst),
-        0,
-        "a history hit returns archived completion observation without consulting the current estimator"
+        expected_map_calls,
+        "strict replay only consults the binding estimator for deterministic chunk planning; \
+         completion history hits retain their archived observations"
     );
-    assert_eq!(
-        *replay_outputs.lock().expect("replay output lock"),
-        vec![DigestOut { total: 15 }]
-    );
-
     let replay_archive = latest_run_dir(&journal_base);
     let replay_map = stage_envelopes(&replay_archive, "digest__map").await;
     let replay_finalise = stage_envelopes(&replay_archive, "digest__finalize").await;
+    assert_eq!(
+        *replay_outputs.lock().expect("replay output lock"),
+        vec![DigestOut { total: 15 }],
+        "map event types: {:?}; finalise event types: {:?}",
+        replay_map
+            .iter()
+            .map(|envelope| envelope.event.event_type())
+            .collect::<Vec<_>>(),
+        replay_finalise
+            .iter()
+            .map(|envelope| envelope.event.event_type())
+            .collect::<Vec<_>>()
+    );
+
     assert_eq!(effect_evidence_ids(&replay_map), live_map_ids);
     assert_eq!(effect_evidence_ids(&replay_finalise), live_finalise_ids);
     assert_atomic_completion_groups(&replay_map, expected_map_calls);
@@ -1482,7 +1502,7 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
     let entered = Arc::new(Notify::new());
     let hanging_ports = EffectPortRegistry::new()
         .with_port::<dyn ChatClient>(
-            "chat",
+            CHAT_CLIENT_PORT,
             Arc::new(HangingChatClient {
                 target: target(),
                 calls: hanging_calls.clone(),
@@ -1525,7 +1545,7 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
     );
     assert!(in_doubt_map.iter().all(|envelope| {
         envelope.event.event_type() != EFFECT_RECORD_EVENT_TYPE
-            && !ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
+            && chat_completion_reply(&envelope.event).is_none()
     }));
 
     let resume_calls = Arc::new(AtomicUsize::new(0));
@@ -1584,9 +1604,9 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
             ..
         }
     ));
-    assert!(!map.iter().any(|envelope| {
-        ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
-    }));
+    assert!(!map
+        .iter()
+        .any(|envelope| chat_completion_reply(&envelope.event).is_some()));
 
     let collect = stage_envelopes(&abandonment_archive, "recovery_digest__collect").await;
     assert_eq!(
@@ -1599,7 +1619,7 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
     let finalise = stage_envelopes(&abandonment_archive, "recovery_digest__finalize").await;
     assert!(!finalise.iter().any(|envelope| {
         EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-            || ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
+            || chat_completion_reply(&envelope.event).is_some()
     }));
 
     let strict_outputs = Arc::new(Mutex::new(Vec::new()));
@@ -1753,9 +1773,7 @@ async fn generated_map_waits_for_all_three_real_edge_credits_before_second_role_
     );
     assert_eq!(
         map.iter()
-            .filter(|envelope| {
-                ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
-            })
+            .filter(|envelope| chat_completion_reply(&envelope.event).is_some())
             .count(),
         2
     );
@@ -1992,9 +2010,7 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
     let completions = generated
         .iter()
         .flat_map(|stage| stage.iter())
-        .filter(|envelope| {
-            ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
-        })
+        .filter(|envelope| chat_completion_reply(&envelope.event).is_some())
         .count();
     let settlements = generated
         .iter()
@@ -2046,7 +2062,7 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
                 manifest.chunk_count,
             ),
             (
-                ChatCompletionCompleted::versioned_event_type(),
+                EFFECT_RECORD_EVENT_TYPE.to_string(),
                 port_invocations,
             ),
             (DigestOut::versioned_event_type(), 1),
@@ -2057,42 +2073,6 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
         ]),
         "the one protocol manifest plus three rows per port invocation are the complete Data set; \
          internal downstream retries allocate no ordinal, resilience settlement, or durable row"
-    );
-}
-
-#[tokio::test]
-async fn prepared_request_target_mismatch_is_fatal_before_history_or_port_resolution() {
-    let temp = tempfile::tempdir().expect("temporary journal root");
-    let journal_base = temp.path().join("journals");
-    let resolutions = Arc::new(AtomicUsize::new(0));
-    let calls = Arc::new(AtomicUsize::new(0));
-    let result = FlowApplication::builder()
-        .with_cli_args(["obzenflow"])
-        .run_async(build_flow(
-            journal_base.clone(),
-            Arc::new(Mutex::new(Vec::new())),
-            deferred_chat_port(resolutions.clone(), calls.clone(), true),
-            3,
-            ChatTarget::new("fixture", "wrong-model"),
-            false,
-        ))
-        .await;
-
-    assert!(
-        result.is_err(),
-        "request/descriptor target mismatch must terminate the stage"
-    );
-    assert_eq!(resolutions.load(Ordering::SeqCst), 0);
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-
-    let archive = latest_run_dir(&journal_base);
-    let map = stage_envelopes(&archive, "digest__map").await;
-    assert!(
-        !map.iter().any(|envelope| {
-            EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-                || ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
-        }),
-        "target assertion must precede cursor history and physical execution"
     );
 }
 
@@ -2132,7 +2112,7 @@ async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
     assert!(
         !map.iter().any(|envelope| {
             EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-                || ChatCompletionCompleted::event_type_matches(&envelope.event.event_type())
+                || chat_completion_reply(&envelope.event).is_some()
                 || envelope.event.event_type() == EFFECT_RECORD_EVENT_TYPE
         }),
         "client target validation must precede the attempt boundary"
@@ -2191,7 +2171,7 @@ async fn endpoint_fingerprint_drift_is_rejected_by_effect_history_before_port_re
                     true,
                 );
                 EffectPortRegistry::new()
-                    .with_deferred::<dyn ChatClient>("chat", resolver)
+                    .with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)
                     .expect("endpoint-B replay resolver is registered")
             },
             backpressure_window: 3,

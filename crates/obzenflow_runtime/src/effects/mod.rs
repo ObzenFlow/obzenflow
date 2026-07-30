@@ -121,5 +121,6 @@ use identity::{
 use replay::{
     decode_effect_outcome, decode_effect_outcome_group, effect_fact_set_error,
     effect_record_from_event, effect_record_group_materialization, is_routable_output_fact,
-    recorded_failure_from_outcome, validate_effect_outcome_group, EffectRecordMaterialization,
+    legacy_recorded_reply_materialization, recorded_failure_from_outcome,
+    validate_effect_outcome_group, EffectRecordMaterialization,
 };
