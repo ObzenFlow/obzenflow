@@ -127,7 +127,7 @@ async fn main() -> Result<()> {
             stages: {
                 evidence = source!(ReducedEvidence => sources::finite([input]));
                 brief = inference!(
-                    ReducedEvidence ->{
+                    ReducedEvidence -> {
                         at_least_once(ChatCompletion)
                             via chat
                             with { ai_resilience() }
