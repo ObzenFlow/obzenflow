@@ -448,12 +448,13 @@ pub(crate) fn build_flow_definition(
             // - reduce's `[HnDigestGroupSummary]` is collected in chunk-index order.
             digest = ai_map_reduce!(
                 HnTopStories -> HnDigestSummary => {
-                    map: [FormattedStory] ->{
+                    map: [FormattedStory] -> {
                         at_least_once(ChatCompletion)
                             via chat
                             with { ai_resilience() }
                     } HnDigestGroupSummary => map_role,
-                    reduce: (HnTopStories, [HnDigestGroupSummary]) ->{
+
+                    reduce: (HnTopStories, [HnDigestGroupSummary]) -> {
                         at_least_once(ChatCompletion)
                             via chat
                             with { ai_resilience() }
@@ -461,10 +462,15 @@ pub(crate) fn build_flow_definition(
                 },
                 chunking: by_budget {
                     items: |seed: &HnTopStories| seed.stories.clone(),
-                    render: |story: &FormattedStory, ctx| render_story_line(ctx.item_ordinal + 1, story),
+                    render: |story: &FormattedStory, ctx| {
+                        render_story_line(ctx.item_ordinal + 1, story)
+                    },
                     budget: budget_per_group,
                     max_items: max_stories_per_group,
-                    oversize: decompose { max_depth: 5, exhaustion: fail },
+                    oversize: decompose {
+                        max_depth: 5,
+                        exhaustion: fail,
+                    },
                     snapshot_excluded_items_limit: 25,
                 }
             );

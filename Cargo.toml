@@ -203,6 +203,11 @@ name = "payment_gateway_resilience"
 path = "examples/payment_gateway_resilience/main.rs"
 
 [[example]]
+name = "one_shot_inference_demo"
+path = "examples/one_shot_inference_demo/main.rs"
+required-features = ["ai"]
+
+[[example]]
 name = "hn_ai_digest_demo"
 path = "examples/hn_ai_digest_demo/main.rs"
 required-features = ["http-pull", "ai"]
