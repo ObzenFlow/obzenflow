@@ -5039,7 +5039,7 @@ macro_rules! __obzenflow_inference_contract {
         -> $($rest:tt)+
     ) => {
         compile_error!(
-            "inference!: expected `Input ->{ at_least_once(ChatCompletion) \
+            "inference!: expected `Input -> { at_least_once(ChatCompletion) \
              via <chat binding> with { <EffectResilience> } } Output => role`"
         )
     };
@@ -5236,7 +5236,7 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
         -> $($rest:tt)+
     ) => {
         compile_error!(
-            "ai_map_reduce!: expected role-local `->{ at_least_once(ChatCompletion) \
+            "ai_map_reduce!: expected role-local `-> { at_least_once(ChatCompletion) \
              via <chat binding> with { <EffectResilience> } }` rows on map and reduce"
         )
     };

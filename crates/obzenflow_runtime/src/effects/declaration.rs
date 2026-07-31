@@ -260,20 +260,6 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
 
     async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError>;
 
-    /// Narrow effect-owned compatibility seam for a historical success
-    /// representation.
-    ///
-    /// The default accepts nothing. An effect that changes ownership from a
-    /// domain fact to a recorded reply may recognise its own exact historical
-    /// envelope here without teaching the generic recorded-reply decoder to
-    /// reinterpret arbitrary `SucceededFact` rows.
-    #[doc(hidden)]
-    fn decode_legacy_recorded_reply(
-        _records: &[&EffectRecord],
-    ) -> Result<Option<Self::Outcome>, EffectError> {
-        Ok(None)
-    }
-
     /// Validate metadata on already-resolved required ports before boundary
     /// admission. Implementations must not perform I/O or resolve another
     /// port from this hook.

@@ -10,12 +10,9 @@ use obzenflow_core::ai::{
 };
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectOutcomePayload, EffectPortRequirement, EffectRecord,
-    EffectSafety, RecordedReply,
+    Effect, EffectContext, EffectError, EffectPortRequirement, EffectSafety, RecordedReply,
 };
 
-const LEGACY_CHAT_COMPLETION_EVENT_TYPE: &str = "ai.chat_completion.completed";
-const LEGACY_CHAT_COMPLETION_EVENT_TYPE_V1: &str = "ai.chat_completion.completed.v1";
 const MAX_CANONICALIZATION_DETAIL_BYTES: usize = 512;
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
@@ -87,7 +84,7 @@ impl ChatCompletion {
 #[async_trait]
 impl Effect for ChatCompletion {
     const EFFECT_TYPE: &'static str = "obzenflow.ai.chat_completion";
-    const SCHEMA_VERSION: u32 = 2;
+    const SCHEMA_VERSION: u32 = 3;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
 
     type Outcome = ChatCompletionReply;
@@ -151,41 +148,6 @@ impl Effect for ChatCompletion {
             observability,
         })
     }
-
-    fn decode_legacy_recorded_reply(
-        records: &[&EffectRecord],
-    ) -> Result<Option<Self::Outcome>, EffectError> {
-        let [record] = records else {
-            return Ok(None);
-        };
-        if record.descriptor.effect_type.as_str() != Self::EFFECT_TYPE {
-            return Ok(None);
-        }
-        let EffectOutcomePayload::SucceededFact {
-            event_type,
-            output,
-            outcome_fact_ordinal,
-            outcome_fact_count,
-        } = &record.outcome
-        else {
-            return Ok(None);
-        };
-        if !matches!(
-            event_type.as_str(),
-            LEGACY_CHAT_COMPLETION_EVENT_TYPE | LEGACY_CHAT_COMPLETION_EVENT_TYPE_V1
-        ) {
-            return Ok(None);
-        }
-        if outcome_fact_ordinal.get() != 0 || outcome_fact_count.get() != 1 {
-            return Err(EffectError::EffectProvenanceMismatch(
-                "legacy ChatCompletion reply must be one complete ordinal-0 outcome row"
-                    .to_string(),
-            ));
-        }
-        serde_json::from_value(output.clone())
-            .map(Some)
-            .map_err(|error| EffectError::Serialization(error.to_string()))
-    }
 }
 
 fn canonicalization_error(
@@ -234,43 +196,6 @@ fn dependency(code: &'static str, message: String) -> EffectError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::{
-        EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectRecord, OutcomeFactOrdinal,
-    };
-    use obzenflow_runtime::effects::OutcomeFactCount;
-
-    fn legacy_record(
-        effect_type: &str,
-        event_type: &str,
-        ordinal: u32,
-        count: u32,
-    ) -> EffectRecord {
-        let reply = ChatCompletionReply {
-            response: obzenflow_core::ai::ChatResponse {
-                text: "archived reply".to_string(),
-                tool_calls: Vec::new(),
-                usage: None,
-                raw: None,
-            },
-            observability: LlmObservability::new(
-                obzenflow_core::ai::AiProvider::new("fixture"),
-                "model",
-                LlmHashes::new("prompt".to_string(), "params".to_string()),
-            ),
-        };
-        EffectRecord {
-            cursor: EffectCursor::new("flow", "stage", 1_u64, 0_u32),
-            descriptor_hash: EffectDescriptorHash::new("descriptor"),
-            descriptor: EffectDescriptor::new(effect_type, "chat", 2_u32, "1", "input"),
-            outcome: EffectOutcomePayload::SucceededFact {
-                event_type: obzenflow_core::EventType::from(event_type),
-                output: serde_json::to_value(reply).expect("reply serialises"),
-                outcome_fact_ordinal: OutcomeFactOrdinal::new(ordinal),
-                outcome_fact_count: OutcomeFactCount::new(count),
-            },
-            origin: None,
-        }
-    }
 
     #[test]
     fn canonicalization_detail_is_bounded_at_a_utf8_boundary() {
@@ -281,42 +206,5 @@ mod tests {
 
         assert_eq!(detail, "x".repeat(MAX_CANONICALIZATION_DETAIL_BYTES - 1));
         assert!(detail.len() <= MAX_CANONICALIZATION_DETAIL_BYTES);
-    }
-
-    #[test]
-    fn legacy_decoder_is_exactly_scoped_to_historical_chat_completion_rows() {
-        for event_type in [
-            LEGACY_CHAT_COMPLETION_EVENT_TYPE,
-            LEGACY_CHAT_COMPLETION_EVENT_TYPE_V1,
-        ] {
-            let record = legacy_record(ChatCompletion::EFFECT_TYPE, event_type, 0, 1);
-            let decoded = <ChatCompletion as Effect>::decode_legacy_recorded_reply(&[&record])
-                .expect("legacy row decodes")
-                .expect("legacy row is recognised");
-            assert_eq!(decoded.response.text, "archived reply");
-        }
-
-        let wrong_effect = legacy_record("test.not_chat", LEGACY_CHAT_COMPLETION_EVENT_TYPE, 0, 1);
-        assert!(
-            <ChatCompletion as Effect>::decode_legacy_recorded_reply(&[&wrong_effect])
-                .expect("unrelated effect is ignored")
-                .is_none()
-        );
-        let wrong_fact = legacy_record(ChatCompletion::EFFECT_TYPE, "test.not_legacy_chat", 0, 1);
-        assert!(
-            <ChatCompletion as Effect>::decode_legacy_recorded_reply(&[&wrong_fact])
-                .expect("unrelated fact is ignored")
-                .is_none()
-        );
-        let malformed = legacy_record(
-            ChatCompletion::EFFECT_TYPE,
-            LEGACY_CHAT_COMPLETION_EVENT_TYPE,
-            1,
-            2,
-        );
-        assert!(matches!(
-            <ChatCompletion as Effect>::decode_legacy_recorded_reply(&[&malformed]),
-            Err(EffectError::EffectProvenanceMismatch(_))
-        ));
     }
 }

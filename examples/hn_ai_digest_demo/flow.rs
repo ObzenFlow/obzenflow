@@ -392,12 +392,12 @@ pub(crate) fn build_flow_definition(
         bindings: |runtime_config| {
             let ai_models = runtime_config.ai_models();
             let (chat, chat_registration) =
-                ChatEffectBinding::from_config(&ai_models).map_err(|error|
-                FlowBuildError::BindingConfiguration {
-                    binding: "chat".to_string(),
-                    detail: error.to_string(),
-                }
-            )?.into_parts();
+                ChatEffectBinding::from_config(&ai_models)
+                    .map_err(|error| FlowBuildError::BindingConfiguration {
+                        binding: "chat".to_string(),
+                        detail: error.to_string(),
+                    })?
+                    .into_parts();
             let chat_target = chat.target().clone();
             let budget_per_group =
                 resolve_hn_group_budget(budget_per_group_override, &chat_target);
@@ -422,8 +422,9 @@ pub(crate) fn build_flow_definition(
                     .with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)
             } else {
                 chat_registration.install_into(EffectPortRegistry::new())
-            }
-                .map_err(|error| FlowBuildError::BindingConfiguration {
+            };
+            let effect_ports =
+                effect_ports.map_err(|error| FlowBuildError::BindingConfiguration {
                     binding: "chat".to_string(),
                     detail: error.to_string(),
                 })?;

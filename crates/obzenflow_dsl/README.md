@@ -49,7 +49,7 @@ Use `inference!` when each input is already bounded and needs exactly one model 
 
 ```rust,ignore
 brief = inference!(
-    ReducedEvidence ->{
+    ReducedEvidence -> {
         at_least_once(ChatCompletion)
             via chat
             with { ai_resilience() }

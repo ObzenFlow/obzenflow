@@ -510,27 +510,18 @@ impl EffectsCore {
                         });
                     }
                 }
-                let legacy_reply = E::decode_legacy_recorded_reply(&record_refs)?;
-                let used_legacy_reply = legacy_reply.is_some();
-                let output_result = match legacy_reply {
-                    Some(output) => Ok(output),
-                    None => self.replay_records_output::<E>(
-                        &record_refs,
-                        cursor.clone(),
-                        descriptor_hash.clone(),
-                    ),
-                };
+                let output_result = self.replay_records_output::<E>(
+                    &record_refs,
+                    cursor.clone(),
+                    descriptor_hash.clone(),
+                );
                 if output_result
                     .as_ref()
                     .is_err_and(|error| !matches!(error, EffectError::RecordedFailure { .. }))
                 {
                     return output_result;
                 }
-                let materialization = if used_legacy_reply {
-                    legacy_recorded_reply_materialization(&record_refs)?
-                } else {
-                    effect_record_group_materialization(&record_refs)?
-                };
+                let materialization = effect_record_group_materialization(&record_refs)?;
                 if selected.attempts.is_empty()
                     && selected.abandonment.is_none()
                     && selected.terminal_group_events.is_empty()
@@ -2390,38 +2381,6 @@ impl EffectsCore {
                     });
                 }
             }
-            EffectRecordMaterialization::LegacyRecordedReply(records) => {
-                // The historical reply occupied user-output ordinal space.
-                // Preserve that position so any later archived business fact
-                // rematerialises with its original deterministic identity.
-                self.reserve_output_ordinals(records.len())?;
-
-                let mut archived_reply_events = Vec::new();
-                for event in &history.terminal_group_events {
-                    let Some(record) = effect_record_from_event(event)? else {
-                        continue;
-                    };
-                    if records.contains(&record) {
-                        archived_reply_events.push(event.clone());
-                    }
-                }
-                if archived_reply_events.len() != records.len() {
-                    return Err(EffectError::EffectProvenanceMismatch(format!(
-                        "legacy recorded reply for cursor {cursor:?} has {} archived physical rows for {} records",
-                        archived_reply_events.len(),
-                        records.len()
-                    )));
-                }
-                entries.extend(
-                    archived_reply_events
-                        .into_iter()
-                        .map(|event| AtomicCommitEntry {
-                            event,
-                            options: CommitOptions::default(),
-                            intent: StageAppendIntent::NonDataStageFact,
-                        }),
-                );
-            }
         }
 
         if let Some(abandoned) = history.abandonment.clone() {
@@ -2471,47 +2430,6 @@ impl EffectsCore {
             EffectRecordMaterialization::FrameworkRecords(records) => {
                 for record in records {
                     self.append_record(record).await?;
-                }
-                Ok(())
-            }
-            EffectRecordMaterialization::LegacyRecordedReply(records) => {
-                let output_ordinal = self.reserve_output_ordinals(records.len())?;
-                let origin = records.first().and_then(|record| record.origin.clone());
-                if records
-                    .iter()
-                    .any(|record| record.origin.as_ref() != origin.as_ref())
-                {
-                    return Err(EffectError::EffectProvenanceMismatch(
-                        "legacy recorded-reply records disagree on fact origin".to_string(),
-                    ));
-                }
-                let facts = records
-                    .iter()
-                    .map(|record| match &record.outcome {
-                        EffectOutcomePayload::SucceededFact {
-                            event_type, output, ..
-                        } => Ok(TypedFact {
-                            event_type: event_type.clone(),
-                            payload: output.clone(),
-                        }),
-                        _ => Err(EffectError::EffectProvenanceMismatch(
-                            "legacy recorded reply contains a non-SucceededFact row".to_string(),
-                        )),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let events = build_domain_effect_success_facts(
-                    self.ctx.writer_id,
-                    &self.ctx.parent,
-                    cursor,
-                    descriptor_hash,
-                    descriptor,
-                    facts,
-                    output_ordinal,
-                    origin,
-                    self.ctx.lineage,
-                )?;
-                for event in events {
-                    self.commit_framework_effect_event(event).await?;
                 }
                 Ok(())
             }

@@ -617,6 +617,10 @@ async fn one_shot_inference_live_and_strict_replay_use_three_rows_and_no_live_re
         reply_record.descriptor.label.as_str(),
         "inference.chat_completion"
     );
+    assert_eq!(
+        reply_record.descriptor.schema_version, 3,
+        "recorded-reply storage is the ChatCompletion v3 schema"
+    );
     assert_eq!(reply.response.text, "ship the scalar path");
     assert!(matches!(
         reply_record.outcome,
@@ -639,15 +643,6 @@ async fn one_shot_inference_live_and_strict_replay_use_three_rows_and_no_live_re
             .filter(|event| DecisionBrief::event_type_matches(&event.event_type()))
             .count(),
         1
-    );
-    assert!(
-        live_events.iter().all(|event| {
-            !matches!(
-                event.event_type().as_str(),
-                "ai.chat_completion.completed" | "ai.chat_completion.completed.v1"
-            )
-        }),
-        "new runs never write the historical domain-fact reply type"
     );
     let live_ids = durable_inference_ids(&live_events);
 

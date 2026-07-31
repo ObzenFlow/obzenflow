@@ -809,15 +809,6 @@ fn effect_evidence_ids(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<EventId> 
 }
 
 const CHAT_COMPLETION_EFFECT_TYPE: &str = "obzenflow.ai.chat_completion";
-const LEGACY_CHAT_COMPLETION_EVENT_TYPE: &str = "ai.chat_completion.completed";
-const LEGACY_CHAT_COMPLETION_EVENT_TYPE_V1: &str = "ai.chat_completion.completed.v1";
-
-fn is_legacy_chat_completion_event_type(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        LEGACY_CHAT_COMPLETION_EVENT_TYPE | LEGACY_CHAT_COMPLETION_EVENT_TYPE_V1
-    )
-}
 
 fn chat_completion_reply(event: &ChainEvent) -> Option<ChatCompletionReply> {
     let ChainEventContent::Data {
@@ -828,9 +819,6 @@ fn chat_completion_reply(event: &ChainEvent) -> Option<ChatCompletionReply> {
         return None;
     };
 
-    if is_legacy_chat_completion_event_type(event_type) {
-        return serde_json::from_value(payload.clone()).ok();
-    }
     if event_type != EFFECT_RECORD_EVENT_TYPE {
         return None;
     }
@@ -843,27 +831,6 @@ fn chat_completion_reply(event: &ChainEvent) -> Option<ChatCompletionReply> {
         EffectOutcomePayload::Succeeded { output } => serde_json::from_value(output).ok(),
         EffectOutcomePayload::SucceededFact { .. } | EffectOutcomePayload::Failed { .. } => None,
     }
-}
-
-fn chat_completion_descriptor_hashes(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<String> {
-    envelopes
-        .iter()
-        .filter_map(|envelope| {
-            let ChainEventContent::Data {
-                event_type,
-                payload,
-            } = &envelope.event.content
-            else {
-                return None;
-            };
-            if event_type != EFFECT_RECORD_EVENT_TYPE {
-                return None;
-            }
-            let record: EffectRecord = serde_json::from_value(payload.clone()).ok()?;
-            (record.descriptor.effect_type.as_str() == CHAT_COMPLETION_EFFECT_TYPE)
-                .then(|| record.descriptor_hash.as_str().to_string())
-        })
-        .collect()
 }
 
 fn assert_atomic_completion_groups(envelopes: &[EventEnvelope<ChainEvent>], expected: usize) {
@@ -908,6 +875,10 @@ fn assert_completion_contract(
             .as_ref()
             .expect("completion carries effect provenance");
         assert_eq!(provenance.descriptor.label.as_str(), expected_label);
+        assert_eq!(
+            provenance.descriptor.schema_version, 3,
+            "recorded-reply storage is the ChatCompletion v3 schema"
+        );
         assert_eq!(completion.observability.provider, expected_target.provider);
         assert_eq!(completion.observability.model, expected_target.model);
         assert_eq!(
@@ -998,11 +969,11 @@ fn hn_witness_source_uses_the_snapshot_binding_and_deferred_port_contract() {
         "let ai_models = runtime_config.ai_models();",
         "ChatEffectBinding::from_config(&ai_models)",
         "let (chat, chat_registration) =",
-        "?.into_parts();",
+        ".into_parts();",
         "chat_registration.install_into(EffectPortRegistry::new())",
         "effect_ports: effect_ports,",
-        "map: [FormattedStory] ->{",
-        "reduce: (HnTopStories, [HnDigestGroupSummary]) ->{",
+        "map: [FormattedStory] -> {",
+        "reduce: (HnTopStories, [HnDigestGroupSummary]) -> {",
         "via chat",
         "with { ai_resilience() }",
     ] {
@@ -1268,16 +1239,6 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
         1,
         "ai_map_reduce.finalise.chat_completion",
         &target(),
-    );
-    assert_eq!(
-        chat_completion_descriptor_hashes(&live_map),
-        vec!["4eb605a73a06973c192100572573b052652dc3f750451693c5af73eec9034fda"; 5],
-        "the migrated HN map requests retain their pre-FLOWIP-120j descriptor bytes"
-    );
-    assert_eq!(
-        chat_completion_descriptor_hashes(&live_finalise),
-        vec!["d8c705883562665f8fd050a4db8df91e96e33bdd026f93309b9d468cb373a726"],
-        "the migrated HN finalise request retains its pre-FLOWIP-120j descriptor bytes"
     );
     let live_map_ids = effect_evidence_ids(&live_map);
     let live_finalise_ids = effect_evidence_ids(&live_finalise);

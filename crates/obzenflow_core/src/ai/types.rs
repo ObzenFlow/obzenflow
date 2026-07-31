@@ -377,8 +377,8 @@ impl ChatRequest {
 /// Target-free request material prepared by an AI role.
 ///
 /// Provider, model, and endpoint identity belong to the selected
-/// [`ChatBindingContract`], not to role logic. Binding a spec reproduces the
-/// pre-FLOWIP-120j `ChatRequest` wire shape exactly.
+/// [`ChatBindingContract`], not to role logic. Binding a spec produces the
+/// canonical `ChatRequest` wire shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatRequestSpec {
     pub messages: Vec<ChatMessage>,
