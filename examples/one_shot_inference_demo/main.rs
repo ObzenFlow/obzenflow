@@ -52,10 +52,7 @@ impl TypedPayload for DecisionBrief {
 struct BriefRole;
 
 impl AiInferenceRole<ReducedEvidence, DecisionBrief> for BriefRole {
-    fn prepare(
-        &self,
-        input: &ReducedEvidence,
-    ) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+    fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
         Ok(ChatRequestSpec {
             messages: vec![
                 ChatMessage::system(

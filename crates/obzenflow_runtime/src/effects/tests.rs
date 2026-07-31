@@ -439,19 +439,20 @@ impl Effect for RecordedReplyEffect {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum AdapterFailure {
+enum AdapterSettlement {
+    Success,
     Nonfatal,
     Fatal,
 }
 
 #[derive(Clone, Debug)]
-struct ConsumeOneEffectThenFail {
+struct ConsumeOneEffectThenSettle {
     calls: Arc<AtomicUsize>,
-    failure: AdapterFailure,
+    settlement: AdapterSettlement,
 }
 
 #[async_trait]
-impl crate::stages::common::handlers::EffectfulTransformHandler for ConsumeOneEffectThenFail {
+impl crate::stages::common::handlers::EffectfulTransformHandler for ConsumeOneEffectThenSettle {
     type Input = FirstOutput;
     type Output = CountingOutput;
     type AllowedEffects = crate::effect_set![CountingEffect];
@@ -471,21 +472,22 @@ impl crate::stages::common::handlers::EffectfulTransformHandler for ConsumeOneEf
         .map_err(|error| {
             crate::stages::common::handler_error::HandlerError::Other(error.to_string())
         })?;
-        match self.failure {
-            AdapterFailure::Nonfatal => {
+        match self.settlement {
+            AdapterSettlement::Success => fx.complete().map_err(Into::into),
+            AdapterSettlement::Nonfatal => {
                 Err(crate::stages::common::handler_error::HandlerError::Domain(
                     "failed between effect cursors".to_string(),
                 ))
             }
-            AdapterFailure::Fatal => Err(
-                crate::stages::common::handler_error::HandlerError::Fatal(
+            AdapterSettlement::Fatal => {
+                Err(crate::stages::common::handler_error::HandlerError::Fatal(
                     crate::stages::common::handler_error::StageFatal::new(
                         obzenflow_core::event::StageFatalCode::Protocol,
                         obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
                         "original fatal wins",
                     ),
-                ),
-            ),
+                ))
+            }
         }
     }
 }
@@ -2393,7 +2395,7 @@ async fn recorded_reply_is_replay_authority_but_not_a_public_output_fact() {
 }
 
 #[tokio::test]
-async fn legacy_recorded_reply_preserves_physical_identity_and_historical_output_ordinal() {
+async fn legacy_recorded_reply_preserves_identity_output_ordinal_and_cursor_exhaustion() {
     let stage_id = StageId::new();
     let parent = parent_envelope(WriterId::from(stage_id));
     let calls = Arc::new(AtomicUsize::new(0));
@@ -2483,6 +2485,10 @@ async fn legacy_recorded_reply_preserves_physical_identity_and_historical_output
         1,
         "the legacy reply is not a current user output"
     );
+    replay
+        .preflight_next_effect_cursor_is_empty()
+        .await
+        .expect("legacy materialisation exhausts its cursor before successful settlement and EOF");
     let replay_events = replay_journal.events();
     assert_eq!(replay_events.len(), 2);
     assert_eq!(replay_events[0].event.id, archived_reply_id);
@@ -2544,9 +2550,9 @@ async fn adapter_history_fixture(
 async fn run_consume_one_adapter(
     parent: EventEnvelope<ChainEvent>,
     history: Arc<EffectHistory>,
-    failure: AdapterFailure,
+    settlement: AdapterSettlement,
     calls: Arc<AtomicUsize>,
-) -> crate::stages::common::handler_error::HandlerError {
+) -> Result<Vec<ChainEvent>, crate::stages::common::handler_error::HandlerError> {
     use crate::stages::common::handlers::{
         EffectfulTransformHandlerAdapter, UnifiedTransformHandler,
     };
@@ -2555,7 +2561,7 @@ async fn run_consume_one_adapter(
     let mut context = invocation_context(journal, parent.clone(), Some(history));
     context.output_contract = output_contract_for::<CountingOutput>();
     let adapter = EffectfulTransformHandlerAdapter::new(
-        ConsumeOneEffectThenFail { calls, failure },
+        ConsumeOneEffectThenSettle { calls, settlement },
         Arc::new(AbortingBoundary),
     );
     UnifiedTransformHandler::process(
@@ -2565,7 +2571,6 @@ async fn run_consume_one_adapter(
         obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
     )
     .await
-    .expect_err("the fixture handler always fails after its first cursor")
 }
 
 #[tokio::test]
@@ -2575,10 +2580,11 @@ async fn effectful_transform_nonfatal_error_checks_the_next_unused_cursor() {
     let miss = run_consume_one_adapter(
         parent.clone(),
         one_cursor,
-        AdapterFailure::Nonfatal,
+        AdapterSettlement::Nonfatal,
         calls.clone(),
     )
-    .await;
+    .await
+    .expect_err("the fixture settles with a nonfatal error");
     assert!(matches!(
         miss,
         crate::stages::common::handler_error::HandlerError::Domain(ref message)
@@ -2589,10 +2595,11 @@ async fn effectful_transform_nonfatal_error_checks_the_next_unused_cursor() {
     let hit = run_consume_one_adapter(
         parent.clone(),
         two_cursors.clone(),
-        AdapterFailure::Nonfatal,
+        AdapterSettlement::Nonfatal,
         calls.clone(),
     )
-    .await;
+    .await
+    .expect_err("unused history must replace the nonfatal error");
     assert!(matches!(
         hit,
         crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
@@ -2601,13 +2608,10 @@ async fn effectful_transform_nonfatal_error_checks_the_next_unused_cursor() {
                 && fatal.detail.contains("would replace an existing terminal")
     ));
 
-    let fatal = run_consume_one_adapter(
-        parent,
-        two_cursors,
-        AdapterFailure::Fatal,
-        calls.clone(),
-    )
-    .await;
+    let fatal =
+        run_consume_one_adapter(parent, two_cursors, AdapterSettlement::Fatal, calls.clone())
+            .await
+            .expect_err("the fixture settles with its original fatal error");
     assert!(matches!(
         fatal,
         crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
@@ -2620,6 +2624,43 @@ async fn effectful_transform_nonfatal_error_checks_the_next_unused_cursor() {
         calls.load(Ordering::SeqCst),
         0,
         "history selection and error settlement resolve no live authority"
+    );
+}
+
+#[tokio::test]
+async fn effectful_transform_success_checks_the_next_unused_cursor() {
+    let (parent, one_cursor) = adapter_history_fixture(1).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let settled = run_consume_one_adapter(
+        parent.clone(),
+        one_cursor,
+        AdapterSettlement::Success,
+        calls.clone(),
+    )
+    .await
+    .expect("settlement at the end of archived history succeeds");
+    assert!(settled.is_empty());
+
+    let (parent, two_cursors) = adapter_history_fixture(2).await;
+    let divergence = run_consume_one_adapter(
+        parent,
+        two_cursors,
+        AdapterSettlement::Success,
+        calls.clone(),
+    )
+    .await
+    .expect_err("successful settlement cannot abandon archived history");
+    assert!(matches!(
+        divergence,
+        crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
+            if fatal.code == obzenflow_core::event::StageFatalCode::Replay
+                && fatal.reason == obzenflow_core::event::StageFatalReason::ReplayDivergence
+                && fatal.detail.contains("would replace an existing terminal")
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "successful settlement resolves archived effects without live calls"
     );
 }
 

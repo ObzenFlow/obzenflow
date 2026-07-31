@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use async_trait::async_trait;
 use crate::dsl::ai_effect::{invoke_generated_chat, GeneratedChatInvocationError};
+use async_trait::async_trait;
 use obzenflow_adapters::ai::{ChatCompletion, ChatCompletionBuildError};
 use obzenflow_core::ai::{
     AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceMapInput,
@@ -287,10 +287,8 @@ where
     Role: AiMapRole<Item, Partial>,
 {
     type Input = AiMapReduceMapInput<ChunkEnvelope<Item>>;
-    type Output = obzenflow_core::stage_fact_set![
-        AiMapReduceTaggedPartial<Partial>,
-        AiMapReduceChunkFailed,
-    ];
+    type Output =
+        obzenflow_core::stage_fact_set![AiMapReduceTaggedPartial<Partial>, AiMapReduceChunkFailed,];
     type AllowedEffects = obzenflow_runtime::effect_set![ChatCompletion];
 
     async fn process(
@@ -400,10 +398,7 @@ where
     Role: AiFinaliseRole<Seed, Collected, Out>,
 {
     type Input = obzenflow_core::ai::AiMapReduceReduceInput<Seed, Collected>;
-    type Output = obzenflow_core::stage_fact_set![
-        Out,
-        AiMapReduceFinaliseFailed,
-    ];
+    type Output = obzenflow_core::stage_fact_set![Out, AiMapReduceFinaliseFailed,];
     type AllowedEffects = obzenflow_runtime::effect_set![ChatCompletion];
 
     async fn process(

@@ -4913,9 +4913,24 @@ macro_rules! __obzenflow_ai_map_reduce_chunker_by_budget {
 
 #[doc(hidden)]
 #[macro_export]
+macro_rules! __obzenflow_clone_ai_chat_contract {
+    ("inference!", $binding:ident) => {{
+        #[allow(non_camel_case_types)]
+        struct $binding {
+            _private: (),
+        }
+        $crate::dsl::ai_effect::clone_inference_chat_contract::<_, $binding>(&$binding)
+    }};
+    ($surface:literal, $binding:ident) => {
+        $crate::dsl::ai_effect::clone_chat_contract(&$binding)
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
 macro_rules! __obzenflow_ai_chat_effect_row {
     (
-        surface = $surface:literal,
+        surface = $surface:tt,
         row = {
             at_least_once(ChatCompletion)
                 via $binding:ident
@@ -4929,7 +4944,7 @@ macro_rules! __obzenflow_ai_chat_effect_row {
         ))
     };
     (
-        surface = $surface:literal,
+        surface = $surface:tt,
         row = {
             at_least_once(ChatCompletion)
                 via $binding:ident
@@ -4943,7 +4958,7 @@ macro_rules! __obzenflow_ai_chat_effect_row {
         )
     };
     (
-        surface = $surface:literal,
+        surface = $surface:tt,
         row = {
             at_least_once(ChatCompletion)
                 via $binding:ident
@@ -4952,14 +4967,12 @@ macro_rules! __obzenflow_ai_chat_effect_row {
         }
     ) => {{
         let __chat_binding: ::obzenflow_core::ai::ChatBindingContract =
-            $crate::dsl::ai_effect::clone_chat_contract(&$binding);
-        let __chat_policy: Box<
-            dyn ::obzenflow_adapters::middleware::MiddlewareFactory,
-        > = $policy;
+            $crate::__obzenflow_clone_ai_chat_contract!($surface, $binding);
+        let __chat_policy: Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory> = $policy;
         (__chat_binding, __chat_policy)
     }};
     (
-        surface = $surface:literal,
+        surface = $surface:tt,
         row = { ChatCompletion $($rest:tt)* }
     ) => {
         compile_error!(concat!(
@@ -4969,7 +4982,7 @@ macro_rules! __obzenflow_ai_chat_effect_row {
         ))
     };
     (
-        surface = $surface:literal,
+        surface = $surface:tt,
         row = { transactional(ChatCompletion) $($rest:tt)* }
     ) => {
         compile_error!(concat!(
@@ -4978,7 +4991,7 @@ macro_rules! __obzenflow_ai_chat_effect_row {
         ))
     };
     (
-        surface = $surface:literal,
+        surface = $surface:tt,
         row = { $($invalid:tt)* }
     ) => {
         compile_error!(concat!(

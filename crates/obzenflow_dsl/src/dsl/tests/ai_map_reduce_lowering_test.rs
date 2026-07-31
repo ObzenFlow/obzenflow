@@ -171,6 +171,7 @@ mod tests {
             ChatTarget::new("ollama", target_model),
             test_estimator(estimator_model),
         )
+        .expect("test chat target and estimator models agree")
     }
 
     fn mk_transform(name: &str) -> Box<dyn StageDescriptor> {
@@ -229,10 +230,7 @@ mod tests {
 
         let declarations = inference.effect_declarations();
         assert_eq!(declarations.len(), 1);
-        assert_eq!(
-            declarations[0].effect_type,
-            "obzenflow.ai.chat_completion"
-        );
+        assert_eq!(declarations[0].effect_type, "obzenflow.ai.chat_completion");
         let policies = inference.effect_policy_attachments();
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0].effect_type, "obzenflow.ai.chat_completion");
@@ -447,45 +445,19 @@ mod tests {
 
     #[test]
     fn ai_map_reduce_rejects_an_estimator_for_a_different_target_model() {
-        let chat = test_chat_contract("test-model", "different-model");
-        let digest = crate::ai_map_reduce!(
-            TestSeed -> TestOut => {
-                map: [TestItem] ->{
-                    at_least_once(ChatCompletion)
-                        via chat
-                        with { obzenflow_adapters::middleware::control::ai_resilience() }
-                } TestPartial => TestMapRole,
-                reduce: (TestSeed, [TestPartial]) ->{
-                    at_least_once(ChatCompletion)
-                        via chat
-                        with { obzenflow_adapters::middleware::control::ai_resilience() }
-                } TestOut => TestFinaliseRole,
-            },
-            chunking: by_budget {
-                items: |seed: &TestSeed| seed.items.clone(),
-                render: |item: &TestItem, _ctx| format!("{}", item.value),
-                budget: ::obzenflow_core::ai::TokenCount::new(100),
-                max_items: None,
-                oversize: error,
-            }
-        );
+        let error = ChatBindingContract::from_resolved(
+            ChatTarget::new("ollama", "test-model"),
+            test_estimator("different-model"),
+        )
+        .expect_err("the contract constructor rejects contradictory model evidence");
 
-        let mut members: HashMap<String, FlowMember> = HashMap::new();
-        members.insert("digest".to_string(), digest.into_flow_member());
-        let mut connections = Vec::new();
-        let error = match lower_composites(members, &mut connections) {
-            Ok(_) => panic!("the estimator model must agree with effects.chat_target"),
-            Err(error) => error,
-        };
-        match error {
-            crate::dsl::FlowBuildError::BindingConfiguration { binding, detail } => {
-                assert_eq!(binding, "chat");
-                assert!(detail.contains("estimator model"));
-            }
-            other => panic!(
-                "estimator mismatch must be a typed pre-substrate binding error, got {other:?}"
-            ),
-        }
+        assert!(matches!(
+            error,
+            obzenflow_core::ai::ChatBindingContractError::EstimatorModelMismatch {
+                ref target_model,
+                ref estimator_model,
+            } if target_model == "test-model" && estimator_model == "different-model"
+        ));
     }
 
     #[test]

@@ -126,10 +126,7 @@ impl Effect for ChatCompletion {
         Ok(())
     }
 
-    async fn execute(
-        &self,
-        ctx: &mut EffectContext,
-    ) -> Result<ChatCompletionReply, EffectError> {
+    async fn execute(&self, ctx: &mut EffectContext) -> Result<ChatCompletionReply, EffectError> {
         let client = ctx.port::<dyn ChatClient>(CHAT_CLIENT_PORT)?;
         let estimated_input_tokens = self
             .estimator
@@ -305,12 +302,7 @@ mod tests {
                 .expect("unrelated effect is ignored")
                 .is_none()
         );
-        let wrong_fact = legacy_record(
-            ChatCompletion::EFFECT_TYPE,
-            "test.not_legacy_chat",
-            0,
-            1,
-        );
+        let wrong_fact = legacy_record(ChatCompletion::EFFECT_TYPE, "test.not_legacy_chat", 0, 1);
         assert!(
             <ChatCompletion as Effect>::decode_legacy_recorded_reply(&[&wrong_fact])
                 .expect("unrelated fact is ignored")

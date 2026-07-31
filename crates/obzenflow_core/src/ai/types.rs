@@ -408,6 +408,17 @@ struct ChatBindingContractInner {
     estimator: ResolvedTokenEstimator,
 }
 
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum ChatBindingContractError {
+    #[error(
+        "chat target model '{target_model}' does not match token estimator model '{estimator_model}'"
+    )]
+    EstimatorModelMismatch {
+        target_model: String,
+        estimator_model: String,
+    },
+}
+
 /// Credential-free, immutable evidence for one concrete chat binding.
 ///
 /// Clones share a construction family. That process-local relationship is
@@ -420,8 +431,20 @@ impl ChatBindingContract {
     /// Infrastructure-only construction seam. This creates no client or live
     /// invocation authority.
     #[doc(hidden)]
-    pub fn from_resolved(target: ChatTarget, estimator: ResolvedTokenEstimator) -> Self {
-        Self(Arc::new(ChatBindingContractInner { target, estimator }))
+    pub fn from_resolved(
+        target: ChatTarget,
+        estimator: ResolvedTokenEstimator,
+    ) -> Result<Self, ChatBindingContractError> {
+        if target.model != estimator.info().model {
+            return Err(ChatBindingContractError::EstimatorModelMismatch {
+                target_model: target.model,
+                estimator_model: estimator.info().model.clone(),
+            });
+        }
+        Ok(Self(Arc::new(ChatBindingContractInner {
+            target,
+            estimator,
+        })))
     }
 
     pub fn target(&self) -> &ChatTarget {
@@ -516,6 +539,9 @@ pub struct EmbeddingResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::{
+        HeuristicTokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
+    };
 
     #[test]
     fn ai_provider_normalizes_to_lowercase() {
@@ -573,6 +599,32 @@ mod tests {
                 "params": {},
                 "response_format": {"kind": "json_object"}
             })
+        );
+    }
+
+    #[test]
+    fn chat_binding_contract_rejects_an_estimator_for_another_model() {
+        let estimator = ResolvedTokenEstimator::new(
+            Arc::new(HeuristicTokenEstimator::default()),
+            TokenEstimatorResolutionInfo::heuristic(
+                "estimator-model",
+                TokenEstimatorFallbackReason::ExplicitHeuristic,
+                None,
+            ),
+        );
+
+        let error = ChatBindingContract::from_resolved(
+            ChatTarget::new("fixture", "target-model"),
+            estimator,
+        )
+        .expect_err("a contract cannot carry contradictory model evidence");
+
+        assert_eq!(
+            error,
+            ChatBindingContractError::EstimatorModelMismatch {
+                target_model: "target-model".to_string(),
+                estimator_model: "estimator-model".to_string(),
+            }
         );
     }
 }

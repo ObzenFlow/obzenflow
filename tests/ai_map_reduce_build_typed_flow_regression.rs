@@ -20,10 +20,9 @@
 
 use async_trait::async_trait;
 use obzenflow_core::ai::{
-    AiClientError, AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatClient,
-    ChatBindingContract, ChatCompletionReply, ChatMessage, ChatParams, ChatRequest,
-    ChatRequestSpec, ChatResponse, ChatTarget, HeuristicTokenEstimator, Many,
-    ResolvedTokenEstimator, TokenCount,
+    AiClientError, AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatBindingContract, ChatClient,
+    ChatCompletionReply, ChatMessage, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse,
+    ChatTarget, HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenCount,
     TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
@@ -187,7 +186,8 @@ macro_rules! generated_digest {
     }};
     ($estimator_model:expr) => {{
         let chat =
-            ChatBindingContract::from_resolved(test_target(), test_estimator($estimator_model));
+            ChatBindingContract::from_resolved(test_target(), test_estimator($estimator_model))
+                .expect("test chat target and estimator models agree");
         ai_map_reduce!(
             BuildOnlySeed -> BuildOnlyOut => {
                 map: [BuildOnlyItem] ->{
@@ -372,7 +372,8 @@ async fn flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
             let chat = ChatBindingContract::from_resolved(
                 test_target(),
                 test_estimator("deterministic"),
-            );
+            )
+            .expect("test chat target and estimator models agree");
             let bound_map_role = BuildMapRole;
             let bound_finalise_role = BuildFinaliseRole;
             let bound_effect_ports = test_effect_ports();
@@ -431,7 +432,8 @@ async fn test_flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
             let chat = ChatBindingContract::from_resolved(
                 test_target(),
                 test_estimator("deterministic"),
-            );
+            )
+            .expect("test chat target and estimator models agree");
             let bound_map_role = BuildMapRole;
             let bound_finalise_role = BuildFinaliseRole;
             let bound_effect_ports = test_effect_ports();
@@ -478,58 +480,36 @@ async fn test_flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
     let _harness = result.expect("test_flow! bindings must remain visible to later clauses");
 }
 
-#[tokio::test]
-async fn estimator_mismatch_fails_before_journal_or_effect_port_evaluation() {
+#[test]
+fn estimator_mismatch_fails_before_journal_or_effect_port_evaluation() {
     let journals_evaluated = Arc::new(AtomicBool::new(false));
     let ports_evaluated = Arc::new(AtomicBool::new(false));
     let journal_probe = Arc::clone(&journals_evaluated);
     let port_probe = Arc::clone(&ports_evaluated);
 
-    let result = flow! {
-        name: "amr_pre_substrate_binding_failure",
-        journals: {
-            journal_probe.store(true, Ordering::SeqCst);
-            memory_journals()
-        },
-        middleware: [],
-        effect_ports: {
-            port_probe.store(true, Ordering::SeqCst);
-            test_effect_ports()
-        },
+    let result = (|| {
+        let contract =
+            ChatBindingContract::from_resolved(test_target(), test_estimator("different-model"))?;
+        journal_probe.store(true, Ordering::SeqCst);
+        port_probe.store(true, Ordering::SeqCst);
+        Ok::<_, obzenflow_core::ai::ChatBindingContractError>(contract)
+    })();
+    let error = result.expect_err("an estimator for a different model must fail construction");
 
-        stages: {
-            seed = source!(BuildOnlySeed => NoEventSource);
-            digest = generated_digest!("different-model");
-            sink_stage = sink!(BuildOnlyOut => NoopSink);
-        },
-
-        topology: {
-            seed |> digest;
-            digest |> sink_stage;
-        }
-    }
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await;
-    let failure = match result {
-        Ok(_) => panic!("an estimator for a different model must fail flow build"),
-        Err(failure) => failure,
-    };
-
-    match failure.error {
-        obzenflow_dsl::dsl::FlowBuildError::BindingConfiguration { binding, detail } => {
-            assert_eq!(binding, "chat");
-            assert!(detail.contains("estimator model"));
-            assert!(detail.contains("chat target"));
-        }
-        other => panic!("expected typed chat binding failure, got {other:?}"),
-    }
+    assert!(matches!(
+        error,
+        obzenflow_core::ai::ChatBindingContractError::EstimatorModelMismatch {
+            ref target_model,
+            ref estimator_model,
+        } if target_model == "deterministic" && estimator_model == "different-model"
+    ));
     assert!(
         !journals_evaluated.load(Ordering::SeqCst),
-        "journal construction must remain outside a rejected composite build"
+        "journal construction must remain outside a rejected chat contract"
     );
     assert!(
         !ports_evaluated.load(Ordering::SeqCst),
-        "effect-port registration must remain outside a rejected composite build"
+        "effect-port registration must remain outside a rejected chat contract"
     );
 }
 

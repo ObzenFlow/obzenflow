@@ -207,11 +207,9 @@
 //! let _ = effectful_sink!(Out => Handler, effects: [], middleware: []);
 //! ```
 
-pub mod backpressure_clause;
 #[doc(hidden)]
 pub mod ai_effect;
-#[doc(hidden)]
-pub mod inference;
+pub mod backpressure_clause;
 mod binder;
 pub mod composites;
 /// FLOWIP-128a composite substrate. Public for macro reachability only;
@@ -222,6 +220,8 @@ pub mod composition;
 mod dsl_impl;
 pub mod error;
 mod flow_definition;
+#[doc(hidden)]
+pub mod inference;
 pub mod stage_descriptor;
 mod stage_macros;
 pub mod typing;

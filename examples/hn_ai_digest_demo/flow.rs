@@ -122,10 +122,8 @@ impl AiMapRole<FormattedStory, HnDigestGroupSummary> for HnMapRole {
         _request: ChatRequestSpec,
         reply: ChatCompletionReply,
     ) -> Result<HnDigestGroupSummary, AiRoleLogicFailure> {
-        digest_map_parse(&self.context, reply.response).map_err(|error| {
-            AiRoleLogicFailure::Parse {
-                message: error.to_string(),
-            }
+        digest_map_parse(&self.context, reply.response).map_err(|error| AiRoleLogicFailure::Parse {
+            message: error.to_string(),
         })
     }
 }

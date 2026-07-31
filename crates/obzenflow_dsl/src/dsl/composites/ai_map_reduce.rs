@@ -13,6 +13,7 @@ mod effects;
 
 use self::chunk::GeneratedAiChunkHandler;
 use self::effects::{GeneratedAiFinaliseHandler, GeneratedAiMapHandler};
+use crate::dsl::ai_effect::require_generated_chat_resilience;
 use crate::dsl::composition::{CompositeBuildContext, CompositeBuildError, CompositeDescriptor};
 use crate::dsl::stage_descriptor::{
     EffectPolicyAttachment, EffectfulTransformDescriptor, StatefulDescriptor, TransformDescriptor,
@@ -170,17 +171,20 @@ where
                  prove one estimator/configuration decision",
             ));
         }
-        if self.map_chat_binding.estimator().info().model
-            != self.map_chat_binding.target().model
-        {
-            return Err(CompositeBuildError::binding_configuration(
-                "chat",
-                "ai_map_reduce!: ChatBindingContract estimator model does not match its chat target",
-            ));
-        }
-
-        require_generated_resilience("map", &self.map_policies)?;
-        require_generated_resilience("reduce", &self.finalise_policies)?;
+        require_generated_chat_resilience(
+            "ai_map_reduce!",
+            "role",
+            "map",
+            self.map_policies.iter().map(Box::as_ref),
+        )
+        .map_err(CompositeBuildError::new)?;
+        require_generated_chat_resilience(
+            "ai_map_reduce!",
+            "role",
+            "reduce",
+            self.finalise_policies.iter().map(Box::as_ref),
+        )
+        .map_err(CompositeBuildError::new)?;
 
         let composite_id = CompositeId::new(format!("ai_map_reduce:{}", self.name));
         let direct_bound = NonZeroU64::MIN.saturating_add(2);
@@ -208,10 +212,8 @@ where
             ]),
         );
 
-        let map_handler = GeneratedAiMapHandler::<Item, Partial, _>::new(
-            self.map_role,
-            self.map_chat_binding,
-        );
+        let map_handler =
+            GeneratedAiMapHandler::<Item, Partial, _>::new(self.map_role, self.map_chat_binding);
         let map_descriptor = wrap_typed_descriptor(
             Box::new(EffectfulTransformDescriptor::generated_with_pass_through::<
                 AiMapReduceMapInput<ChunkEnvelope<Item>>,
@@ -320,23 +322,4 @@ where
             .default();
         Ok(())
     }
-}
-
-fn require_generated_resilience(
-    role: &'static str,
-    policies: &[Box<dyn MiddlewareFactory>],
-) -> Result<(), CompositeBuildError> {
-    let count = policies
-        .iter()
-        .filter(|policy| policy.declaration().is_effect_resilience())
-        .count();
-    if count == 1 {
-        return Ok(());
-    }
-
-    Err(CompositeBuildError::new(format!(
-        "ai_map_reduce!: generated role '{role}' requires exactly one EffectResilience \
-         policy on 'ChatCompletion'; attach `with {{ ai_resilience() }}` to the role row \
-         (found {count})"
-    )))
 }

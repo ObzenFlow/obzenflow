@@ -58,8 +58,9 @@ pub use token_estimation::{
     TokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 pub use types::{
-    AiProvider, CanonicalizationComponent, ChatBindingContract, ChatBindingFingerprint,
-    ChatCompletionReply, ChatMessage, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse,
-    ChatResponseFormat, ChatRole, ChatTarget, EmbeddingParams, EmbeddingRequest, EmbeddingResponse,
-    SystemPrompt, ToolCall, ToolDefinition, Usage, UsageSource, UserPrompt, CHAT_CLIENT_PORT,
+    AiProvider, CanonicalizationComponent, ChatBindingContract, ChatBindingContractError,
+    ChatBindingFingerprint, ChatCompletionReply, ChatMessage, ChatParams, ChatRequest,
+    ChatRequestSpec, ChatResponse, ChatResponseFormat, ChatRole, ChatTarget, EmbeddingParams,
+    EmbeddingRequest, EmbeddingResponse, SystemPrompt, ToolCall, ToolDefinition, Usage,
+    UsageSource, UserPrompt, CHAT_CLIENT_PORT,
 };

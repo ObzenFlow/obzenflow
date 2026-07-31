@@ -1623,6 +1623,21 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
+        if let Some(surface) = self.generated_surface {
+            crate::dsl::ai_effect::require_generated_chat_resilience(
+                surface,
+                self.generated_owner_kind,
+                &self.name,
+                self.effect_policies
+                    .iter()
+                    .filter(|attachment| {
+                        attachment.effect_type
+                            == <obzenflow_adapters::ai::ChatCompletion as obzenflow_runtime::effects::Effect>::EFFECT_TYPE
+                    })
+                    .flat_map(|attachment| attachment.factories.iter())
+                    .map(Box::as_ref),
+            )?;
+        }
         if let Some(bound) = self.direct_fact_plan.maximum_bound() {
             let surface = self.generated_surface.unwrap_or("generated stage");
             resources

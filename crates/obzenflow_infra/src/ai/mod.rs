@@ -46,6 +46,4 @@ pub use rig_builder::{
 pub use model_config::{ModelChatBuilder, ModelChatBuilderWithContext, ModelConfig};
 
 #[cfg(feature = "ai-rig")]
-pub use chat_effect_binding::{
-    ChatEffectBinding, ChatEffectBindingError, ChatEffectRegistration,
-};
+pub use chat_effect_binding::{ChatEffectBinding, ChatEffectBindingError, ChatEffectRegistration};

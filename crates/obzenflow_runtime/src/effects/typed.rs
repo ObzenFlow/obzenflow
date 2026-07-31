@@ -202,7 +202,7 @@ where
         self.core.drain_committed_facts()
     }
 
-    pub(crate) async fn preflight_nonfatal_error_has_no_unused_history(
+    pub(crate) async fn preflight_settlement_has_no_unused_history(
         &self,
     ) -> Result<(), EffectError> {
         self.core.preflight_next_effect_cursor_is_empty().await

@@ -352,13 +352,21 @@ where
         let input = H::Input::try_from_event(&event)
             .map_err(|e| HandlerError::Deserialization(e.to_string()))?;
         match self.handler.process(input, &mut fx).await {
-            Ok(_completion) => Ok(Vec::new()),
+            Ok(_completion) => {
+                if let Err(divergence) = fx.preflight_settlement_has_no_unused_history().await {
+                    return Err(HandlerError::Fatal(
+                        crate::stages::common::handler_error::StageFatal::new(
+                            StageFatalCode::Replay,
+                            StageFatalReason::ReplayDivergence,
+                            divergence.to_string(),
+                        ),
+                    ));
+                }
+                Ok(Vec::new())
+            }
             Err(error) if error.is_fatal() => Err(error),
             Err(error) => {
-                if let Err(divergence) = fx
-                    .preflight_nonfatal_error_has_no_unused_history()
-                    .await
-                {
+                if let Err(divergence) = fx.preflight_settlement_has_no_unused_history().await {
                     return Err(HandlerError::Fatal(
                         crate::stages::common::handler_error::StageFatal::new(
                             StageFatalCode::Replay,

@@ -10,7 +10,8 @@ use super::endpoint_identity::{
 use super::resolve_estimator_for_model;
 use crate::ai::rig::RigChatClient;
 use obzenflow_core::ai::{
-    AiProvider, ChatBindingContract, ChatClient, ChatTarget, CHAT_CLIENT_PORT,
+    AiProvider, ChatBindingContract, ChatBindingContractError, ChatClient, ChatTarget,
+    CHAT_CLIENT_PORT,
 };
 use obzenflow_core::config::SecretRef;
 use obzenflow_core::http_client::Url;
@@ -34,6 +35,8 @@ pub enum ChatEffectBindingError {
     MissingBaseUrl,
     #[error("invalid ai.models.base_url: {message}")]
     InvalidBaseUrl { message: String },
+    #[error(transparent)]
+    InvalidContract(#[from] ChatBindingContractError),
 }
 
 #[derive(Debug, Clone)]
@@ -121,7 +124,7 @@ impl ChatEffectBinding {
         let target = bound_chat_target(AiProvider::new(provider), model.clone(), &endpoint);
         let estimator = resolve_estimator_for_model(&model);
         Ok(Self {
-            contract: ChatBindingContract::from_resolved(target, estimator),
+            contract: ChatBindingContract::from_resolved(target, estimator)?,
             provider: deferred,
         })
     }
@@ -256,10 +259,7 @@ mod tests {
             .target()
             .logically_matches(&ChatTarget::new("openai_compatible", "fixture-model")));
         assert!(contract.target().binding_fingerprint.is_some());
-        assert_eq!(
-            contract.estimator().info().model,
-            contract.target().model
-        );
+        assert_eq!(contract.estimator().info().model, contract.target().model);
     }
 
     #[test]
@@ -296,21 +296,15 @@ mod tests {
 
     #[test]
     fn clones_share_one_contract_family_but_equal_constructions_do_not() {
-        let (left, _) = ChatEffectBinding::from_config(&config(
-            "ollama",
-            Some("fixture-model"),
-            None,
-        ))
-        .unwrap()
-        .into_parts();
+        let (left, _) =
+            ChatEffectBinding::from_config(&config("ollama", Some("fixture-model"), None))
+                .unwrap()
+                .into_parts();
         let alias = left.clone();
-        let (equal_but_separate, _) = ChatEffectBinding::from_config(&config(
-            "ollama",
-            Some("fixture-model"),
-            None,
-        ))
-        .unwrap()
-        .into_parts();
+        let (equal_but_separate, _) =
+            ChatEffectBinding::from_config(&config("ollama", Some("fixture-model"), None))
+                .unwrap()
+                .into_parts();
 
         assert!(left.shares_construction_origin(&alias));
         assert!(!left.shares_construction_origin(&equal_but_separate));
@@ -319,21 +313,17 @@ mod tests {
 
     #[test]
     fn registration_installs_only_at_the_sealed_chat_coordinate() {
-        let (_, registration) = ChatEffectBinding::from_config(&config(
-            "ollama",
-            Some("fixture-model"),
-            None,
-        ))
-        .unwrap()
-        .into_parts();
+        let (_, registration) =
+            ChatEffectBinding::from_config(&config("ollama", Some("fixture-model"), None))
+                .unwrap()
+                .into_parts();
 
         let registry = registration
             .install_into(EffectPortRegistry::new())
             .expect("first sealed registration succeeds");
-        let requirement =
-            obzenflow_runtime::effects::EffectPortRequirement::of::<dyn ChatClient>(
-                CHAT_CLIENT_PORT,
-            );
+        let requirement = obzenflow_runtime::effects::EffectPortRequirement::of::<dyn ChatClient>(
+            CHAT_CLIENT_PORT,
+        );
         assert!(registry.contains_requirement(&requirement));
     }
 }

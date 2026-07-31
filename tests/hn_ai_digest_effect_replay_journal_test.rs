@@ -545,7 +545,8 @@ fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
         chat_target: _chat_target,
         map_prepare_calls,
     } = behaviour;
-    let chat = ChatBindingContract::from_resolved(map_request_target, chat_estimator);
+    let chat = ChatBindingContract::from_resolved(map_request_target, chat_estimator)
+        .expect("test chat target and estimator models agree");
     flow! {
         name: "hn_ai_digest_effect_replay_journal",
         journals: disk_journals(journal_base),
@@ -601,8 +602,8 @@ fn build_recovery_flow(
     effect_ports: EffectPortRegistry,
     map_policy: Box<dyn MiddlewareFactory>,
 ) -> FlowDefinition {
-    let chat =
-        ChatBindingContract::from_resolved(target(), estimator());
+    let chat = ChatBindingContract::from_resolved(target(), estimator())
+        .expect("test chat target and estimator models agree");
     flow! {
         name: "hn_ai_digest_recovery_composition",
         journals: disk_journals(journal_base),
@@ -658,8 +659,8 @@ fn build_credit_flow(
     effect_ports: EffectPortRegistry,
     prepare_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
-    let chat =
-        ChatBindingContract::from_resolved(target(), estimator());
+    let chat = ChatBindingContract::from_resolved(target(), estimator())
+        .expect("test chat target and estimator models agree");
     flow! {
         name: "hn_ai_digest_credit_composition",
         journals: disk_journals(journal_base),
@@ -844,6 +845,27 @@ fn chat_completion_reply(event: &ChainEvent) -> Option<ChatCompletionReply> {
     }
 }
 
+fn chat_completion_descriptor_hashes(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<String> {
+    envelopes
+        .iter()
+        .filter_map(|envelope| {
+            let ChainEventContent::Data {
+                event_type,
+                payload,
+            } = &envelope.event.content
+            else {
+                return None;
+            };
+            if event_type != EFFECT_RECORD_EVENT_TYPE {
+                return None;
+            }
+            let record: EffectRecord = serde_json::from_value(payload.clone()).ok()?;
+            (record.descriptor.effect_type.as_str() == CHAT_COMPLETION_EFFECT_TYPE)
+                .then(|| record.descriptor_hash.as_str().to_string())
+        })
+        .collect()
+}
+
 fn assert_atomic_completion_groups(envelopes: &[EventEnvelope<ChainEvent>], expected: usize) {
     let completions = envelopes
         .iter()
@@ -874,7 +896,9 @@ fn assert_completion_contract(
 ) {
     let completions = envelopes
         .iter()
-        .filter_map(|envelope| chat_completion_reply(&envelope.event).map(|reply| (envelope, reply)))
+        .filter_map(|envelope| {
+            chat_completion_reply(&envelope.event).map(|reply| (envelope, reply))
+        })
         .collect::<Vec<_>>();
     assert_eq!(completions.len(), expected);
     for (envelope, completion) in completions {
@@ -1157,9 +1181,9 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
             .count(),
         MAP_CHUNKS
     );
-    assert!(provider_map.iter().all(|envelope| {
-        chat_completion_reply(&envelope.event).is_none()
-    }));
+    assert!(provider_map
+        .iter()
+        .all(|envelope| { chat_completion_reply(&envelope.event).is_none() }));
     assert!(provider_outputs
         .lock()
         .expect("provider outputs lock")
@@ -1244,6 +1268,16 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
         1,
         "ai_map_reduce.finalise.chat_completion",
         &target(),
+    );
+    assert_eq!(
+        chat_completion_descriptor_hashes(&live_map),
+        vec!["4eb605a73a06973c192100572573b052652dc3f750451693c5af73eec9034fda"; 5],
+        "the migrated HN map requests retain their pre-FLOWIP-120j descriptor bytes"
+    );
+    assert_eq!(
+        chat_completion_descriptor_hashes(&live_finalise),
+        vec!["d8c705883562665f8fd050a4db8df91e96e33bdd026f93309b9d468cb373a726"],
+        "the migrated HN finalise request retains its pre-FLOWIP-120j descriptor bytes"
     );
     let live_map_ids = effect_evidence_ids(&live_map);
     let live_finalise_ids = effect_evidence_ids(&live_finalise);
@@ -2061,10 +2095,7 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
                 AiMapReduceTaggedPartial::<DigestPartial>::versioned_event_type(),
                 manifest.chunk_count,
             ),
-            (
-                EFFECT_RECORD_EVENT_TYPE.to_string(),
-                port_invocations,
-            ),
+            (EFFECT_RECORD_EVENT_TYPE.to_string(), port_invocations,),
             (DigestOut::versioned_event_type(), 1),
             (
                 EffectAttemptStarted::versioned_event_type(),

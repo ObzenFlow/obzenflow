@@ -116,6 +116,7 @@ pub fn contract() -> ChatBindingContract {
             ),
         ),
     )
+    .expect("trybuild chat target and estimator models agree")
 }
 
 fn spec() -> ChatRequestSpec {
