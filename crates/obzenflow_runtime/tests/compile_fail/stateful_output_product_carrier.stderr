@@ -18,7 +18,7 @@ help: the trait `TypedPayload` is not implemented for `Product`
              AiMapReducePlanningManifest
              AiMapReduceReduceInput<Seed, Collected>
              AiMapReduceTaggedPartial<T>
-             ChatCompletionCompleted
+             ChunkEnvelope<T>
            and $N others
    = note: required for `Product` to implement `OneFactStageOutput`
 note: required by a bound in `obzenflow_runtime::stages::EffectfulStatefulHandler::Output`

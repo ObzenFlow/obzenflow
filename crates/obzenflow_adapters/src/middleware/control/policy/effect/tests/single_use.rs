@@ -151,6 +151,7 @@ impl Effect for TransactionProbe {
     const SAFETY: EffectSafety = EffectSafety::Transactional;
 
     type Outcome = TransactionProbeOutput;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "transaction_probe"

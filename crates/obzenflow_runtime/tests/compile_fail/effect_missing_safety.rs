@@ -24,6 +24,7 @@ impl Effect for MissingSafetyEffect {
     const SCHEMA_VERSION: u32 = 1;
 
     type Outcome = MissingSafetyOutput;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "missing_safety"

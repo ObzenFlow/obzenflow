@@ -1,13 +1,27 @@
-error: ai_map_reduce!: effect 'ChatCompletion' on role 'map' is NonIdempotentAtLeastOnce; retry is forbidden
-  --> tests/compile_fail/ai_map_reduce_retry_forbidden.rs:8:13
+error: ai_map_reduce!: ChatCompletion is NonIdempotentAtLeastOnce; retry is forbidden
+  --> tests/compile_fail/ai_map_reduce_retry_forbidden.rs:16:13
    |
- 8 |       let _ = ai_map_reduce!(
+16 |       let _ = ai_map_reduce!(
    |  _____________^
- 9 | |         Seed -> Out => {
-10 | |             map: [Item] -> Partial => map_role,
-11 | |             reduce: (Seed, [Partial]) -> Out => finalise_role,
+17 | |         Seed -> Output => {
+18 | |             map: [Item] ->{
+19 | |                 at_least_once(ChatCompletion) via chat with { retry(3) }
 ...  |
-20 | |     );
+32 | |     );
    | |_____^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_ai_map_reduce_effects_contract` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_ai_chat_effect_row` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0282]: type annotations needed
+  --> tests/compile_fail/ai_map_reduce_retry_forbidden.rs:16:13
+   |
+16 |       let _ = ai_map_reduce!(
+   |  _____________^
+17 | |         Seed -> Output => {
+18 | |             map: [Item] ->{
+19 | |                 at_least_once(ChatCompletion) via chat with { retry(3) }
+...  |
+32 | |     );
+   | |_____^ cannot infer type
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_ai_map_reduce_build` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)

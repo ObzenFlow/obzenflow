@@ -103,7 +103,8 @@ mod tests {
                 idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
                 required_ports: Vec::new(),
                 transactional_executor: None,
-                outcome_fact_types: Vec::new(),
+                outcome_kind: obzenflow_runtime::effects::EffectOutcomeKind::DomainFacts,
+                public_outcome_fact_types: Vec::new(),
             }]
         }
 

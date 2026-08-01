@@ -375,6 +375,17 @@ impl BackpressureWriter {
     /// every participating enforced physical edge.
     #[doc(hidden)]
     pub fn validate_generated_direct_bound(&self, bound: NonZeroU64) -> Result<(), String> {
+        self.validate_generated_direct_bound_for(bound, "role", None)
+    }
+
+    /// Surface-aware form used by generated DSL descriptors.
+    #[doc(hidden)]
+    pub fn validate_generated_direct_bound_for(
+        &self,
+        bound: NonZeroU64,
+        owner_kind: &str,
+        owner_name: Option<&str>,
+    ) -> Result<(), String> {
         let Some(state) = &self.state else {
             return Ok(());
         };
@@ -386,9 +397,12 @@ impl BackpressureWriter {
         if enforced.is_empty() {
             return Ok(());
         }
+        let owner = owner_name
+            .map(|name| format!("{owner_kind} '{name}'"))
+            .unwrap_or_else(|| owner_kind.to_string());
         if Self::is_bypass_enabled() {
             return Err(format!(
-                "generated role requires enforced direct admission for {} physical Data rows, \
+                "generated {owner} requires enforced direct admission for {} physical Data rows, \
                  but OBZENFLOW_BACKPRESSURE_DISABLED is set; unset it or configure the edge \
                  explicitly as track/off",
                 bound
@@ -396,7 +410,7 @@ impl BackpressureWriter {
         }
         if let Some(edge) = enforced.iter().find(|edge| edge.window < bound.get()) {
             return Err(format!(
-                "generated role requires {} live physical Data credits; edge to stage '{}' \
+                "generated {owner} requires {} live physical Data credits; edge to stage '{}' \
                  resolved enforced window {}; set runtime.backpressure.window to at least {}",
                 bound, edge.downstream, edge.window, bound
             ));

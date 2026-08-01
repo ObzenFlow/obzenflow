@@ -22,6 +22,7 @@ impl Effect for UndeclaredEffect {
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
     type Outcome = Outcome;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str { "undeclared" }
     fn canonical_input(&self) -> serde_json::Value { serde_json::Value::Null }

@@ -1,0 +1,13 @@
+error: inference!: `chunking` is not supported; use `ai_map!` or `ai_map_reduce!`
+  --> tests/compile_fail/inference_chunking.rs:8:13
+   |
+ 8 |       let _ = inference!(
+   |  _____________^
+ 9 | |         Input ->{
+10 | |             at_least_once(ChatCompletion) via chat with { policy }
+11 | |         } Output => role,
+12 | |         chunking: by_budget { placeholder }
+13 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_inference_contract` which comes from the expansion of the macro `inference` (in Nightly builds, run with -Z macro-backtrace for more info)

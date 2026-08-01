@@ -39,10 +39,11 @@ pub use hashing::{
     CHAT_BINDING_FINGERPRINT_VERSION_SHA256_V1, LLM_HASH_VERSION_SHA256_V1,
 };
 pub use map_reduce::{
-    AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceJobFailed,
-    AiMapReduceMapInput, AiMapReducePlanningFailed, AiMapReducePlanningFailure,
-    AiMapReducePlanningManifest, AiMapReduceReduceInput, AiMapReduceRoleFailure,
-    AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind, AiRoleLogicFailure, Many,
+    AiFinaliseRole, AiInferenceRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed,
+    AiMapReduceJobFailed, AiMapReduceMapInput, AiMapReducePlanningFailed,
+    AiMapReducePlanningFailure, AiMapReducePlanningManifest, AiMapReduceReduceInput,
+    AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind,
+    AiRoleLogicFailure, Many,
 };
 pub use model_profile::{ChatModelProfile, ContextWindowSource};
 pub use observability::{
@@ -57,8 +58,9 @@ pub use token_estimation::{
     TokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 pub use types::{
-    AiProvider, CanonicalizationComponent, ChatBindingFingerprint, ChatCompletionCompleted,
-    ChatMessage, ChatParams, ChatRequest, ChatResponse, ChatResponseFormat, ChatRole, ChatTarget,
-    EmbeddingParams, EmbeddingRequest, EmbeddingResponse, SystemPrompt, ToolCall, ToolDefinition,
-    Usage, UsageSource, UserPrompt,
+    AiProvider, CanonicalizationComponent, ChatBindingContract, ChatBindingContractError,
+    ChatBindingFingerprint, ChatCompletionReply, ChatMessage, ChatParams, ChatRequest,
+    ChatRequestSpec, ChatResponse, ChatResponseFormat, ChatRole, ChatTarget, EmbeddingParams,
+    EmbeddingRequest, EmbeddingResponse, SystemPrompt, ToolCall, ToolDefinition, Usage,
+    UsageSource, UserPrompt, CHAT_CLIENT_PORT,
 };

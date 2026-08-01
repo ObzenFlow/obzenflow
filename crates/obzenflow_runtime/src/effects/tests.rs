@@ -347,6 +347,7 @@ impl Effect for CountingEffect {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
     type Outcome = CountingOutput;
+    type OutcomeSemantics = crate::effects::DomainFacts;
 
     fn label(&self) -> &str {
         self.label
@@ -365,6 +366,105 @@ impl Effect for CountingEffect {
 }
 
 #[derive(Clone, Debug)]
+struct RecordedReplyEffect {
+    value: u64,
+    calls: Arc<AtomicUsize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RecordedReplyValue {
+    value: u64,
+    provider_trace: String,
+}
+
+fn assert_effect_outcome_fits<E, Output, Proof>()
+where
+    E: EffectOutcomeFitsOutput<Output, Proof>,
+    Output: obzenflow_core::StageFactSet,
+{
+}
+
+#[async_trait]
+impl Effect for RecordedReplyEffect {
+    const EFFECT_TYPE: &'static str = "test.recorded_reply";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+
+    type Outcome = RecordedReplyValue;
+    type OutcomeSemantics = crate::effects::RecordedReply;
+
+    fn label(&self) -> &str {
+        "recorded-reply"
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({ "value": self.value })
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(RecordedReplyValue {
+            value: self.value + 1,
+            provider_trace: "integration-material".to_string(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AdapterSettlement {
+    Success,
+    Nonfatal,
+    Fatal,
+}
+
+#[derive(Clone, Debug)]
+struct ConsumeOneEffectThenSettle {
+    calls: Arc<AtomicUsize>,
+    settlement: AdapterSettlement,
+}
+
+#[async_trait]
+impl crate::stages::common::handlers::EffectfulTransformHandler for ConsumeOneEffectThenSettle {
+    type Input = FirstOutput;
+    type Output = CountingOutput;
+    type AllowedEffects = crate::effect_set![CountingEffect];
+
+    async fn process(
+        &self,
+        input: Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
+    {
+        fx.perform(CountingEffect {
+            value: input.value,
+            label: "first",
+            calls: self.calls.clone(),
+        })
+        .await
+        .map_err(|error| {
+            crate::stages::common::handler_error::HandlerError::Other(error.to_string())
+        })?;
+        match self.settlement {
+            AdapterSettlement::Success => fx.complete().map_err(Into::into),
+            AdapterSettlement::Nonfatal => {
+                Err(crate::stages::common::handler_error::HandlerError::Domain(
+                    "failed between effect cursors".to_string(),
+                ))
+            }
+            AdapterSettlement::Fatal => {
+                Err(crate::stages::common::handler_error::HandlerError::Fatal(
+                    crate::stages::common::handler_error::StageFatal::new(
+                        obzenflow_core::event::StageFatalCode::Protocol,
+                        obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
+                        "original fatal wins",
+                    ),
+                ))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct AffineCountingEffect {
     calls: Arc<AtomicUsize>,
 }
@@ -376,6 +476,7 @@ impl Effect for AffineCountingEffect {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
 
     type Outcome = CountingOutput;
+    type OutcomeSemantics = crate::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "affine-counting"
@@ -403,6 +504,7 @@ impl Effect for InvariantAffineEffect {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
 
     type Outcome = CountingOutput;
+    type OutcomeSemantics = crate::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "invariant-affine"
@@ -435,6 +537,7 @@ impl Effect for FailingEffect {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
     type Outcome = CountingOutput;
+    type OutcomeSemantics = crate::effects::DomainFacts;
 
     fn label(&self) -> &str {
         self.label
@@ -463,6 +566,7 @@ impl Effect for TransactionalCountingEffect {
     const SAFETY: EffectSafety = EffectSafety::Transactional;
 
     type Outcome = CountingOutput;
+    type OutcomeSemantics = crate::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "transactional"
@@ -709,6 +813,7 @@ impl Effect for MultiFactEffect {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
     type Outcome = MultiFactOutcome;
+    type OutcomeSemantics = crate::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "multi"
@@ -941,6 +1046,7 @@ fn invocation_context_with_mode(
         effect_ports,
         effect_declarations: vec![
             EffectDeclaration::of::<CountingEffect>(),
+            EffectDeclaration::of::<RecordedReplyEffect>(),
             EffectDeclaration::at_least_once::<AffineCountingEffect>(),
             EffectDeclaration::at_least_once::<InvariantAffineEffect>(),
             EffectDeclaration::of::<FailingEffect>(),
@@ -2156,6 +2262,263 @@ async fn live_perform_records_effect_data_fact() {
     assert_eq!(
         provenance.group_id.as_ref(),
         Some(&effect_outcome_group_id(&records[0].cursor))
+    );
+}
+
+#[tokio::test]
+async fn recorded_reply_is_replay_authority_but_not_a_public_output_fact() {
+    assert_effect_outcome_fits::<RecordedReplyEffect, CountingOutput, _>();
+
+    let stage_id = StageId::new();
+    let parent = parent_envelope(WriterId::from(stage_id));
+    let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut live_ctx = invocation_context(live_journal.clone(), parent.clone(), None);
+    live_ctx.emit_enabled = true;
+    live_ctx.output_contract =
+        output_contract_for_many(vec![output_descriptor_for::<CountingOutput>()]);
+    let live_flow_id = live_ctx.flow_id.to_string();
+    let mut live = EffectsCore::new(live_ctx);
+
+    let declaration = EffectDeclaration::of::<RecordedReplyEffect>();
+    assert_eq!(declaration.outcome_kind, EffectOutcomeKind::RecordedReply);
+    assert!(declaration.public_outcome_fact_types.is_empty());
+
+    let reply = live
+        .perform(RecordedReplyEffect {
+            value: 41,
+            calls: calls.clone(),
+        })
+        .await
+        .expect("recorded-reply effect succeeds");
+    live.emit(CountingOutput { value: reply.value })
+        .await
+        .expect("domain translation commits");
+
+    assert_eq!(
+        reply,
+        RecordedReplyValue {
+            value: 42,
+            provider_trace: "integration-material".to_string(),
+        }
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(live.committed_fact_evidence().0, 1);
+
+    let live_events = live_journal.events();
+    assert_eq!(live_events.len(), 2);
+    assert!(is_framework_effect_event_type(
+        &live_events[0].event.event_type()
+    ));
+    let reply_provenance = live_events[0]
+        .event
+        .effect_provenance
+        .as_ref()
+        .expect("recorded reply carries provenance");
+    assert!(reply_provenance.fact_owner.is_framework());
+    assert_eq!(
+        live_events[1].event.id,
+        deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 0),
+        "the recorded reply must not consume a user output ordinal"
+    );
+
+    let live_records = effect_records(&live_journal);
+    assert_eq!(live_records.len(), 1);
+    assert!(matches!(
+        live_records[0].outcome,
+        EffectOutcomePayload::Succeeded { .. }
+    ));
+    let history = Arc::new(
+        EffectHistory::from_records(live_flow_id, live_records)
+            .expect("recorded-reply history loads"),
+    );
+    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut replay_ctx = invocation_context(replay_journal.clone(), parent, Some(history));
+    replay_ctx.emit_enabled = true;
+    replay_ctx.output_contract =
+        output_contract_for_many(vec![output_descriptor_for::<CountingOutput>()]);
+    let mut replay = EffectsCore::new(replay_ctx);
+
+    let replayed_reply = replay
+        .perform(RecordedReplyEffect {
+            value: 41,
+            calls: calls.clone(),
+        })
+        .await
+        .expect("recorded reply reconstructs");
+    replay
+        .emit(CountingOutput {
+            value: replayed_reply.value,
+        })
+        .await
+        .expect("replayed domain translation commits");
+
+    assert_eq!(replayed_reply, reply);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "strict replay must not execute the integration effect"
+    );
+    let replay_events = replay_journal.events();
+    assert_eq!(replay_events.len(), 2);
+    assert_eq!(replay_events[0].event.id, live_events[0].event.id);
+    assert_eq!(replay_events[1].event.id, live_events[1].event.id);
+    assert_eq!(replay.committed_fact_evidence().0, 1);
+}
+
+async fn adapter_history_fixture(
+    effect_count: usize,
+) -> (EventEnvelope<ChainEvent>, Arc<EffectHistory>) {
+    let stage_id = StageId::new();
+    let input = ChainEventFactory::data_event(
+        WriterId::from(stage_id),
+        FirstOutput::versioned_event_type(),
+        json!({ "value": 9 }),
+    );
+    let parent = EventEnvelope::new(JournalWriterId::new(), input);
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let live_ctx = invocation_context(journal.clone(), parent.clone(), None);
+    let recorded_flow_id = live_ctx.flow_id.to_string();
+    let mut live = EffectsCore::new(live_ctx);
+    live.perform(CountingEffect {
+        value: 9,
+        label: "first",
+        calls: Arc::new(AtomicUsize::new(0)),
+    })
+    .await
+    .expect("first archived effect");
+    live.perform(CountingEffect {
+        value: 10,
+        label: "second",
+        calls: Arc::new(AtomicUsize::new(0)),
+    })
+    .await
+    .expect("second archived effect");
+    let mut records = effect_records(&journal);
+    records.truncate(effect_count);
+    (
+        parent,
+        Arc::new(
+            EffectHistory::from_records(recorded_flow_id, records)
+                .expect("adapter history indexes"),
+        ),
+    )
+}
+
+async fn run_consume_one_adapter(
+    parent: EventEnvelope<ChainEvent>,
+    history: Arc<EffectHistory>,
+    settlement: AdapterSettlement,
+    calls: Arc<AtomicUsize>,
+) -> Result<Vec<ChainEvent>, crate::stages::common::handler_error::HandlerError> {
+    use crate::stages::common::handlers::{
+        EffectfulTransformHandlerAdapter, UnifiedTransformHandler,
+    };
+
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let mut context = invocation_context(journal, parent.clone(), Some(history));
+    context.output_contract = output_contract_for::<CountingOutput>();
+    let adapter = EffectfulTransformHandlerAdapter::new(
+        ConsumeOneEffectThenSettle { calls, settlement },
+        Arc::new(AbortingBoundary),
+    );
+    UnifiedTransformHandler::process(
+        &adapter,
+        parent.event,
+        Some(context),
+        obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn effectful_transform_nonfatal_error_checks_the_next_unused_cursor() {
+    let (parent, one_cursor) = adapter_history_fixture(1).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let miss = run_consume_one_adapter(
+        parent.clone(),
+        one_cursor,
+        AdapterSettlement::Nonfatal,
+        calls.clone(),
+    )
+    .await
+    .expect_err("the fixture settles with a nonfatal error");
+    assert!(matches!(
+        miss,
+        crate::stages::common::handler_error::HandlerError::Domain(ref message)
+            if message == "failed between effect cursors"
+    ));
+
+    let (parent, two_cursors) = adapter_history_fixture(2).await;
+    let hit = run_consume_one_adapter(
+        parent.clone(),
+        two_cursors.clone(),
+        AdapterSettlement::Nonfatal,
+        calls.clone(),
+    )
+    .await
+    .expect_err("unused history must replace the nonfatal error");
+    assert!(matches!(
+        hit,
+        crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
+            if fatal.code == obzenflow_core::event::StageFatalCode::Replay
+                && fatal.reason == obzenflow_core::event::StageFatalReason::ReplayDivergence
+                && fatal.detail.contains("would replace an existing terminal")
+    ));
+
+    let fatal =
+        run_consume_one_adapter(parent, two_cursors, AdapterSettlement::Fatal, calls.clone())
+            .await
+            .expect_err("the fixture settles with its original fatal error");
+    assert!(matches!(
+        fatal,
+        crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
+            if fatal.code == obzenflow_core::event::StageFatalCode::Protocol
+                && fatal.reason
+                    == obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity
+                && fatal.detail == "original fatal wins"
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "history selection and error settlement resolve no live authority"
+    );
+}
+
+#[tokio::test]
+async fn effectful_transform_success_checks_the_next_unused_cursor() {
+    let (parent, one_cursor) = adapter_history_fixture(1).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let settled = run_consume_one_adapter(
+        parent.clone(),
+        one_cursor,
+        AdapterSettlement::Success,
+        calls.clone(),
+    )
+    .await
+    .expect("settlement at the end of archived history succeeds");
+    assert!(settled.is_empty());
+
+    let (parent, two_cursors) = adapter_history_fixture(2).await;
+    let divergence = run_consume_one_adapter(
+        parent,
+        two_cursors,
+        AdapterSettlement::Success,
+        calls.clone(),
+    )
+    .await
+    .expect_err("successful settlement cannot abandon archived history");
+    assert!(matches!(
+        divergence,
+        crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
+            if fatal.code == obzenflow_core::event::StageFatalCode::Replay
+                && fatal.reason == obzenflow_core::event::StageFatalReason::ReplayDivergence
+                && fatal.detail.contains("would replace an existing terminal")
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "successful settlement resolves archived effects without live calls"
     );
 }
 
@@ -4274,6 +4637,7 @@ impl Effect for KeylessEffect {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
     type Outcome = CountingOutput;
+    type OutcomeSemantics = crate::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "keyless"
@@ -4302,6 +4666,7 @@ impl Effect for KeyedEffect {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
     type Outcome = CountingOutput;
+    type OutcomeSemantics = crate::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "keyed"

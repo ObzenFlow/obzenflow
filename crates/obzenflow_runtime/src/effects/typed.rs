@@ -84,7 +84,8 @@ impl<E, Output, Proof> EffectOutcomeFitsOutput<Output, Proof> for E
 where
     E: Effect,
     Output: StageFactSet,
-    <<E as Effect>::Outcome as StageFactSet>::Members: SubsetOf<Output::Members, Proof>,
+    <<E::OutcomeSemantics as super::EffectOutcomeSemantics<E::Outcome>>::PublicFacts as StageFactSet>::Members:
+        SubsetOf<Output::Members, Proof>,
 {
 }
 
@@ -199,5 +200,11 @@ where
 
     pub(crate) fn drain_committed_facts(&mut self) -> Vec<ChainEvent> {
         self.core.drain_committed_facts()
+    }
+
+    pub(crate) async fn preflight_settlement_has_no_unused_history(
+        &self,
+    ) -> Result<(), EffectError> {
+        self.core.preflight_next_effect_cursor_is_empty().await
     }
 }

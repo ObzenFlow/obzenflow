@@ -78,7 +78,8 @@ pub use context::{EffectContext, EffectInvocationContext};
 #[cfg(test)]
 pub(crate) use context::EffectRuntimeMode;
 pub use declaration::{
-    Effect, EffectDeclaration, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,
+    DomainFacts, Effect, EffectDeclaration, EffectOutcomeKind, EffectOutcomeSemantics,
+    EffectSafety, IdempotencyKey, IdempotencyKeyPolicy, PreparedEffectSuccess, RecordedReply,
     SinkDeliverySafety, TransactionalEffectPort,
 };
 // FLOWIP-120z effect capability sets; the list traits are doc(hidden)

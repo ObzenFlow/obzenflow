@@ -17,3 +17,9 @@ fn ai_map_reduce_effect_contract_has_curated_diagnostics() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile_fail/ai_map_reduce_*.rs");
 }
+
+#[test]
+fn inference_effect_contract_has_curated_diagnostics() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/compile_fail/inference_*.rs");
+}

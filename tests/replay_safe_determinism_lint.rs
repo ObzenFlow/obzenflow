@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 const SURFACE_MARKERS: &[&str] = &[
     "impl EffectfulTransformHandler",
     "impl EffectfulStatefulHandler",
+    "impl AiInferenceRole",
+    "impl AiMapRole",
+    "impl AiFinaliseRole",
     "effectful_transform!",
     "effectful_stateful!",
 ];

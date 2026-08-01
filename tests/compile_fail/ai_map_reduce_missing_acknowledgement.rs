@@ -4,18 +4,30 @@
 
 use obzenflow_dsl::ai_map_reduce;
 
+#[path = "support/ai_surface.rs"]
+mod support;
+use support::*;
+
 fn main() {
+    let chat = contract();
+    let map_role = MapRole;
+    let finalise_role = FinaliseRole;
+    let policy = obzenflow_adapters::middleware::control::ai_resilience();
     let _ = ai_map_reduce!(
-        Seed -> Out => {
-            map: [Item] -> Partial => map_role,
-            reduce: (Seed, [Partial]) -> Out => finalise_role,
+        Seed -> Output => {
+            map: [Item] ->{
+                ChatCompletion via chat with { policy }
+            } Partial => map_role,
+            reduce: (Seed, [Partial]) ->{
+                at_least_once(ChatCompletion) via chat with { policy }
+            } Output => finalise_role,
         },
-        chunking: by_budget { placeholder },
-        effects: {
-            chat_target: target,
-            chat_estimator: estimator,
-            map: [ChatCompletion with []],
-            reduce: [at_least_once(ChatCompletion) with []],
+        chunking: by_budget {
+            items: |_seed: &Seed| Vec::<Item>::new(),
+            render: |_item: &Item, _ctx: obzenflow_core::ai::ChunkRenderContext| String::new(),
+            budget: obzenflow_core::ai::TokenCount::new(1),
+            max_items: None,
+            oversize: error,
         }
     );
 }

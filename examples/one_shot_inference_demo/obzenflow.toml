@@ -1,0 +1,10 @@
+# One successful inference appends three physical Data rows: the attempt
+# start, the framework-owned recorded reply, and the business output.
+[runtime.backpressure.flow]
+mode = "enforce"
+window = 3
+stall_timeout_ms = 30000
+
+[ai.models]
+provider = "ollama"
+model = "llama3.1:8b"

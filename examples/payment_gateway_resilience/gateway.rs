@@ -179,6 +179,7 @@ impl Effect for AuthorizePayment {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
     type Outcome = AuthorizePaymentOutcome;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "authorize_payment"

@@ -5,15 +5,14 @@
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     params_hash_for_chat, prompt_hash_for_chat, schema_hash_for_response_format, AiClientError,
-    CanonicalizationComponent, ChatClient, ChatCompletionCompleted, ChatRequest, ChatTarget,
-    LlmHashes, LlmObservability, ResolvedTokenEstimator,
+    CanonicalizationComponent, ChatClient, ChatCompletionReply, ChatRequest, ChatTarget, LlmHashes,
+    LlmObservability, ResolvedTokenEstimator, CHAT_CLIENT_PORT,
 };
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectPortRequirement, EffectSafety,
+    Effect, EffectContext, EffectError, EffectPortRequirement, EffectSafety, RecordedReply,
 };
 
-const CHAT_PORT: &str = "chat";
 const MAX_CANONICALIZATION_DETAIL_BYTES: usize = 512;
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
@@ -85,10 +84,11 @@ impl ChatCompletion {
 #[async_trait]
 impl Effect for ChatCompletion {
     const EFFECT_TYPE: &'static str = "obzenflow.ai.chat_completion";
-    const SCHEMA_VERSION: u32 = 2;
+    const SCHEMA_VERSION: u32 = 3;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
 
-    type Outcome = ChatCompletionCompleted;
+    type Outcome = ChatCompletionReply;
+    type OutcomeSemantics = RecordedReply;
 
     fn label(&self) -> &str {
         &self.label
@@ -104,16 +104,18 @@ impl Effect for ChatCompletion {
     }
 
     fn required_ports() -> Vec<EffectPortRequirement> {
-        vec![EffectPortRequirement::of::<dyn ChatClient>(CHAT_PORT)]
+        vec![EffectPortRequirement::of::<dyn ChatClient>(
+            CHAT_CLIENT_PORT,
+        )]
     }
 
     fn validate_port_bindings(&self, ctx: &EffectContext) -> Result<(), EffectError> {
-        let client = ctx.port::<dyn ChatClient>(CHAT_PORT)?;
+        let client = ctx.port::<dyn ChatClient>(CHAT_CLIENT_PORT)?;
         let expected = &self.binding_target;
         let observed = client.target();
         if expected != observed {
             return Err(EffectError::EffectPortBindingMismatch {
-                port: CHAT_PORT.to_string(),
+                port: CHAT_CLIENT_PORT.to_string(),
                 expected: expected.to_string(),
                 observed: observed.to_string(),
             });
@@ -121,11 +123,8 @@ impl Effect for ChatCompletion {
         Ok(())
     }
 
-    async fn execute(
-        &self,
-        ctx: &mut EffectContext,
-    ) -> Result<ChatCompletionCompleted, EffectError> {
-        let client = ctx.port::<dyn ChatClient>(CHAT_PORT)?;
+    async fn execute(&self, ctx: &mut EffectContext) -> Result<ChatCompletionReply, EffectError> {
+        let client = ctx.port::<dyn ChatClient>(CHAT_CLIENT_PORT)?;
         let estimated_input_tokens = self
             .estimator
             .estimator()
@@ -144,7 +143,7 @@ impl Effect for ChatCompletion {
         observability.estimated_input_tokens = Some(estimated_input_tokens);
         observability.estimated_input_resolution = Some(self.estimator.info().clone());
 
-        Ok(ChatCompletionCompleted {
+        Ok(ChatCompletionReply {
             response,
             observability,
         })
@@ -170,7 +169,7 @@ fn map_client_error(error: AiClientError) -> EffectError {
     match error {
         AiClientError::TargetMismatch { requested, bound } => {
             EffectError::EffectPortBindingInvariantViolation {
-                port: CHAT_PORT.to_string(),
+                port: CHAT_CLIENT_PORT.to_string(),
                 expected: bound.to_string(),
                 observed: requested.to_string(),
             }

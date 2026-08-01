@@ -1470,7 +1470,7 @@ pub fn validate_effect_fact_containment(
             // any I/O. Dispatch is by event type, so a collision would make
             // carrier reconstruction ambiguous.
             let mut members_by_event_type: HashMap<String, String> = HashMap::new();
-            for fact in &declaration.outcome_fact_types {
+            for fact in &declaration.public_outcome_fact_types {
                 if let Some(first_member) = members_by_event_type
                     .insert(fact.event_type.to_string(), fact.display_name.clone())
                 {

@@ -3,6 +3,8 @@
 // https://obzenflow.dev
 
 use super::*;
+use obzenflow_core::StageFactSet;
+use serde::de::DeserializeOwned;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IdempotencyKey(pub String);
@@ -36,6 +38,123 @@ pub enum IdempotencyKeyPolicy {
     AtLeastOnceAcknowledged,
 }
 
+/// Event-sourcing meaning of a successful effect outcome (FLOWIP-120j).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectOutcomeKind {
+    /// The outcome lowers to named business facts in the stage output
+    /// contract.
+    DomainFacts,
+    /// The outcome is framework-owned replay material returned to the
+    /// handler, never a stage output fact.
+    RecordedReply,
+}
+
+/// Successful domain-effect outcomes lower to their named fact set.
+#[derive(Debug, Clone, Copy)]
+pub struct DomainFacts;
+
+/// Successful integration replies are recorded by the framework without
+/// entering the stage's public fact set.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordedReply;
+
+mod sealed_outcome_semantics {
+    pub trait Sealed {}
+
+    impl Sealed for super::DomainFacts {}
+    impl Sealed for super::RecordedReply {}
+}
+
+/// Runtime preparation of a successful effect result.
+///
+/// This is public only because it appears in the sealed
+/// [`EffectOutcomeSemantics`] contract. Effect authors select `DomainFacts`
+/// or `RecordedReply`; they do not construct this value.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub enum PreparedEffectSuccess {
+    DomainFacts(Vec<TypedFact>),
+    RecordedReply(Value),
+}
+
+/// Sealed semantics selected by an [`Effect`] for its successful outcome.
+///
+/// The associated public fact set drives both compile-time containment and
+/// value-level build validation. The preparation and replay methods keep the
+/// mode-specific marshalling behind the same runtime path.
+pub trait EffectOutcomeSemantics<Outcome>:
+    sealed_outcome_semantics::Sealed + Send + Sync + 'static
+{
+    type PublicFacts: StageFactSet;
+
+    const KIND: EffectOutcomeKind;
+
+    #[doc(hidden)]
+    fn prepare_success(output: &Outcome) -> Result<PreparedEffectSuccess, EffectError>;
+
+    #[doc(hidden)]
+    fn decode_success(records: &[&EffectRecord]) -> Result<Outcome, EffectError>;
+}
+
+impl<Outcome> EffectOutcomeSemantics<Outcome> for DomainFacts
+where
+    Outcome: EffectOutcomeFacts + Clone + Send + Sync + 'static,
+{
+    type PublicFacts = Outcome;
+
+    const KIND: EffectOutcomeKind = EffectOutcomeKind::DomainFacts;
+
+    fn prepare_success(output: &Outcome) -> Result<PreparedEffectSuccess, EffectError> {
+        let facts = output.clone().into_facts().map_err(effect_fact_set_error)?;
+        if facts.is_empty() {
+            return Err(EffectError::Execution(
+                "domain effect success must author at least one fact".to_string(),
+            ));
+        }
+        Ok(PreparedEffectSuccess::DomainFacts(facts))
+    }
+
+    fn decode_success(records: &[&EffectRecord]) -> Result<Outcome, EffectError> {
+        decode_effect_outcome_group(records)
+    }
+}
+
+impl<Outcome> EffectOutcomeSemantics<Outcome> for RecordedReply
+where
+    Outcome: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    type PublicFacts = obzenflow_core::stage_fact_set![];
+
+    const KIND: EffectOutcomeKind = EffectOutcomeKind::RecordedReply;
+
+    fn prepare_success(output: &Outcome) -> Result<PreparedEffectSuccess, EffectError> {
+        serde_json::to_value(output)
+            .map(PreparedEffectSuccess::RecordedReply)
+            .map_err(|error| EffectError::Serialization(error.to_string()))
+    }
+
+    fn decode_success(records: &[&EffectRecord]) -> Result<Outcome, EffectError> {
+        validate_effect_outcome_group(records)?;
+        let [record] = records else {
+            return Err(EffectError::EffectProvenanceMismatch(
+                "recorded-reply effect outcome must contain exactly one framework record"
+                    .to_string(),
+            ));
+        };
+        match &record.outcome {
+            EffectOutcomePayload::Succeeded { output } => serde_json::from_value(output.clone())
+                .map_err(|error| EffectError::Serialization(error.to_string())),
+            EffectOutcomePayload::Failed { .. } => recorded_failure_from_outcome(&record.outcome),
+            EffectOutcomePayload::SucceededFact { .. } => {
+                Err(EffectError::EffectProvenanceMismatch(
+                    "recorded-reply effect outcome used a user-owned domain-fact record"
+                        .to_string(),
+                ))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EffectDeclaration {
     pub effect_type: &'static str,
@@ -43,10 +162,11 @@ pub struct EffectDeclaration {
     pub idempotency_key_policy: IdempotencyKeyPolicy,
     pub required_ports: Vec<EffectPortRequirement>,
     pub transactional_executor: Option<&'static str>,
-    /// Fact types this effect's `Outcome` may produce, read off the type via
-    /// `TypedFactSet::fact_types()` (FLOWIP-120h). Build validation checks
-    /// these against the stage output contract unconditionally (FLOWIP-120m).
-    pub outcome_fact_types: Vec<TypedFactType>,
+    /// Event-sourcing meaning selected by the effect type.
+    pub outcome_kind: EffectOutcomeKind,
+    /// Public facts this effect may author. Recorded replies project an empty
+    /// set and therefore never enter a stage output contract.
+    pub public_outcome_fact_types: Vec<TypedFactType>,
 }
 
 impl EffectDeclaration {
@@ -68,7 +188,11 @@ impl EffectDeclaration {
             idempotency_key_policy,
             required_ports: E::required_ports(),
             transactional_executor: None,
-            outcome_fact_types: E::Outcome::fact_types(),
+            outcome_kind: <E::OutcomeSemantics as EffectOutcomeSemantics<E::Outcome>>::KIND,
+            public_outcome_fact_types: <<E::OutcomeSemantics as EffectOutcomeSemantics<
+                E::Outcome,
+            >>::PublicFacts as StageFactSet>::member_fact_types(
+            ),
         }
     }
 
@@ -99,7 +223,11 @@ impl EffectDeclaration {
             idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
             required_ports,
             transactional_executor: Some(executor),
-            outcome_fact_types: E::Outcome::fact_types(),
+            outcome_kind: <E::OutcomeSemantics as EffectOutcomeSemantics<E::Outcome>>::KIND,
+            public_outcome_fact_types: <<E::OutcomeSemantics as EffectOutcomeSemantics<
+                E::Outcome,
+            >>::PublicFacts as StageFactSet>::member_fact_types(
+            ),
         }
     }
 
@@ -119,10 +247,12 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
     const SCHEMA_VERSION: u32;
     const SAFETY: EffectSafety;
 
-    /// The closed set of successful facts this effect may produce, as a
-    /// transient outcome carrier (FLOWIP-120m). A scalar `TypedPayload` is a
-    /// valid carrier for single-fact effects.
-    type Outcome: EffectOutcomeFacts + Clone + Send + Sync + 'static;
+    /// The typed value returned to the handler after live execution or replay.
+    type Outcome: Clone + Send + Sync + 'static;
+
+    /// Whether `Outcome` lowers to public domain facts or to a
+    /// framework-owned recorded reply.
+    type OutcomeSemantics: EffectOutcomeSemantics<Self::Outcome>;
 
     fn label(&self) -> &str;
 
@@ -152,6 +282,6 @@ pub trait TransactionalEffectPort<E: Effect>: Send + Sync {
         &self,
         effect: E,
         ctx: &mut EffectContext,
-        commit: EffectCommitHandle<E::Outcome>,
+        commit: EffectCommitHandle<E::Outcome, E::OutcomeSemantics>,
     ) -> Result<E::Outcome, EffectError>;
 }

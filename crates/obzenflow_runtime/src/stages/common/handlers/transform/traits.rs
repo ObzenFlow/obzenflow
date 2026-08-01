@@ -10,6 +10,7 @@ use crate::effects::{EffectBoundary, EffectInvocationContext, Effects};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::TypedPayload;
+use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, EventType};
 use std::fmt;
 use std::sync::Arc;
@@ -350,8 +351,33 @@ where
         let mut fx = Effects::<H::Output, H::AllowedEffects>::new(effect_context);
         let input = H::Input::try_from_event(&event)
             .map_err(|e| HandlerError::Deserialization(e.to_string()))?;
-        let _completion = self.handler.process(input, &mut fx).await?;
-        Ok(Vec::new())
+        match self.handler.process(input, &mut fx).await {
+            Ok(_completion) => {
+                if let Err(divergence) = fx.preflight_settlement_has_no_unused_history().await {
+                    return Err(HandlerError::Fatal(
+                        crate::stages::common::handler_error::StageFatal::new(
+                            StageFatalCode::Replay,
+                            StageFatalReason::ReplayDivergence,
+                            divergence.to_string(),
+                        ),
+                    ));
+                }
+                Ok(Vec::new())
+            }
+            Err(error) if error.is_fatal() => Err(error),
+            Err(error) => {
+                if let Err(divergence) = fx.preflight_settlement_has_no_unused_history().await {
+                    return Err(HandlerError::Fatal(
+                        crate::stages::common::handler_error::StageFatal::new(
+                            StageFatalCode::Replay,
+                            StageFatalReason::ReplayDivergence,
+                            divergence.to_string(),
+                        ),
+                    ));
+                }
+                Err(error)
+            }
+        }
     }
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {

@@ -207,6 +207,8 @@
 //! let _ = effectful_sink!(Out => Handler, effects: [], middleware: []);
 //! ```
 
+#[doc(hidden)]
+pub mod ai_effect;
 pub mod backpressure_clause;
 mod binder;
 pub mod composites;
@@ -218,6 +220,8 @@ pub mod composition;
 mod dsl_impl;
 pub mod error;
 mod flow_definition;
+#[doc(hidden)]
+pub mod inference;
 pub mod stage_descriptor;
 mod stage_macros;
 pub mod typing;

@@ -5,7 +5,7 @@
 //! Framework-internal transport payloads for AI map-reduce composites.
 
 use super::{
-    CanonicalizationComponent, ChatCompletionCompleted, ChatRequest, ChunkExclusionReason,
+    CanonicalizationComponent, ChatCompletionReply, ChatRequestSpec, ChunkExclusionReason,
     ChunkInfo, ChunkPlanningSummary, TokenCount,
 };
 use crate::{EventId, TypedPayload};
@@ -194,39 +194,57 @@ pub enum AiMapReduceRoleFailure {
 /// User-authored map role. The generated adapter owns effect execution,
 /// target validation, labels, and durable protocol tagging.
 pub trait AiMapRole<Item, Partial>: Send + Sync + 'static {
-    type Prepared: Send + 'static;
+    const LOGIC_VERSION: &'static str = "1";
 
     fn prepare(
         &self,
         items: &[Item],
         chunk: &ChunkInfo,
-    ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure>;
+    ) -> Result<ChatRequestSpec, AiRoleLogicFailure>;
 
     fn interpret(
         &self,
         items: Vec<Item>,
-        prepared: Self::Prepared,
-        completion: ChatCompletionCompleted,
+        chunk: ChunkInfo,
+        request: ChatRequestSpec,
+        reply: ChatCompletionReply,
     ) -> Result<Partial, AiRoleLogicFailure>;
 }
 
 /// User-authored finalisation role. The generated adapter owns the single chat
 /// effect and only exposes the domain seed and collected value.
 pub trait AiFinaliseRole<Seed, Collected, Out>: Send + Sync + 'static {
-    type Prepared: Send + 'static;
+    const LOGIC_VERSION: &'static str = "1";
 
     fn prepare(
         &self,
         seed: &Seed,
         collected: &Collected,
-    ) -> Result<(ChatRequest, Self::Prepared), AiRoleLogicFailure>;
+    ) -> Result<ChatRequestSpec, AiRoleLogicFailure>;
 
     fn interpret(
         &self,
         seed: Seed,
         collected: Collected,
-        prepared: Self::Prepared,
-        completion: ChatCompletionCompleted,
+        request: ChatRequestSpec,
+        reply: ChatCompletionReply,
+    ) -> Result<Out, AiRoleLogicFailure>;
+}
+
+/// User-authored scalar inference role.
+///
+/// The generated adapter retains the exact target-free request across the
+/// effect call and supplies it again during deterministic interpretation.
+pub trait AiInferenceRole<Input, Out>: Send + Sync + 'static {
+    const LOGIC_VERSION: &'static str = "1";
+
+    fn prepare(&self, input: &Input) -> Result<ChatRequestSpec, AiRoleLogicFailure>;
+
+    fn interpret(
+        &self,
+        input: Input,
+        request: ChatRequestSpec,
+        reply: ChatCompletionReply,
     ) -> Result<Out, AiRoleLogicFailure>;
 }
 
