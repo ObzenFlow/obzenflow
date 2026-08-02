@@ -6,13 +6,16 @@ use anyhow::Result;
 use obzenflow::sources::Url;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::task::JoinSet;
 
 pub struct MockHnServer {
     addr: SocketAddr,
-    _task: tokio::task::JoinHandle<()>,
+    requests: Arc<AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl MockHnServer {
@@ -20,6 +23,17 @@ impl MockHnServer {
         format!("http://{}/", self.addr)
             .parse()
             .expect("mock base url parses")
+    }
+
+    pub fn request_count(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for MockHnServer {
+    fn drop(&mut self) {
+        tracing::debug!(requests = self.request_count(), "stopping mock HN server");
+        self.task.abort();
     }
 }
 
@@ -30,12 +44,24 @@ pub async fn spawn_mock_hn_server() -> Result<MockHnServer> {
     let (items, topstories) = build_mock_hn_payloads();
     let items = Arc::new(items);
     let topstories: Arc<str> = Arc::from(topstories);
+    let requests = Arc::new(AtomicUsize::new(0));
 
     let task = tokio::spawn({
         let items = items.clone();
         let topstories = topstories.clone();
+        let requests = requests.clone();
         async move {
+            // Keep connection work attached to the listener task. Aborting the
+            // host-held guard then drops this set and cancels any in-flight
+            // fixture request as well as the accept loop.
+            let mut connections = JoinSet::new();
             loop {
+                while let Some(result) = connections.try_join_next() {
+                    if let Err(error) = result {
+                        tracing::debug!(?error, "mock HN server connection task failed");
+                    }
+                }
+
                 let (socket, _) = match listener.accept().await {
                     Ok(v) => v,
                     Err(_) => break,
@@ -43,8 +69,11 @@ pub async fn spawn_mock_hn_server() -> Result<MockHnServer> {
 
                 let items = items.clone();
                 let topstories = topstories.clone();
-                tokio::spawn(async move {
-                    if let Err(err) = handle_connection(socket, &items, topstories.as_ref()).await {
+                let requests = requests.clone();
+                connections.spawn(async move {
+                    if let Err(err) =
+                        handle_connection(socket, &items, topstories.as_ref(), &requests).await
+                    {
                         tracing::debug!(?err, "mock HN server connection failed");
                     }
                 });
@@ -52,7 +81,11 @@ pub async fn spawn_mock_hn_server() -> Result<MockHnServer> {
         }
     });
 
-    Ok(MockHnServer { addr, _task: task })
+    Ok(MockHnServer {
+        addr,
+        requests,
+        task,
+    })
 }
 
 fn build_mock_hn_payloads() -> (HashMap<u64, String>, String) {
@@ -117,8 +150,10 @@ async fn handle_connection(
     mut socket: tokio::net::TcpStream,
     items: &HashMap<u64, String>,
     topstories: &str,
+    requests: &AtomicUsize,
 ) -> Result<()> {
     let request = read_http_head(&mut socket).await?;
+    requests.fetch_add(1, Ordering::SeqCst);
     let path = request_path(&request);
 
     let (status, body) = if path.starts_with("/v0/topstories.json") {

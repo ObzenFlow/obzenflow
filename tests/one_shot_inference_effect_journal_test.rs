@@ -47,6 +47,34 @@ use tokio::sync::Notify;
 const CHAT_EFFECT_TYPE: &str = "obzenflow.ai.chat_completion";
 const REPLY_CUT_JOURNAL_ENV: &str = "OBZENFLOW_120J_REPLY_CUT_JOURNAL";
 
+#[test]
+fn one_shot_witness_uses_the_locked_materializer_surface() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(root.join("examples/one_shot_inference_demo/main.rs"))
+        .expect("one-shot witness source is readable");
+
+    for required in [
+        "FlowDefinition::materialize(move |runtime_config| {",
+        "let ai_models = runtime_config.ai_models();",
+        "ChatEffectBinding::from_config(&ai_models)",
+        "let evidence_source = sources::finite([input]);",
+        "let brief_role = BriefRole;",
+        "effect_ports,",
+    ] {
+        assert!(
+            source.contains(required),
+            "one-shot witness must retain the locked source clause: {required}"
+        );
+    }
+
+    for forbidden in ["bindings:", "effect_ports: effect_ports,", "std::env"] {
+        assert!(
+            !source.contains(forbidden),
+            "one-shot builder must not regain the retired source spelling: {forbidden}"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct ReducedEvidence {
     value: u64,
@@ -321,7 +349,7 @@ where
         journals: disk_journals(journal_base),
         middleware: [],
         backpressure: backpressure,
-        effect_ports: effect_ports,
+        effect_ports,
 
         stages: {
             evidence = source!(
@@ -363,7 +391,7 @@ fn build_credit_flow(
         journals: disk_journals(journal_base),
         middleware: [],
         backpressure: enforced_backpressure(3).stall_timeout_ms(5_000),
-        effect_ports: effect_ports,
+        effect_ports,
 
         stages: {
             credit_evidence = source!(
@@ -408,7 +436,7 @@ fn build_fan_out_flow(
         journals: disk_journals(journal_base),
         middleware: [],
         backpressure: enforced_backpressure(3).stall_timeout_ms(5_000),
-        effect_ports: effect_ports,
+        effect_ports,
 
         stages: {
             fan_out_evidence = source!(

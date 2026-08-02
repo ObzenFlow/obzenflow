@@ -4,8 +4,8 @@
 
 //! Main flow! macro - the primary API for building ObzenFlow pipelines
 //!
-//! This is now a clean implementation using the let bindings approach that
-//! separates stage declaration from topology definition.
+//! Stage declarations and topology remain separate, while any preparation for
+//! those declarations is ordinary Rust outside the macro.
 
 /// Parse topology edges supporting both |> and <| operators (single collector)
 /// Note: Join stages only accept stream inputs in topology.
@@ -110,16 +110,26 @@ macro_rules! __obzenflow_effect_ports_or_default {
     () => {
         ::obzenflow_runtime::effects::EffectPortRegistry::new()
     };
-    ($effect_ports:expr) => {
+    (expression $effect_ports:expr) => {
         $effect_ports
+    };
+    (shorthand effect_ports, $effect_ports:ident) => {
+        $effect_ports
+    };
+    (shorthand $unexpected:ident, $_effect_ports:ident) => {
+        compile_error!(concat!(
+            "flow!: expected the effect-port shorthand `effect_ports,`, found `",
+            stringify!($unexpected),
+            ",`"
+        ))
     };
 }
 
 /// Declare an ObzenFlow pipeline as a single expression.
 ///
-/// `flow!` is the primary API for building pipelines. It takes five sections
-/// and returns a [`FlowDefinition`](crate::FlowDefinition) that can be handed
-/// to `FlowApplication::run()`.
+/// `flow!` is the primary API for building pipelines. It returns a
+/// [`FlowDefinition`](crate::FlowDefinition) that can be handed to a
+/// `FlowApplication` launch method.
 ///
 /// ## Sections
 ///
@@ -128,8 +138,14 @@ macro_rules! __obzenflow_effect_ports_or_default {
 /// | `name:` | String identifier used for journal directories and metrics. |
 /// | `journals:` | Journal factory (`disk_journals(path)` or `memory_journals()`). The factory declares its substrate via the required `run_state()`: durable with a run location, or ephemeral with none (FLOWIP-120u). |
 /// | `middleware:` | Flow-level middleware applied to every stage by default. |
+/// | `backpressure:` | Optional flow-level backpressure clause. |
+/// | `effect_ports,` or `effect_ports: expression,` | Optional effect-port registry; omission uses an empty registry. |
 /// | `stages:` | Let-bindings producing stage descriptors via stage macros. |
 /// | `topology:` | Edges connecting stages (`a \|> b;` forward, `a <\| b;` backward). |
+///
+/// Configuration-derived construction belongs in one ordinary Rust factory:
+/// [`FlowDefinition::materialize`](crate::FlowDefinition::materialize).
+/// The former free-form `bindings:` section is intentionally unsupported.
 ///
 /// ## Minimal example
 ///
@@ -138,15 +154,19 @@ macro_rules! __obzenflow_effect_ports_or_default {
 /// use obzenflow_infra::journal::memory_journals;
 /// use obzenflow::typed::{sources, transforms};
 ///
+/// let input = sources::finite(vec![MyEvent { value: 1 }]);
+/// let double = transforms::map(|event: MyEvent| Doubled { value: event.value * 2 });
+/// let print = |event: Doubled| { println!("{}", event.value); };
+///
 /// let pipeline = flow! {
 ///     name: "example",
 ///     journals: memory_journals(),
 ///     middleware: [],
 ///
 ///     stages: {
-///         src = source!(MyEvent => sources::finite(vec![MyEvent { value: 1 }]));
-///         map = transform!(MyEvent -> Doubled => transforms::map(|e: MyEvent| Doubled { value: e.value * 2 }));
-///         out = sink!(Doubled => |d| { println!("{}", d.value); });
+///         src = source!(MyEvent => input);
+///         map = transform!(MyEvent -> Doubled => double);
+///         out = sink!(Doubled => print);
 ///     },
 ///
 ///     topology: {
@@ -159,13 +179,82 @@ macro_rules! __obzenflow_effect_ports_or_default {
 /// The `name:` section is optional. If omitted, the flow is named `"default"`.
 #[macro_export]
 macro_rules! flow {
+    // Explicit shorthand with backpressure. Separate arms avoid the local
+    // ambiguity between the `backpressure` keyword and a captured shorthand.
+    {
+        name: $flow_name:literal,
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+        backpressure: $flow_bp:expr,
+        $effect_ports_keyword:ident,
+
+        stages: {
+            $($stage_name:ident = $descriptor:expr;)*
+        },
+
+        topology: {
+            $($edge:tt)*
+        }
+    } => {{
+        $crate::flow! {
+            name: $flow_name,
+            journals: $journals,
+            middleware: [$($flow_mw),*],
+            backpressure: $flow_bp,
+            effect_ports: $crate::__obzenflow_effect_ports_or_default!(
+                shorthand $effect_ports_keyword, $effect_ports_keyword
+            ),
+
+            stages: {
+                $($stage_name = $descriptor;)*
+            },
+
+            topology: {
+                $($edge)*
+            }
+        }
+    }};
+
+    // Explicit shorthand. Capture the identifier so it retains call-site
+    // hygiene, then validate that the authored token is exactly `effect_ports`.
+    {
+        name: $flow_name:literal,
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+        $effect_ports_keyword:ident,
+
+        stages: {
+            $($stage_name:ident = $descriptor:expr;)*
+        },
+
+        topology: {
+            $($edge:tt)*
+        }
+    } => {{
+        $crate::flow! {
+            name: $flow_name,
+            journals: $journals,
+            middleware: [$($flow_mw),*],
+            effect_ports: $crate::__obzenflow_effect_ports_or_default!(
+                shorthand $effect_ports_keyword, $effect_ports_keyword
+            ),
+
+            stages: {
+                $($stage_name = $descriptor;)*
+            },
+
+            topology: {
+                $($edge)*
+            }
+        }
+    }};
+
     // Pattern with explicit flow name (stage descriptors as expressions)
     {
         name: $flow_name:literal,
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         $(backpressure: $flow_bp:expr,)?
-        $(bindings: |$runtime_config:ident| { $($binding:tt)* },)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -184,13 +273,6 @@ macro_rules! flow {
             use $crate::prelude::*;
             use $crate::dsl::stage_descriptor::*;
             use std::collections::HashMap;
-
-            $(
-                let $runtime_config = __build_ctx.runtime_config().as_ref();
-                $(
-                    $binding
-                )*
-            )?
 
             // Collect flow members (FLOWIP-128a D5): stages and composites
             // both enter through IntoFlowMember; user syntax is unchanged.
@@ -227,7 +309,9 @@ macro_rules! flow {
             // Composite expansion performs all pre-substrate binding
             // validation before journal or effect-port expressions run.
             let journals = $journals;
-            let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
+            let effect_ports = $crate::__obzenflow_effect_ports_or_default!(
+                $(expression $effect_ports)?
+            );
 
             // Create closure for flow middleware
             let create_flow_middleware =
@@ -252,12 +336,75 @@ macro_rules! flow {
         })
     }};
 
+    // Explicit shorthand with backpressure and without a flow name.
+    {
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+        backpressure: $flow_bp:expr,
+        $effect_ports_keyword:ident,
+
+        stages: {
+            $($stage_name:ident = $descriptor:expr;)*
+        },
+
+        topology: {
+            $($edge:tt)*
+        }
+    } => {{
+        $crate::flow! {
+            journals: $journals,
+            middleware: [$($flow_mw),*],
+            backpressure: $flow_bp,
+            effect_ports: $crate::__obzenflow_effect_ports_or_default!(
+                shorthand $effect_ports_keyword, $effect_ports_keyword
+            ),
+
+            stages: {
+                $($stage_name = $descriptor;)*
+            },
+
+            topology: {
+                $($edge)*
+            }
+        }
+    }};
+
+    // Explicit shorthand without a flow name.
+    {
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+        $effect_ports_keyword:ident,
+
+        stages: {
+            $($stage_name:ident = $descriptor:expr;)*
+        },
+
+        topology: {
+            $($edge:tt)*
+        }
+    } => {{
+        $crate::flow! {
+            journals: $journals,
+            middleware: [$($flow_mw),*],
+            effect_ports: $crate::__obzenflow_effect_ports_or_default!(
+                shorthand $effect_ports_keyword, $effect_ports_keyword
+            ),
+
+            stages: {
+                $($stage_name = $descriptor;)*
+            },
+
+            topology: {
+                $($edge)*
+            }
+        }
+    }};
+
     // Pattern without explicit flow name (uses "default")
     {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         $(backpressure: $flow_bp:expr,)?
-        $(bindings: |$runtime_config:ident| { $($binding:tt)* },)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -276,13 +423,6 @@ macro_rules! flow {
             use $crate::prelude::*;
             use $crate::dsl::stage_descriptor::*;
             use std::collections::HashMap;
-
-            $(
-                let $runtime_config = __build_ctx.runtime_config().as_ref();
-                $(
-                    $binding
-                )*
-            )?
 
             // Collect flow members (FLOWIP-128a D5): stages and composites
             // both enter through IntoFlowMember; user syntax is unchanged.
@@ -319,7 +459,9 @@ macro_rules! flow {
             // Composite expansion performs all pre-substrate binding
             // validation before journal or effect-port expressions run.
             let journals = $journals;
-            let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
+            let effect_ports = $crate::__obzenflow_effect_ports_or_default!(
+                $(expression $effect_ports)?
+            );
 
             // Create closure for flow middleware
             let create_flow_middleware =
@@ -343,6 +485,33 @@ macro_rules! flow {
             )
         })
     }};
+
+    // Trailing teaching diagnostics for the retired unrestricted statement
+    // drawer. Valid declaration arms above remain the primary grammar.
+    {
+        name: $flow_name:literal,
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+        $(backpressure: $flow_bp:expr,)?
+        bindings: $($retired_bindings:tt)*
+    } => {{
+        compile_error!(
+            "flow!: `bindings:` was removed; construct flow values inside \
+             `FlowDefinition::materialize(|runtime_config| { ... })`"
+        );
+    }};
+
+    {
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+        $(backpressure: $flow_bp:expr,)?
+        bindings: $($retired_bindings:tt)*
+    } => {{
+        compile_error!(
+            "flow!: `bindings:` was removed; construct flow values inside \
+             `FlowDefinition::materialize(|runtime_config| { ... })`"
+        );
+    }};
 }
 
 /// Build a flow for tests, returning a `FlowTestHarness` (FLOWIP-114h).
@@ -350,16 +519,94 @@ macro_rules! flow {
 /// This macro is gated behind `#[cfg(any(test, feature = "test-support"))]`.
 /// It reuses the normal `flow!` build path, but retains the stage data journals
 /// produced during construction so deterministic test helpers can observe them.
+/// It accepts the same `name:`, `journals:`, `middleware:`, optional
+/// `backpressure:`, optional `effect_ports,` / `effect_ports: expression,`,
+/// `stages:`, and `topology:` sections as [`flow!`](crate::flow). Omitting
+/// `name:` uses `"default"`; omitting the effect-port section uses an empty
+/// registry.
+///
+/// Construction happens in ordinary Rust before the invocation. Tests that
+/// need the host's resolved snapshot can instead return an inner `flow!` from
+/// [`FlowDefinition::materialize`](crate::FlowDefinition::materialize) and call
+/// `build` with an explicit test context. The retired `bindings:` section is
+/// not accepted.
 #[cfg(any(test, feature = "test-support"))]
 #[macro_export]
 macro_rules! test_flow {
+    // Explicit effect-port shorthand with backpressure.
+    {
+        name: $flow_name:literal,
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+        backpressure: $flow_bp:expr,
+        $effect_ports_keyword:ident,
+
+        stages: {
+            $($stage_name:ident = $descriptor:expr;)*
+        },
+
+        topology: {
+            $($edge:tt)*
+        }
+    } => {{
+        $crate::test_flow! {
+            name: $flow_name,
+            journals: $journals,
+            middleware: [$($flow_mw),*],
+            backpressure: $flow_bp,
+            effect_ports: $crate::__obzenflow_effect_ports_or_default!(
+                shorthand $effect_ports_keyword, $effect_ports_keyword
+            ),
+
+            stages: {
+                $($stage_name = $descriptor;)*
+            },
+
+            topology: {
+                $($edge)*
+            }
+        }
+    }};
+
+    // Explicit effect-port shorthand with call-site hygiene.
+    {
+        name: $flow_name:literal,
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+        $effect_ports_keyword:ident,
+
+        stages: {
+            $($stage_name:ident = $descriptor:expr;)*
+        },
+
+        topology: {
+            $($edge:tt)*
+        }
+    } => {{
+        $crate::test_flow! {
+            name: $flow_name,
+            journals: $journals,
+            middleware: [$($flow_mw),*],
+            effect_ports: $crate::__obzenflow_effect_ports_or_default!(
+                shorthand $effect_ports_keyword, $effect_ports_keyword
+            ),
+
+            stages: {
+                $($stage_name = $descriptor;)*
+            },
+
+            topology: {
+                $($edge)*
+            }
+        }
+    }};
+
     // Pattern with explicit flow name (stage descriptors as expressions)
     {
         name: $flow_name:literal,
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         $(backpressure: $flow_bp:expr,)?
-        $(bindings: |$runtime_config:ident| { $($binding:tt)* },)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -380,13 +627,6 @@ macro_rules! test_flow {
             // Explicit built-in-defaults context: test_flow! builds without
             // a host (FLOWIP-010 §7).
             let __build_ctx = obzenflow_runtime::run_context::FlowBuildContext::for_tests();
-            $(
-                let $runtime_config = __build_ctx.runtime_config().as_ref();
-                $(
-                    $binding
-                )*
-            )?
-
             let mut members: HashMap<String, $crate::dsl::composition::FlowMember> = HashMap::new();
             $(
                 let member = $crate::dsl::composition::IntoFlowMember::into_flow_member($descriptor);
@@ -408,7 +648,9 @@ macro_rules! test_flow {
             // Composite expansion performs all pre-substrate binding
             // validation before journal or effect-port expressions run.
             let journals = $journals;
-            let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
+            let effect_ports = $crate::__obzenflow_effect_ports_or_default!(
+                $(expression $effect_ports)?
+            );
 
             let create_flow_middleware =
                 || -> Vec<Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>> {
@@ -437,12 +679,73 @@ macro_rules! test_flow {
         }
     }};
 
+    // Explicit shorthand with backpressure and without a flow name.
+    {
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+        backpressure: $flow_bp:expr,
+        $effect_ports_keyword:ident,
+
+        stages: {
+            $($stage_name:ident = $descriptor:expr;)*
+        },
+
+        topology: {
+            $($edge:tt)*
+        }
+    } => {{
+        $crate::test_flow! {
+            name: "default",
+            journals: $journals,
+            middleware: [$($flow_mw),*],
+            backpressure: $flow_bp,
+            $effect_ports_keyword,
+
+            stages: {
+                $($stage_name = $descriptor;)*
+            },
+
+            topology: {
+                $($edge)*
+            }
+        }
+    }};
+
+    // Explicit shorthand without a flow name.
+    {
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+        $effect_ports_keyword:ident,
+
+        stages: {
+            $($stage_name:ident = $descriptor:expr;)*
+        },
+
+        topology: {
+            $($edge:tt)*
+        }
+    } => {{
+        $crate::test_flow! {
+            name: "default",
+            journals: $journals,
+            middleware: [$($flow_mw),*],
+            $effect_ports_keyword,
+
+            stages: {
+                $($stage_name = $descriptor;)*
+            },
+
+            topology: {
+                $($edge)*
+            }
+        }
+    }};
+
     // Pattern without explicit flow name (uses "default")
     {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         $(backpressure: $flow_bp:expr,)?
-        $(bindings: |$runtime_config:ident| { $($binding:tt)* },)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -461,9 +764,6 @@ macro_rules! test_flow {
             middleware: [$($flow_mw),*],
             $(backpressure: $flow_bp,)?
             $(
-                bindings: |$runtime_config| { $($binding)* },
-            )?
-            $(
                 effect_ports: $effect_ports,
             )?
 
@@ -475,6 +775,33 @@ macro_rules! test_flow {
                 $($edge)*
             }
         }
+    }};
+
+    // Trailing teaching diagnostics for the retired unrestricted statement
+    // drawer.
+    {
+        name: $flow_name:literal,
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+        $(backpressure: $flow_bp:expr,)?
+        bindings: $($retired_bindings:tt)*
+    } => {{
+        compile_error!(
+            "test_flow!: `bindings:` was removed; construct flow values inside \
+             `FlowDefinition::materialize(|runtime_config| { ... })`"
+        );
+    }};
+
+    {
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+        $(backpressure: $flow_bp:expr,)?
+        bindings: $($retired_bindings:tt)*
+    } => {{
+        compile_error!(
+            "test_flow!: `bindings:` was removed; construct flow values inside \
+             `FlowDefinition::materialize(|runtime_config| { ... })`"
+        );
     }};
 }
 

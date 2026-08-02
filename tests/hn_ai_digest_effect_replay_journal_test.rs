@@ -553,7 +553,7 @@ fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
         middleware: [],
         backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(backpressure_window)
             .stall_timeout_ms(5_000),
-        effect_ports: effect_ports,
+        effect_ports,
 
         stages: {
             seed = source!(DigestSeed => OneSeed::new());
@@ -610,7 +610,7 @@ fn build_recovery_flow(
         middleware: [],
         backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
             .stall_timeout_ms(5_000),
-        effect_ports: effect_ports,
+        effect_ports,
 
         stages: {
             recovery_seed = source!(DigestSeed => OneSeed::with_count(1));
@@ -667,7 +667,7 @@ fn build_credit_flow(
         middleware: [],
         backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
             .stall_timeout_ms(5_000),
-        effect_ports: effect_ports,
+        effect_ports,
 
         stages: {
             credit_seed = source!(DigestSeed => OneSeed::with_count(2));
@@ -948,11 +948,11 @@ async fn wait_for_counter(counter: &AtomicUsize, minimum: usize) {
 }
 
 #[test]
-fn hn_witness_source_uses_the_snapshot_binding_and_deferred_port_contract() {
+fn hn_witness_uses_materialization_and_deferred_port_contract() {
     let _ = config::DEFAULT_HN_MAX_STORIES;
     let _ = config::DEFAULT_HN_SOURCE_RATE_LIMIT;
-    let _ = config::DemoConfig::from_env;
-    let _ = config::DemoConfig::group_max_stories_label;
+    let _ = config::PreparedHnRun::from_env;
+    let _ = config::HnRunInputs::group_max_stories_label;
     let _ = hn_demo_flow::run_example;
     let _ = hn_demo_flow::run_demo_blocking;
     let _ = hn_demo_flow::build_presentation;
@@ -965,13 +965,15 @@ fn hn_witness_source_uses_the_snapshot_binding_and_deferred_port_contract() {
             .expect("HN witness config is readable");
 
     for required in [
-        "bindings: |runtime_config| {",
+        "FlowDefinition::materialize(move |runtime_config| {",
+        "let HnRunInputs {",
         "let ai_models = runtime_config.ai_models();",
         "ChatEffectBinding::from_config(&ai_models)",
         "let (chat, chat_registration) =",
         ".into_parts();",
         "chat_registration.install_into(EffectPortRegistry::new())",
-        "effect_ports: effect_ports,",
+        "effect_ports,",
+        "let hn_source = HttpPullSource::new(decoder, http_source_config);",
         "map: [FormattedStory] -> {",
         "reduce: (HnTopStories, [HnDigestGroupSummary]) -> {",
         "via chat",
@@ -989,6 +991,12 @@ fn hn_witness_source_uses_the_snapshot_binding_and_deferred_port_contract() {
         "config.ai.",
         "HN_AI_PROVIDER",
         "HN_AI_MODEL",
+        "std::env",
+        "env_var(",
+        "read_to_string(",
+        "bindings:",
+        "effect_ports: effect_ports,",
+        "DemoConfig",
     ] {
         assert!(
             !flow_source.contains(forbidden),
@@ -1781,21 +1789,16 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let server = mock_server::spawn_mock_hn_server()
         .await
         .expect("deterministic HN server starts");
-    let demo_config = config::DemoConfig {
+    let demo_inputs = config::HnRunInputs {
         max_stories: 5,
         poll_timeout_secs: 10,
         source_rate_limit: 1_000.0,
         budget_per_group_override: Some(TokenCount::new(10_000)),
         max_stories_per_group: Some(5),
         interests: Some("runtime protocols".to_string()),
-        mode_label: "checked-fixture".to_string(),
+        mode_label: "mock".to_string(),
         base_url: server.base_url(),
-        _mock_server: Some(server),
     };
-    assert!(
-        demo_config._mock_server.is_some(),
-        "the shared checked fixture keeps its mock HN server alive"
-    );
     let config_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/hn_ai_digest_demo/obzenflow.toml");
     let production_provider = AiProvider::new("ollama");
@@ -1812,7 +1815,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let live_calls = Arc::new(AtomicUsize::new(0));
 
     let live_flow = hn_demo_flow::build_flow_definition(
-        &demo_config,
+        demo_inputs.clone(),
         hn_demo_flow::HnFlowOptions {
             journal_base: journal_base.clone(),
             chat_resolver_override: Some(counting_chat_resolver(
@@ -1822,8 +1825,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
                 false,
             )),
         },
-    )
-    .expect("the production HN flow assembles for the checked fixture");
+    );
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
@@ -1833,6 +1835,11 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         .run_async(live_flow)
         .await
         .expect("the shared production HN flow runs live");
+    let live_source_requests = server.request_count();
+    assert!(
+        live_source_requests > 0,
+        "the live shared flow must poll the prepared HN fixture"
+    );
 
     let live_archive = latest_run_dir(&journal_base);
     let live_chunk = stage_envelopes(&live_archive, "digest__chunk").await;
@@ -1867,10 +1874,20 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let live_map_ids = effect_evidence_ids(&live_map);
     let live_finalise_ids = effect_evidence_ids(&live_finalise);
 
+    // Replay prepares a fresh host fixture with a different physical endpoint.
+    // The live guard can be retired; neither endpoint is durable flow identity.
+    drop(server);
+    let replay_server = mock_server::spawn_mock_hn_server()
+        .await
+        .expect("strict replay HN server starts");
+    let replay_inputs = config::HnRunInputs {
+        base_url: replay_server.base_url(),
+        ..demo_inputs
+    };
     let replay_resolutions = Arc::new(AtomicUsize::new(0));
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_flow = hn_demo_flow::build_flow_definition(
-        &demo_config,
+        replay_inputs,
         hn_demo_flow::HnFlowOptions {
             journal_base: journal_base.clone(),
             chat_resolver_override: Some(counting_chat_resolver(
@@ -1880,8 +1897,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
                 true,
             )),
         },
-    )
-    .expect("the production HN replay flow assembles");
+    );
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
@@ -1896,6 +1912,11 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
 
     assert_eq!(replay_resolutions.load(Ordering::SeqCst), 0);
     assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        replay_server.request_count(),
+        0,
+        "strict replay may start a fresh host fixture but must not poll it"
+    );
     let replay_archive = latest_run_dir(&journal_base);
     let replay_map = stage_envelopes(&replay_archive, "digest__map").await;
     let replay_finalise = stage_envelopes(&replay_archive, "digest__finalize").await;

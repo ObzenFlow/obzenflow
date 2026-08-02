@@ -28,7 +28,7 @@ use obzenflow_core::ai::{
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{id::StageId, TypedPayload, WriterId};
-use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source};
+use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::EffectPortRegistry;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -363,82 +363,77 @@ async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
 }
 
 #[tokio::test]
-async fn flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
-    let result = flow! {
-        name: "amr_flow_binding_hygiene",
-        journals: memory_journals(),
-        middleware: [],
-        bindings: |_runtime_config| {
-            let chat = ChatBindingContract::from_resolved(
-                test_target(),
-                test_estimator("deterministic"),
-            )
-            .expect("test chat target and estimator models agree");
-            let bound_map_role = BuildMapRole;
-            let bound_finalise_role = BuildFinaliseRole;
-            let bound_effect_ports = test_effect_ports();
-        },
-        effect_ports: bound_effect_ports,
+async fn materializer_scope_remains_visible_to_ai_effects_and_effect_ports() {
+    let result = FlowDefinition::materialize(|_runtime_config| {
+        let chat =
+            ChatBindingContract::from_resolved(test_target(), test_estimator("deterministic"))
+                .expect("test chat target and estimator models agree");
+        let bound_map_role = BuildMapRole;
+        let bound_finalise_role = BuildFinaliseRole;
+        let effect_ports = test_effect_ports();
 
-        stages: {
-            seed = source!(BuildOnlySeed => NoEventSource);
-            digest = ai_map_reduce!(
-                BuildOnlySeed -> BuildOnlyOut => {
-                    map: [BuildOnlyItem] ->{
-                        at_least_once(ChatCompletion)
-                            via chat
-                            with { obzenflow_adapters::middleware::control::ai_resilience() }
-                    } BuildOnlyPartial => bound_map_role,
-                    reduce: (BuildOnlySeed, [BuildOnlyPartial]) ->{
-                        at_least_once(ChatCompletion)
-                            via chat
-                            with { obzenflow_adapters::middleware::control::ai_resilience() }
-                    } BuildOnlyOut => bound_finalise_role,
-                },
-                chunking: by_budget {
-                    items: |seed: &BuildOnlySeed| {
-                        (1..=seed.n)
-                            .map(|value| BuildOnlyItem { value })
-                            .collect::<Vec<_>>()
+        Ok(flow! {
+            name: "amr_flow_materializer_hygiene",
+            journals: memory_journals(),
+            middleware: [],
+            effect_ports,
+
+            stages: {
+                seed = source!(BuildOnlySeed => NoEventSource);
+                digest = ai_map_reduce!(
+                    BuildOnlySeed -> BuildOnlyOut => {
+                        map: [BuildOnlyItem] ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { obzenflow_adapters::middleware::control::ai_resilience() }
+                        } BuildOnlyPartial => bound_map_role,
+                        reduce: (BuildOnlySeed, [BuildOnlyPartial]) ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { obzenflow_adapters::middleware::control::ai_resilience() }
+                        } BuildOnlyOut => bound_finalise_role,
                     },
-                    render: |item: &BuildOnlyItem, _ctx| item.value.to_string(),
-                    budget: TokenCount::new(100),
-                    max_items: Some(1),
-                    oversize: error,
-                }
-            );
-            sink_stage = sink!(BuildOnlyOut => NoopSink);
-        },
+                    chunking: by_budget {
+                        items: |seed: &BuildOnlySeed| {
+                            (1..=seed.n)
+                                .map(|value| BuildOnlyItem { value })
+                                .collect::<Vec<_>>()
+                        },
+                        render: |item: &BuildOnlyItem, _ctx| item.value.to_string(),
+                        budget: TokenCount::new(100),
+                        max_items: Some(1),
+                        oversize: error,
+                    }
+                );
+                sink_stage = sink!(BuildOnlyOut => NoopSink);
+            },
 
-        topology: {
-            seed |> digest;
-            digest |> sink_stage;
-        }
-    }
+            topology: {
+                seed |> digest;
+                digest |> sink_stage;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
-    let _handle = result.expect("flow! bindings must remain visible to later clauses");
+    let _handle = result.expect("materializer locals must remain visible to the inner flow");
 }
 
 #[cfg(feature = "test-support")]
 #[tokio::test]
-async fn test_flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
+async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
+    let chat = ChatBindingContract::from_resolved(test_target(), test_estimator("deterministic"))
+        .expect("test chat target and estimator models agree");
+    let bound_map_role = BuildMapRole;
+    let bound_finalise_role = BuildFinaliseRole;
+    let effect_ports = test_effect_ports();
+
     let result = obzenflow_dsl::test_flow! {
         name: "amr_test_flow_binding_hygiene",
         journals: memory_journals(),
         middleware: [],
-        bindings: |_runtime_config| {
-            let chat = ChatBindingContract::from_resolved(
-                test_target(),
-                test_estimator("deterministic"),
-            )
-            .expect("test chat target and estimator models agree");
-            let bound_map_role = BuildMapRole;
-            let bound_finalise_role = BuildFinaliseRole;
-            let bound_effect_ports = test_effect_ports();
-        },
-        effect_ports: bound_effect_ports,
+        effect_ports,
 
         stages: {
             seed = source!(BuildOnlySeed => NoEventSource);
@@ -477,7 +472,7 @@ async fn test_flow_bindings_remain_visible_to_ai_effects_and_effect_ports() {
     }
     .await;
 
-    let _harness = result.expect("test_flow! bindings must remain visible to later clauses");
+    let _harness = result.expect("ordinary Rust locals must remain visible to test_flow!");
 }
 
 #[test]

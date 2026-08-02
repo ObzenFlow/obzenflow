@@ -22,7 +22,7 @@ use obzenflow_core::ai::{
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::error::FlowBuildError;
-use obzenflow_dsl::{flow, inference, sink, source};
+use obzenflow_dsl::{flow, inference, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::EffectPortRegistry;
@@ -87,6 +87,53 @@ impl AiInferenceRole<ReducedEvidence, DecisionBrief> for BriefRole {
     }
 }
 
+fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowDefinition {
+    FlowDefinition::materialize(move |runtime_config| {
+        let ai_models = runtime_config.ai_models();
+        let (chat, chat_registration) = ChatEffectBinding::from_config(&ai_models)
+            .map_err(|error| FlowBuildError::BindingConfiguration {
+                binding: "chat".to_string(),
+                detail: error.to_string(),
+            })?
+            .into_parts();
+        let effect_ports = chat_registration
+            .install_into(EffectPortRegistry::new())
+            .map_err(|error| FlowBuildError::BindingConfiguration {
+                binding: "chat".to_string(),
+                detail: error.to_string(),
+            })?;
+        let evidence_source = sources::finite([input]);
+        let brief_role = BriefRole;
+        let display_brief = sinks::console(|brief: &DecisionBrief| {
+            format!("{}\n\n{}", brief.question, brief.recommendation.trim())
+        });
+
+        Ok(flow! {
+            name: "one_shot_inference_demo",
+            journals: disk_journals(journal_path),
+            middleware: [],
+            effect_ports,
+
+            stages: {
+                evidence = source!(ReducedEvidence => evidence_source);
+                brief = inference!(
+                    ReducedEvidence -> {
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { ai_resilience() }
+                    } DecisionBrief => brief_role
+                );
+                display = sink!(DecisionBrief => display_brief);
+            },
+
+            topology: {
+                evidence |> brief;
+                brief |> display;
+            }
+        })
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let input = ReducedEvidence {
@@ -99,54 +146,10 @@ async fn main() -> Result<()> {
     };
 
     FlowApplication::builder()
-        .run_async(flow! {
-            name: "one_shot_inference_demo",
-            journals: disk_journals(PathBuf::from(
-                "target/one_shot_inference_demo_journal",
-            )),
-            middleware: [],
-            bindings: |runtime_config| {
-                let ai_models = runtime_config.ai_models();
-                let (chat, chat_registration) =
-                    ChatEffectBinding::from_config(&ai_models)
-                        .map_err(|error| FlowBuildError::BindingConfiguration {
-                            binding: "chat".to_string(),
-                            detail: error.to_string(),
-                        })?
-                        .into_parts();
-                let effect_ports = chat_registration
-                    .install_into(EffectPortRegistry::new())
-                    .map_err(|error| FlowBuildError::BindingConfiguration {
-                        binding: "chat".to_string(),
-                        detail: error.to_string(),
-                    })?;
-                let brief_role = BriefRole;
-            },
-            effect_ports: effect_ports,
-
-            stages: {
-                evidence = source!(ReducedEvidence => sources::finite([input]));
-                brief = inference!(
-                    ReducedEvidence -> {
-                        at_least_once(ChatCompletion)
-                            via chat
-                            with { ai_resilience() }
-                    } DecisionBrief => brief_role
-                );
-                display = sink!(DecisionBrief => sinks::console(|brief: &DecisionBrief| {
-                    format!(
-                        "{}\n\n{}",
-                        brief.question,
-                        brief.recommendation.trim()
-                    )
-                }));
-            },
-
-            topology: {
-                evidence |> brief;
-                brief |> display;
-            }
-        })
+        .run_async(build_flow_definition(
+            input,
+            PathBuf::from("target/one_shot_inference_demo_journal"),
+        ))
         .await?;
 
     Ok(())
