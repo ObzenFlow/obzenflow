@@ -11,7 +11,8 @@ use obzenflow::sources::Url;
 pub(crate) const DEFAULT_HN_MAX_STORIES: usize = 60;
 pub(crate) const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
 
-pub struct DemoConfig {
+#[derive(Clone)]
+pub struct HnRunInputs {
     pub max_stories: usize,
     pub poll_timeout_secs: usize,
     pub source_rate_limit: f64,
@@ -20,10 +21,14 @@ pub struct DemoConfig {
     pub interests: Option<String>,
     pub mode_label: String,
     pub base_url: Url,
-    pub(crate) _mock_server: Option<MockHnServer>,
 }
 
-impl DemoConfig {
+pub struct PreparedHnRun {
+    pub inputs: HnRunInputs,
+    pub(crate) mock_server: Option<MockHnServer>,
+}
+
+impl PreparedHnRun {
     pub async fn from_env() -> Result<Self> {
         let max_stories = env_var_or::<usize>("HN_MAX_STORIES", DEFAULT_HN_MAX_STORIES)?;
         let poll_timeout_secs = env_var_or::<usize>("HN_POLL_TIMEOUT_SECS", 120)?;
@@ -68,18 +73,22 @@ impl DemoConfig {
         let interests = env_var::<String>("HN_AI_INTERESTS")?;
 
         Ok(Self {
-            max_stories,
-            poll_timeout_secs,
-            source_rate_limit,
-            budget_per_group_override,
-            max_stories_per_group,
-            interests,
-            mode_label,
-            base_url,
-            _mock_server: mock_server,
+            inputs: HnRunInputs {
+                max_stories,
+                poll_timeout_secs,
+                source_rate_limit,
+                budget_per_group_override,
+                max_stories_per_group,
+                interests,
+                mode_label,
+                base_url,
+            },
+            mock_server,
         })
     }
+}
 
+impl HnRunInputs {
     pub fn group_max_stories_label(&self) -> String {
         match self.max_stories_per_group {
             None => "unlimited".to_string(),
