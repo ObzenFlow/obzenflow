@@ -271,30 +271,38 @@ fn build_flow(
     let a_count = ranges.a_count;
     let b_first = ranges.b_first;
     let b_count = ranges.b_count;
-    flow! {
-        name: "resume_fan_in",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let source_a_handler = ChannelTicker::new("a", a_first, a_count);
+        let source_b_handler = ChannelTicker::new("b", b_first, b_count);
+        let merge_handler = MergeTransform::new();
+        let effectful_handler = EffectfulTail { calls };
+        let collect_handler = CountingSink { delivered };
 
-        stages: {
-            src_a = infinite_source!(ChannelTick => ChannelTicker::new("a", a_first, a_count));
-            src_b = infinite_source!(ChannelTick => ChannelTicker::new("b", b_first, b_count));
-            merge = transform!(ChannelTick -> Merged => MergeTransform::new());
-            effectful = effectful_transform!(
-                Merged -> { FanInOutput, EffectValue } => EffectfulTail { calls },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            collect = sink!(FanInOutput => CountingSink { delivered });
-        },
+        Ok(flow! {
+            name: "resume_fan_in",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            src_a |> merge;
-            src_b |> merge;
-            merge |> effectful;
-            effectful |> collect;
-        }
-    }
+            stages: {
+                src_a = infinite_source!(ChannelTick => source_a_handler);
+                src_b = infinite_source!(ChannelTick => source_b_handler);
+                merge = transform!(ChannelTick -> Merged => merge_handler);
+                effectful = effectful_transform!(
+                    Merged -> { FanInOutput, EffectValue } => effectful_handler,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                collect = sink!(FanInOutput => collect_handler);
+            },
+
+            topology: {
+                src_a |> merge;
+                src_b |> merge;
+                merge |> effectful;
+                effectful |> collect;
+            }
+        })
+    })
 }
 
 async fn wait_for_running(handle: &FlowHandle) -> Result<()> {

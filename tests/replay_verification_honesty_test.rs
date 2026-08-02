@@ -103,24 +103,31 @@ where
 /// Two channels converge on a plain transform with no effectful descendant:
 /// the merge keeps availability-driven scheduling and stays unordered.
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
-    flow! {
-        name: "replay_verification_honesty",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let channel_a_handler = Channel::new("a");
+        let channel_b_handler = Channel::new("b");
+        let merge_handler = PassthroughMerge;
+        let out_handler = SinkTyped::with_delivery(discard::<Reading>()).idempotent();
 
-        stages: {
-            channel_a = source!(Reading => Channel::new("a"));
-            channel_b = source!(Reading => Channel::new("b"));
-            merge = transform!(Reading -> Reading => PassthroughMerge);
-            out = sink!(Reading => SinkTyped::with_delivery(discard::<Reading>()).idempotent());
-        },
+        Ok(flow! {
+            name: "replay_verification_honesty",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            channel_a |> merge;
-            channel_b |> merge;
-            merge |> out;
-        }
-    }
+            stages: {
+                channel_a = source!(Reading => channel_a_handler);
+                channel_b = source!(Reading => channel_b_handler);
+                merge = transform!(Reading -> Reading => merge_handler);
+                out = sink!(Reading => out_handler);
+            },
+
+            topology: {
+                channel_a |> merge;
+                channel_b |> merge;
+                merge |> out;
+            }
+        })
+    })
 }
 
 fn latest_run_dir(base: &Path) -> PathBuf {

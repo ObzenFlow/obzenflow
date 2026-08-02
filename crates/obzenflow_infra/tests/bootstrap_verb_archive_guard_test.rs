@@ -11,7 +11,7 @@
 //! test building concurrently would see this test's verb.
 
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
@@ -44,27 +44,29 @@ async fn installed_replay_verb_without_opened_archive_fails_the_build() {
     // strategy-selection point this guard sits at.
     let base = tempfile::tempdir().expect("tempdir");
     let journals = disk_journals(base.path().to_path_buf());
-    let failure = flow! {
-        name: "verb_without_archive",
-        journals: journals,
-        middleware: [],
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let guard_sink = SinkTyped::new(|_value: GuardEvent| async move {});
 
-        stages: {
-            src = source!(GuardEvent => placeholder!());
-            snk = sink!(
-                GuardEvent => SinkTyped::new(|_value: GuardEvent| async move {}),
-                delivery: idempotent
-            );
-        },
+        Ok(flow! {
+            name: "verb_without_archive",
+            journals: journals,
+            middleware: [],
 
-        topology: {
-            src |> snk;
-        }
-    }
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await
-    .err()
-    .expect("an installed verb without an opened archive must fail the build");
+            stages: {
+                src = source!(GuardEvent => placeholder!());
+                snk = sink!(GuardEvent => guard_sink, delivery: idempotent);
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    });
+    let failure = flow_definition
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .err()
+        .expect("an installed verb without an opened archive must fail the build");
 
     assert!(
         failure.error.to_string().contains("no opened archive"),

@@ -188,18 +188,20 @@ macro_rules! generated_digest {
         let chat =
             ChatBindingContract::from_resolved(test_target(), test_estimator($estimator_model))
                 .expect("test chat target and estimator models agree");
+        let map_role = BuildMapRole;
+        let finalise_role = BuildFinaliseRole;
         ai_map_reduce!(
             BuildOnlySeed -> BuildOnlyOut => {
                 map: [BuildOnlyItem] ->{
                     at_least_once(ChatCompletion)
                         via chat
                         with { obzenflow_adapters::middleware::control::ai_resilience() }
-                } BuildOnlyPartial => BuildMapRole,
+                } BuildOnlyPartial => map_role,
                 reduce: (BuildOnlySeed, [BuildOnlyPartial]) ->{
                     at_least_once(ChatCompletion)
                         via chat
                         with { obzenflow_adapters::middleware::control::ai_resilience() }
-                } BuildOnlyOut => BuildFinaliseRole,
+                } BuildOnlyOut => finalise_role,
             },
             chunking: by_budget {
                 items: |seed: &BuildOnlySeed| {
@@ -248,17 +250,8 @@ struct CountingOutSink {
 }
 
 impl CountingOutSink {
-    fn new() -> (Self, Arc<AtomicUsize>, Arc<AtomicU64>) {
-        let delivered = Arc::new(AtomicUsize::new(0));
-        let total = Arc::new(AtomicU64::new(0));
-        (
-            Self {
-                delivered: Arc::clone(&delivered),
-                total: Arc::clone(&total),
-            },
-            delivered,
-            total,
-        )
+    fn new(delivered: Arc<AtomicUsize>, total: Arc<AtomicU64>) -> Self {
+        Self { delivered, total }
     }
 }
 
@@ -330,23 +323,28 @@ async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
     // `.await` would resolve to `Err`. With the FLOWIP-114c closing-PR fix in
     // `build_typed_flow!`, subgraph membership is attached before the
     // validator runs and the three composite-internal edges are recognized.
-    let result = flow! {
-        name: "amr_build_only",
-        journals: memory_journals(),
-        middleware: [],
-        effect_ports: test_effect_ports(),
+    let result = FlowDefinition::materialize(|_runtime_config| {
+        let seed_handler = NoEventSource;
+        let sink_handler = NoopSink;
 
-        stages: {
-            seed = source!(BuildOnlySeed => NoEventSource);
-            digest = generated_digest!();
-            sink_stage = sink!(BuildOnlyOut => NoopSink);
-        },
+        Ok(flow! {
+            name: "amr_build_only",
+            journals: memory_journals(),
+            middleware: [],
+            effect_ports: test_effect_ports(),
 
-        topology: {
-            seed |> digest;
-            digest |> sink_stage;
-        }
-    }
+            stages: {
+                seed = source!(BuildOnlySeed => seed_handler);
+                digest = generated_digest!();
+                sink_stage = sink!(BuildOnlyOut => sink_handler);
+            },
+
+            topology: {
+                seed |> digest;
+                digest |> sink_stage;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
@@ -371,6 +369,8 @@ async fn materializer_scope_remains_visible_to_ai_effects_and_effect_ports() {
         let bound_map_role = BuildMapRole;
         let bound_finalise_role = BuildFinaliseRole;
         let effect_ports = test_effect_ports();
+        let seed_handler = NoEventSource;
+        let sink_handler = NoopSink;
 
         Ok(flow! {
             name: "amr_flow_materializer_hygiene",
@@ -379,7 +379,7 @@ async fn materializer_scope_remains_visible_to_ai_effects_and_effect_ports() {
             effect_ports,
 
             stages: {
-                seed = source!(BuildOnlySeed => NoEventSource);
+                seed = source!(BuildOnlySeed => seed_handler);
                 digest = ai_map_reduce!(
                     BuildOnlySeed -> BuildOnlyOut => {
                         map: [BuildOnlyItem] ->{
@@ -405,7 +405,7 @@ async fn materializer_scope_remains_visible_to_ai_effects_and_effect_ports() {
                         oversize: error,
                     }
                 );
-                sink_stage = sink!(BuildOnlyOut => NoopSink);
+                sink_stage = sink!(BuildOnlyOut => sink_handler);
             },
 
             topology: {
@@ -423,52 +423,58 @@ async fn materializer_scope_remains_visible_to_ai_effects_and_effect_ports() {
 #[cfg(feature = "test-support")]
 #[tokio::test]
 async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
-    let chat = ChatBindingContract::from_resolved(test_target(), test_estimator("deterministic"))
-        .expect("test chat target and estimator models agree");
-    let bound_map_role = BuildMapRole;
-    let bound_finalise_role = BuildFinaliseRole;
-    let effect_ports = test_effect_ports();
+    let result = async {
+        let chat =
+            ChatBindingContract::from_resolved(test_target(), test_estimator("deterministic"))
+                .expect("test chat target and estimator models agree");
+        let bound_map_role = BuildMapRole;
+        let bound_finalise_role = BuildFinaliseRole;
+        let effect_ports = test_effect_ports();
+        let seed_handler = NoEventSource;
+        let sink_handler = NoopSink;
 
-    let result = obzenflow_dsl::test_flow! {
-        name: "amr_test_flow_binding_hygiene",
-        journals: memory_journals(),
-        middleware: [],
-        effect_ports,
+        obzenflow_dsl::test_flow! {
+            name: "amr_test_flow_binding_hygiene",
+            journals: memory_journals(),
+            middleware: [],
+            effect_ports,
 
-        stages: {
-            seed = source!(BuildOnlySeed => NoEventSource);
-            digest = ai_map_reduce!(
-                BuildOnlySeed -> BuildOnlyOut => {
-                    map: [BuildOnlyItem] ->{
-                        at_least_once(ChatCompletion)
-                            via chat
-                            with { obzenflow_adapters::middleware::control::ai_resilience() }
-                    } BuildOnlyPartial => bound_map_role,
-                    reduce: (BuildOnlySeed, [BuildOnlyPartial]) ->{
-                        at_least_once(ChatCompletion)
-                            via chat
-                            with { obzenflow_adapters::middleware::control::ai_resilience() }
-                    } BuildOnlyOut => bound_finalise_role,
-                },
-                chunking: by_budget {
-                    items: |seed: &BuildOnlySeed| {
-                        (1..=seed.n)
-                            .map(|value| BuildOnlyItem { value })
-                            .collect::<Vec<_>>()
+            stages: {
+                seed = source!(BuildOnlySeed => seed_handler);
+                digest = ai_map_reduce!(
+                    BuildOnlySeed -> BuildOnlyOut => {
+                        map: [BuildOnlyItem] ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { obzenflow_adapters::middleware::control::ai_resilience() }
+                        } BuildOnlyPartial => bound_map_role,
+                        reduce: (BuildOnlySeed, [BuildOnlyPartial]) ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { obzenflow_adapters::middleware::control::ai_resilience() }
+                        } BuildOnlyOut => bound_finalise_role,
                     },
-                    render: |item: &BuildOnlyItem, _ctx| item.value.to_string(),
-                    budget: TokenCount::new(100),
-                    max_items: Some(1),
-                    oversize: error,
-                }
-            );
-            sink_stage = sink!(BuildOnlyOut => NoopSink);
-        },
+                    chunking: by_budget {
+                        items: |seed: &BuildOnlySeed| {
+                            (1..=seed.n)
+                                .map(|value| BuildOnlyItem { value })
+                                .collect::<Vec<_>>()
+                        },
+                        render: |item: &BuildOnlyItem, _ctx| item.value.to_string(),
+                        budget: TokenCount::new(100),
+                        max_items: Some(1),
+                        oversize: error,
+                    }
+                );
+                sink_stage = sink!(BuildOnlyOut => sink_handler);
+            },
 
-        topology: {
-            seed |> digest;
-            digest |> sink_stage;
+            topology: {
+                seed |> digest;
+                digest |> sink_stage;
+            }
         }
+        .await
     }
     .await;
 
@@ -510,23 +516,28 @@ fn estimator_mismatch_fails_before_journal_or_effect_port_evaluation() {
 
 #[tokio::test]
 async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
-    let handle = flow! {
-        name: "amr_boundary_payload_contract",
-        journals: memory_journals(),
-        middleware: [],
-        effect_ports: test_effect_ports(),
+    let handle = FlowDefinition::materialize(|_runtime_config| {
+        let seed_handler = NoEventSource;
+        let sink_handler = NoopSink;
 
-        stages: {
-            seed = source!(BuildOnlySeed => NoEventSource);
-            digest = generated_digest!();
-            sink_stage = sink!(BuildOnlyOut => NoopSink);
-        },
+        Ok(flow! {
+            name: "amr_boundary_payload_contract",
+            journals: memory_journals(),
+            middleware: [],
+            effect_ports: test_effect_ports(),
 
-        topology: {
-            seed |> digest;
-            digest |> sink_stage;
-        }
-    }
+            stages: {
+                seed = source!(BuildOnlySeed => seed_handler);
+                digest = generated_digest!();
+                sink_stage = sink!(BuildOnlyOut => sink_handler);
+            },
+
+            topology: {
+                seed |> digest;
+                digest |> sink_stage;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .expect("typed ai_map_reduce flow should build");
@@ -568,27 +579,35 @@ async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
 
 #[tokio::test]
 async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
-    let (sink_handler, delivered, total) = CountingOutSink::new();
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let delivered_for_flow = delivered.clone();
+    let total = Arc::new(AtomicU64::new(0));
+    let total_for_flow = total.clone();
 
-    let handle = flow! {
-        name: "amr_runtime_internal_contracts",
-        journals: memory_journals(),
-        middleware: [],
-        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
-            .stall_timeout_ms(3_000),
-        effect_ports: test_effect_ports(),
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let seed_handler = OneSeedSource::new();
+        let sink_handler = CountingOutSink::new(delivered_for_flow, total_for_flow);
 
-        stages: {
-            seed = source!(BuildOnlySeed => OneSeedSource::new());
-            digest = generated_digest!();
-            sink_stage = sink!(BuildOnlyOut => sink_handler);
-        },
+        Ok(flow! {
+            name: "amr_runtime_internal_contracts",
+            journals: memory_journals(),
+            middleware: [],
+            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
+                .stall_timeout_ms(3_000),
+            effect_ports: test_effect_ports(),
 
-        topology: {
-            seed |> digest;
-            digest |> sink_stage;
-        }
-    }
+            stages: {
+                seed = source!(BuildOnlySeed => seed_handler);
+                digest = generated_digest!();
+                sink_stage = sink!(BuildOnlyOut => sink_handler);
+            },
+
+            topology: {
+                seed |> digest;
+                digest |> sink_stage;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .expect("ai_map_reduce runtime flow should build");
@@ -669,25 +688,30 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
 /// the composite and the port rather than only the mangled member stage.
 #[tokio::test]
 async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
-    let result = flow! {
-        name: "amr_boundary_mismatch",
-        journals: memory_journals(),
-        middleware: [],
-        effect_ports: test_effect_ports(),
+    let result = FlowDefinition::materialize(|_runtime_config| {
+        let seed_handler = NoEventSource;
+        let sink_handler = NoopSink;
 
-        stages: {
-            seed = source!(BuildOnlySeed => NoEventSource);
-            digest = generated_digest!();
-            // Wrong type: no output port carries BuildOnlySeed, so the edge
-            // binds the default `out` port and must fail edge typing there.
-            sink_stage = sink!(BuildOnlySeed => NoopSink);
-        },
+        Ok(flow! {
+            name: "amr_boundary_mismatch",
+            journals: memory_journals(),
+            middleware: [],
+            effect_ports: test_effect_ports(),
 
-        topology: {
-            seed |> digest;
-            digest |> sink_stage;
-        }
-    }
+            stages: {
+                seed = source!(BuildOnlySeed => seed_handler);
+                digest = generated_digest!();
+                // Wrong type: no output port carries BuildOnlySeed, so the edge
+                // binds the default `out` port and must fail edge typing there.
+                sink_stage = sink!(BuildOnlySeed => sink_handler);
+            },
+
+            topology: {
+                seed |> digest;
+                digest |> sink_stage;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
@@ -768,26 +792,33 @@ impl FiniteSourceHandler for NoStreamSource {
 /// "references unknown stage variable 'digest'".
 #[tokio::test]
 async fn join_reference_resolves_through_composite_boundary_port() {
-    let result = flow! {
-        name: "amr_join_reference",
-        journals: memory_journals(),
-        middleware: [],
-        effect_ports: test_effect_ports(),
+    let result = FlowDefinition::materialize(|_runtime_config| {
+        let seed_handler = NoEventSource;
+        let stream_handler = NoStreamSource;
+        let join_handler = LocalNoopJoin;
+        let sink_handler = NoopSink;
 
-        stages: {
-            seed = source!(BuildOnlySeed => NoEventSource);
-            digest = generated_digest!();
-            stream_src = source!(JoinStreamP => NoStreamSource);
-            enrich = join!(catalog digest: BuildOnlyOut, JoinStreamP -> JoinedP => LocalNoopJoin);
-            joined_sink = sink!(JoinedP => NoopSink);
-        },
+        Ok(flow! {
+            name: "amr_join_reference",
+            journals: memory_journals(),
+            middleware: [],
+            effect_ports: test_effect_ports(),
 
-        topology: {
-            seed |> digest;
-            stream_src |> enrich;
-            enrich |> joined_sink;
-        }
-    }
+            stages: {
+                seed = source!(BuildOnlySeed => seed_handler);
+                digest = generated_digest!();
+                stream_src = source!(JoinStreamP => stream_handler);
+                enrich = join!(catalog digest: BuildOnlyOut, JoinStreamP -> JoinedP => join_handler);
+                joined_sink = sink!(JoinedP => sink_handler);
+            },
+
+            topology: {
+                seed |> digest;
+                stream_src |> enrich;
+                enrich |> joined_sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 

@@ -167,28 +167,35 @@ fn build_flow(
     unexpected_error_calls: Arc<AtomicUsize>,
     collected: Arc<Mutex<Vec<ChainEvent>>>,
 ) -> FlowDefinition {
-    flow! {
-        name: "stateful_pre_error_bypass",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let input_handler = ThreeRows::new();
+        let validate_handler = RejectTwo::new();
+        let aggregate_handler = GuardedAccumulator {
+            calls,
+            unexpected_error_calls,
+            writer_id: WriterId::from(StageId::new()),
+        };
+        let output_handler = CollectSink { events: collected };
 
-        stages: {
-            input = source!(Input => ThreeRows::new());
-            validate = transform!(Input -> Input => RejectTwo::new());
-            aggregate = stateful!(Input -> Aggregate => GuardedAccumulator {
-                calls,
-                unexpected_error_calls,
-                writer_id: WriterId::from(StageId::new()),
-            });
-            output = sink!(Aggregate => CollectSink { events: collected });
-        },
+        Ok(flow! {
+            name: "stateful_pre_error_bypass",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            input |> validate;
-            validate |> aggregate;
-            aggregate |> output;
-        }
-    }
+            stages: {
+                input = source!(Input => input_handler);
+                validate = transform!(Input -> Input => validate_handler);
+                aggregate = stateful!(Input -> Aggregate => aggregate_handler);
+                output = sink!(Aggregate => output_handler);
+            },
+
+            topology: {
+                input |> validate;
+                validate |> aggregate;
+                aggregate |> output;
+            }
+        })
+    })
 }
 
 #[tokio::test]

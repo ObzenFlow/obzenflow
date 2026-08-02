@@ -13,7 +13,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, MetricsBootstrap, StartupMode,
@@ -93,22 +93,29 @@ async fn measure_waiting_for_gun_cpu() -> anyhow::Result<f64> {
 
     let (journals_base_path, _temp_dir) = create_temp_journals_base("waiting_for_gun_cpu")?;
 
-    let handle = flow! {
-        journals: disk_journals(journals_base_path),
-        middleware: [],
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let idle_source = IdleSource::new();
+        let noop_sink = NoopSink;
 
-        stages: {
-            src = source!(BenchEvent => IdleSource::new());
-            snk = sink!(BenchEvent => NoopSink);
-        },
+        Ok(flow! {
+            journals: disk_journals(journals_base_path),
+            middleware: [],
 
-        topology: {
-            src |> snk;
-        }
-    }
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
+            stages: {
+                src = source!(BenchEvent => idle_source);
+                snk = sink!(BenchEvent => noop_sink);
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    });
+
+    let handle = flow_definition
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     // Wait until the pipeline is materialized (but not started).
     let mut state_rx = handle.state_receiver();

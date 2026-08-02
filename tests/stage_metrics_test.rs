@@ -13,7 +13,7 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -107,14 +107,8 @@ struct CollectorSink {
 }
 
 impl CollectorSink {
-    fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                events: events.clone(),
-            },
-            events,
-        )
+    fn new(events: Arc<Mutex<Vec<ChainEvent>>>) -> Self {
+        Self { events }
     }
 }
 
@@ -140,30 +134,34 @@ impl SinkHandler for CollectorSink {
 async fn test_stage_level_metrics_automatic() -> Result<()> {
     println!("\n=== Stage-Level Metrics Test ===\n");
 
-    // Create handlers
-    let source = TestSource::new();
-    let transform = UppercaseTransform;
-    let (sink, collected_events) = CollectorSink::new();
+    let collected_events = Arc::new(Mutex::new(Vec::new()));
+    let collected_events_for_flow = Arc::clone(&collected_events);
 
     println!("Building flow with automatic stage metrics...");
 
     // Build flow - metrics are automatically enabled
-    let flow_handle = flow! {
-        name: "stage_metrics_test",
-        journals: disk_journals(std::path::PathBuf::from("target/stage_metrics_test")),
-        middleware: [],
+    let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source = TestSource::new();
+        let transform = UppercaseTransform;
+        let sink = CollectorSink::new(collected_events_for_flow);
 
-        stages: {
-            test_source = source!(MetricEvent => source);
-            uppercase_transform = transform!(MetricEvent -> MetricEvent => transform);
-            collector_sink = sink!(MetricEvent => sink);
-        },
+        Ok(flow! {
+            name: "stage_metrics_test",
+            journals: disk_journals(std::path::PathBuf::from("target/stage_metrics_test")),
+            middleware: [],
 
-        topology: {
-            test_source |> uppercase_transform;
-            uppercase_transform |> collector_sink;
-        }
-    }
+            stages: {
+                test_source = source!(MetricEvent => source);
+                uppercase_transform = transform!(MetricEvent -> MetricEvent => transform);
+                collector_sink = sink!(MetricEvent => sink);
+            },
+
+            topology: {
+                test_source |> uppercase_transform;
+                uppercase_transform |> collector_sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;

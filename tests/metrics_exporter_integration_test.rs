@@ -318,15 +318,18 @@ fn metric_line_value(
 #[cfg(feature = "test-support")]
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn metrics_barrier_smoke_current_thread_paused_time() -> Result<()> {
+    let source = BurstSource::new(10);
+    let transform = PassthroughTransform;
+    let (sink, _count) = CountingSink::new();
     let test_handle = test_flow! {
         name: "metrics_barrier_paused_time_smoke",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            src = source!(MetricEvent => BurstSource::new(10));
-            trans = transform!(MetricEvent -> MetricEvent => PassthroughTransform);
-            snk = sink!(MetricEvent => CountingSink::new().0);
+            src = source!(MetricEvent => source);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
         },
 
         topology: {
@@ -370,6 +373,9 @@ async fn metrics_barrier_smoke_current_thread_paused_time() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
     let timeout_flow = Duration::from_secs(30);
+    let source = BurstSource::new(50);
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
         name: "metrics_flow_id_labels",
@@ -377,13 +383,13 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!(MetricEvent => BurstSource::new(50), [
+            src = source!(MetricEvent => source, [
                 // No summaries/threshold crossings required; utilization is derived from bucket state.
                 rate_limit_with_burst(10_000.0, 10_000.0),
                 CircuitBreaker::builder().consecutive_failures(10).build().expect("source breaker")
             ]);
-            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
-            snk = sink!(MetricEvent => CountingSink::new().0);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
         },
 
         topology: {
@@ -431,6 +437,9 @@ async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
 
     let per_event = Duration::from_millis(10);
     let total_events: usize = 100;
+    let source = BurstSource::new(total_events);
+    let transform = PassthroughTransform;
+    let sink = SleepingSink::new(per_event);
 
     let test_handle = test_flow! {
         name: "metrics_processing_time_sum",
@@ -438,9 +447,9 @@ async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!(MetricEvent => BurstSource::new(total_events));
-            trans = transform!(MetricEvent -> MetricEvent => PassthroughTransform);
-            snk = sink!(MetricEvent => SleepingSink::new(per_event));
+            src = source!(MetricEvent => source);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
         },
 
         topology: {
@@ -519,6 +528,9 @@ async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
 async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() -> Result<()> {
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
+    let source = BurstSource::new(1001);
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
         name: "metrics_cb_exporter",
@@ -528,13 +540,13 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
         stages: {
             // 1000 events triggers a CircuitBreaker summary (>=1000 processed requests).
             // Use 1001 so the summary is not emitted on the final stage output.
-            src = source!(MetricEvent => BurstSource::new(1001), [
+            src = source!(MetricEvent => source, [
                 CircuitBreaker::builder().consecutive_failures(10).build().expect("source breaker")
             ]);
             // Drop downstream data outputs to keep journaling light; the circuit breaker
             // still observes successful source polling and emits a summary at 1000.
-            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
-            snk = sink!(MetricEvent => CountingSink::new().0);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
         },
 
         topology: {
@@ -594,6 +606,9 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
 async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Result<()> {
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
+    let source = ErrorAfterFirstSource::new();
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
         name: "metrics_cb_cumulative",
@@ -603,15 +618,15 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
         stages: {
             // 1001 events ensures the 1000-threshold summary is emitted before the run completes.
             // First poll succeeds, second poll fails (Timeout), opening the breaker.
-            src = source!(MetricEvent => ErrorAfterFirstSource::new(), [
+            src = source!(MetricEvent => source, [
                 CircuitBreaker::builder()
                     .consecutive_failures(1)
                     .open_for(Duration::from_millis(1))
                     .build()
                     .expect("source breaker")
             ]);
-            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
-            snk = sink!(MetricEvent => CountingSink::new().0);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
         },
 
         topology: {
@@ -737,6 +752,9 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle() -> Result<()> {
     let timeout_flow = Duration::from_secs(30);
+    let source = ErrorAfterFirstSource::new();
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
         name: "metrics_source_rate_based_cb",
@@ -744,7 +762,7 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
         middleware: [],
 
         stages: {
-            src = source!(MetricEvent => ErrorAfterFirstSource::new(), [
+            src = source!(MetricEvent => source, [
                 CircuitBreaker::builder()
                     .count_window(2)
                     .minimum_calls(2)
@@ -753,8 +771,8 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
                     .build()
                     .expect("rate breaker")
             ]);
-            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
-            snk = sink!(MetricEvent => CountingSink::new().0);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
         },
 
         topology: {
@@ -828,6 +846,9 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let total_events: usize = 250;
+    let source = BurstSource::new(total_events);
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
 
     // Configure the limiter to produce at least one delayed event while keeping
     // the end-to-end run comfortably inside CI timing variance.
@@ -837,7 +858,7 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
         middleware: [],
 
         stages: {
-            src = source!(MetricEvent => BurstSource::new(total_events), [
+            src = source!(MetricEvent => source, [
                 // Force deterministic backpressure: small burst + low rate so at least
                 // one event must block while still allowing the run to complete
                 // within the metrics wait window on slower CI hosts.
@@ -845,8 +866,8 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
             ]);
             // Drop downstream data outputs to keep journaling light; rate limiting
             // metrics are emitted from the source stage.
-            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
-            snk = sink!(MetricEvent => CountingSink::new().0);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
         },
 
         topology: {
@@ -987,6 +1008,9 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
     // snapshots must carry cumulative CB counters so the last event has truth.
     let timeout_flow = Duration::from_secs(30);
     let total_events: usize = 500;
+    let source = BurstSource::new(total_events);
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
         name: "metrics_cb_no_summary",
@@ -994,11 +1018,11 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
         middleware: [],
 
         stages: {
-            src = source!(MetricEvent => BurstSource::new(total_events), [
+            src = source!(MetricEvent => source, [
                 CircuitBreaker::builder().consecutive_failures(10).build().expect("source breaker")
             ]);
-            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
-            snk = sink!(MetricEvent => CountingSink::new().0);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
         },
 
         topology: {
@@ -1055,6 +1079,9 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
     // utilization must be derivable from bucket state even when no summaries emit.
     let timeout_flow = Duration::from_secs(30);
     let total_events: usize = 200;
+    let source = BurstSource::new(total_events);
+    let transform = DropTransform;
+    let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
         name: "metrics_rl_no_summary",
@@ -1062,13 +1089,13 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
         middleware: [],
 
         stages: {
-            src = source!(MetricEvent => BurstSource::new(total_events), [
+            src = source!(MetricEvent => source, [
                 // High rate + high burst ensures no time-based (10s) or count-based (1000)
                 // WindowUtilization summary is *not* required for correct totals or utilization.
                 rate_limit_with_burst(10_000.0, 10_000.0)
             ]);
-            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
-            snk = sink!(MetricEvent => CountingSink::new().0);
+            trans = transform!(MetricEvent -> MetricEvent => transform);
+            snk = sink!(MetricEvent => sink);
         },
 
         topology: {
@@ -1157,6 +1184,8 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
 async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Result<()> {
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
+    let source = BurstSource::new(10);
+    let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
         name: "metrics_contracts_exporter",
@@ -1164,8 +1193,8 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
         middleware: [],
 
         stages: {
-            src = source!(MetricEvent => BurstSource::new(10));
-            snk = sink!(MetricEvent => CountingSink::new().0);
+            src = source!(MetricEvent => source);
+            snk = sink!(MetricEvent => sink);
         },
 
         topology: {

@@ -14,7 +14,7 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::WriterId;
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -91,12 +91,6 @@ impl FiniteSourceHandler for TimestampedSource {
 #[derive(Clone, Debug)]
 struct PassthroughStage;
 
-impl PassthroughStage {
-    fn new(_name: &str) -> Self {
-        Self
-    }
-}
-
 #[async_trait]
 impl TransformHandler for PassthroughStage {
     fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
@@ -116,17 +110,11 @@ struct LatencySink {
 }
 
 impl LatencySink {
-    fn new(expected_count: u64) -> (Self, Arc<tokio::sync::Mutex<Vec<Duration>>>) {
-        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
-            expected_count as usize,
-        )));
-        (
-            Self {
-                received: Arc::new(AtomicU64::new(0)),
-                latencies: latencies.clone(),
-            },
+    fn new(received: Arc<AtomicU64>, latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>) -> Self {
+        Self {
+            received,
             latencies,
-        )
+        }
     }
 }
 
@@ -171,36 +159,64 @@ async fn run_20_stage_pipeline() -> anyhow::Result<Duration> {
     ));
     std::fs::create_dir_all(&journals_base_path)?;
 
-    let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
-    let (sink, latencies) = LatencySink::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
-    let sink_clone = sink.clone();
+    let received = Arc::new(AtomicU64::new(0));
+    let received_for_flow = received.clone();
+    let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
+        (WARMUP_EVENT_COUNT + TEST_EVENT_COUNT) as usize,
+    )));
+    let latencies_for_flow = latencies.clone();
 
     // For 20 stages, we'll use the simplified form that the throughput benchmark uses
-    let handle = flow! {
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
+        let sink = LatencySink::new(received_for_flow, latencies_for_flow);
+        let [
+            stage1_handler,
+            stage2_handler,
+            stage3_handler,
+            stage4_handler,
+            stage5_handler,
+            stage6_handler,
+            stage7_handler,
+            stage8_handler,
+            stage9_handler,
+            stage10_handler,
+            stage11_handler,
+            stage12_handler,
+            stage13_handler,
+            stage14_handler,
+            stage15_handler,
+            stage16_handler,
+            stage17_handler,
+            stage18_handler,
+            stage19_handler,
+        ] = std::array::from_fn(|_| PassthroughStage);
+
+        Ok(flow! {
         journals: disk_journals(journals_base_path),
         middleware: [],
 
         stages: {
             src = source!(BenchEvent => source);
-            s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
-            s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
-            s3 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage3"));
-            s4 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage4"));
-            s5 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage5"));
-            s6 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage6"));
-            s7 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage7"));
-            s8 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage8"));
-            s9 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage9"));
-            s10 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage10"));
-            s11 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage11"));
-            s12 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage12"));
-            s13 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage13"));
-            s14 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage14"));
-            s15 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage15"));
-            s16 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage16"));
-            s17 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage17"));
-            s18 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage18"));
-            s19 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage19"));
+            s1 = transform!(BenchEvent -> BenchEvent => stage1_handler);
+            s2 = transform!(BenchEvent -> BenchEvent => stage2_handler);
+            s3 = transform!(BenchEvent -> BenchEvent => stage3_handler);
+            s4 = transform!(BenchEvent -> BenchEvent => stage4_handler);
+            s5 = transform!(BenchEvent -> BenchEvent => stage5_handler);
+            s6 = transform!(BenchEvent -> BenchEvent => stage6_handler);
+            s7 = transform!(BenchEvent -> BenchEvent => stage7_handler);
+            s8 = transform!(BenchEvent -> BenchEvent => stage8_handler);
+            s9 = transform!(BenchEvent -> BenchEvent => stage9_handler);
+            s10 = transform!(BenchEvent -> BenchEvent => stage10_handler);
+            s11 = transform!(BenchEvent -> BenchEvent => stage11_handler);
+            s12 = transform!(BenchEvent -> BenchEvent => stage12_handler);
+            s13 = transform!(BenchEvent -> BenchEvent => stage13_handler);
+            s14 = transform!(BenchEvent -> BenchEvent => stage14_handler);
+            s15 = transform!(BenchEvent -> BenchEvent => stage15_handler);
+            s16 = transform!(BenchEvent -> BenchEvent => stage16_handler);
+            s17 = transform!(BenchEvent -> BenchEvent => stage17_handler);
+            s18 = transform!(BenchEvent -> BenchEvent => stage18_handler);
+            s19 = transform!(BenchEvent -> BenchEvent => stage19_handler);
             snk = sink!(BenchEvent => sink);
         },
 
@@ -226,7 +242,8 @@ async fn run_20_stage_pipeline() -> anyhow::Result<Duration> {
             s18 |> s19;
             s19 |> snk;
         }
-    }
+    })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
@@ -241,7 +258,7 @@ async fn run_20_stage_pipeline() -> anyhow::Result<Duration> {
     let timeout = Duration::from_secs(90); // Increased timeout for 20 stages
     let start = Instant::now();
 
-    while sink_clone.received.load(Ordering::Relaxed) < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT {
+    while received.load(Ordering::Relaxed) < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT {
         if start.elapsed() > timeout {
             break;
         }

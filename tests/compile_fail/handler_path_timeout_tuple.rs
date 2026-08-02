@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+use std::time::Duration;
+
+struct Event;
+struct Handler;
+
+fn main() {
+    let _ = obzenflow_dsl::async_source!(
+        Event => (Handler, Duration::from_secs(1))
+    );
+    let _ = obzenflow_dsl::async_infinite_source!(
+        name: "events",
+        Event => (Handler, Duration::from_secs(1)),
+        []
+    );
+    let _ = obzenflow_dsl::async_source!(
+        name: "constructed",
+        Event => (Handler::new(), Duration::from_secs(1)),
+        [],
+        backpressure: policy
+    );
+}

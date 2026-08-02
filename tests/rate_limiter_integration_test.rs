@@ -226,16 +226,18 @@ impl SinkHandler for CountingSink {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
     let (sink, count) = CountingSink::new();
+    let source = SequenceSource::new(2);
+    let passthrough = PassthroughTransform;
     let test_handle = test_flow! {
         name: "rate_limiter_low_rate_half_eps",
         journals: disk_journals(unique_journal_dir("rate_limiter_low_rate_half_eps")),
         middleware: [],
 
         stages: {
-            src = source!(RateLimiterTestEvent => SequenceSource::new(2), [
+            src = source!(RateLimiterTestEvent => source, [
                 rate_limit_with_burst(50.0, 1.0)
             ]);
-            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform);
+            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough);
             snk = sink!(RateLimiterTestEvent => sink);
         },
 
@@ -269,18 +271,20 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
     let (sink, count) = CountingSink::new();
+    let source = SequenceSource::new(1);
+    let passthrough = PassthroughTransform;
     let test_handle = test_flow! {
         name: "rate_limiter_weighted_default_burst",
         journals: disk_journals(unique_journal_dir("rate_limiter_weighted_default_burst")),
         middleware: [],
 
         stages: {
-            src = source!(RateLimiterTestEvent => SequenceSource::new(1), [
+            src = source!(RateLimiterTestEvent => source, [
                 RateLimiterBuilder::new(2.0)
                     .with_cost_per_event(5.0)
                     .build()
             ]);
-            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform);
+            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough);
             snk = sink!(RateLimiterTestEvent => sink);
         },
 
@@ -303,20 +307,23 @@ async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
+    let source = SequenceSource::new(1);
+    let passthrough = PassthroughTransform;
+    let (sink, _count) = CountingSink::new();
     let result = test_flow! {
         name: "rate_limiter_invalid",
         journals: disk_journals(unique_journal_dir("rate_limiter_invalid")),
         middleware: [],
 
         stages: {
-            src = source!(RateLimiterTestEvent => SequenceSource::new(1), [
+            src = source!(RateLimiterTestEvent => source, [
                 RateLimiterBuilder::new(10.0)
                     .with_burst(2.0)
                     .with_cost_per_event(5.0)
                     .build()
             ]);
-            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform);
-            snk = sink!(RateLimiterTestEvent => CountingSink::new().0);
+            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough);
+            snk = sink!(RateLimiterTestEvent => sink);
         },
 
         topology: {
@@ -455,16 +462,18 @@ impl AsyncFiniteSourceHandler for ScriptedAsyncSource {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> Result<()> {
     let (sink, count) = CountingSink::new();
+    let source = BatchedSource::new(vec![2, 2]);
+    let passthrough = PassthroughTransform;
     let test_handle = test_flow! {
         name: "rate_limiter_source_poll_gating",
         journals: disk_journals(unique_journal_dir("rate_limiter_source_poll_gating")),
         middleware: [],
 
         stages: {
-            src = source!(RateLimiterTestEvent => BatchedSource::new(vec![2, 2]), [
+            src = source!(RateLimiterTestEvent => source, [
                 rate_limit_with_burst(50.0, 1.0)
             ]);
-            passthrough = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform);
+            passthrough = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough);
             snk = sink!(RateLimiterTestEvent => sink);
         },
 
@@ -513,17 +522,15 @@ async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> R
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_async_finite_does_not_charge_eof_poll() -> Result<()> {
     let (sink, count) = CountingSink::new();
+    let source =
+        ScriptedAsyncSource::new(vec![SourceStep::Data, SourceStep::Data, SourceStep::Done]);
     let test_handle = test_flow! {
         name: "rate_limiter_async_finite_eof_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_async_finite_eof_no_charge")),
         middleware: [],
 
         stages: {
-            src = async_source!(RateLimiterTestEvent => ScriptedAsyncSource::new(vec![
-                SourceStep::Data,
-                SourceStep::Data,
-                SourceStep::Done,
-            ]), [
+            src = async_source!(RateLimiterTestEvent => source, [
                 rate_limit_with_burst(1.0, 2.0)
             ]);
             snk = sink!(RateLimiterTestEvent => sink);
@@ -558,17 +565,15 @@ async fn rate_limiter_async_finite_does_not_charge_eof_poll() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_sync_finite_does_not_charge_eof_poll() -> Result<()> {
     let (sink, count) = CountingSink::new();
+    let source =
+        ScriptedSyncSource::new(vec![SourceStep::Data, SourceStep::Data, SourceStep::Done]);
     let test_handle = test_flow! {
         name: "rate_limiter_sync_finite_eof_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_sync_finite_eof_no_charge")),
         middleware: [],
 
         stages: {
-            src = source!(RateLimiterTestEvent => ScriptedSyncSource::new(vec![
-                SourceStep::Data,
-                SourceStep::Data,
-                SourceStep::Done,
-            ]), [
+            src = source!(RateLimiterTestEvent => source, [
                 rate_limit_with_burst(1.0, 2.0)
             ]);
             snk = sink!(RateLimiterTestEvent => sink);
@@ -603,18 +608,19 @@ async fn rate_limiter_sync_finite_does_not_charge_eof_poll() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_async_finite_does_not_charge_empty_batch() -> Result<()> {
     let (sink, count) = CountingSink::new();
+    let source = ScriptedAsyncSource::new(vec![
+        SourceStep::Data,
+        SourceStep::Empty,
+        SourceStep::Data,
+        SourceStep::Done,
+    ]);
     let test_handle = test_flow! {
         name: "rate_limiter_async_empty_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_async_empty_no_charge")),
         middleware: [],
 
         stages: {
-            src = async_source!(RateLimiterTestEvent => ScriptedAsyncSource::new(vec![
-                SourceStep::Data,
-                SourceStep::Empty,
-                SourceStep::Data,
-                SourceStep::Done,
-            ]), [
+            src = async_source!(RateLimiterTestEvent => source, [
                 rate_limit_with_burst(1.0, 2.0)
             ]);
             snk = sink!(RateLimiterTestEvent => sink);
@@ -649,18 +655,19 @@ async fn rate_limiter_async_finite_does_not_charge_empty_batch() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_sync_finite_does_not_charge_empty_batch() -> Result<()> {
     let (sink, count) = CountingSink::new();
+    let source = ScriptedSyncSource::new(vec![
+        SourceStep::Data,
+        SourceStep::Empty,
+        SourceStep::Data,
+        SourceStep::Done,
+    ]);
     let test_handle = test_flow! {
         name: "rate_limiter_sync_empty_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_sync_empty_no_charge")),
         middleware: [],
 
         stages: {
-            src = source!(RateLimiterTestEvent => ScriptedSyncSource::new(vec![
-                SourceStep::Data,
-                SourceStep::Empty,
-                SourceStep::Data,
-                SourceStep::Done,
-            ]), [
+            src = source!(RateLimiterTestEvent => source, [
                 rate_limit_with_burst(1.0, 2.0)
             ]);
             snk = sink!(RateLimiterTestEvent => sink);
@@ -695,18 +702,19 @@ async fn rate_limiter_sync_finite_does_not_charge_empty_batch() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_async_finite_does_not_charge_source_error() -> Result<()> {
     let (sink, count) = CountingSink::new();
+    let source = ScriptedAsyncSource::new(vec![
+        SourceStep::Data,
+        SourceStep::Err,
+        SourceStep::Data,
+        SourceStep::Done,
+    ]);
     let test_handle = test_flow! {
         name: "rate_limiter_async_error_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_async_error_no_charge")),
         middleware: [],
 
         stages: {
-            src = async_source!(RateLimiterTestEvent => ScriptedAsyncSource::new(vec![
-                SourceStep::Data,
-                SourceStep::Err,
-                SourceStep::Data,
-                SourceStep::Done,
-            ]), [
+            src = async_source!(RateLimiterTestEvent => source, [
                 rate_limit_with_burst(1.0, 2.0)
             ]);
             snk = sink!(RateLimiterTestEvent => sink);
@@ -741,18 +749,19 @@ async fn rate_limiter_async_finite_does_not_charge_source_error() -> Result<()> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_sync_finite_does_not_charge_source_error() -> Result<()> {
     let (sink, count) = CountingSink::new();
+    let source = ScriptedSyncSource::new(vec![
+        SourceStep::Data,
+        SourceStep::Err,
+        SourceStep::Data,
+        SourceStep::Done,
+    ]);
     let test_handle = test_flow! {
         name: "rate_limiter_sync_error_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_sync_error_no_charge")),
         middleware: [],
 
         stages: {
-            src = source!(RateLimiterTestEvent => ScriptedSyncSource::new(vec![
-                SourceStep::Data,
-                SourceStep::Err,
-                SourceStep::Data,
-                SourceStep::Done,
-            ]), [
+            src = source!(RateLimiterTestEvent => source, [
                 rate_limit_with_burst(1.0, 2.0)
             ]);
             snk = sink!(RateLimiterTestEvent => sink);
@@ -933,15 +942,18 @@ impl JoinHandler for PassthroughJoin {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
     let (sink, _count) = CountingSink::new();
+    let reference_source = SingleRefSource::new();
+    let stream_source = TwoStreamEventsSource::new();
+    let joiner = PassthroughJoin;
     let result = test_flow! {
         name: "rate_limiter_join_support",
         journals: disk_journals(unique_journal_dir("rate_limiter_join_support")),
         middleware: [],
 
         stages: {
-            ref_src = source!(RefPayload => SingleRefSource::new());
-            stream_src = async_source!(StreamPayload => TwoStreamEventsSource::new());
-            joiner = join!(catalog ref_src: RefPayload, StreamPayload -> EnrichedPayload => PassthroughJoin, [
+            ref_src = source!(RefPayload => reference_source);
+            stream_src = async_source!(StreamPayload => stream_source);
+            joiner = join!(catalog ref_src: RefPayload, StreamPayload -> EnrichedPayload => joiner, [
                 // Joins are deterministic coordination surfaces under FLOWIP-120c H1.
                 rate_limit_with_burst(1.0, 3.0)
             ]);
@@ -973,14 +985,16 @@ async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_transform_stage_rejects_rate_limit_middleware() -> Result<()> {
     let (sink, _count) = CountingSink::new();
+    let source = SequenceSource::new(2);
+    let passthrough = PassthroughTransform;
     let result = test_flow! {
         name: "rate_limiter_transform_reject",
         journals: disk_journals(unique_journal_dir("rate_limiter_transform_reject")),
         middleware: [],
 
         stages: {
-            src = source!(RateLimiterTestEvent => SequenceSource::new(2));
-            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform, [
+            src = source!(RateLimiterTestEvent => source);
+            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough, [
                 rate_limit_with_burst(1.0, 3.0)
             ]);
             snk = sink!(RateLimiterTestEvent => sink);
@@ -1013,14 +1027,16 @@ async fn rate_limiter_transform_stage_rejects_rate_limit_middleware() -> Result<
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_stateful_stage_rejects_rate_limit_middleware() -> Result<()> {
     let (sink, _count) = CountingSink::new();
+    let source = SequenceSource::new(2);
+    let passthrough = PassthroughStateful;
     let result = test_flow! {
         name: "rate_limiter_stateful_reject",
         journals: disk_journals(unique_journal_dir("rate_limiter_stateful_reject")),
         middleware: [],
 
         stages: {
-            src = source!(RateLimiterTestEvent => SequenceSource::new(2));
-            agg = stateful!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughStateful, [
+            src = source!(RateLimiterTestEvent => source);
+            agg = stateful!(RateLimiterTestEvent -> RateLimiterTestEvent => passthrough, [
                 rate_limit_with_burst(1.0, 3.0)
             ]);
             snk = sink!(RateLimiterTestEvent => sink);

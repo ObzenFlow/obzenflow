@@ -166,22 +166,28 @@ fn build_flow(
     count: u64,
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
-    flow! {
-        name: "resume_linear",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = BoundedTicker::new(first_n, count);
+        let transform_handler = DoubleTransform::new();
+        let sink_handler = CountingSink { delivered };
 
-        stages: {
-            src = infinite_source!(Tick => BoundedTicker::new(first_n, count));
-            xform = transform!(Tick -> Doubled => DoubleTransform::new());
-            snk = sink!(Doubled => CountingSink { delivered });
-        },
+        Ok(flow! {
+            name: "resume_linear",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            src |> xform;
-            xform |> snk;
-        }
-    }
+            stages: {
+                src = infinite_source!(Tick => source_handler);
+                xform = transform!(Tick -> Doubled => transform_handler);
+                snk = sink!(Doubled => sink_handler);
+            },
+
+            topology: {
+                src |> xform;
+                xform |> snk;
+            }
+        })
+    })
 }
 
 async fn wait_for_running(handle: &FlowHandle) -> Result<()> {
@@ -245,22 +251,28 @@ async fn run_until_delivered(
 /// The same flow shape on memory journals (FLOWIP-120u: an unlocated run may
 /// consume a located archive as input).
 fn build_flow_memory(first_n: u64, count: u64, delivered: Arc<AtomicU64>) -> FlowDefinition {
-    flow! {
-        name: "resume_linear",
-        journals: memory_journals(),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = BoundedTicker::new(first_n, count);
+        let transform_handler = DoubleTransform::new();
+        let sink_handler = CountingSink { delivered };
 
-        stages: {
-            src = infinite_source!(Tick => BoundedTicker::new(first_n, count));
-            xform = transform!(Tick -> Doubled => DoubleTransform::new());
-            snk = sink!(Doubled => CountingSink { delivered });
-        },
+        Ok(flow! {
+            name: "resume_linear",
+            journals: memory_journals(),
+            middleware: [],
 
-        topology: {
-            src |> xform;
-            xform |> snk;
-        }
-    }
+            stages: {
+                src = infinite_source!(Tick => source_handler);
+                xform = transform!(Tick -> Doubled => transform_handler);
+                snk = sink!(Doubled => sink_handler);
+            },
+
+            topology: {
+                src |> xform;
+                xform |> snk;
+            }
+        })
+    })
 }
 
 /// Run one memory-substrate flow instance until the sink consumed `expected`

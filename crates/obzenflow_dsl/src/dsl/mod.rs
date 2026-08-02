@@ -7,6 +7,42 @@
 //! This module contains the flow! macro and related DSL components
 //! that provide the high-level API for building ObzenFlow pipelines.
 //!
+//! ## Handler references and construction
+//!
+//! Supported stage and AI-role slots take a reference name, unit value path,
+//! or qualified value path. They do not take calls, builder chains, closures,
+//! or struct literals. Construct builder-owned handlers as ordinary Rust inside
+//! the flow's deferred materialiser, immediately above the inner `flow!`, then
+//! pass only the binding name:
+//!
+//! ```ignore
+//! FlowDefinition::materialize(move |_runtime_config| {
+//!     let input = sources::finite(events);
+//!     let transform = MyTransform::new(options);
+//!     let output = SinkTyped::new(|event: Output| async move {
+//!         println!("{event:?}");
+//!     });
+//!
+//!     Ok(flow! {
+//!         stages: {
+//!             input = source!(Input => input);
+//!             transformed = transform!(Input -> Output => transform);
+//!             output = sink!(Output => output);
+//!         },
+//!         topology: {
+//!             input |> transformed;
+//!             transformed |> output;
+//!         }
+//!     })
+//! })
+//! ```
+//!
+//! Both `placeholder!()` and `placeholder!("reason")` remain valid sketch
+//! markers. Async-source poll timeout is handler configuration exposed through
+//! `poll_timeout()`; timeout tuples are no longer stage syntax. Exported
+//! `__obzenflow_*` macros are doc-hidden cross-crate lowering machinery and are
+//! unsupported for direct author calls.
+//!
 //! ## Legacy syntax (compile-fail)
 //!
 //! FLOWIP-105g-part-2 intentionally breaks the legacy stage-macro grammars.
@@ -139,16 +175,24 @@
 //! let _ = sink!(Out => handler, delivery: sometimes);
 //! ```
 //!
-//! Facade helpers self-declare their safety; the `delivery:` clause is
-//! rejected on them.
+//! Facade helpers are constructed and bound before `sink!`. They self-declare
+//! their safety, so the `delivery:` clause is rejected on the bound facade.
 //!
 //! ```compile_fail
+//! use obzenflow_adapters::sinks::{ConsoleSink, JsonFormatter};
+//! use obzenflow_core::TypedPayload;
 //! use obzenflow_dsl::sink;
+//! use serde::{Deserialize, Serialize};
 //!
+//! #[derive(Clone, Debug, Deserialize, Serialize)]
 //! struct Out;
+//! impl TypedPayload for Out {
+//!     const EVENT_TYPE: &'static str = "doc.out";
+//! }
 //!
-//! // Facade forms take no `delivery:` clause.
-//! let _ = sink!(Out => sinks::json(), delivery: idempotent);
+//! let output = ConsoleSink::<Out, JsonFormatter>::json();
+//! // Bound facade handlers take no `delivery:` clause.
+//! let _ = sink!(Out => output, delivery: idempotent);
 //! ```
 //!
 //! A typed `Delivery` carries `SAFETY` on the type; the site adverb fails by

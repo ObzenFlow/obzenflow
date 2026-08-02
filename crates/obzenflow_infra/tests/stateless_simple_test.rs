@@ -10,7 +10,7 @@ use obzenflow_core::{
     id::StageId,
     WriterId,
 };
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -94,30 +94,33 @@ impl SinkHandler for Printer {
 
 #[tokio::test]
 async fn stateless_pipeline_runs_to_completion() {
-    FlowApplication::builder()
-        .with_cli_args(["obzenflow"])
-        .run_async(flow! {
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let simple_source = SimpleSource::new(5);
+        let doubler = Map::new(|event| {
+            if let Some(value) = event.payload()["value"].as_u64() {
+                ChainEventFactory::data_event(
+                    WriterId::from(StageId::new()),
+                    DoubledEvent::versioned_event_type(),
+                    json!({
+                        "original": value,
+                        "doubled": value * 2,
+                    }),
+                )
+            } else {
+                event
+            }
+        });
+        let printer = Printer;
+
+        Ok(flow! {
             name: "stateless_simple_test",
             journals: disk_journals(std::path::PathBuf::from("target/stateless_simple_test_logs")),
             middleware: [],
 
             stages: {
-                numbers = source!(StatelessSimpleEvent => SimpleSource::new(5));
-                doubler = transform!(StatelessSimpleEvent -> DoubledEvent => Map::new(|event| {
-                    if let Some(value) = event.payload()["value"].as_u64() {
-                        ChainEventFactory::data_event(
-                            WriterId::from(StageId::new()),
-                            DoubledEvent::versioned_event_type(),
-                            json!({
-                                "original": value,
-                                "doubled": value * 2,
-                            }),
-                        )
-                    } else {
-                        event
-                    }
-                }));
-                printer = sink!(DoubledEvent => Printer);
+                numbers = source!(StatelessSimpleEvent => simple_source);
+                doubler = transform!(StatelessSimpleEvent -> DoubledEvent => doubler);
+                printer = sink!(DoubledEvent => printer);
             },
 
             topology: {
@@ -125,6 +128,11 @@ async fn stateless_pipeline_runs_to_completion() {
                 doubler |> printer;
             }
         })
+    });
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(flow_definition)
         .await
         .expect("flow should complete without stateful stages");
 }

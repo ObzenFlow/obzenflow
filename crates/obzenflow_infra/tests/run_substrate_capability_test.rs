@@ -13,7 +13,7 @@ use obzenflow_adapters::middleware::{
     MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::{FlowId, TypedPayload};
-use obzenflow_dsl::{flow, sink, source};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::{
     disk_journals, memory_journals, DiskJournalFactory, MemoryJournalFactory,
 };
@@ -82,20 +82,22 @@ fn provider_preflight_accepts_small_plans() {
 /// disk, so there is nothing to point the operator at.
 #[tokio::test]
 async fn pre_substrate_failure_carries_no_run_state() {
-    let built = flow! {
-        name: "pre_substrate_failure",
-        journals: memory_journals(),
-        middleware: [],
+    let built = FlowDefinition::materialize(move |_runtime_config| {
+        Ok(flow! {
+            name: "pre_substrate_failure",
+            journals: memory_journals(),
+            middleware: [],
 
-        stages: {
-            src = source!(TestEvent => placeholder!());
-            snk = sink!(OtherEvent => placeholder!());
-        },
+            stages: {
+                src = source!(TestEvent => placeholder!());
+                snk = sink!(OtherEvent => placeholder!());
+            },
 
-        topology: {
-            src |> snk;
-        }
-    }
+            topology: {
+                src |> snk;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
@@ -184,31 +186,33 @@ impl MiddlewareFactory for SlotFactory {
 }
 
 fn colliding_flow(name: &'static str, base: std::path::PathBuf) -> obzenflow_dsl::FlowDefinition {
-    flow! {
-        name: "post_substrate_failure",
-        journals: disk_journals(base),
-        middleware: [
-            SlotFactory {
-                label: name,
-                key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
-                slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
+    FlowDefinition::materialize(move |_runtime_config| {
+        Ok(flow! {
+            name: "post_substrate_failure",
+            journals: disk_journals(base),
+            middleware: [
+                SlotFactory {
+                    label: name,
+                    key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
+                    slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
+                },
+                SlotFactory {
+                    label: "slot.b",
+                    key: MiddlewareOverrideKey::of::<FamilyB>("family.b"),
+                    slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
+                }
+            ],
+
+            stages: {
+                src = source!(TestEvent => placeholder!());
+                snk = sink!(TestEvent => placeholder!());
             },
-            SlotFactory {
-                label: "slot.b",
-                key: MiddlewareOverrideKey::of::<FamilyB>("family.b"),
-                slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
+
+            topology: {
+                src |> snk;
             }
-        ],
-
-        stages: {
-            src = source!(TestEvent => placeholder!());
-            snk = sink!(TestEvent => placeholder!());
-        },
-
-        topology: {
-            src |> snk;
-        }
-    }
+        })
+    })
 }
 
 /// A build that fails after substrate selection carries the durable locator, so
@@ -270,21 +274,24 @@ async fn concurrent_failing_builds_carry_independent_run_state() {
 #[tokio::test]
 async fn successful_disk_flow_reports_durable_and_persists_the_manifest() {
     let base = tempfile::tempdir().expect("tempdir");
-    let journals = disk_journals(base.path().to_path_buf());
-    let handle = flow! {
-        name: "durable_success",
-        journals: journals,
-        middleware: [],
+    let base_path = base.path().to_path_buf();
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let journals = disk_journals(base_path);
+        Ok(flow! {
+            name: "durable_success",
+            journals: journals,
+            middleware: [],
 
-        stages: {
-            src = source!(TestEvent => placeholder!());
-            snk = sink!(TestEvent => placeholder!());
-        },
+            stages: {
+                src = source!(TestEvent => placeholder!());
+                snk = sink!(TestEvent => placeholder!());
+            },
 
-        topology: {
-            src |> snk;
-        }
-    }
+            topology: {
+                src |> snk;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .expect("flow must build");
@@ -307,20 +314,22 @@ async fn successful_disk_flow_reports_durable_and_persists_the_manifest() {
 /// A successful memory build reports Ephemeral: no location exists anywhere.
 #[tokio::test]
 async fn successful_memory_flow_reports_ephemeral() {
-    let handle = flow! {
-        name: "ephemeral_success",
-        journals: memory_journals(),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        Ok(flow! {
+            name: "ephemeral_success",
+            journals: memory_journals(),
+            middleware: [],
 
-        stages: {
-            src = source!(TestEvent => placeholder!());
-            snk = sink!(TestEvent => placeholder!());
-        },
+            stages: {
+                src = source!(TestEvent => placeholder!());
+                snk = sink!(TestEvent => placeholder!());
+            },
 
-        topology: {
-            src |> snk;
-        }
-    }
+            topology: {
+                src |> snk;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .expect("flow must build");

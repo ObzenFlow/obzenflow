@@ -312,29 +312,38 @@ impl JoinHandler for GuardedInnerJoin {
 }
 
 fn build_flow(journal_base: PathBuf, unexpected_error_calls: Arc<AtomicUsize>) -> FlowDefinition {
-    flow! {
-        name: "join_error_passthrough_identity",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let reference_source = RefSource::new();
+        let reference_validator = RefValidator::new();
+        let stream_source = StreamSource::new();
+        let stream_validator = Validator::new();
+        let joined = GuardedInnerJoin {
+            unexpected_error_calls,
+        };
+        let collector = DropSink;
 
-        stages: {
-            ref_src = source!(RefItem => RefSource::new());
-            ref_validator = transform!(RefItem -> RefItem => RefValidator::new());
-            stream_src = source!(StreamItem => StreamSource::new());
-            validator = transform!(StreamItem -> StreamItem => Validator::new());
-            joined = join!(catalog ref_validator: RefItem, StreamItem -> JoinedItem => GuardedInnerJoin {
-                unexpected_error_calls,
-            });
-            collector = sink!(JoinedItem => DropSink);
-        },
+        Ok(flow! {
+            name: "join_error_passthrough_identity",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            ref_src |> ref_validator;
-            stream_src |> validator;
-            validator |> joined;
-            joined |> collector;
-        }
-    }
+            stages: {
+                ref_src = source!(RefItem => reference_source);
+                ref_validator = transform!(RefItem -> RefItem => reference_validator);
+                stream_src = source!(StreamItem => stream_source);
+                validator = transform!(StreamItem -> StreamItem => stream_validator);
+                joined = join!(catalog ref_validator: RefItem, StreamItem -> JoinedItem => joined);
+                collector = sink!(JoinedItem => collector);
+            },
+
+            topology: {
+                ref_src |> ref_validator;
+                stream_src |> validator;
+                validator |> joined;
+                joined |> collector;
+            }
+        })
+    })
 }
 
 fn is_error_row(envelope: &obzenflow_core::event::EventEnvelope<ChainEvent>) -> bool {

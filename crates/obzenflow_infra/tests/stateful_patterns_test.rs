@@ -11,7 +11,7 @@ use obzenflow_core::{
     id::StageId,
     WriterId,
 };
-use obzenflow_dsl::{flow, sink, source, stateful};
+use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -124,14 +124,8 @@ struct CollectingSink {
 }
 
 impl CollectingSink {
-    fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                events: events.clone(),
-            },
-            events,
-        )
+    fn new(events: Arc<Mutex<Vec<ChainEvent>>>) -> Self {
+        Self { events }
     }
 }
 
@@ -327,26 +321,33 @@ impl StatefulHandler for ImmediateEmitter {
 
 #[tokio::test]
 async fn counter_emits_single_event_on_drain() {
-    let (sink, events) = CollectingSink::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_flow = events.clone();
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(flow! {
-        name: "pattern_counter_test",
-        journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_counter")),
-        middleware: [],
+        .run_async(FlowDefinition::materialize(move |_runtime_config| {
+            let source_handler = NumberSource::new(5);
+            let counter_handler = CounterHandler::new();
+            let sink_handler = CollectingSink::new(events_for_flow);
 
-        stages: {
-            src = source!(NumberEvent => NumberSource::new(5));
-            counter = stateful!(NumberEvent -> CountResult => CounterHandler::new());
-            sink = sink!(CountResult => sink);
-        },
+            Ok(flow! {
+                name: "pattern_counter_test",
+                journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_counter")),
+                middleware: [],
 
-        topology: {
-            src |> counter;
-            counter |> sink;
-        }
-    })
+                stages: {
+                    src = source!(NumberEvent => source_handler);
+                    counter = stateful!(NumberEvent -> CountResult => counter_handler);
+                    sink = sink!(CountResult => sink_handler);
+                },
+
+                topology: {
+                    src |> counter;
+                    counter |> sink;
+                }
+            })
+        }))
     .await
     .expect("flow should complete");
     let events = events.lock().unwrap();
@@ -361,26 +362,33 @@ async fn counter_emits_single_event_on_drain() {
 
 #[tokio::test]
 async fn accumulator_emits_one_event_per_input_on_drain() {
-    let (sink, events) = CollectingSink::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_flow = events.clone();
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(flow! {
-        name: "pattern_accumulator_test",
-        journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_accumulator")),
-        middleware: [],
+        .run_async(FlowDefinition::materialize(move |_runtime_config| {
+            let source_handler = NumberSource::new(5);
+            let accumulator_handler = AccumulatorHandler::new();
+            let sink_handler = CollectingSink::new(events_for_flow);
 
-        stages: {
-            src = source!(NumberEvent => NumberSource::new(5));
-            acc = stateful!(NumberEvent -> CollectedValue => AccumulatorHandler::new());
-            sink = sink!(CollectedValue => sink);
-        },
+            Ok(flow! {
+                name: "pattern_accumulator_test",
+                journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_accumulator")),
+                middleware: [],
 
-        topology: {
-            src |> acc;
-            acc |> sink;
-        }
-    })
+                stages: {
+                    src = source!(NumberEvent => source_handler);
+                    acc = stateful!(NumberEvent -> CollectedValue => accumulator_handler);
+                    sink = sink!(CollectedValue => sink_handler);
+                },
+
+                topology: {
+                    src |> acc;
+                    acc |> sink;
+                }
+            })
+        }))
     .await
     .expect("flow should complete");
     let events = events.lock().unwrap();
@@ -393,26 +401,33 @@ async fn accumulator_emits_one_event_per_input_on_drain() {
 
 #[tokio::test]
 async fn sum_handler_emits_aggregated_result_on_drain() {
-    let (sink, events) = CollectingSink::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_flow = events.clone();
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(flow! {
-            name: "pattern_sum_test",
-            journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_sum")),
-            middleware: [],
+        .run_async(FlowDefinition::materialize(move |_runtime_config| {
+            let source_handler = NumberSource::new(10);
+            let sum_handler = SumHandler::new();
+            let sink_handler = CollectingSink::new(events_for_flow);
 
-            stages: {
-                src = source!(NumberEvent => NumberSource::new(10));
-                summer = stateful!(NumberEvent -> SumResult => SumHandler::new());
-                sink = sink!(SumResult => sink);
-            },
+            Ok(flow! {
+                name: "pattern_sum_test",
+                journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_sum")),
+                middleware: [],
 
-            topology: {
-                src |> summer;
-                summer |> sink;
-            }
-        })
+                stages: {
+                    src = source!(NumberEvent => source_handler);
+                    summer = stateful!(NumberEvent -> SumResult => sum_handler);
+                    sink = sink!(SumResult => sink_handler);
+                },
+
+                topology: {
+                    src |> summer;
+                    summer |> sink;
+                }
+            })
+        }))
         .await
         .expect("flow should complete");
     let events = events.lock().unwrap();
@@ -427,26 +442,33 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
 
 #[tokio::test]
 async fn immediate_emitter_emits_during_accumulating() {
-    let (sink, events) = CollectingSink::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_flow = events.clone();
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(flow! {
-        name: "pattern_immediate_test",
-        journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_immediate")),
-        middleware: [],
+        .run_async(FlowDefinition::materialize(move |_runtime_config| {
+            let source_handler = NumberSource::new(5);
+            let emitter_handler = ImmediateEmitter::new();
+            let sink_handler = CollectingSink::new(events_for_flow);
 
-        stages: {
-            src = source!(NumberEvent => NumberSource::new(5));
-            emitter = stateful!(NumberEvent -> ProgressUpdate => ImmediateEmitter::new());
-            sink = sink!(ProgressUpdate => sink);
-        },
+            Ok(flow! {
+                name: "pattern_immediate_test",
+                journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_immediate")),
+                middleware: [],
 
-        topology: {
-            src |> emitter;
-            emitter |> sink;
-        }
-    })
+                stages: {
+                    src = source!(NumberEvent => source_handler);
+                    emitter = stateful!(NumberEvent -> ProgressUpdate => emitter_handler);
+                    sink = sink!(ProgressUpdate => sink_handler);
+                },
+
+                topology: {
+                    src |> emitter;
+                    emitter |> sink;
+                }
+            })
+        }))
     .await
     .expect("flow should complete");
     let events = events.lock().unwrap();
@@ -459,26 +481,33 @@ async fn immediate_emitter_emits_during_accumulating() {
 
 #[tokio::test]
 async fn empty_source_still_triggers_drain_for_stateful_handler() {
-    let (sink, events) = CollectingSink::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_flow = events.clone();
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(flow! {
-        name: "pattern_empty_test",
-        journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_empty")),
-        middleware: [],
+        .run_async(FlowDefinition::materialize(move |_runtime_config| {
+            let source_handler = EmptySource::new();
+            let counter_handler = CounterHandler::new();
+            let sink_handler = CollectingSink::new(events_for_flow);
 
-        stages: {
-            src = source!(NumberEvent => EmptySource::new());
-            counter = stateful!(NumberEvent -> CountResult => CounterHandler::new());
-            sink = sink!(CountResult => sink);
-        },
+            Ok(flow! {
+                name: "pattern_empty_test",
+                journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_empty")),
+                middleware: [],
 
-        topology: {
-            src |> counter;
-            counter |> sink;
-        }
-    })
+                stages: {
+                    src = source!(NumberEvent => source_handler);
+                    counter = stateful!(NumberEvent -> CountResult => counter_handler);
+                    sink = sink!(CountResult => sink_handler);
+                },
+
+                topology: {
+                    src |> counter;
+                    counter |> sink;
+                }
+            })
+        }))
     .await
     .expect("flow should complete");
     let events = events.lock().unwrap();

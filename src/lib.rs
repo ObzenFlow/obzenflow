@@ -55,8 +55,9 @@
 //! one-to-one mappings.
 //!
 //! **Sinks** consume events at the end of a pipeline. Implement
-//! [`obzenflow_runtime::stages::SinkHandler`], or use a closure with the
-//! `sink!` macro for quick prototyping.
+//! [`obzenflow_runtime::stages::SinkHandler`], or construct a
+//! [`obzenflow_runtime::stages::sink::SinkTyped`] adapter from a closure inside
+//! the deferred materialiser and pass its binding to `sink!`.
 //!
 //! ## 3. The `flow!` block
 //!
@@ -103,10 +104,10 @@
 //!
 //! [`obzenflow_infra::application::FlowApplication`] handles runtime setup,
 //! optional HTTP server, CLI argument parsing, Prometheus metrics, and graceful
-//! shutdown. Pass the `flow! { ... }` block directly to `run()`:
+//! shutdown. Pass a deferred [`obzenflow_dsl::FlowDefinition`] to `run()`:
 //!
 //! ```rust,ignore
-//! FlowApplication::run(flow! { ... }).await?;
+//! FlowApplication::run(build_flow()).await?;
 //! ```
 //!
 //! Or use the builder for finer control:
@@ -114,7 +115,7 @@
 //! ```rust,ignore
 //! FlowApplication::builder()
 //!     .with_log_level(LogLevel::Info)
-//!     .run_async(flow! { ... })
+//!     .run_async(build_flow())
 //!     .await?;
 //! ```
 //!
@@ -124,9 +125,10 @@
 //! use anyhow::Result;
 //! use obzenflow_core::TypedPayload;
 //! use obzenflow::typed::{sources, transforms};
-//! use obzenflow_dsl::{flow, sink, source, transform};
+//! use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 //! use obzenflow_infra::application::FlowApplication;
 //! use obzenflow_infra::journal::disk_journals;
+//! use obzenflow_runtime::stages::sink::SinkTyped;
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,14 +159,9 @@
 //!         Measurement { sensor: "C3".into(), celsius: 42.1 },
 //!     ];
 //!
-//!     FlowApplication::run(flow! {
-//!         name: "temp_alerts",
-//!         journals: disk_journals("target/temp-alerts-logs".into()),
-//!         middleware: [],
-//!
-//!         stages: {
-//!             src = source!(Measurement => sources::finite(readings));
-//!             check = transform!(Measurement -> Alert => transforms::map(|m| {
+//!     let flow = FlowDefinition::materialize(move |_runtime_config| {
+//!         let readings_source = sources::finite(readings);
+//!         let check_temperature = transforms::map(|m: Measurement| {
 //!                 Alert {
 //!                     sensor: m.sensor.clone(),
 //!                     message: if m.celsius > 50.0 {
@@ -173,16 +170,30 @@
 //!                         format!("{}: normal {:.1}C", m.sensor, m.celsius)
 //!                     },
 //!                 }
-//!             }));
-//!             out = sink!(|alert: Alert| { println!("[ALERT] {}", alert.message); });
-//!         },
+//!             });
+//!         let print_alert = SinkTyped::new(|alert: Alert| async move {
+//!             println!("[ALERT] {}", alert.message);
+//!         });
 //!
-//!         topology: {
-//!             src |> check;
-//!             check |> out;
-//!         }
-//!     })
-//!     .await?;
+//!         Ok(flow! {
+//!             name: "temp_alerts",
+//!             journals: disk_journals("target/temp-alerts-logs".into()),
+//!             middleware: [],
+//!
+//!             stages: {
+//!                 src = source!(Measurement => readings_source);
+//!                 check = transform!(Measurement -> Alert => check_temperature);
+//!                 out = sink!(Alert => print_alert);
+//!             },
+//!
+//!             topology: {
+//!                 src |> check;
+//!                 check |> out;
+//!             }
+//!         })
+//!     });
+//!
+//!     FlowApplication::run(flow).await?;
 //!
 //!     Ok(())
 //! }

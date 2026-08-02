@@ -81,7 +81,7 @@ impl WebSurfaceWiring {
 ///
 /// FlowApplication::builder()
 ///     .with_web_surface(surface)
-///     .run_blocking(flow! { /* ... */ })?;
+///     .run_blocking(build_flow())?;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct WebSurfaceAttachment {

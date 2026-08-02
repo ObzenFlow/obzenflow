@@ -10,7 +10,7 @@ use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -289,14 +289,8 @@ struct DoneCounterSink {
 }
 
 impl DoneCounterSink {
-    fn new() -> (Self, Arc<AtomicU64>) {
-        let done_count = Arc::new(AtomicU64::new(0));
-        (
-            Self {
-                done_count: done_count.clone(),
-            },
-            done_count,
-        )
+    fn new(done_count: Arc<AtomicU64>) -> Self {
+        Self { done_count }
     }
 }
 
@@ -347,31 +341,40 @@ async fn cycle_guard_fan_out_siblings_converge_without_spurious_abort() -> Resul
     let entry_processed = Arc::new(AtomicU64::new(0));
     let iter_processed = Arc::new(AtomicU64::new(0));
 
-    let (sink, done_count) = DoneCounterSink::new();
+    let done_count = Arc::new(AtomicU64::new(0));
+    let done_count_for_flow = done_count.clone();
     let entry_processed_for_flow = entry_processed.clone();
     let iter_processed_for_flow = iter_processed.clone();
 
-    let handle = flow! {
-        name: "cycle_guard_fan_out_siblings_converge_without_spurious_abort",
-        journals: disk_journals(journal_root_for_flow),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = SingleSeedFanOutSource::new(fan_out, target_round_trips);
+        let entry_handler = FanOutEntryTransform::new(entry_processed_for_flow);
+        let pass_handler = PassThroughTransform;
+        let iter_handler = IterationTransform::new(iter_processed_for_flow);
+        let sink_handler = DoneCounterSink::new(done_count_for_flow);
 
-        stages: {
-            src = source!(SeedEvent => SingleSeedFanOutSource::new(fan_out, target_round_trips));
-            entry = transform!(SeedEvent -> SeedEvent => FanOutEntryTransform::new(entry_processed_for_flow));
-            pass = transform!(SeedEvent -> SeedEvent => PassThroughTransform);
-            iter = transform!(SeedEvent -> SeedEvent => IterationTransform::new(iter_processed_for_flow));
-            snk = sink!(SeedEvent => sink);
-        },
+        Ok(flow! {
+            name: "cycle_guard_fan_out_siblings_converge_without_spurious_abort",
+            journals: disk_journals(journal_root_for_flow),
+            middleware: [],
 
-        topology: {
-            src |> entry;
-            entry |> pass;
-            pass |> iter;
-            entry <| iter;
-            entry |> snk;
-        }
-    }
+            stages: {
+                src = source!(SeedEvent => source_handler);
+                entry = transform!(SeedEvent -> SeedEvent => entry_handler);
+                pass = transform!(SeedEvent -> SeedEvent => pass_handler);
+                iter = transform!(SeedEvent -> SeedEvent => iter_handler);
+                snk = sink!(SeedEvent => sink_handler);
+            },
+
+            topology: {
+                src |> entry;
+                entry |> pass;
+                pass |> iter;
+                entry <| iter;
+                entry |> snk;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;

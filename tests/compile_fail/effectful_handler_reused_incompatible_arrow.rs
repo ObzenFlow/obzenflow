@@ -8,8 +8,9 @@ use support::{First, FirstOnly, Input, Second};
 
 fn main() {
     let handler = FirstOnly;
+    let first_handler = handler.clone();
     let _ = obzenflow_dsl::effectful_transform!(
-        Input -> { First } => handler.clone(),
+        Input -> { First } => first_handler,
         effects: [],
         middleware: []
     );

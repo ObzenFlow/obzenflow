@@ -15,7 +15,7 @@
 
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::{id::StageId, TypedPayload, WriterId};
-use obzenflow_dsl::{flow, sink, source};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
@@ -91,20 +91,25 @@ where
 
 macro_rules! prefix_flow {
     ($journal_base:expr, $delivered:expr) => {
-        flow! {
-            name: "replay_verification_prefix",
-            journals: disk_journals($journal_base),
-            middleware: [],
+        FlowDefinition::materialize(move |_runtime_config| {
+            let stalling_ticks = StallingTicks::new();
+            let counting_sink = SinkTyped::with_delivery(counting::<Tick>($delivered)).idempotent();
 
-            stages: {
-                ticks = source!(Tick => StallingTicks::new());
-                out = sink!(Tick => SinkTyped::with_delivery(counting::<Tick>($delivered)).idempotent());
-            },
+            Ok(flow! {
+                name: "replay_verification_prefix",
+                journals: disk_journals($journal_base),
+                middleware: [],
 
-            topology: {
-                ticks |> out;
-            }
-        }
+                stages: {
+                    ticks = source!(Tick => stalling_ticks);
+                    out = sink!(Tick => counting_sink);
+                },
+
+                topology: {
+                    ticks |> out;
+                }
+            })
+        })
     };
 }
 

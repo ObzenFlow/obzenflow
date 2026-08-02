@@ -920,27 +920,33 @@ fn build_flow(
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
-    flow! {
-        name: "effect_replay_suppression",
-        journals: disk_journals(journal_base),
-        middleware: [],
-        effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
+    FlowDefinition::materialize(move |_runtime_config| {
+        let inputs_handler = ReplaySource::new();
+        let effectful_handler = ReplayTransform { calls };
+        let collector_handler = CollectSink { outputs };
 
-        stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayTransform { calls },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+        Ok(flow! {
+            name: "effect_replay_suppression",
+            journals: disk_journals(journal_base),
+            middleware: [],
+            effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
 
-        topology: {
-            inputs |> effectful;
-            effectful |> collector;
-        }
-    }
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                effectful = effectful_transform!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                collector = sink!(ReplayOutput => collector_handler);
+            },
+
+            topology: {
+                inputs |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 fn build_source_limiter_flow(
@@ -948,28 +954,34 @@ fn build_source_limiter_flow(
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
-    flow! {
-        name: "effect_replay_source_limiter",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let inputs_handler = ReplaySource::new();
+        let effectful_handler = ReplayTransform { calls };
+        let collector_handler = CollectSink { outputs };
 
-        stages: {
-            inputs = source!(ReplayInput => ReplaySource::new(), [
-                RateLimiterBuilder::new(1.0).build()
-            ]);
-            effectful = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayTransform { calls },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+        Ok(flow! {
+            name: "effect_replay_source_limiter",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            inputs |> effectful;
-            effectful |> collector;
-        }
-    }
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler, [
+                    RateLimiterBuilder::new(1.0).build()
+                ]);
+                effectful = effectful_transform!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                collector = sink!(ReplayOutput => collector_handler);
+            },
+
+            topology: {
+                inputs |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 /// Same shape as `build_flow` but with a high effect-boundary admission rate, so
@@ -982,28 +994,34 @@ fn build_fast_limiter_flow(
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
-    flow! {
-        name: "effect_replay_fast_limiter",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let inputs_handler = ReplaySource::new();
+        let effectful_handler = ReplayTransform { calls };
+        let collector_handler = CollectSink { outputs };
 
-        stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayTransform { calls },
-                effects: [CountingEffect with [
-                    RateLimiterBuilder::new(1000.0).build()
-                ]],
-                middleware: []
-            );
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+        Ok(flow! {
+            name: "effect_replay_fast_limiter",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            inputs |> effectful;
-            effectful |> collector;
-        }
-    }
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                effectful = effectful_transform!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    effects: [CountingEffect with [
+                        RateLimiterBuilder::new(1000.0).build()
+                    ]],
+                    middleware: []
+                );
+                collector = sink!(ReplayOutput => collector_handler);
+            },
+
+            topology: {
+                inputs |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 fn build_blocking_flow(
@@ -1014,41 +1032,46 @@ fn build_blocking_flow(
     invocations: Arc<Mutex<Vec<BlockingInvocation>>>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
-    let resilience = EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .consecutive_failures(1)
-            .build()
-            .expect("blocking breaker configuration"),
-    )
-    .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(2))
-    .build()
-    .expect("blocking resilience configuration");
+    FlowDefinition::materialize(move |_runtime_config| {
+        let resilience = EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .consecutive_failures(1)
+                .build()
+                .expect("blocking breaker configuration"),
+        )
+        .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(2))
+        .build()
+        .expect("blocking resilience configuration");
+        let inputs_handler = SingleReplaySource::new();
+        let effectful_handler = BlockingTransform {
+            calls,
+            release,
+            cancelled_futures,
+            invocations,
+        };
+        let collector_handler = CollectSink { outputs };
 
-    flow! {
-        name: "effect_replay_blocking",
-        journals: disk_journals(journal_base),
-        middleware: [],
+        Ok(flow! {
+            name: "effect_replay_blocking",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        stages: {
-            inputs = source!(ReplayInput => SingleReplaySource::new());
-            effectful = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => BlockingTransform {
-                    calls,
-                    release,
-                    cancelled_futures,
-                    invocations
-                },
-                effects: [BlockingEffect with [resilience]],
-                middleware: []
-            );
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                effectful = effectful_transform!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    effects: [BlockingEffect with [resilience]],
+                    middleware: []
+                );
+                collector = sink!(ReplayOutput => collector_handler);
+            },
 
-        topology: {
-            inputs |> effectful;
-            effectful |> collector;
-        }
-    }
+            topology: {
+                inputs |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 fn build_post_perform_blocking_flow(
@@ -1058,39 +1081,44 @@ fn build_post_perform_blocking_flow(
     handler_release: Arc<Semaphore>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
-    let resilience = EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .consecutive_failures(2)
-            .build()
-            .expect("post-perform breaker configuration"),
-    )
-    .build()
-    .expect("post-perform resilience configuration");
+    FlowDefinition::materialize(move |_runtime_config| {
+        let resilience = EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .consecutive_failures(2)
+                .build()
+                .expect("post-perform breaker configuration"),
+        )
+        .build()
+        .expect("post-perform resilience configuration");
+        let inputs_handler = SingleReplaySource::new();
+        let effectful_handler = PostPerformBlockingTransform {
+            calls,
+            performed,
+            handler_release,
+        };
+        let collector_handler = CollectSink { outputs };
 
-    flow! {
-        name: "effect_replay_post_perform_blocking",
-        journals: disk_journals(journal_base),
-        middleware: [],
+        Ok(flow! {
+            name: "effect_replay_post_perform_blocking",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        stages: {
-            inputs = source!(ReplayInput => SingleReplaySource::new());
-            effectful = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => PostPerformBlockingTransform {
-                    calls,
-                    performed,
-                    handler_release
-                },
-                effects: [CountingEffect with [resilience]],
-                middleware: []
-            );
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                effectful = effectful_transform!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    effects: [CountingEffect with [resilience]],
+                    middleware: []
+                );
+                collector = sink!(ReplayOutput => collector_handler);
+            },
 
-        topology: {
-            inputs |> effectful;
-            effectful |> collector;
-        }
-    }
+            topology: {
+                inputs |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 fn build_fan_out_flow(
@@ -1098,37 +1126,43 @@ fn build_fan_out_flow(
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
-    let resilience = EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .consecutive_failures(2)
-            .build()
-            .expect("fan-out breaker configuration"),
-    )
-    .build()
-    .expect("fan-out resilience configuration");
+    FlowDefinition::materialize(move |_runtime_config| {
+        let resilience = EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .consecutive_failures(2)
+                .build()
+                .expect("fan-out breaker configuration"),
+        )
+        .build()
+        .expect("fan-out resilience configuration");
+        let inputs_handler = SingleReplaySource::new();
+        let fan_out_handler = FanOutTransform::new();
+        let effectful_handler = ReplayTransform { calls };
+        let collector_handler = CollectSink { outputs };
 
-    flow! {
-        name: "effect_replay_fan_out",
-        journals: disk_journals(journal_base),
-        middleware: [],
+        Ok(flow! {
+            name: "effect_replay_fan_out",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        stages: {
-            inputs = source!(ReplayInput => SingleReplaySource::new());
-            fan_out = transform!(ReplayInput -> ReplayInput => FanOutTransform::new());
-            effectful = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayTransform { calls },
-                effects: [CountingEffect with [resilience]],
-                middleware: []
-            );
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                fan_out = transform!(ReplayInput -> ReplayInput => fan_out_handler);
+                effectful = effectful_transform!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    effects: [CountingEffect with [resilience]],
+                    middleware: []
+                );
+                collector = sink!(ReplayOutput => collector_handler);
+            },
 
-        topology: {
-            inputs |> fan_out;
-            fan_out |> effectful;
-            effectful |> collector;
-        }
-    }
+            topology: {
+                inputs |> fan_out;
+                fan_out |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 fn build_stateful_flow(
@@ -1136,26 +1170,32 @@ fn build_stateful_flow(
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
-    flow! {
-        name: "effect_replay_stateful",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let inputs_handler = ReplaySource::new();
+        let effectful_handler = ReplayStateful { calls };
+        let collector_handler = CollectSink { outputs };
 
-        stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_stateful!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayStateful { calls },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+        Ok(flow! {
+            name: "effect_replay_stateful",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            inputs |> effectful;
-            effectful |> collector;
-        }
-    }
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                effectful = effectful_stateful!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                collector = sink!(ReplayOutput => collector_handler);
+            },
+
+            topology: {
+                inputs |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 /// Match `build_stateful_flow` at every durable replay boundary while
@@ -1168,30 +1208,36 @@ fn build_dishonest_one_fact_stateful_flow(
     apply_calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
-    flow! {
-        name: "effect_replay_stateful",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let inputs_handler = ReplaySource::new();
+        let effectful_handler = DishonestOneFactStateful {
+            calls,
+            decide_inputs,
+            apply_calls,
+        };
+        let collector_handler = CollectSink { outputs };
 
-        stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_stateful!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => DishonestOneFactStateful {
-                    calls,
-                    decide_inputs,
-                    apply_calls
-                },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+        Ok(flow! {
+            name: "effect_replay_stateful",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            inputs |> effectful;
-            effectful |> collector;
-        }
-    }
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                effectful = effectful_stateful!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                collector = sink!(ReplayOutput => collector_handler);
+            },
+
+            topology: {
+                inputs |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 fn build_error_after_commit_stateful_flow(
@@ -1201,30 +1247,36 @@ fn build_error_after_commit_stateful_flow(
     applied: Arc<Mutex<Vec<String>>>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
-    flow! {
-        name: "effect_replay_error_after_commit_stateful",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let inputs_handler = ReplaySource::new();
+        let effectful_handler = ErrorAfterCommitStateful {
+            calls,
+            observed_fact_counts,
+            applied,
+        };
+        let collector_handler = CollectSink { outputs };
 
-        stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_stateful!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ErrorAfterCommitStateful {
-                    calls,
-                    observed_fact_counts,
-                    applied
-                },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+        Ok(flow! {
+            name: "effect_replay_error_after_commit_stateful",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            inputs |> effectful;
-            effectful |> collector;
-        }
-    }
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                effectful = effectful_stateful!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                collector = sink!(ReplayOutput => collector_handler);
+            },
+
+            topology: {
+                inputs |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 fn build_apply_rejection_stateful_flow(
@@ -1235,31 +1287,37 @@ fn build_apply_rejection_stateful_flow(
     reject_apply: bool,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
-    flow! {
-        name: "effect_replay_apply_rejection_stateful",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let inputs_handler = ReplaySource::new();
+        let effectful_handler = ApplyRejectingStateful {
+            calls,
+            decide_inputs,
+            apply_attempts,
+            reject_apply,
+        };
+        let collector_handler = CollectSink { outputs };
 
-        stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_stateful!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ApplyRejectingStateful {
-                    calls,
-                    decide_inputs,
-                    apply_attempts,
-                    reject_apply
-                },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+        Ok(flow! {
+            name: "effect_replay_apply_rejection_stateful",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            inputs |> effectful;
-            effectful |> collector;
-        }
-    }
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                effectful = effectful_stateful!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                collector = sink!(ReplayOutput => collector_handler);
+            },
+
+            topology: {
+                inputs |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 fn build_product_stateful_flow(
@@ -1268,26 +1326,32 @@ fn build_product_stateful_flow(
     applied: Arc<Mutex<Vec<String>>>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
-    flow! {
-        name: "effect_replay_product_stateful",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let inputs_handler = ReplaySource::new();
+        let effectful_handler = ProductStateful { calls, applied };
+        let collector_handler = CollectSink { outputs };
 
-        stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_stateful!(
-                ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } => ProductStateful { calls, applied },
-                effects: [ProductEffect],
-                middleware: []
-            );
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+        Ok(flow! {
+            name: "effect_replay_product_stateful",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            inputs |> effectful;
-            effectful |> collector;
-        }
-    }
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                effectful = effectful_stateful!(
+                    ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } => effectful_handler,
+                    effects: [ProductEffect],
+                    middleware: []
+                );
+                collector = sink!(ReplayOutput => collector_handler);
+            },
+
+            topology: {
+                inputs |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 fn latest_run_dir(base: &Path) -> PathBuf {
@@ -3432,27 +3496,33 @@ fn build_ported_flow(
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
     ports: EffectPortRegistry,
 ) -> FlowDefinition {
-    flow! {
-        name: "effect_port_supply",
-        journals: disk_journals(journal_base),
-        middleware: [],
-        effect_ports: ports,
+    FlowDefinition::materialize(move |_runtime_config| {
+        let inputs_handler = ReplaySource::new();
+        let ported_handler = PortedTransform { calls };
+        let collector_handler = CollectSink { outputs };
 
-        stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
-            ported = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => PortedTransform { calls },
-                effects: [PortedEffect],
-                middleware: []
-            );
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+        Ok(flow! {
+            name: "effect_port_supply",
+            journals: disk_journals(journal_base),
+            middleware: [],
+            effect_ports: ports,
 
-        topology: {
-            inputs |> ported;
-            ported |> collector;
-        }
-    }
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                ported = effectful_transform!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => ported_handler,
+                    effects: [PortedEffect],
+                    middleware: []
+                );
+                collector = sink!(ReplayOutput => collector_handler);
+            },
+
+            topology: {
+                inputs |> ported;
+                ported |> collector;
+            }
+        })
+    })
 }
 
 #[tokio::test]
@@ -3630,36 +3700,41 @@ fn build_transactional_flow(
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
     ports: EffectPortRegistry,
 ) -> FlowDefinition {
-    let resilience = EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .consecutive_failures(2)
-            .build()
-            .expect("transactional breaker configuration"),
-    )
-    .build()
-    .expect("transactional resilience configuration");
+    FlowDefinition::materialize(move |_runtime_config| {
+        let resilience = EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .consecutive_failures(2)
+                .build()
+                .expect("transactional breaker configuration"),
+        )
+        .build()
+        .expect("transactional resilience configuration");
+        let inputs_handler = SingleReplaySource::new();
+        let ledger_handler = LedgerTransform;
+        let collector_handler = CollectSink { outputs };
 
-    flow! {
-        name: "effect_port_supply_transactional",
-        journals: disk_journals(journal_base),
-        middleware: [],
-        effect_ports: ports,
+        Ok(flow! {
+            name: "effect_port_supply_transactional",
+            journals: disk_journals(journal_base),
+            middleware: [],
+            effect_ports: ports,
 
-        stages: {
-            inputs = source!(ReplayInput => SingleReplaySource::new());
-            ledger = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => LedgerTransform,
-                effects: [transactional(LedgerEffect, "ledger_tx") with [resilience]],
-                middleware: []
-            );
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                ledger = effectful_transform!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => ledger_handler,
+                    effects: [transactional(LedgerEffect, "ledger_tx") with [resilience]],
+                    middleware: []
+                );
+                collector = sink!(ReplayOutput => collector_handler);
+            },
 
-        topology: {
-            inputs |> ledger;
-            ledger |> collector;
-        }
-    }
+            topology: {
+                inputs |> ledger;
+                ledger |> collector;
+            }
+        })
+    })
 }
 
 #[tokio::test]
@@ -3928,34 +4003,39 @@ fn build_fail_fast_rejection_flow(
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
-    let resilience = EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .consecutive_failures(1)
-            .build()
-            .expect("fail-fast breaker configuration"),
-    )
-    .build()
-    .expect("fail-fast resilience configuration");
+    FlowDefinition::materialize(move |_runtime_config| {
+        let resilience = EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .consecutive_failures(1)
+                .build()
+                .expect("fail-fast breaker configuration"),
+        )
+        .build()
+        .expect("fail-fast resilience configuration");
+        let inputs_handler = ReplaySource::new();
+        let effectful_handler = FailFastTransform { calls };
+        let collector_handler = CollectSink { outputs };
 
-    flow! {
-        name: "effect_replay_fail_fast_rejection",
-        journals: disk_journals(journal_base),
-        middleware: [],
+        Ok(flow! {
+            name: "effect_replay_fail_fast_rejection",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => FailFastTransform { calls },
-                effects: [AlwaysFailingEffect with [resilience]],
-                middleware: []);
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                effectful = effectful_transform!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    effects: [AlwaysFailingEffect with [resilience]],
+                    middleware: []);
+                collector = sink!(ReplayOutput => collector_handler);
+            },
 
-        topology: {
-            inputs |> effectful;
-            effectful |> collector;
-        }
-    }
+            topology: {
+                inputs |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 fn build_multi_effect_per_effect_breaker_flow(
@@ -3963,33 +4043,39 @@ fn build_multi_effect_per_effect_breaker_flow(
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
-    let resilience = EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .consecutive_failures(1)
-            .build()
-            .expect("per-effect breaker configuration"),
-    )
-    .build()
-    .expect("per-effect resilience configuration");
-    flow! {
-        name: "effect_replay_multi_effect_breaker",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let resilience = EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .consecutive_failures(1)
+                .build()
+                .expect("per-effect breaker configuration"),
+        )
+        .build()
+        .expect("per-effect resilience configuration");
+        let inputs_handler = ReplaySource::new();
+        let effectful_handler = MultiEffectFailFastTransform { calls };
+        let collector_handler = CollectSink { outputs };
 
-        stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => MultiEffectFailFastTransform { calls },
-                effects: [AlwaysFailingEffect with [resilience], CountingEffect],
-                middleware: []);
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
+        Ok(flow! {
+            name: "effect_replay_multi_effect_breaker",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            inputs |> effectful;
-            effectful |> collector;
-        }
-    }
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                effectful = effectful_transform!(
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    effects: [AlwaysFailingEffect with [resilience], CountingEffect],
+                    middleware: []);
+                collector = sink!(ReplayOutput => collector_handler);
+            },
+
+            topology: {
+                inputs |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 /// Plain fail-fast rejection: the breaker prevents the call, `perform`

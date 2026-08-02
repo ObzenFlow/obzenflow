@@ -24,23 +24,29 @@
 //!
 //! ## Quick start: the typed tiers
 //!
-//! Most sinks never implement this trait directly. A quick projection is a
-//! `sink!` closure; a production destination is a typed
+//! Most sinks never implement this trait directly. A quick projection binds a
+//! `SinkTyped` adapter before its `sink!` declaration; a production destination
+//! is a typed
 //! [`Delivery`](super::delivery::Delivery), carrying identity and
 //! duplicate-safety on the type and bridging onto this trait automatically:
 //!
 //! ```ignore
-//! // Tier 1/2: closures, optionally with declared safety and provenance.
-//! let quick = sink!(PaymentAuthorized => |authorized| { println!("{authorized:?}"); });
-//! let declared = sink!(
-//!     PaymentAuthorized => |authorized, delivery| {
+//! // Tier 1/2: bind typed adapters, optionally with declared safety and provenance.
+//! let quick_handler = SinkTyped::new(|authorized: PaymentAuthorized| async move {
+//!     println!("{authorized:?}");
+//! });
+//! let quick = sink!(PaymentAuthorized => quick_handler);
+//!
+//! let declared_handler = SinkTyped::with_delivery(
+//!     |authorized: PaymentAuthorized, delivery| async move {
 //!         audit(authorized, delivery.provenance());
 //!     },
-//!     delivery: idempotent
 //! );
+//! let declared = sink!(PaymentAuthorized => declared_handler, delivery: idempotent);
 //!
 //! // Tier 3: a typed delivery.
-//! let production = sink!(PaymentAuthorized => ShippingHandoff::new(queue));
+//! let shipping = ShippingHandoff::new(queue);
+//! let production = sink!(PaymentAuthorized => shipping);
 //! ```
 //!
 //! Implement `SinkHandler` directly only for buffered or otherwise

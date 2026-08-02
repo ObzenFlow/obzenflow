@@ -11,7 +11,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
-use obzenflow_dsl::{flow, infinite_source, sink, source};
+use obzenflow_dsl::{flow, infinite_source, sink, source, FlowDefinition};
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the stop-lifecycle test. The JSON shape matches
@@ -215,20 +215,25 @@ async fn stop_infinite_source_reports_cancelled() -> Result<()> {
     let dir = tempdir()?;
     let journal_root = dir.path().join("journals");
 
-    let handle = flow! {
-        name: "stateful_stop_infinite_source",
-        journals: disk_journals(journal_root.clone()),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = SlowInfiniteSource::new(Duration::from_millis(5));
+        let sink_handler = NoopSink;
 
-        stages: {
-            src = infinite_source!(LifecycleEvent => SlowInfiniteSource::new(Duration::from_millis(5)));
-            snk = sink!(LifecycleEvent => NoopSink);
-        },
+        Ok(flow! {
+            name: "stateful_stop_infinite_source",
+            journals: disk_journals(journal_root.clone()),
+            middleware: [],
 
-        topology: {
-            src |> snk;
-        }
-    }
+            stages: {
+                src = infinite_source!(LifecycleEvent => source_handler);
+                snk = sink!(LifecycleEvent => sink_handler);
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
@@ -269,21 +274,26 @@ async fn stop_finite_source_reports_cancelled() -> Result<()> {
     let dir = tempdir()?;
     let journal_root = dir.path().join("journals");
 
-    let handle = flow! {
-        name: "stateful_stop_finite_source",
-        journals: disk_journals(journal_root.clone()),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = SlowFiniteSource::new(10_000, Duration::from_millis(5));
+        let sink_handler = NoopSink;
 
-        stages: {
-            // Large upper bound so the source is still active when Stop is issued.
-            src = source!(LifecycleEvent => SlowFiniteSource::new(10_000, Duration::from_millis(5)));
-            snk = sink!(LifecycleEvent => NoopSink);
-        },
+        Ok(flow! {
+            name: "stateful_stop_finite_source",
+            journals: disk_journals(journal_root.clone()),
+            middleware: [],
 
-        topology: {
-            src |> snk;
-        }
-    }
+            stages: {
+                // Large upper bound so the source is still active when Stop is issued.
+                src = source!(LifecycleEvent => source_handler);
+                snk = sink!(LifecycleEvent => sink_handler);
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
@@ -324,20 +334,25 @@ async fn stop_cancel_timeout_overrides_cancel_reason() -> Result<()> {
     let dir = tempdir()?;
     let journal_root = dir.path().join("journals");
 
-    let handle = flow! {
-        name: "stateful_stop_cancel_timeout_reason",
-        journals: disk_journals(journal_root.clone()),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = SlowInfiniteSource::new(Duration::from_millis(1));
+        let sink_handler = SlowSink::new(Duration::from_millis(250));
 
-        stages: {
-            src = infinite_source!(LifecycleEvent => SlowInfiniteSource::new(Duration::from_millis(1)));
-            snk = sink!(LifecycleEvent => SlowSink::new(Duration::from_millis(250)));
-        },
+        Ok(flow! {
+            name: "stateful_stop_cancel_timeout_reason",
+            journals: disk_journals(journal_root.clone()),
+            middleware: [],
 
-        topology: {
-            src |> snk;
-        }
-    }
+            stages: {
+                src = infinite_source!(LifecycleEvent => source_handler);
+                snk = sink!(LifecycleEvent => sink_handler);
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;

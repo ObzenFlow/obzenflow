@@ -14,7 +14,7 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::WriterId;
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -115,21 +115,6 @@ struct LatencySink {
     latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
 }
 
-impl LatencySink {
-    fn new(expected_count: u64) -> (Self, Arc<tokio::sync::Mutex<Vec<Duration>>>) {
-        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
-            expected_count as usize,
-        )));
-        (
-            Self {
-                received: Arc::new(AtomicU64::new(0)),
-                latencies: latencies.clone(),
-            },
-            latencies,
-        )
-    }
-}
-
 #[async_trait]
 impl SinkHandler for LatencySink {
     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
@@ -171,28 +156,42 @@ async fn run_2_stage_pipeline() -> anyhow::Result<Duration> {
     ));
     std::fs::create_dir_all(&journals_base_path)?;
 
-    let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
-    let (sink, latencies) = LatencySink::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
-    let sink_clone = sink.clone();
+    let received = Arc::new(AtomicU64::new(0));
+    let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
+        (WARMUP_EVENT_COUNT + TEST_EVENT_COUNT) as usize,
+    )));
+    let received_for_flow = received.clone();
+    let latencies_for_flow = latencies.clone();
 
-    let handle = flow! {
-        journals: disk_journals(journals_base_path),
-        middleware: [],
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let timestamped_source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
+        let passthrough = PassthroughStage::new("stage1");
+        let latency_sink = LatencySink {
+            received: received_for_flow,
+            latencies: latencies_for_flow,
+        };
 
-        stages: {
-            src = source!(BenchEvent => source);
-            s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
-            snk = sink!(BenchEvent => sink);
-        },
+        Ok(flow! {
+            journals: disk_journals(journals_base_path),
+            middleware: [],
 
-        topology: {
-            src |> s1;
-            s1 |> snk;
-        }
-    }
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
+            stages: {
+                src = source!(BenchEvent => timestamped_source);
+                s1 = transform!(BenchEvent -> BenchEvent => passthrough);
+                snk = sink!(BenchEvent => latency_sink);
+            },
+
+            topology: {
+                src |> s1;
+                s1 |> snk;
+            }
+        })
+    });
+
+    let handle = flow_definition
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     // Start the pipeline
     handle
@@ -204,7 +203,7 @@ async fn run_2_stage_pipeline() -> anyhow::Result<Duration> {
     let timeout = Duration::from_secs(30);
     let start = Instant::now();
 
-    while sink_clone.received.load(Ordering::Relaxed) < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT {
+    while received.load(Ordering::Relaxed) < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT {
         if start.elapsed() > timeout {
             break;
         }

@@ -16,23 +16,35 @@ Where to go next:
 Every ObzenFlow application follows the same shape:
 
 ```rust,ignore
-FlowApplication::run(flow! {
-    name: "my_flow",
-    journals: disk_journals("target/logs".into()),
-    middleware: [rate_limit(100.0)],
+fn build_flow() -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let my_source = build_source();
+        let my_transform = build_transform();
+        let my_sink = build_sink();
 
-    stages: {
-        input = source!(InputEvent => my_source);
-        enrich = transform!(InputEvent -> OutputEvent => my_transform);
-        output = sink!(OutputEvent => my_sink);
-    },
+        Ok(flow! {
+            name: "my_flow",
+            journals: disk_journals("target/logs".into()),
+            middleware: [rate_limit(100.0)],
 
-    topology: {
-        input |> enrich |> output;
-    }
-})
-.await?;
+            stages: {
+                input = source!(InputEvent => my_source);
+                enrich = transform!(InputEvent -> OutputEvent => my_transform);
+                output = sink!(OutputEvent => my_sink);
+            },
+
+            topology: {
+                input |> enrich |> output;
+            }
+        })
+    })
+}
+
+FlowApplication::run(build_flow()).await?;
 ```
+
+Builder-owned handlers are ordinary Rust locals inside the deferred materialiser;
+stage rows reference those locals by name.
 
 For runnable versions with real domain types and handlers, see the examples catalog in `examples/README.md`.
 

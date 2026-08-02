@@ -13,9 +13,10 @@ use anyhow::Result;
 use obzenflow::typed::{sources, stateful as typed_stateful};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, stateful};
+use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::stages::sink::SinkTyped;
 use serde::{Deserialize, Serialize};
 
 // FLOWIP-082a: Strongly-typed event with schema version
@@ -235,84 +236,89 @@ fn main() -> Result<()> {
 
     FlowApplication::builder()
         .with_presentation(presentation)
-        .run_blocking(flow! {
-            name: "ecommerce_analytics",
-            journals: disk_journals(std::path::PathBuf::from("target/ecommerce-logs")),
-            middleware: [],
+        .run_blocking(FlowDefinition::materialize(move |_runtime_config| {
+            let orders_handler = sources::finite_from_fn(move |index| {
+                let (product_id, product_name, unit_price, quantity, category) =
+                    orders.get(index)?;
+                let order_number = index + 1;
+                let total_value = unit_price * (*quantity as f64);
 
-            stages: {
-                // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
-                orders = source!(OrderEvent => sources::finite_from_fn(move |index| {
-                    let (product_id, product_name, unit_price, quantity, category) =
-                        orders.get(index)?;
-                    let order_number = index + 1;
-                    let total_value = unit_price * (*quantity as f64);
+                println!("📦 Order #{order_number}: {product_name} x{quantity} ({product_id}) = ${total_value:.2}");
 
-                    println!("📦 Order #{order_number}: {product_name} x{quantity} ({product_id}) = ${total_value:.2}");
+                Some(OrderEvent {
+                    order_id: format!("ORD-{order_number:04}"),
+                    product_id: product_id.clone(),
+                    product_name: product_name.clone(),
+                    category: category.clone(),
+                    unit_price: *unit_price,
+                    quantity: *quantity,
+                    total_value,
+                    timestamp: order_number, // Simulated timestamp
+                })
+            });
+            let top_products_handler = typed_stateful::top_n_by(
+                5,
+                |order: &OrderEvent| order.product_id.clone(),
+                |order: &OrderEvent| order.total_value,
+            )
+            .emit_every_n(5);
+            let dashboard_handler = SinkTyped::new(|update: TopProductsUpdate| async move {
+                println!("\n📊 TOP SELLING PRODUCTS DASHBOARD 📊");
+                println!("====================================");
+                println!("Total Unique Products Sold: {}\n", update.total_items);
 
-                    Some(OrderEvent {
-                        order_id: format!("ORD-{order_number:04}"),
-                        product_id: product_id.clone(),
-                        product_name: product_name.clone(),
-                        category: category.clone(),
-                        unit_price: *unit_price,
-                        quantity: *quantity,
-                        total_value,
-                        timestamp: order_number, // Simulated timestamp
-                    })
-                }), [RateLimiterBuilder::new(3.0).build()]); // Pace source intake for demo visibility.
+                let mut total_revenue = 0.0;
+                for entry in &update.top_n {
+                    total_revenue += entry.total_score;
 
-                // FLOWIP-080j: TopNByTyped - Type-safe accumulation with no ChainEvent!
-                // Type-safe extraction functions instead of string field names
-                top_products = stateful!(
-                    OrderEvent -> TopProductsUpdate => typed_stateful::top_n_by(
-                        5,
-                        |order: &OrderEvent| order.product_id.clone(), // Key extractor
-                        |order: &OrderEvent| order.total_value,        // Score extractor
-                    )
-                    .emit_every_n(5)
-                );
+                    let medal = match entry.rank {
+                        1 => "🥇",
+                        2 => "🥈",
+                        3 => "🥉",
+                        _ => "  ",
+                    };
 
-                dashboard = sink!(|update: TopProductsUpdate| {
-                    println!("\n📊 TOP SELLING PRODUCTS DASHBOARD 📊");
-                    println!("====================================");
-                    println!("Total Unique Products Sold: {}\n", update.total_items);
+                    println!(
+                        "{} #{}: {} ({})",
+                        medal, entry.rank, entry.metadata.product_name, entry.key
+                    );
+                    println!("      Category: {}", entry.metadata.category);
+                    println!(
+                        "      Revenue: ${:.2} from {} orders",
+                        entry.total_score, entry.count
+                    );
+                    println!("      Avg Order Value: ${:.2}", entry.avg_score);
+                    println!();
+                }
 
-                    let mut total_revenue = 0.0;
-                    for entry in &update.top_n {
-                        total_revenue += entry.total_score;
+                println!("------------------------------------");
+                println!("Top 5 Products Revenue: ${total_revenue:.2}");
+                println!("====================================\n");
+            })
+            .idempotent();
 
-                        let medal = match entry.rank {
-                            1 => "🥇",
-                            2 => "🥈",
-                            3 => "🥉",
-                            _ => "  ",
-                        };
+            Ok(flow! {
+                name: "ecommerce_analytics",
+                journals: disk_journals(std::path::PathBuf::from("target/ecommerce-logs")),
+                middleware: [],
 
-                        println!(
-                            "{} #{}: {} ({})",
-                            medal, entry.rank, entry.metadata.product_name, entry.key
-                        );
-                        println!("      Category: {}", entry.metadata.category);
-                        println!(
-                            "      Revenue: ${:.2} from {} orders",
-                            entry.total_score, entry.count
-                        );
-                        println!("      Avg Order Value: ${:.2}", entry.avg_score);
-                        println!();
-                    }
+                stages: {
+                    // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
+                    orders = source!(OrderEvent => orders_handler, [
+                        RateLimiterBuilder::new(3.0).build()
+                    ]); // Pace source intake for demo visibility.
 
-                    println!("------------------------------------");
-                    println!("Top 5 Products Revenue: ${total_revenue:.2}");
-                    println!("====================================\n");
-                }, delivery: idempotent);
-            },
+                    // FLOWIP-080j: TopNByTyped - Type-safe accumulation with no ChainEvent!
+                    top_products = stateful!(OrderEvent -> TopProductsUpdate => top_products_handler);
+                    dashboard = sink!(TopProductsUpdate => dashboard_handler);
+                },
 
-            topology: {
-                orders |> top_products;
-                top_products |> dashboard;
-            }
-        })?;
+                topology: {
+                    orders |> top_products;
+                    top_products |> dashboard;
+                }
+            })
+        }))?;
 
     Ok(())
 }

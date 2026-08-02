@@ -7,7 +7,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, EdgeLivenessState, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{async_source, async_transform, flow, sink};
+use obzenflow_dsl::{async_source, async_transform, flow, sink, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::prelude::FlowHandle;
@@ -216,26 +216,34 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
         tokio::spawn(async {})
     });
 
-    let flow_definition = flow! {
-        name: "liveness_fan_out",
-        journals: memory_journals(),
-        middleware: [],
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let numbers_handler = DelayedTwoEventSource::new();
+        let slow_handler = SlowTransform::new();
+        let fast_handler = FastTransform::new();
+        let slow_sink_handler = NoopSink;
+        let fast_sink_handler = NoopSink;
 
-        stages: {
-            numbers = async_source!(ProbeEvent => DelayedTwoEventSource::new());
-            slow = async_transform!(ProbeEvent -> SlowProbeEvent => SlowTransform::new());
-            fast = async_transform!(ProbeEvent -> FastProbeEvent => FastTransform::new());
-            sink_slow = sink!(SlowProbeEvent => NoopSink);
-            sink_fast = sink!(FastProbeEvent => NoopSink);
-        },
+        Ok(flow! {
+            name: "liveness_fan_out",
+            journals: memory_journals(),
+            middleware: [],
 
-        topology: {
-            numbers |> slow;
-            numbers |> fast;
-            slow |> sink_slow;
-            fast |> sink_fast;
-        }
-    };
+            stages: {
+                numbers = async_source!(ProbeEvent => numbers_handler);
+                slow = async_transform!(ProbeEvent -> SlowProbeEvent => slow_handler);
+                fast = async_transform!(ProbeEvent -> FastProbeEvent => fast_handler);
+                sink_slow = sink!(SlowProbeEvent => slow_sink_handler);
+                sink_fast = sink!(FastProbeEvent => fast_sink_handler);
+            },
+
+            topology: {
+                numbers |> slow;
+                numbers |> fast;
+                slow |> sink_slow;
+                fast |> sink_fast;
+            }
+        })
+    });
 
     let mut run_task = tokio_test::task::spawn(async move {
         FlowApplication::builder()

@@ -352,19 +352,20 @@ fn payload_writer_stage(payload: &FlowControlPayload) -> Option<StageId> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn emit_within_flushes_final_partial_window_before_authored_eof() -> Result<()> {
     let (sink, seen) = AggregateSink::new();
+    let source = SequenceSource::new(3);
+    let window = typed_stateful::reduce(
+        WindowAgg::default(),
+        |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
+    )
+    .emit_within(Duration::from_secs(60));
     let harness = test_flow! {
         name: "emit_within_final_flush",
         journals: disk_journals(unique_journal_dir("emit_within_final_flush")),
         middleware: [],
 
         stages: {
-            src = source!(WindowInput => SequenceSource::new(3));
-            win = stateful!(WindowInput -> WindowAgg =>
-                typed_stateful::reduce(WindowAgg::default(), |acc: &mut WindowAgg, _in: &WindowInput| {
-                    acc.event_count += 1;
-                })
-                .emit_within(Duration::from_secs(60))
-            );
+            src = source!(WindowInput => source);
+            win = stateful!(WindowInput -> WindowAgg => window);
             snk = sink!(WindowAgg => sink);
         },
 
@@ -429,19 +430,20 @@ async fn emit_within_flushes_final_partial_window_before_authored_eof() -> Resul
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn emit_within_final_aggregate_preserves_buffered_input_lineage() -> Result<()> {
     let (sink, _seen) = AggregateSink::new();
+    let source = SequenceSource::new(3);
+    let window = typed_stateful::reduce(
+        WindowAgg::default(),
+        |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
+    )
+    .emit_within(Duration::from_secs(60));
     let harness = test_flow! {
         name: "emit_within_lineage",
         journals: disk_journals(unique_journal_dir("emit_within_lineage")),
         middleware: [],
 
         stages: {
-            src = source!(WindowInput => SequenceSource::new(3));
-            win = stateful!(WindowInput -> WindowAgg =>
-                typed_stateful::reduce(WindowAgg::default(), |acc: &mut WindowAgg, _in: &WindowInput| {
-                    acc.event_count += 1;
-                })
-                .emit_within(Duration::from_secs(60))
-            );
+            src = source!(WindowInput => source);
+            win = stateful!(WindowInput -> WindowAgg => window);
             snk = sink!(WindowAgg => sink);
         },
 
@@ -488,19 +490,20 @@ async fn emit_within_final_aggregate_records_mixed_correlation_ids() -> Result<(
     let correlation_b = CorrelationId::new();
 
     let (sink, seen) = AggregateSink::new();
+    let source = CorrelatedSequenceSource::new(vec![correlation_a, correlation_b]);
+    let window = typed_stateful::reduce(
+        WindowAgg::default(),
+        |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
+    )
+    .emit_within(Duration::from_secs(60));
     let harness = test_flow! {
         name: "emit_within_mixed_correlation",
         journals: disk_journals(unique_journal_dir("emit_within_mixed_correlation")),
         middleware: [],
 
         stages: {
-            src = source!(WindowInput => CorrelatedSequenceSource::new(vec![correlation_a, correlation_b]));
-            win = stateful!(WindowInput -> WindowAgg =>
-                typed_stateful::reduce(WindowAgg::default(), |acc: &mut WindowAgg, _in: &WindowInput| {
-                    acc.event_count += 1;
-                })
-                .emit_within(Duration::from_secs(60))
-            );
+            src = source!(WindowInput => source);
+            win = stateful!(WindowInput -> WindowAgg => window);
             snk = sink!(WindowAgg => sink);
         },
 
@@ -554,19 +557,20 @@ async fn emit_within_emits_more_than_one_window_aggregate_per_run_and_resets_sta
     let total = 3u64;
 
     let (sink, seen) = AggregateSink::new();
+    let source = DelayedSequenceSource::new(total, per_event_delay);
+    let window_handler = typed_stateful::reduce(
+        WindowAgg::default(),
+        |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
+    )
+    .emit_within(window);
     let harness = test_flow! {
         name: "emit_within_multi_window",
         journals: disk_journals(unique_journal_dir("emit_within_multi_window")),
         middleware: [],
 
         stages: {
-            src = source!(WindowInput => DelayedSequenceSource::new(total, per_event_delay));
-            win = stateful!(WindowInput -> WindowAgg =>
-                typed_stateful::reduce(WindowAgg::default(), |acc: &mut WindowAgg, _in: &WindowInput| {
-                    acc.event_count += 1;
-                })
-                .emit_within(window)
-            );
+            src = source!(WindowInput => source);
+            win = stateful!(WindowInput -> WindowAgg => window_handler);
             snk = sink!(WindowAgg => sink);
         },
 
@@ -608,20 +612,22 @@ async fn emit_within_emits_more_than_one_window_aggregate_per_run_and_resets_sta
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forwarded_inbound_eof_does_not_complete_downstream_reader() -> Result<()> {
     let (sink, _seen) = AggregateSink::new();
+    let source = SequenceSource::new(3);
+    let window = typed_stateful::reduce(
+        WindowAgg::default(),
+        |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
+    )
+    .emit_within(Duration::from_secs(60));
+    let identity = IdentityTransform;
     let harness = test_flow! {
         name: "emit_within_forwarded_eof_invariant",
         journals: disk_journals(unique_journal_dir("emit_within_forwarded_eof_invariant")),
         middleware: [],
 
         stages: {
-            src = source!(WindowInput => SequenceSource::new(3));
-            win = stateful!(WindowInput -> WindowAgg =>
-                typed_stateful::reduce(WindowAgg::default(), |acc: &mut WindowAgg, _in: &WindowInput| {
-                    acc.event_count += 1;
-                })
-                .emit_within(Duration::from_secs(60))
-            );
-            tr = transform!(WindowAgg -> WindowAgg => IdentityTransform);
+            src = source!(WindowInput => source);
+            win = stateful!(WindowInput -> WindowAgg => window);
+            tr = transform!(WindowAgg -> WindowAgg => identity);
             snk = sink!(WindowAgg => sink);
         },
 
@@ -692,23 +698,22 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
         ("c".to_string(), 4u64),
     ];
 
+    let source = GroupedSequenceSource::new(items.clone());
+    let grouped = typed_stateful::group_by(
+        |input: &GroupInput| input.group.clone(),
+        |acc: &mut GroupAgg, _input: &GroupInput| acc.event_count += 1,
+    )
+    .emit_within(Duration::from_secs(60));
+    let sink = AckSink;
     let harness = test_flow! {
         name: "emit_within_group_by_lineage",
         journals: disk_journals(unique_journal_dir("emit_within_group_by_lineage")),
         middleware: [],
 
         stages: {
-            src = source!(GroupInput => GroupedSequenceSource::new(items.clone()));
-            grp = stateful!(GroupInput -> GroupAgg =>
-                typed_stateful::group_by(
-                    |input: &GroupInput| input.group.clone(),
-                    |acc: &mut GroupAgg, _input: &GroupInput| {
-                        acc.event_count += 1;
-                    }
-                )
-                .emit_within(Duration::from_secs(60))
-            );
-            snk = sink!(GroupAgg => AckSink);
+            src = source!(GroupInput => source);
+            grp = stateful!(GroupInput -> GroupAgg => grouped);
+            snk = sink!(GroupAgg => sink);
         },
 
         topology: {

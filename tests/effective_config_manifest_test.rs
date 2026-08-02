@@ -11,8 +11,8 @@ use obzenflow_core::config::{ConfigSubject, ResolvedForDoc};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::journal::run_manifest::RunManifest;
-use obzenflow_core::{TypedPayload, WriterId};
-use obzenflow_dsl::{effectful_transform, flow, sink, source};
+use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{Effect, EffectContext, EffectError, EffectSafety, Effects};
 use obzenflow_runtime::journal::RunSubstrateState;
@@ -176,20 +176,28 @@ fn build_flow_future(
 ) -> impl std::future::Future<
     Output = Result<obzenflow_runtime::prelude::FlowHandle, obzenflow_dsl::dsl::FlowBuildFailure>,
 > {
-    flow! {
-        name: "effective_config_manifest",
-        journals: disk_journals(base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let one_shot_source = OneShotSource {
+            emitted: false,
+            writer_id: WriterId::from(StageId::new()),
+        };
+        let null_sink = NullSink;
 
-        stages: {
-            src = source!(Item => OneShotSource { emitted: false, writer_id: WriterId::from(StageId::new()) });
-            snk = sink!(Item => NullSink);
-        },
+        Ok(flow! {
+            name: "effective_config_manifest",
+            journals: disk_journals(base),
+            middleware: [],
 
-        topology: {
-            src |> snk;
-        }
-    }
+            stages: {
+                src = source!(Item => one_shot_source);
+                snk = sink!(Item => null_sink);
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    })
     .build(ctx)
 }
 
@@ -199,21 +207,29 @@ fn build_rate_limited_flow_future(
 ) -> impl std::future::Future<
     Output = Result<obzenflow_runtime::prelude::FlowHandle, obzenflow_dsl::dsl::FlowBuildFailure>,
 > {
-    let limiter = rate_limit(10.0);
-    flow! {
-        name: "effective_config_manifest_with_optional_limiter_burst",
-        journals: disk_journals(base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let limiter = rate_limit(10.0);
+        let one_shot_source = OneShotSource {
+            emitted: false,
+            writer_id: WriterId::from(StageId::new()),
+        };
+        let null_sink = NullSink;
 
-        stages: {
-            src = source!(Item => OneShotSource { emitted: false, writer_id: WriterId::from(StageId::new()) });
-            snk = sink!(Item => NullSink, middleware: [limiter]);
-        },
+        Ok(flow! {
+            name: "effective_config_manifest_with_optional_limiter_burst",
+            journals: disk_journals(base),
+            middleware: [],
 
-        topology: {
-            src |> snk;
-        }
-    }
+            stages: {
+                src = source!(Item => one_shot_source);
+                snk = sink!(Item => null_sink, middleware: [limiter]);
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    })
     .build(ctx)
 }
 
@@ -236,31 +252,40 @@ fn build_two_effect_flow_future(
 ) -> impl std::future::Future<
     Output = Result<obzenflow_runtime::prelude::FlowHandle, obzenflow_dsl::dsl::FlowBuildFailure>,
 > {
-    let authorize_resilience = payment_resilience();
-    let refund_resilience = payment_resilience();
-    flow! {
-        name: "effective_config_manifest_two_effects",
-        journals: disk_journals(base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let authorize_resilience = payment_resilience();
+        let refund_resilience = payment_resilience();
+        let one_shot_source = OneShotSource {
+            emitted: false,
+            writer_id: WriterId::from(StageId::new()),
+        };
+        let payment_effects = PaymentEffectsHandler;
+        let null_sink = NullSink;
 
-        stages: {
-            orders = source!(Item => OneShotSource { emitted: false, writer_id: WriterId::from(StageId::new()) });
-            authorize_payment = effectful_transform!(
-                Item -> PaymentEffectFact => PaymentEffectsHandler,
-                effects: [
-                    AuthorizePayment with [authorize_resilience],
-                    RefundPayment with [refund_resilience]
-                ],
-                middleware: []
-            );
-            output = sink!(PaymentEffectFact => NullSink);
-        },
+        Ok(flow! {
+            name: "effective_config_manifest_two_effects",
+            journals: disk_journals(base),
+            middleware: [],
 
-        topology: {
-            orders |> authorize_payment;
-            authorize_payment |> output;
-        }
-    }
+            stages: {
+                orders = source!(Item => one_shot_source);
+                authorize_payment = effectful_transform!(
+                    Item -> PaymentEffectFact => payment_effects,
+                    effects: [
+                        AuthorizePayment with [authorize_resilience],
+                        RefundPayment with [refund_resilience]
+                    ],
+                    middleware: []
+                );
+                output = sink!(PaymentEffectFact => null_sink);
+            },
+
+            topology: {
+                orders |> authorize_payment;
+                authorize_payment |> output;
+            }
+        })
+    })
     .build(ctx)
 }
 

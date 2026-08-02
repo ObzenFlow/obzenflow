@@ -343,33 +343,36 @@ fn build_flow_for_role<Role>(
 where
     Role: AiInferenceRole<ReducedEvidence, DecisionBrief>,
 {
-    let chat = contract();
-    flow! {
-        name: "one_shot_inference_effect_journal",
-        journals: disk_journals(journal_base),
-        middleware: [],
-        backpressure: backpressure,
-        effect_ports,
+    FlowDefinition::materialize(move |_runtime_config| {
+        let chat = contract();
+        let evidence_handler = obzenflow::typed::sources::finite(evidence_inputs);
+        let collected_handler = CollectBrief { outputs };
 
-        stages: {
-            evidence = source!(
-                ReducedEvidence => obzenflow::typed::sources::finite(evidence_inputs)
-            );
-            brief = inference!(
-                ReducedEvidence ->{
-                    at_least_once(ChatCompletion)
-                        via chat
-                        with { brief_policy }
-                } DecisionBrief => brief_role
-            );
-            collected = sink!(DecisionBrief => CollectBrief { outputs });
-        },
+        Ok(flow! {
+            name: "one_shot_inference_effect_journal",
+            journals: disk_journals(journal_base),
+            middleware: [],
+            backpressure: backpressure,
+            effect_ports,
 
-        topology: {
-            evidence |> brief;
-            brief |> collected;
-        }
-    }
+            stages: {
+                evidence = source!(ReducedEvidence => evidence_handler);
+                brief = inference!(
+                    ReducedEvidence ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { brief_policy }
+                    } DecisionBrief => brief_role
+                );
+                collected = sink!(DecisionBrief => collected_handler);
+            },
+
+            topology: {
+                evidence |> brief;
+                brief |> collected;
+            }
+        })
+    })
 }
 
 #[cfg(feature = "test-support")]
@@ -380,41 +383,44 @@ fn build_credit_flow(
     prepare_calls: Arc<AtomicUsize>,
     interpret_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
-    let chat = contract();
-    let brief_role = BriefRole {
-        prepare_calls,
-        interpret_calls,
-        prompt_suffix: "",
-    };
-    flow! {
-        name: "one_shot_inference_credit_retirement",
-        journals: disk_journals(journal_base),
-        middleware: [],
-        backpressure: enforced_backpressure(3).stall_timeout_ms(5_000),
-        effect_ports,
+    FlowDefinition::materialize(move |_runtime_config| {
+        let chat = contract();
+        let brief_role = BriefRole {
+            prepare_calls,
+            interpret_calls,
+            prompt_suffix: "",
+        };
+        let credit_evidence = obzenflow::typed::sources::finite([
+            ReducedEvidence { value: 7 },
+            ReducedEvidence { value: 8 },
+        ]);
+        let credit_collected = CollectBrief { outputs };
 
-        stages: {
-            credit_evidence = source!(
-                ReducedEvidence => obzenflow::typed::sources::finite([
-                    ReducedEvidence { value: 7 },
-                    ReducedEvidence { value: 8 },
-                ])
-            );
-            credit_brief = inference!(
-                ReducedEvidence ->{
-                    at_least_once(ChatCompletion)
-                        via chat
-                        with { ai_resilience() }
-                } DecisionBrief => brief_role
-            );
-            credit_collected = sink!(DecisionBrief => CollectBrief { outputs });
-        },
+        Ok(flow! {
+            name: "one_shot_inference_credit_retirement",
+            journals: disk_journals(journal_base),
+            middleware: [],
+            backpressure: enforced_backpressure(3).stall_timeout_ms(5_000),
+            effect_ports,
 
-        topology: {
-            credit_evidence |> credit_brief;
-            credit_brief |> credit_collected;
-        }
-    }
+            stages: {
+                credit_evidence = source!(ReducedEvidence => credit_evidence);
+                credit_brief = inference!(
+                    ReducedEvidence ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { ai_resilience() }
+                    } DecisionBrief => brief_role
+                );
+                credit_collected = sink!(DecisionBrief => credit_collected);
+            },
+
+            topology: {
+                credit_evidence |> credit_brief;
+                credit_brief |> credit_collected;
+            }
+        })
+    })
 }
 
 #[cfg(feature = "test-support")]
@@ -425,47 +431,51 @@ fn build_fan_out_flow(
     effect_ports: EffectPortRegistry,
     prepare_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
-    let chat = contract();
-    let brief_role = BriefRole {
-        prepare_calls,
-        interpret_calls: Arc::new(AtomicUsize::new(0)),
-        prompt_suffix: "",
-    };
-    flow! {
-        name: "one_shot_inference_fan_out",
-        journals: disk_journals(journal_base),
-        middleware: [],
-        backpressure: enforced_backpressure(3).stall_timeout_ms(5_000),
-        effect_ports,
+    FlowDefinition::materialize(move |_runtime_config| {
+        let chat = contract();
+        let brief_role = BriefRole {
+            prepare_calls,
+            interpret_calls: Arc::new(AtomicUsize::new(0)),
+            prompt_suffix: "",
+        };
+        let fan_out_evidence = obzenflow::typed::sources::finite([
+            ReducedEvidence { value: 7 },
+            ReducedEvidence { value: 8 },
+        ]);
+        let fast_collected = CollectBrief {
+            outputs: fast_outputs,
+        };
+        let slow_collected = CollectBrief {
+            outputs: slow_outputs,
+        };
 
-        stages: {
-            fan_out_evidence = source!(
-                ReducedEvidence => obzenflow::typed::sources::finite([
-                    ReducedEvidence { value: 7 },
-                    ReducedEvidence { value: 8 },
-                ])
-            );
-            fan_out_brief = inference!(
-                ReducedEvidence ->{
-                    at_least_once(ChatCompletion)
-                        via chat
-                        with { ai_resilience() }
-                } DecisionBrief => brief_role
-            );
-            fast_collected = sink!(
-                DecisionBrief => CollectBrief { outputs: fast_outputs }
-            );
-            slow_collected = sink!(
-                DecisionBrief => CollectBrief { outputs: slow_outputs }
-            );
-        },
+        Ok(flow! {
+            name: "one_shot_inference_fan_out",
+            journals: disk_journals(journal_base),
+            middleware: [],
+            backpressure: enforced_backpressure(3).stall_timeout_ms(5_000),
+            effect_ports,
 
-        topology: {
-            fan_out_evidence |> fan_out_brief;
-            fan_out_brief |> fast_collected;
-            fan_out_brief |> slow_collected;
-        }
-    }
+            stages: {
+                fan_out_evidence = source!(ReducedEvidence => fan_out_evidence);
+                fan_out_brief = inference!(
+                    ReducedEvidence ->{
+                        at_least_once(ChatCompletion)
+                            via chat
+                            with { ai_resilience() }
+                    } DecisionBrief => brief_role
+                );
+                fast_collected = sink!(DecisionBrief => fast_collected);
+                slow_collected = sink!(DecisionBrief => slow_collected);
+            },
+
+            topology: {
+                fan_out_evidence |> fan_out_brief;
+                fan_out_brief |> fast_collected;
+                fan_out_brief |> slow_collected;
+            }
+        })
+    })
 }
 
 fn try_latest_run_dir(base: &Path) -> Option<PathBuf> {

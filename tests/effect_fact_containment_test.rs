@@ -224,46 +224,57 @@ fn missing_effect_fact_descriptor() -> Box<dyn StageDescriptor> {
 /// The effect's `ContainmentEffectValue` outcome fact is missing from the
 /// arrow.
 fn undeclared_effect_fact_flow(journal_base: PathBuf) -> FlowDefinition {
-    flow! {
-        name: "effect_fact_containment_missing",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let inputs_handler = OneShotSource::new();
+        let drops_handler = DropSink;
 
-        stages: {
-            inputs = source!(ContainmentInput => OneShotSource::new());
-            effectful = missing_effect_fact_descriptor();
-            drops = sink!(ContainmentOutput => DropSink);
-        },
+        Ok(flow! {
+            name: "effect_fact_containment_missing",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            inputs |> effectful;
-            effectful |> drops;
-        }
-    }
+            stages: {
+                inputs = source!(ContainmentInput => inputs_handler);
+                effectful = missing_effect_fact_descriptor();
+                drops = sink!(ContainmentOutput => drops_handler);
+            },
+
+            topology: {
+                inputs |> effectful;
+                effectful |> drops;
+            }
+        })
+    })
 }
 
 /// `effects: []` stages have no declarations, so containment has nothing to
 /// check and the build proceeds.
 fn empty_effects_flow(journal_base: PathBuf) -> FlowDefinition {
-    flow! {
-        name: "effect_fact_containment_empty_effects",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let inputs_handler = OneShotSource::new();
+        let effectful_handler = EmitOnlyTransform;
+        let drops_handler = DropSink;
 
-        stages: {
-            inputs = source!(ContainmentInput => OneShotSource::new());
-            effectful = effectful_transform!(
-                ContainmentInput -> { ContainmentOutput } => EmitOnlyTransform,
-                effects: [],
-                middleware: []);
-            drops = sink!(ContainmentOutput => DropSink);
-        },
+        Ok(flow! {
+            name: "effect_fact_containment_empty_effects",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            inputs |> effectful;
-            effectful |> drops;
-        }
-    }
+            stages: {
+                inputs = source!(ContainmentInput => inputs_handler);
+                effectful = effectful_transform!(
+                    ContainmentInput -> { ContainmentOutput } => effectful_handler,
+                    effects: [],
+                    middleware: []);
+                drops = sink!(ContainmentOutput => drops_handler);
+            },
+
+            topology: {
+                inputs |> effectful;
+                effectful |> drops;
+            }
+        })
+    })
 }
 
 #[tokio::test]
@@ -421,22 +432,27 @@ fn colliding_effect_descriptor() -> Box<dyn StageDescriptor> {
 }
 
 fn colliding_event_type_flow(journal_base: PathBuf) -> FlowDefinition {
-    flow! {
-        name: "effect_fact_containment_collision",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let inputs_handler = OneShotSource::new();
+        let drops_handler = DropSink;
 
-        stages: {
-            inputs = source!(ContainmentInput => OneShotSource::new());
-            effectful = colliding_effect_descriptor();
-            drops = sink!(ColliderA => DropSink);
-        },
+        Ok(flow! {
+            name: "effect_fact_containment_collision",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            inputs |> effectful;
-            effectful |> drops;
-        }
-    }
+            stages: {
+                inputs = source!(ContainmentInput => inputs_handler);
+                effectful = colliding_effect_descriptor();
+                drops = sink!(ColliderA => drops_handler);
+            },
+
+            topology: {
+                inputs |> effectful;
+                effectful |> drops;
+            }
+        })
+    })
 }
 
 #[tokio::test]

@@ -257,6 +257,10 @@ impl SinkHandler for CountingSink {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     let clock = TestClock::new().await.expect("paused runtime");
+    let source = SeedSource::new(30);
+    let entry = SlowEntryTransform::new(Duration::from_millis(10));
+    let iter = SignalStormTransform::new(50);
+    let sink = CountingSink;
 
     let harness = test_flow! {
         name: "divergence_mid_flight_abort",
@@ -264,10 +268,10 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!(SeedEvent => SeedSource::new(30));
-            entry = async_transform!(SeedEvent -> SeedEvent => SlowEntryTransform::new(Duration::from_millis(10)));
-            iter = transform!(SeedEvent -> SeedEvent => SignalStormTransform::new(50));
-            snk = sink!(SeedEvent => CountingSink);
+            src = source!(SeedEvent => source);
+            entry = async_transform!(SeedEvent -> SeedEvent => entry);
+            iter = transform!(SeedEvent -> SeedEvent => iter);
+            snk = sink!(SeedEvent => sink);
         },
 
         topology: {
@@ -381,6 +385,9 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> {
     let clock = TestClock::new().await.expect("paused runtime");
+    let source = SeedSource::new(50);
+    let delay = SlowEntryTransform::new(Duration::from_millis(1));
+    let sink = CountingSink;
 
     let harness = test_flow! {
         name: "divergence_mid_flight_contract_health",
@@ -388,9 +395,9 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
         middleware: [],
 
         stages: {
-            src = source!(SeedEvent => SeedSource::new(50));
-            delay = async_transform!(SeedEvent -> SeedEvent => SlowEntryTransform::new(Duration::from_millis(1)));
-            snk = sink!(SeedEvent => CountingSink);
+            src = source!(SeedEvent => source);
+            delay = async_transform!(SeedEvent -> SeedEvent => delay);
+            snk = sink!(SeedEvent => sink);
         },
 
         topology: {
@@ -462,6 +469,12 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<()> {
     let clock = TestClock::new().await.expect("paused runtime");
+    let source = SeedSource::new(50);
+    let entry = FanInEntryTransform;
+    let branch_a = PassThroughTransform;
+    let branch_b = PassThroughTransform;
+    let merge = PassThroughTransform;
+    let sink = CountingSink;
 
     let harness = test_flow! {
         name: "divergence_fan_in_inside_cycle",
@@ -469,12 +482,12 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
         middleware: [],
 
         stages: {
-            src = source!(SeedEvent => SeedSource::new(50));
-            entry = transform!(SeedEvent -> SeedEvent => FanInEntryTransform);
-            a = transform!(SeedEvent -> SeedEvent => PassThroughTransform);
-            b = transform!(SeedEvent -> SeedEvent => PassThroughTransform);
-            merge = transform!(SeedEvent -> SeedEvent => PassThroughTransform);
-            snk = sink!(SeedEvent => CountingSink);
+            src = source!(SeedEvent => source);
+            entry = transform!(SeedEvent -> SeedEvent => entry);
+            a = transform!(SeedEvent -> SeedEvent => branch_a);
+            b = transform!(SeedEvent -> SeedEvent => branch_b);
+            merge = transform!(SeedEvent -> SeedEvent => merge);
+            snk = sink!(SeedEvent => sink);
         },
 
         topology: {
@@ -563,6 +576,10 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
     let clock = TestClock::new().await.expect("paused runtime");
+    let source = SeedSource::new(10);
+    let entry = CycleDepthInjectionEntryTransform::new(Duration::from_millis(5), 100);
+    let iter = DropAllDataTransform;
+    let sink = CountingSink;
 
     let harness = test_flow! {
         name: "divergence_cycle_depth_abort",
@@ -570,10 +587,10 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!(SeedEvent => SeedSource::new(10));
-            entry = async_transform!(SeedEvent -> SeedEvent => CycleDepthInjectionEntryTransform::new(Duration::from_millis(5), 100));
-            iter = transform!(SeedEvent -> SeedEvent => DropAllDataTransform);
-            snk = sink!(SeedEvent => CountingSink);
+            src = source!(SeedEvent => source);
+            entry = async_transform!(SeedEvent -> SeedEvent => entry);
+            iter = transform!(SeedEvent -> SeedEvent => iter);
+            snk = sink!(SeedEvent => sink);
         },
 
         topology: {

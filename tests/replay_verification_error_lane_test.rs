@@ -127,26 +127,32 @@ where
 }
 
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
-    flow! {
-        name: "replay_verification_error_lane",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let numbers_handler = Numbers::new();
+        let gate_handler = RejectOdd;
+        let out_handler = SinkTyped::with_delivery(discard::<Accepted>()).idempotent();
 
-        stages: {
-            numbers = source!(Input => Numbers::new());
-            gate = effectful_transform!(
-                Input -> { Accepted } => RejectOdd,
-                effects: [],
-                middleware: []
-            );
-            out = sink!(Accepted => SinkTyped::with_delivery(discard::<Accepted>()).idempotent());
-        },
+        Ok(flow! {
+            name: "replay_verification_error_lane",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            numbers |> gate;
-            gate |> out;
-        }
-    }
+            stages: {
+                numbers = source!(Input => numbers_handler);
+                gate = effectful_transform!(
+                    Input -> { Accepted } => gate_handler,
+                    effects: [],
+                    middleware: []
+                );
+                out = sink!(Accepted => out_handler);
+            },
+
+            topology: {
+                numbers |> gate;
+                gate |> out;
+            }
+        })
+    })
 }
 
 fn latest_run_dir(base: &Path) -> PathBuf {

@@ -19,7 +19,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::WriterId;
-use obzenflow_dsl::{async_transform, flow, sink, source};
+use obzenflow_dsl::{async_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -97,14 +97,8 @@ struct EventCounterSink {
 }
 
 impl EventCounterSink {
-    fn new() -> (Self, Arc<AtomicU64>) {
-        let count = Arc::new(AtomicU64::new(0));
-        (
-            Self {
-                count: count.clone(),
-            },
-            count,
-        )
+    fn new(count: Arc<AtomicU64>) -> Self {
+        Self { count }
     }
 }
 
@@ -130,14 +124,8 @@ struct CollectSink {
 }
 
 impl CollectSink {
-    fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                events: events.clone(),
-            },
-            events,
-        )
+    fn new(events: Arc<Mutex<Vec<ChainEvent>>>) -> Self {
+        Self { events }
     }
 }
 
@@ -161,14 +149,8 @@ struct AsyncErrorTransform {
 }
 
 impl AsyncErrorTransform {
-    fn new() -> (Self, Arc<AtomicU64>) {
-        let drain_calls = Arc::new(AtomicU64::new(0));
-        (
-            Self {
-                drain_calls: drain_calls.clone(),
-            },
-            drain_calls,
-        )
+    fn new(drain_calls: Arc<AtomicU64>) -> Self {
+        Self { drain_calls }
     }
 }
 
@@ -288,14 +270,8 @@ struct AsyncDrainFailTransform {
 }
 
 impl AsyncDrainFailTransform {
-    fn new() -> (Self, Arc<AtomicU64>) {
-        let drain_calls = Arc::new(AtomicU64::new(0));
-        (
-            Self {
-                drain_calls: drain_calls.clone(),
-            },
-            drain_calls,
-        )
+    fn new(drain_calls: Arc<AtomicU64>) -> Self {
+        Self { drain_calls }
     }
 }
 
@@ -317,28 +293,36 @@ impl AsyncTransformHandler for AsyncDrainFailTransform {
 
 #[tokio::test]
 async fn async_transform_routes_error_kinds_to_correct_journal() -> Result<()> {
-    let (counter_sink, counter) = EventCounterSink::new();
-    let (transform, drain_calls) = AsyncErrorTransform::new();
+    let counter = Arc::new(AtomicU64::new(0));
+    let counter_for_flow = counter.clone();
+    let drain_calls = Arc::new(AtomicU64::new(0));
+    let drain_calls_for_flow = drain_calls.clone();
 
     let journal_root = unique_journal_dir("async_transform_routing");
     let journal_root_for_flow = journal_root.clone();
 
-    let handle = flow! {
-        name: "async_transform_routing_test",
-        journals: disk_journals(journal_root_for_flow.clone()),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = TestEventSource::new();
+        let transform_handler = AsyncErrorTransform::new(drain_calls_for_flow);
+        let sink_handler = EventCounterSink::new(counter_for_flow);
 
-        stages: {
-            source = source!(AsyncTransformEvent => TestEventSource::new());
-            async_errors = async_transform!(AsyncTransformEvent -> AsyncTransformEvent => transform);
-            sink = sink!(AsyncTransformEvent => counter_sink);
-        },
+        Ok(flow! {
+            name: "async_transform_routing_test",
+            journals: disk_journals(journal_root_for_flow.clone()),
+            middleware: [],
 
-        topology: {
-            source |> async_errors;
-            async_errors |> sink;
-        }
-    }
+            stages: {
+                source = source!(AsyncTransformEvent => source_handler);
+                async_errors = async_transform!(AsyncTransformEvent -> AsyncTransformEvent => transform_handler);
+                sink = sink!(AsyncTransformEvent => sink_handler);
+            },
+
+            topology: {
+                source |> async_errors;
+                async_errors |> sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
@@ -475,30 +459,37 @@ async fn async_transform_routes_error_kinds_to_correct_journal() -> Result<()> {
 
 #[tokio::test]
 async fn async_transform_applies_stage_middleware() -> Result<()> {
-    let (sink, events) = CollectSink::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_flow = events.clone();
     let observer_calls = Arc::new(AtomicU64::new(0));
     let observer_calls_for_flow = observer_calls.clone();
 
     let journal_root = unique_journal_dir("async_transform_middleware");
 
-    let handle = flow! {
-        name: "async_transform_middleware_test",
-        journals: disk_journals(journal_root.clone()),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = TestEventSource::new();
+        let transform_handler = AsyncPassThroughTransform;
+        let sink_handler = CollectSink::new(events_for_flow);
 
-        stages: {
-            source = source!(AsyncTransformEvent => TestEventSource::new());
-            mw_transform = async_transform!(AsyncTransformEvent -> AsyncTransformEvent => AsyncPassThroughTransform, [
-                CountDataCommitFactory { calls: observer_calls_for_flow.clone() }
-            ]);
-            sink = sink!(AsyncTransformEvent => sink);
-        },
+        Ok(flow! {
+            name: "async_transform_middleware_test",
+            journals: disk_journals(journal_root.clone()),
+            middleware: [],
 
-        topology: {
-            source |> mw_transform;
-            mw_transform |> sink;
-        }
-    }
+            stages: {
+                source = source!(AsyncTransformEvent => source_handler);
+                mw_transform = async_transform!(AsyncTransformEvent -> AsyncTransformEvent => transform_handler, [
+                    CountDataCommitFactory { calls: observer_calls_for_flow.clone() }
+                ]);
+                sink = sink!(AsyncTransformEvent => sink_handler);
+            },
+
+            topology: {
+                source |> mw_transform;
+                mw_transform |> sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
@@ -529,27 +520,34 @@ async fn async_transform_applies_stage_middleware() -> Result<()> {
 
 #[tokio::test]
 async fn async_transform_drain_failure_is_stage_level_failure() -> Result<()> {
-    let (sink, _counter) = EventCounterSink::new();
-    let (transform, drain_calls) = AsyncDrainFailTransform::new();
+    let counter = Arc::new(AtomicU64::new(0));
+    let drain_calls = Arc::new(AtomicU64::new(0));
+    let drain_calls_for_flow = drain_calls.clone();
 
     let journal_root = unique_journal_dir("async_transform_drain_failure");
 
-    let handle = flow! {
-        name: "async_transform_drain_failure_test",
-        journals: disk_journals(journal_root.clone()),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = TestEventSource::new();
+        let transform_handler = AsyncDrainFailTransform::new(drain_calls_for_flow);
+        let sink_handler = EventCounterSink::new(counter);
 
-        stages: {
-            source = source!(AsyncTransformEvent => TestEventSource::new());
-            drain_fail_transform = async_transform!(AsyncTransformEvent -> AsyncTransformEvent => transform);
-            sink = sink!(AsyncTransformEvent => sink);
-        },
+        Ok(flow! {
+            name: "async_transform_drain_failure_test",
+            journals: disk_journals(journal_root.clone()),
+            middleware: [],
 
-        topology: {
-            source |> drain_fail_transform;
-            drain_fail_transform |> sink;
-        }
-    }
+            stages: {
+                source = source!(AsyncTransformEvent => source_handler);
+                drain_fail_transform = async_transform!(AsyncTransformEvent -> AsyncTransformEvent => transform_handler);
+                sink = sink!(AsyncTransformEvent => sink_handler);
+            },
+
+            topology: {
+                source |> drain_fail_transform;
+                drain_fail_transform |> sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;

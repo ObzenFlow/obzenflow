@@ -263,25 +263,33 @@ fn build_flow(
     tx_count: u64,
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
-    flow! {
-        name: "seq_fan_in",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let accounts_handler = AccountSource::new(account_count);
+        let tx_handler = TxSource::new(tx_first, tx_count);
+        let posted_handler = SeqWitnessJoin;
+        let ledger_handler = LedgerFold::new().with_emission(EmitAlways);
+        let collect_handler = CountingSink { delivered };
 
-        stages: {
-            accounts = infinite_source!(AccountRow => AccountSource::new(account_count));
-            tx = infinite_source!(TxRow => TxSource::new(tx_first, tx_count));
-            posted = join!(catalog accounts: AccountRow, TxRow -> PostedRow => SeqWitnessJoin);
-            ledger = stateful!(PostedRow -> LedgerSnapshot => LedgerFold::new().with_emission(EmitAlways));
-            collect = sink!(LedgerSnapshot => CountingSink { delivered });
-        },
+        Ok(flow! {
+            name: "seq_fan_in",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            tx |> posted;
-            posted |> ledger;
-            ledger |> collect;
-        }
-    }
+            stages: {
+                accounts = infinite_source!(AccountRow => accounts_handler);
+                tx = infinite_source!(TxRow => tx_handler);
+                posted = join!(catalog accounts: AccountRow, TxRow -> PostedRow => posted_handler);
+                ledger = stateful!(PostedRow -> LedgerSnapshot => ledger_handler);
+                collect = sink!(LedgerSnapshot => collect_handler);
+            },
+
+            topology: {
+                tx |> posted;
+                posted |> ledger;
+                ledger |> collect;
+            }
+        })
+    })
 }
 
 async fn wait_for_running(handle: &FlowHandle) -> Result<()> {

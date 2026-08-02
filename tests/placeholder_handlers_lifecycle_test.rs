@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, stateful, transform};
+use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -41,24 +41,26 @@ impl TypedPayload for OutputEvent {
 
 #[tokio::test]
 async fn placeholder_handlers_survive_full_lifecycle() -> Result<()> {
-    let handle = flow! {
-        name: "placeholder_handlers_lifecycle_test",
-        journals: disk_journals(PathBuf::from("target/placeholder_handlers_lifecycle")),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        Ok(flow! {
+            name: "placeholder_handlers_lifecycle_test",
+            journals: disk_journals(PathBuf::from("target/placeholder_handlers_lifecycle")),
+            middleware: [],
 
-        stages: {
-            input = source!(InputEvent => placeholder!());
-            transform = transform!(InputEvent -> IntermediateEvent => placeholder!());
-            stateful = stateful!(IntermediateEvent -> OutputEvent => placeholder!());
-            sink = sink!(OutputEvent => placeholder!());
-        },
+            stages: {
+                input = source!(InputEvent => placeholder!());
+                transform = transform!(InputEvent -> IntermediateEvent => placeholder!());
+                stateful = stateful!(IntermediateEvent -> OutputEvent => placeholder!());
+                sink = sink!(OutputEvent => placeholder!());
+            },
 
-        topology: {
-            input |> transform;
-            transform |> stateful;
-            stateful |> sink;
-        }
-    }
+            topology: {
+                input |> transform;
+                transform |> stateful;
+                stateful |> sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;

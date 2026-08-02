@@ -117,15 +117,74 @@ impl FlowDefinition {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::ptr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
 
     use obzenflow_runtime::run_context::FlowBuildContext;
     use obzenflow_runtime::runtime_config::ResolvedRuntimeConfig;
 
     use super::{FlowBuildFailure, FlowDefinition};
     use crate::dsl::FlowBuildError;
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    #[test]
+    fn materialize_factory_stays_cold_until_the_build_future_is_polled() {
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&factory_calls);
+
+        let flow = FlowDefinition::materialize(move |_| {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            Err(FlowBuildError::StageResourcesFailed(
+                "first-poll sentinel".to_string(),
+            ))
+        });
+
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+
+        let mut build = flow.build(FlowBuildContext::for_tests());
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        let result = Future::poll(build.as_mut(), &mut context);
+
+        assert!(matches!(result, Poll::Ready(Err(_))));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dropping_an_unbuilt_definition_or_unpolled_build_future_does_not_run_the_factory() {
+        let definition_calls = Arc::new(AtomicUsize::new(0));
+        let observed_definition_calls = Arc::clone(&definition_calls);
+        let unbuilt = FlowDefinition::materialize(move |_| {
+            observed_definition_calls.fetch_add(1, Ordering::SeqCst);
+            Err(FlowBuildError::StageResourcesFailed(
+                "unbuilt sentinel".to_string(),
+            ))
+        });
+        drop(unbuilt);
+        assert_eq!(definition_calls.load(Ordering::SeqCst), 0);
+
+        let future_calls = Arc::new(AtomicUsize::new(0));
+        let observed_future_calls = Arc::clone(&future_calls);
+        let flow = FlowDefinition::materialize(move |_| {
+            observed_future_calls.fetch_add(1, Ordering::SeqCst);
+            Err(FlowBuildError::StageResourcesFailed(
+                "unpolled sentinel".to_string(),
+            ))
+        });
+        let build = flow.build(FlowBuildContext::for_tests());
+        drop(build);
+        assert_eq!(future_calls.load(Ordering::SeqCst), 0);
+    }
 
     #[tokio::test]
     async fn materialize_invokes_factory_once_and_forwards_the_same_snapshot() {

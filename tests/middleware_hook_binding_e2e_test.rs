@@ -471,33 +471,39 @@ fn build_flow(
     effect_calls: Arc<AtomicUsize>,
     delivered: &Delivered,
 ) -> FlowDefinition {
-    let probe = sink_probe(delivered);
-    flow! {
-        name: "middleware_hook_binding_e2e",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    let delivered = delivered.clone();
+    FlowDefinition::materialize(move |_runtime_config| {
+        let hook_source = HookSource::new();
+        let hook_transform = HookTransform { effect_calls };
+        let output_sink = SinkTyped::with_delivery(sink_probe(&delivered)).idempotent();
 
-        stages: {
-            input = source!(HookInput => HookSource::new(), [
-                HookProofFactory::new(counters.clone(), 1)
-            ]);
-            transform = effectful_transform!(
-                HookInput -> { HookOutput, HookEffectValue } => HookTransform { effect_calls },
-                effects: [HookEffect],
-                middleware: [
+        Ok(flow! {
+            name: "middleware_hook_binding_e2e",
+            journals: disk_journals(journal_base),
+            middleware: [],
+
+            stages: {
+                input = source!(HookInput => hook_source, [
                     HookProofFactory::new(counters.clone(), 1)
-                ]
-            );
-            output = sink!(HookOutput => SinkTyped::with_delivery(probe).idempotent(), middleware: [
-                HookProofFactory::new(counters.clone(), 1)
-            ]);
-        },
+                ]);
+                transform = effectful_transform!(
+                    HookInput -> { HookOutput, HookEffectValue } => hook_transform,
+                    effects: [HookEffect],
+                    middleware: [
+                        HookProofFactory::new(counters.clone(), 1)
+                    ]
+                );
+                output = sink!(HookOutput => output_sink, middleware: [
+                    HookProofFactory::new(counters.clone(), 1)
+                ]);
+            },
 
-        topology: {
-            input |> transform;
-            transform |> output;
-        }
-    }
+            topology: {
+                input |> transform;
+                transform |> output;
+            }
+        })
+    })
 }
 
 fn build_failure_cause_flow(
@@ -505,26 +511,32 @@ fn build_failure_cause_flow(
     effect_calls: Arc<AtomicUsize>,
     delivered: &Delivered,
 ) -> FlowDefinition {
-    let probe = sink_probe(delivered);
-    flow! {
-        name: "middleware_failure_cause_api",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    let delivered = delivered.clone();
+    FlowDefinition::materialize(move |_runtime_config| {
+        let hook_source = HookSource::new();
+        let hook_transform = HookTransform { effect_calls };
+        let output_sink = SinkTyped::with_delivery(sink_probe(&delivered)).idempotent();
 
-        stages: {
-            input = source!(HookInput => HookSource::new());
-            transform = effectful_transform!(
-                HookInput -> { HookOutput, HookEffectValue } => HookTransform { effect_calls },
-                effects: [HookEffect with [Box::new(BreakerCauseProofFactory)]],
-                middleware: []);
-            output = sink!(HookOutput => SinkTyped::with_delivery(probe).idempotent());
-        },
+        Ok(flow! {
+            name: "middleware_failure_cause_api",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            input |> transform;
-            transform |> output;
-        }
-    }
+            stages: {
+                input = source!(HookInput => hook_source);
+                transform = effectful_transform!(
+                    HookInput -> { HookOutput, HookEffectValue } => hook_transform,
+                    effects: [HookEffect with [Box::new(BreakerCauseProofFactory)]],
+                    middleware: []);
+                output = sink!(HookOutput => output_sink);
+            },
+
+            topology: {
+                input |> transform;
+                transform |> output;
+            }
+        })
+    })
 }
 
 fn delivered_payloads(delivered: &Delivered, provenance: DeliveryProvenance) -> Vec<HookOutput> {

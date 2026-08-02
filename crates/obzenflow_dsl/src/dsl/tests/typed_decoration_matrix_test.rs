@@ -20,8 +20,9 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
         EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler,
-        InfiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
+        InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
     };
+    use obzenflow_runtime::stages::sink::SinkTyped;
     use obzenflow_runtime::typing::{SinkTyping, SourceTyping, StatefulTyping, TransformTyping};
     use serde::{Deserialize, Serialize};
 
@@ -47,6 +48,23 @@ mod tests {
     impl FiniteSourceHandler for Src {
         fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
             Ok(None)
+        }
+    }
+
+    mod qualified {
+        use super::*;
+
+        #[derive(Clone, Debug)]
+        pub(super) struct Source;
+
+        impl SourceTyping for Source {
+            type Output = Out;
+        }
+
+        impl FiniteSourceHandler for Source {
+            fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+                Ok(None)
+            }
         }
     }
 
@@ -214,6 +232,34 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
+    struct Jn;
+    #[async_trait]
+    impl JoinHandler for Jn {
+        type State = ();
+
+        fn initial_state(&self) -> Self::State {}
+
+        fn process_event(
+            &self,
+            _state: &mut Self::State,
+            _event: ChainEvent,
+            _source_id: obzenflow_core::StageId,
+            _writer_id: obzenflow_core::WriterId,
+        ) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![])
+        }
+
+        fn on_source_eof(
+            &self,
+            _state: &mut Self::State,
+            _source_id: obzenflow_core::StageId,
+            _writer_id: obzenflow_core::WriterId,
+        ) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![])
+        }
+    }
+
+    #[derive(Clone, Debug)]
     struct TxEffect;
 
     #[async_trait]
@@ -238,6 +284,91 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_stage_family_accepts_a_bound_path_in_its_maximally_decorated_form() {
+        let finite = Src;
+        let async_finite = AsyncSrc;
+        let infinite = InfSrc;
+        let async_infinite = AsyncInfSrc;
+        let transform = Tr;
+        let async_transform = AsyncTr;
+        let effectful_transform = FxTr;
+        let stateful = St;
+        let effectful_stateful = FxSt;
+        let join = Jn;
+        let sink = SinkTyped::new(|_out: Out| async move {});
+
+        let _ = crate::source!(
+            name: "finite",
+            Out => finite,
+            [],
+            backpressure: crate::dsl::backpressure_clause::enforced(1)
+        );
+        let _ = crate::async_source!(
+            name: "async_finite",
+            Out => async_finite,
+            [],
+            backpressure: crate::dsl::backpressure_clause::enforced(1)
+        );
+        let _ = crate::infinite_source!(
+            name: "infinite",
+            Out => infinite,
+            [],
+            backpressure: crate::dsl::backpressure_clause::enforced(1)
+        );
+        let _ = crate::async_infinite_source!(
+            name: "async_infinite",
+            Out => async_infinite,
+            [],
+            backpressure: crate::dsl::backpressure_clause::enforced(1)
+        );
+        let _ = crate::transform!(
+            name: "transform",
+            In -> Out => transform,
+            [],
+            backpressure: crate::dsl::backpressure_clause::enforced(1)
+        );
+        let _ = crate::async_transform!(
+            name: "async_transform",
+            In -> Out => async_transform,
+            [],
+            backpressure: crate::dsl::backpressure_clause::enforced(1)
+        );
+        let _ = crate::effectful_transform!(
+            name: "effectful_transform",
+            In -> Out => effectful_transform,
+            effects: [],
+            middleware: [],
+            backpressure: crate::dsl::backpressure_clause::enforced(1)
+        );
+        let _ = crate::stateful!(
+            name: "stateful",
+            In -> Out => stateful,
+            emit_interval = std::time::Duration::from_millis(1),
+            [],
+            backpressure: crate::dsl::backpressure_clause::enforced(1)
+        );
+        let _ = crate::effectful_stateful!(
+            name: "effectful_stateful",
+            In -> Out => effectful_stateful,
+            effects: [],
+            middleware: [],
+            backpressure: crate::dsl::backpressure_clause::enforced(1)
+        );
+        let _ = crate::join!(
+            name: "join",
+            catalog reference_stage: In,
+            In -> Out => join,
+            []
+        );
+        let _ = crate::sink!(
+            name: "sink",
+            Out => sink,
+            delivery: idempotent,
+            middleware: []
+        );
+    }
+
     // ── source! ─────────────────────────────────────────────────────────────
     #[test]
     fn source_typed_bare() {
@@ -254,6 +385,18 @@ mod tests {
     #[test]
     fn source_typed_name_mw() {
         let _ = crate::source!(name: "s", Out => Src, []);
+    }
+    #[test]
+    fn source_accepts_a_qualified_unit_path() {
+        let _ = crate::source!(Out => qualified::Source);
+    }
+    #[test]
+    fn source_accepts_a_function_parameter_name() {
+        fn declare(handler: Src) {
+            let _ = crate::source!(Out => handler);
+        }
+
+        declare(Src);
     }
 
     // ── async_source! ───────────────────────────────────────────────────────
@@ -495,23 +638,30 @@ mod tests {
     fn sink_typed_delivery_clause() {
         // The clause rides the sealed closure-tier structs; a custom handler
         // implements `SinkHandler::delivery_safety` directly instead.
-        let _ = crate::sink!(Out => |_out| {}, delivery: idempotent);
-        let _ = crate::sink!(Out => |_out| {}, delivery: non_idempotent, middleware: []);
+        let idempotent_sink = SinkTyped::new(|_out: Out| async move {});
+        let _ = crate::sink!(Out => idempotent_sink, delivery: idempotent);
+        let non_idempotent_sink = SinkTyped::new(|_out: Out| async move {});
+        let _ = crate::sink!(Out => non_idempotent_sink, delivery: non_idempotent, middleware: []);
     }
     #[test]
     fn sink_exact_contract_one_arg_closure() {
-        let _ = crate::sink!(Out => |_out| {});
-        let _ = crate::sink!(Out => |_out| {}, delivery: idempotent);
-        let _ = crate::sink!(name: "s", Out => |_out| {}, middleware: []);
+        let bare_sink = SinkTyped::new(|_out: Out| async move {});
+        let _ = crate::sink!(Out => bare_sink);
+        let idempotent_sink = SinkTyped::new(|_out: Out| async move {});
+        let _ = crate::sink!(Out => idempotent_sink, delivery: idempotent);
+        let named_sink = SinkTyped::new(|_out: Out| async move {});
+        let _ = crate::sink!(name: "s", Out => named_sink, middleware: []);
     }
     #[test]
     fn sink_exact_contract_delivery_closure() {
-        let _ = crate::sink!(Out => |_out, _delivery| {});
+        let bare_sink = SinkTyped::with_delivery(|_out: Out, _delivery| async move {});
+        let _ = crate::sink!(Out => bare_sink);
+        let named_sink = SinkTyped::with_delivery(|out: Out, delivery| async move {
+            let _ = (out, delivery.provenance());
+        });
         let _ = crate::sink!(
             name: "s",
-            Out => |out, delivery| {
-                let _ = (out, delivery.provenance());
-            },
+            Out => named_sink,
             delivery: idempotent,
             middleware: []
         );

@@ -15,9 +15,10 @@
 use anyhow::Result;
 use obzenflow::typed::{sources, stateful as typed_stateful};
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, stateful};
+use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::stages::sink::SinkTyped;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -62,44 +63,53 @@ fn main() -> Result<()> {
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_blocking(flow! {
-            name: "stateful_emit_within_tumbling",
-            journals: disk_journals(std::path::PathBuf::from("target/stateful_emit_within_tumbling")),
-            middleware: [],
+        .run_blocking(FlowDefinition::materialize(move |_runtime_config| {
+            let clicks_handler = sources::finite_from_fn(move |index| {
+                if index >= total {
+                    return None;
+                }
 
-            stages: {
-                clicks = source!(ClickEvent => sources::finite_from_fn(move |index| {
-                    if index >= total {
-                        return None;
-                    }
+                // Ensure the run lasts long enough to produce multiple window emissions.
+                std::thread::sleep(per_event_delay);
 
-                    // Ensure the run lasts long enough to produce multiple window emissions.
-                    std::thread::sleep(per_event_delay);
-
-                    let user_id = if index % 2 == 0 { "alice" } else { "bob" }.to_string();
-                    Some(ClickEvent { user_id, seq: index as u64 })
-                }));
-
-                per_user = stateful!(
-                    ClickEvent -> UserCountUpdate => typed_stateful::group_by(
-                        |e: &ClickEvent| e.user_id.clone(),
-                        |state: &mut UserCount, _e: &ClickEvent| {
-                            state.count += 1;
-                        },
-                    )
-                    .emit_within(window)
+                let user_id = if index % 2 == 0 { "alice" } else { "bob" }.to_string();
+                Some(ClickEvent {
+                    user_id,
+                    seq: index as u64,
+                })
+            });
+            let per_user_handler = typed_stateful::group_by(
+                |e: &ClickEvent| e.user_id.clone(),
+                |state: &mut UserCount, _e: &ClickEvent| {
+                    state.count += 1;
+                },
+            )
+            .emit_within(window);
+            let out_handler = SinkTyped::new(|update: UserCountUpdate| async move {
+                println!(
+                    "window update: user={} count={}",
+                    update.key, update.result.count
                 );
+            })
+            .idempotent();
 
-                out = sink!(|update: UserCountUpdate| {
-                    println!("window update: user={} count={}", update.key, update.result.count);
-                }, delivery: idempotent);
-            },
+            Ok(flow! {
+                name: "stateful_emit_within_tumbling",
+                journals: disk_journals(std::path::PathBuf::from("target/stateful_emit_within_tumbling")),
+                middleware: [],
 
-            topology: {
-                clicks |> per_user;
-                per_user |> out;
-            }
-        })?;
+                stages: {
+                    clicks = source!(ClickEvent => clicks_handler);
+                    per_user = stateful!(ClickEvent -> UserCountUpdate => per_user_handler);
+                    out = sink!(UserCountUpdate => out_handler);
+                },
+
+                topology: {
+                    clicks |> per_user;
+                    per_user |> out;
+                }
+            })
+        }))?;
 
     Ok(())
 }
