@@ -7,10 +7,17 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const LOWERING_IMPLEMENTATION: &str = "crates/obzenflow_dsl/src/dsl/stage_macros.rs";
-const FLOW_IMPLEMENTATION: &str = "crates/obzenflow_dsl/src/dsl/dsl.rs";
-const FOCUSED_HELPER_TESTS: &str =
-    "crates/obzenflow_dsl/src/dsl/tests/typed_decoration_matrix_test.rs";
+// FLOWIP-133a helper boundary: helper spellings are the lowering itself in
+// these two files; everywhere else they are a violation.
+const LOWERING_IMPLEMENTATIONS: &[&str] = &[
+    "crates/obzenflow_dsl/src/dsl/stage_macros.rs",
+    "crates/obzenflow_dsl/src/dsl/dsl.rs",
+];
+// The sole test file licensed to spell helpers: it pins cross-helper lowering
+// contracts the public surface cannot observe (FLOWIP-120z muncher agreement).
+// Public-surface tests must not be added there.
+const LOWERING_CONTRACT_TESTS: &str =
+    "crates/obzenflow_dsl/src/dsl/tests/lowering_helper_contract_test.rs";
 
 fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory)
@@ -92,15 +99,15 @@ fn authored_flow_invocation_lines(source: &str) -> Vec<usize> {
 fn first_party_declarations_do_not_call_exported_lowering_helpers_directly() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut rust_files = Vec::new();
-    for source_root in ["crates", "examples", "tests"] {
+    for source_root in ["crates", "examples", "src", "tests"] {
         collect_rust_files(&repository.join(source_root), &mut rust_files);
     }
 
-    let allowed = [
-        LOWERING_IMPLEMENTATION,
-        FLOW_IMPLEMENTATION,
-        FOCUSED_HELPER_TESTS,
-    ];
+    let allowed: Vec<&str> = LOWERING_IMPLEMENTATIONS
+        .iter()
+        .copied()
+        .chain([LOWERING_CONTRACT_TESTS])
+        .collect();
     let mut violations = Vec::new();
 
     for path in rust_files {

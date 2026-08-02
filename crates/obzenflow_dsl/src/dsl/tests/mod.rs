@@ -10,6 +10,7 @@ pub mod composite_source_guards_test;
 pub mod composite_substrate_test;
 pub mod cycle_detection_test;
 pub mod join_tuple_syntax_test;
+pub mod lowering_helper_contract_test;
 pub mod placeholder_handlers_test;
 pub mod typed_decoration_matrix_test;
 pub mod typed_stage_contracts_test;

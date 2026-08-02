@@ -1,45 +1,37 @@
 error: async_source!: poll timeout is handler configuration; timeout tuples are no longer accepted. Configure the handler inside the materialiser, then pass its name. Example: let source = MySource::builder().poll_timeout(timeout).build()?; events = async_source!(Event => source);
-  --> tests/compile_fail/handler_path_timeout_tuple.rs:11:13
+  --> tests/compile_fail/handler_path_timeout_tuple.rs:9:13
    |
-11 |       let _ = obzenflow_dsl::async_source!(
+ 9 |       let _ = obzenflow_dsl::async_source!(
    |  _____________^
-12 | |         Event => (Handler, Duration::from_secs(1))
-13 | |     );
+10 | |         Event => (Handler, std::time::Duration::from_secs(1))
+11 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_async_source_timeout_diagnostic` which comes from the expansion of the macro `obzenflow_dsl::async_source` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: async_infinite_source!: poll timeout is handler configuration; timeout tuples are no longer accepted. Configure the handler inside the materialiser, then pass its name. Example: let source = MySource::builder().poll_timeout(timeout).build()?; events = async_source!(Event => source);
-  --> tests/compile_fail/handler_path_timeout_tuple.rs:14:13
+error: async_infinite_source!: poll timeout is handler configuration; timeout tuples are no longer accepted. Configure the handler inside the materialiser, then pass its name. Example: let source = MySource::builder().poll_timeout(timeout).build()?; events = async_infinite_source!(Event => source);
+  --> tests/compile_fail/handler_path_timeout_tuple.rs:12:13
    |
-14 |       let _ = obzenflow_dsl::async_infinite_source!(
+12 |       let _ = obzenflow_dsl::async_infinite_source!(
    |  _____________^
-15 | |         name: "events",
-16 | |         Event => (Handler, Duration::from_secs(1)),
-17 | |         []
-18 | |     );
+13 | |         name: "events",
+14 | |         Event => (Handler, std::time::Duration::from_secs(1)),
+15 | |         []
+16 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_async_source_timeout_diagnostic` which comes from the expansion of the macro `obzenflow_dsl::async_infinite_source` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: async_source!: poll timeout is handler configuration; timeout tuples are no longer accepted. Configure the handler inside the materialiser, then pass its name. Example: let source = MySource::builder().poll_timeout(timeout).build()?; events = async_source!(Event => source);
-  --> tests/compile_fail/handler_path_timeout_tuple.rs:19:13
+  --> tests/compile_fail/handler_path_timeout_tuple.rs:17:13
    |
-19 |       let _ = obzenflow_dsl::async_source!(
+17 |       let _ = obzenflow_dsl::async_source!(
    |  _____________^
-20 | |         name: "constructed",
-21 | |         Event => (Handler::new(), Duration::from_secs(1)),
-22 | |         [],
-23 | |         backpressure: policy
-24 | |     );
+18 | |         name: "constructed",
+19 | |         Event => (Handler::new(), std::time::Duration::from_secs(1)),
+20 | |         [],
+21 | |         backpressure: policy
+22 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_async_source_timeout_diagnostic` which comes from the expansion of the macro `obzenflow_dsl::async_source` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-warning: unused import: `std::time::Duration`
- --> tests/compile_fail/handler_path_timeout_tuple.rs:5:5
-  |
-5 | use std::time::Duration;
-  |     ^^^^^^^^^^^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

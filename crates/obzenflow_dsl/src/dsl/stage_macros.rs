@@ -117,13 +117,12 @@ macro_rules! __obzenflow_handler_path_diagnostic {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_source_timeout_diagnostic {
-    ($surface:literal) => {
+    ($surface:literal, $example:literal) => {
         compile_error!(concat!(
             $surface,
             ": poll timeout is handler configuration; timeout tuples are no longer accepted. ",
             "Configure the handler inside the materialiser, then pass its name. Example: ",
-            "let source = MySource::builder().poll_timeout(timeout).build()?; ",
-            "events = async_source!(Event => source);",
+            $example,
         ))
     };
 }
@@ -624,16 +623,28 @@ macro_rules! async_source {
         $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = $handler_head $(:: $handler_tail)*, middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
     ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!("async_source!")
+        $crate::__obzenflow_async_source_timeout_diagnostic!(
+            "async_source!",
+            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_source!(Event => source);"
+        )
     };
     ($out:ty => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!("async_source!")
+        $crate::__obzenflow_async_source_timeout_diagnostic!(
+            "async_source!",
+            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_source!(Event => source);"
+        )
     };
     (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!("async_source!")
+        $crate::__obzenflow_async_source_timeout_diagnostic!(
+            "async_source!",
+            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_source!(Event => source);"
+        )
     };
     (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!("async_source!")
+        $crate::__obzenflow_async_source_timeout_diagnostic!(
+            "async_source!",
+            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_source!(Event => source);"
+        )
     };
     ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
@@ -1391,16 +1402,28 @@ macro_rules! async_infinite_source {
         )
     };
     ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!("async_infinite_source!")
+        $crate::__obzenflow_async_source_timeout_diagnostic!(
+            "async_infinite_source!",
+            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_infinite_source!(Event => source);"
+        )
     };
     ($out:ty => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!("async_infinite_source!")
+        $crate::__obzenflow_async_source_timeout_diagnostic!(
+            "async_infinite_source!",
+            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_infinite_source!(Event => source);"
+        )
     };
     (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!("async_infinite_source!")
+        $crate::__obzenflow_async_source_timeout_diagnostic!(
+            "async_infinite_source!",
+            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_infinite_source!(Event => source);"
+        )
     };
     (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr) $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
-        $crate::__obzenflow_async_source_timeout_diagnostic!("async_infinite_source!")
+        $crate::__obzenflow_async_source_timeout_diagnostic!(
+            "async_infinite_source!",
+            "let source = MySource::builder().poll_timeout(timeout).build()?; events = async_infinite_source!(Event => source);"
+        )
     };
     ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_handler_path_diagnostic!(

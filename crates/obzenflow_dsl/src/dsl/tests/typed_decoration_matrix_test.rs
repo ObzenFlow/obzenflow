@@ -13,7 +13,7 @@ mod tests {
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use obzenflow_core::{ChainEvent, TypedPayload};
     use obzenflow_runtime::effects::{
-        Effect, EffectContext, EffectError, EffectSafety, EffectSet, Effects, StageCompletion,
+        Effect, EffectContext, EffectError, EffectSafety, Effects, StageCompletion,
     };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -523,61 +523,9 @@ mod tests {
         assert_eq!(declarations[0].transactional_executor, Some("tx"));
     }
 
-    #[test]
-    fn effect_manifest_type_muncher_matches_every_declaration_spelling() {
-        type Plain = crate::__obzenflow_effect_manifest_types!(TxEffect);
-        let mut plain = Vec::new();
-        let _plain_attachments: Vec<crate::dsl::stage_descriptor::EffectPolicyAttachment> =
-            Vec::new();
-        crate::__obzenflow_effect_entries!(@entry plain, _plain_attachments, [], TxEffect);
-        assert_eq!(
-            <Plain as EffectSet>::effect_types(),
-            plain
-                .iter()
-                .map(|entry| entry.effect_type)
-                .collect::<Vec<_>>()
-        );
-
-        type WithPolicy = crate::__obzenflow_effect_manifest_types!(
-            TxEffect with [obzenflow_adapters::middleware::RateLimiterBuilder::new(2.0).build()]
-        );
-        let mut with_policy = Vec::new();
-        let mut with_policy_attachments = Vec::new();
-        crate::__obzenflow_effect_entries!(
-            @entry with_policy,
-            with_policy_attachments,
-            [],
-            TxEffect with [obzenflow_adapters::middleware::RateLimiterBuilder::new(2.0).build()]
-        );
-        assert_eq!(
-            <WithPolicy as EffectSet>::effect_types(),
-            with_policy
-                .iter()
-                .map(|entry| entry.effect_type)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(with_policy_attachments.len(), 1);
-
-        type Transactional =
-            crate::__obzenflow_effect_manifest_types!(transactional(TxEffect, "tx"));
-        let mut transactional = Vec::new();
-        let transactional_attachments: Vec<crate::dsl::stage_descriptor::EffectPolicyAttachment> =
-            Vec::new();
-        crate::__obzenflow_effect_entries!(
-            @entry transactional,
-            transactional_attachments,
-            [],
-            transactional(TxEffect, "tx")
-        );
-        assert_eq!(
-            <Transactional as EffectSet>::effect_types(),
-            transactional
-                .iter()
-                .map(|entry| entry.effect_type)
-                .collect::<Vec<_>>()
-        );
-        assert!(transactional_attachments.is_empty());
-    }
+    // The effect-manifest muncher cross-check lives in
+    // `lowering_helper_contract_test.rs`, the sole test file licensed to
+    // invoke lowering helpers directly (FLOWIP-133a helper boundary).
 
     // ── stateful! ───────────────────────────────────────────────────────────
     #[test]
