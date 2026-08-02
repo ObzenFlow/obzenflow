@@ -13,7 +13,7 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{async_source, flow, sink};
+use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncFiniteSourceHandler, SinkHandler};
@@ -55,16 +55,12 @@ struct TestAsyncEventSource {
 }
 
 impl TestAsyncEventSource {
-    fn new() -> (Self, Arc<AtomicU64>) {
-        let drain_calls = Arc::new(AtomicU64::new(0));
-        (
-            Self {
-                emitted: 0,
-                writer_id: WriterId::from(StageId::new()),
-                drain_calls: drain_calls.clone(),
-            },
+    fn new(drain_calls: Arc<AtomicU64>) -> Self {
+        Self {
+            emitted: 0,
+            writer_id: WriterId::from(StageId::new()),
             drain_calls,
-        )
+        }
     }
 }
 
@@ -97,14 +93,8 @@ struct CollectSink {
 }
 
 impl CollectSink {
-    fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                events: events.clone(),
-            },
-            events,
-        )
+    fn new(events: Arc<Mutex<Vec<ChainEvent>>>) -> Self {
+        Self { events }
     }
 }
 
@@ -189,25 +179,31 @@ impl MiddlewareFactory for CountDataCommitFactory {
 
 #[tokio::test]
 async fn async_finite_source_emits_events_and_calls_drain() -> Result<()> {
-    let (source, drain_calls) = TestAsyncEventSource::new();
-    let (sink, events) = CollectSink::new();
-
+    let drain_calls = Arc::new(AtomicU64::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
     let journal_root = unique_journal_dir("async_finite_source_basic");
+    let drain_calls_for_flow = Arc::clone(&drain_calls);
+    let events_for_flow = Arc::clone(&events);
 
-    let handle = flow! {
-        name: "async_finite_source_basic_test",
-        journals: disk_journals(journal_root.clone()),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source = TestAsyncEventSource::new(drain_calls_for_flow);
+        let sink = CollectSink::new(events_for_flow);
 
-        stages: {
-            source = async_source!(AsyncTestEvent => source);
-            sink = sink!(AsyncTestEvent => sink);
-        },
+        Ok(flow! {
+            name: "async_finite_source_basic_test",
+            journals: disk_journals(journal_root),
+            middleware: [],
 
-        topology: {
-            source |> sink;
-        }
-    }
+            stages: {
+                source = async_source!(AsyncTestEvent => source);
+                sink = sink!(AsyncTestEvent => sink);
+            },
+
+            topology: {
+                source |> sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
@@ -237,29 +233,35 @@ async fn async_finite_source_emits_events_and_calls_drain() -> Result<()> {
 
 #[tokio::test]
 async fn async_finite_source_applies_stage_middleware() -> Result<()> {
-    let (source, _drain_calls) = TestAsyncEventSource::new();
-    let (sink, events) = CollectSink::new();
+    let drain_calls = Arc::new(AtomicU64::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
     let observer_calls = Arc::new(AtomicU64::new(0));
-    let observer_calls_for_flow = observer_calls.clone();
-
     let journal_root = unique_journal_dir("async_finite_source_middleware");
+    let drain_calls_for_flow = Arc::clone(&drain_calls);
+    let events_for_flow = Arc::clone(&events);
+    let observer_calls_for_flow = Arc::clone(&observer_calls);
 
-    let handle = flow! {
-        name: "async_finite_source_middleware_test",
-        journals: disk_journals(journal_root.clone()),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source = TestAsyncEventSource::new(drain_calls_for_flow);
+        let sink = CollectSink::new(events_for_flow);
 
-        stages: {
-            source = async_source!(AsyncTestEvent => source, [
-                CountDataCommitFactory { calls: observer_calls_for_flow.clone() }
-            ]);
-            sink = sink!(AsyncTestEvent => sink);
-        },
+        Ok(flow! {
+            name: "async_finite_source_middleware_test",
+            journals: disk_journals(journal_root),
+            middleware: [],
 
-        topology: {
-            source |> sink;
-        }
-    }
+            stages: {
+                source = async_source!(AsyncTestEvent => source, [
+                    CountDataCommitFactory { calls: observer_calls_for_flow }
+                ]);
+                sink = sink!(AsyncTestEvent => sink);
+            },
+
+            topology: {
+                source |> sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;

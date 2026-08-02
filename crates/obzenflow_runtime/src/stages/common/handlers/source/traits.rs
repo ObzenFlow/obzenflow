@@ -114,14 +114,19 @@ pub trait AsyncFiniteSourceHandler: Send + Sync {
     /// Default is a no-op for existing handlers that manage their own `WriterId`.
     fn bind_writer_id(&mut self, _id: WriterId) {}
 
-    /// Suggest a stage-level poll timeout for bounding `next().await`.
+    /// Return the configured poll timeout for bounding one live `next().await`.
     ///
-    /// If `None`, descriptors keep their existing defaults.
-    fn suggested_poll_timeout(&self) -> Option<Duration> {
-        None
+    /// `Some(duration)` asks the supervisor to enforce that deadline. `None`
+    /// disables poll-timeout enforcement. Finite sources default to 30 seconds.
+    fn poll_timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(30))
     }
 
     /// Pull zero or more events from the source asynchronously.
+    ///
+    /// The returned future must be cancellation-safe. Timeout expiry and external
+    /// control signals may drop it before completion, after which live polling may
+    /// resume with another call.
     async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError>;
 
     /// Perform any cleanup during shutdown.
@@ -150,10 +155,11 @@ pub trait AsyncInfiniteSourceHandler: Send + Sync {
     /// Default is a no-op for existing handlers that manage their own `WriterId`.
     fn bind_writer_id(&mut self, _id: WriterId) {}
 
-    /// Suggest a stage-level poll timeout for bounding `next().await`.
+    /// Return the configured poll timeout for bounding one live `next().await`.
     ///
-    /// If `None`, descriptors keep their existing defaults.
-    fn suggested_poll_timeout(&self) -> Option<Duration> {
+    /// `Some(duration)` asks the supervisor to enforce that deadline. `None`
+    /// disables poll-timeout enforcement. Infinite sources default to no timeout.
+    fn poll_timeout(&self) -> Option<Duration> {
         None
     }
 
@@ -168,6 +174,10 @@ pub trait AsyncInfiniteSourceHandler: Send + Sync {
     }
 
     /// Pull zero or more events from the source asynchronously.
+    ///
+    /// The returned future must be cancellation-safe. Timeout expiry and external
+    /// control signals may drop it before completion, after which live polling may
+    /// resume with another call.
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError>;
 
     /// Perform any cleanup during shutdown.

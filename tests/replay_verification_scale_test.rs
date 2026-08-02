@@ -75,20 +75,25 @@ where
 }
 
 fn build_flow(journal_base: PathBuf) -> FlowDefinition {
-    flow! {
-        name: "replay_verification_scale",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let ticks_handler = Ticks::new();
+        let out_handler = SinkTyped::with_delivery(discard::<Tick>()).idempotent();
 
-        stages: {
-            ticks = source!(Tick => Ticks::new());
-            out = sink!(Tick => SinkTyped::with_delivery(discard::<Tick>()).idempotent());
-        },
+        Ok(flow! {
+            name: "replay_verification_scale",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            ticks |> out;
-        }
-    }
+            stages: {
+                ticks = source!(Tick => ticks_handler);
+                out = sink!(Tick => out_handler);
+            },
+
+            topology: {
+                ticks |> out;
+            }
+        })
+    })
 }
 
 fn latest_run_dir(base: &Path) -> PathBuf {

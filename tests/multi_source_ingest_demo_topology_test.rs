@@ -156,45 +156,53 @@ fn multi_source_ingest_demo_satisfies_typed_fan_in_invariants() {
     let align_file_id = StageId::new();
     let aggregator_id = StageId::new();
     let sink_id = StageId::new();
+    let kafka_source_handler = OneShotSource::<KafkaRawEvent>::new();
+    let webhook_source_handler = OneShotSource::<WebhookEnvelope>::new();
+    let file_source_handler = OneShotSource::<FileLine>::new();
+    let align_kafka_handler = align_to_ingested();
+    let align_webhook_handler = align_to_ingested();
+    let align_file_handler = align_to_ingested();
+    let aggregator_handler = IngestAggregator;
+    let summary_sink_handler = NullSink;
 
     let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
     descriptors.insert(
         "kafka_source".to_string(),
-        source!(name: "kafka_source", KafkaRawEvent => OneShotSource::<KafkaRawEvent>::new()),
+        source!(name: "kafka_source", KafkaRawEvent => kafka_source_handler),
     );
     descriptors.insert(
         "webhook_source".to_string(),
         source!(
             name: "webhook_source",
-            WebhookEnvelope => OneShotSource::<WebhookEnvelope>::new()
+            WebhookEnvelope => webhook_source_handler
         ),
     );
     descriptors.insert(
         "file_source".to_string(),
-        source!(name: "file_source", FileLine => OneShotSource::<FileLine>::new()),
+        source!(name: "file_source", FileLine => file_source_handler),
     );
     descriptors.insert(
         "align_kafka".to_string(),
-        transform!(name: "align_kafka", KafkaRawEvent -> IngestedEvent => align_to_ingested()),
+        transform!(name: "align_kafka", KafkaRawEvent -> IngestedEvent => align_kafka_handler),
     );
     descriptors.insert(
         "align_webhook".to_string(),
         transform!(
             name: "align_webhook",
-            WebhookEnvelope -> IngestedEvent => align_to_ingested()
+            WebhookEnvelope -> IngestedEvent => align_webhook_handler
         ),
     );
     descriptors.insert(
         "align_file".to_string(),
-        transform!(name: "align_file", FileLine -> IngestedEvent => align_to_ingested()),
+        transform!(name: "align_file", FileLine -> IngestedEvent => align_file_handler),
     );
     descriptors.insert(
         "aggregator".to_string(),
-        stateful!(name: "aggregator", IngestedEvent -> IngestSummary => IngestAggregator),
+        stateful!(name: "aggregator", IngestedEvent -> IngestSummary => aggregator_handler),
     );
     descriptors.insert(
         "summary_sink".to_string(),
-        sink!(name: "summary_sink", IngestSummary => NullSink),
+        sink!(name: "summary_sink", IngestSummary => summary_sink_handler),
     );
 
     let mut name_to_id = HashMap::new();

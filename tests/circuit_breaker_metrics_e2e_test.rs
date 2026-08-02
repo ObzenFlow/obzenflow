@@ -16,7 +16,7 @@ use obzenflow_core::{
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     StageId, WriterId,
 };
-use obzenflow_dsl::{flow, sink, source};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
@@ -159,34 +159,40 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
 
     println!("\n=== Circuit Breaker Metrics E2E Test ===\n");
 
-    // Create handlers
-    let source = TimedEventSource::new();
-    let (sink, collected_events) = MetricsSink::new();
+    let collected_events = Arc::new(Mutex::new(Vec::new()));
+    let collected_events_for_flow = Arc::clone(&collected_events);
 
     println!("Building flow with circuit breaker middleware...");
 
     // Build flow with circuit breaker
-    let flow_handle = flow! {
-        name: "circuit_breaker_test",
-        journals: disk_journals(std::path::PathBuf::from("target/cb_metrics_e2e")),
-        middleware: [],
+    let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source = TimedEventSource::new();
+        let sink = MetricsSink {
+            events: collected_events_for_flow,
+        };
 
-        stages: {
-            // Typed source-poll binding: three error-marked batches open the breaker.
-            cb_source = source!(CircuitMetricEvent => source, [
-                CircuitBreaker::builder()
-                    .consecutive_failures(3)
-                    .open_for(Duration::from_millis(100))
-                    .build()
-                    .expect("source breaker configuration")
-            ]);
-            cb_sink = sink!(CircuitMetricEvent => sink);
-        },
+        Ok(flow! {
+            name: "circuit_breaker_test",
+            journals: disk_journals(std::path::PathBuf::from("target/cb_metrics_e2e")),
+            middleware: [],
 
-        topology: {
-            cb_source |> cb_sink;
-        }
-    }
+            stages: {
+                // Typed source-poll binding: three error-marked batches open the breaker.
+                cb_source = source!(CircuitMetricEvent => source, [
+                    CircuitBreaker::builder()
+                        .consecutive_failures(3)
+                        .open_for(Duration::from_millis(100))
+                        .build()
+                        .expect("source breaker configuration")
+                ]);
+                cb_sink = sink!(CircuitMetricEvent => sink);
+            },
+
+            topology: {
+                cb_source |> cb_sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
@@ -341,27 +347,35 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
         }
     }
 
-    let flow_handle = flow! {
-        name: "circuit_breaker_summary_test",
-        journals: disk_journals(std::path::PathBuf::from(
-            "target/cb_metrics_summary_e2e",
-        )),
-        middleware: [],
+    let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
+        let rapid_source_handler = RapidSource {
+            count: 0,
+            writer_id: WriterId::from(StageId::new()),
+        };
+        let null_sink_handler = MetricsSink::new().0;
 
-        stages: {
-            rapid_source = source!(CircuitMetricEvent => RapidSource { count: 0, writer_id: WriterId::from(StageId::new()) }, [
-                CircuitBreaker::builder()
-                    .consecutive_failures(10)
-                    .build()
-                    .expect("source breaker configuration")
-            ]);
-            null_sink = sink!(CircuitMetricEvent => MetricsSink::new().0);
-        },
+        Ok(flow! {
+            name: "circuit_breaker_summary_test",
+            journals: disk_journals(std::path::PathBuf::from(
+                "target/cb_metrics_summary_e2e",
+            )),
+            middleware: [],
 
-        topology: {
-            rapid_source |> null_sink;
-        }
-    }
+            stages: {
+                rapid_source = source!(CircuitMetricEvent => rapid_source_handler, [
+                    CircuitBreaker::builder()
+                        .consecutive_failures(10)
+                        .build()
+                        .expect("source breaker configuration")
+                ]);
+                null_sink = sink!(CircuitMetricEvent => null_sink_handler);
+            },
+
+            topology: {
+                rapid_source |> null_sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;

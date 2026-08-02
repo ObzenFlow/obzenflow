@@ -8,7 +8,7 @@ use obzenflow_core::event::{ChainEvent, ChainEventFactory, SystemEvent, SystemEv
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{async_transform, flow, sink, source};
+use obzenflow_dsl::{async_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::prelude::FlowHandle;
@@ -110,22 +110,28 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
         tokio::spawn(async {})
     });
 
-    let flow_definition = flow! {
-        name: "liveness_hung_handler_cancel",
-        journals: memory_journals(),
-        middleware: [],
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let one_event_source = OneEventSource::new();
+        let hung_transform = HungTransform;
+        let noop_sink = NoopSink;
 
-        stages: {
-            numbers = source!(ProbeEvent => OneEventSource::new());
-            hung = async_transform!(ProbeEvent -> ProbeEvent => HungTransform);
-            snk = sink!(ProbeEvent => NoopSink);
-        },
+        Ok(flow! {
+            name: "liveness_hung_handler_cancel",
+            journals: memory_journals(),
+            middleware: [],
 
-        topology: {
-            numbers |> hung;
-            hung |> snk;
-        }
-    };
+            stages: {
+                numbers = source!(ProbeEvent => one_event_source);
+                hung = async_transform!(ProbeEvent -> ProbeEvent => hung_transform);
+                snk = sink!(ProbeEvent => noop_sink);
+            },
+
+            topology: {
+                numbers |> hung;
+                hung |> snk;
+            }
+        })
+    });
 
     let run_task = tokio::spawn(async move {
         FlowApplication::builder()

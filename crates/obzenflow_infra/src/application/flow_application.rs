@@ -204,20 +204,25 @@ enabled = false
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             FlowApplication::launch(
-                flow! {
-                    name: "server_auto_double_run_regression",
-                    journals: disk_journals(journal_dir),
-                    middleware: [],
+                FlowDefinition::materialize(move |_runtime_config| {
+                    let source = IdleInfiniteSource;
+                    let sink = NoopSink;
 
-                    stages: {
-                        src = infinite_source!(IdlePayload => IdleInfiniteSource);
-                        sink = sink!(IdlePayload => NoopSink);
-                    },
+                    Ok(flow! {
+                        name: "server_auto_double_run_regression",
+                        journals: disk_journals(journal_dir),
+                        middleware: [],
 
-                    topology: {
-                        src |> sink;
-                    }
-                },
+                        stages: {
+                            src = infinite_source!(IdlePayload => source);
+                            sink = sink!(IdlePayload => sink);
+                        },
+
+                        topology: {
+                            src |> sink;
+                        }
+                    })
+                }),
                 LaunchParams {
                     enable_autodiscovery: false,
                     flow_handle_hooks: vec![Box::new(move |flow_handle| Ok(hook(flow_handle)))],
@@ -270,20 +275,25 @@ enabled = false
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             FlowApplication::launch(
-                flow! {
-                    name: "server_terminal_journal_regression",
-                    journals: disk_journals(flow_journal_dir),
-                    middleware: [],
+                FlowDefinition::materialize(move |_runtime_config| {
+                    let source = OneShotSource::new();
+                    let sink = NoopSink;
 
-                    stages: {
-                        src = source!(IdlePayload => OneShotSource::new());
-                        sink = sink!(IdlePayload => NoopSink);
-                    },
+                    Ok(flow! {
+                        name: "server_terminal_journal_regression",
+                        journals: disk_journals(flow_journal_dir),
+                        middleware: [],
 
-                    topology: {
-                        src |> sink;
-                    }
-                },
+                        stages: {
+                            src = source!(IdlePayload => source);
+                            sink = sink!(IdlePayload => sink);
+                        },
+
+                        topology: {
+                            src |> sink;
+                        }
+                    })
+                }),
                 LaunchParams {
                     enable_autodiscovery: false,
                     cli_args: Some(vec![
@@ -453,20 +463,25 @@ enabled = false
         let result = tokio::time::timeout(
             Duration::from_secs(15),
             FlowApplication::launch(
-                flow! {
-                    name: "gap24_deregister_regression",
-                    journals: disk_journals(journal_dir),
-                    middleware: [],
+                FlowDefinition::materialize(move |_runtime_config| {
+                    let source = IdleInfiniteSource;
+                    let sink = NoopSink;
 
-                    stages: {
-                        src = infinite_source!(IdlePayload => IdleInfiniteSource);
-                        sink = sink!(IdlePayload => NoopSink);
-                    },
+                    Ok(flow! {
+                        name: "gap24_deregister_regression",
+                        journals: disk_journals(journal_dir),
+                        middleware: [],
 
-                    topology: {
-                        src |> sink;
-                    }
-                },
+                        stages: {
+                            src = infinite_source!(IdlePayload => source);
+                            sink = sink!(IdlePayload => sink);
+                        },
+
+                        topology: {
+                            src |> sink;
+                        }
+                    })
+                }),
                 LaunchParams {
                     enable_autodiscovery: false,
                     flow_handle_hooks: vec![Box::new(move |flow_handle| Ok(hook(flow_handle)))],
@@ -567,12 +582,10 @@ impl LogLevel {
 /// # Example
 /// ```ignore
 /// fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let flow = build_flow(); // returns a deferred FlowDefinition
 ///     FlowApplication::builder()
 ///         .with_web_endpoint(my_endpoint)
-///         .run_blocking(flow! {
-///             name: "my_flow",
-///             // ... flow definition
-///         })?;
+///         .run_blocking(flow)?;
 ///     Ok(())
 /// }
 /// ```
@@ -604,7 +617,7 @@ impl FlowApplicationBuilder {
     /// // This works whether or not 'console' feature is enabled!
     /// FlowApplication::builder()
     ///     .with_console_subscriber()  // No-op if feature disabled
-    ///     .run_blocking(flow! { /* ... */ })
+    ///     .run_blocking(build_flow())
     /// ```
     pub fn with_console_subscriber(mut self) -> Self {
         self.console_subscriber = true;
@@ -900,14 +913,10 @@ impl FlowApplicationBuilder {
 /// # Example with #[tokio::main]
 /// ```ignore
 /// use obzenflow_infra::application::FlowApplication;
-/// use obzenflow_dsl::flow;
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     FlowApplication::run(flow! {
-///         name: "my_flow",
-///         // ... flow definition
-///     }).await?;
+///     FlowApplication::run(build_flow()).await?;
 ///     Ok(())
 /// }
 /// ```
@@ -920,10 +929,7 @@ impl FlowApplicationBuilder {
 ///     FlowApplication::builder()
 ///         .with_console_subscriber()
 ///         .with_log_level(LogLevel::Info)
-///         .run_blocking(flow! {
-///             name: "my_flow",
-///             // ... flow definition
-///         })?;
+///         .run_blocking(build_flow())?;
 ///     Ok(())
 /// }
 /// ```
@@ -942,7 +948,7 @@ impl FlowApplication {
     /// FlowApplication::builder()
     ///     .with_console_subscriber()
     ///     .with_log_level(LogLevel::Info)
-    ///     .run_blocking(flow! { /* flow */ })
+    ///     .run_blocking(build_flow())
     /// ```
     pub fn builder() -> FlowApplicationBuilder {
         FlowApplicationBuilder::default()

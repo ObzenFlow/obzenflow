@@ -30,7 +30,7 @@ use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::journal::DiskJournal;
@@ -172,31 +172,33 @@ fn data_output_count(events: &[ChainEvent], event_type: &str) -> usize {
 async fn observer_evidence_lands_in_journals_without_system_mirror() {
     let base = PathBuf::from(format!("target/observer-evidence-test-{}", Uuid::new_v4()));
     let journal_dir = base.clone();
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let order_source = OrderSource::new(INPUT_COUNT);
+        let process_orders = Map::new(|event| {
+            let id = event.payload()["id"].as_u64().unwrap_or(0);
+            ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                Processed::versioned_event_type(),
+                json!({ "id": id }),
+            )
+        });
+        let handoff = Handoff;
 
-    FlowApplication::builder()
-        .with_cli_args(["obzenflow"])
-        .run_async(flow! {
+        Ok(flow! {
             name: "observer_evidence_test",
             journals: disk_journals(journal_dir),
             middleware: [],
 
             stages: {
-                orders = source!(Order => OrderSource::new(INPUT_COUNT));
-                process = transform!(Order -> Processed => Map::new(|event| {
-                    let id = event.payload()["id"].as_u64().unwrap_or(0);
-                    ChainEventFactory::data_event(
-                        WriterId::from(StageId::new()),
-                        Processed::versioned_event_type(),
-                        json!({ "id": id }),
-                    )
-                }), [
+                orders = source!(Order => order_source);
+                process = transform!(Order -> Processed => process_orders, [
                     indicator()
                         .operation("checkout.process")
                         .kind(IndicatorKind::Latency)
                         .indicator("process.latency")
                         .tag("dependency", "ledger")
                 ]);
-                handoff = sink!(Processed => Handoff, middleware: [
+                handoff = sink!(Processed => handoff, middleware: [
                     log().prefix("handoff")
                 ]);
             },
@@ -206,6 +208,11 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
                 process |> handoff;
             }
         })
+    });
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(flow_definition)
         .await
         .expect("observer evidence flow runs to completion");
 

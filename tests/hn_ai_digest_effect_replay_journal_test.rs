@@ -545,55 +545,62 @@ fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
         chat_target: _chat_target,
         map_prepare_calls,
     } = behaviour;
-    let chat = ChatBindingContract::from_resolved(map_request_target, chat_estimator)
-        .expect("test chat target and estimator models agree");
-    flow! {
-        name: "hn_ai_digest_effect_replay_journal",
-        journals: disk_journals(journal_base),
-        middleware: [],
-        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(backpressure_window)
-            .stall_timeout_ms(5_000),
-        effect_ports,
+    FlowDefinition::materialize(move |_runtime_config| {
+        let chat = ChatBindingContract::from_resolved(map_request_target, chat_estimator)
+            .expect("test chat target and estimator models agree");
+        let seed = OneSeed::new();
+        let map_role = MapRole {
+            fail_prepare: map_prepare_failure,
+            fail_interpret: map_interpret_failure,
+            prepare_calls: map_prepare_calls,
+        };
+        let finalise_role = FinaliseRole;
+        let collected = CollectOut { outputs };
 
-        stages: {
-            seed = source!(DigestSeed => OneSeed::new());
-            digest = ai_map_reduce!(
-                DigestSeed -> DigestOut => {
-                    map: [DigestItem] ->{
-                        at_least_once(ChatCompletion)
-                            via chat
-                            with { ai_resilience() }
-                    } DigestPartial => MapRole {
-                        fail_prepare: map_prepare_failure,
-                        fail_interpret: map_interpret_failure,
-                        prepare_calls: map_prepare_calls,
-                    },
-                    reduce: (DigestSeed, [DigestPartial]) ->{
-                        at_least_once(ChatCompletion)
-                            via chat
-                            with { ai_resilience() }
-                    } DigestOut => FinaliseRole,
-                },
-                chunking: by_budget {
-                    items: |seed: &DigestSeed| {
-                        (1..=seed.n)
-                            .map(|value| DigestItem { value })
-                            .collect::<Vec<_>>()
-                    },
-                    render: |item: &DigestItem, _ctx| item.value.to_string(),
-                    budget: TokenCount::new(100),
-                    max_items: Some(1),
-                    oversize: error,
-                }
-            );
-            collected = sink!(DigestOut => CollectOut { outputs });
-        },
+        Ok(flow! {
+            name: "hn_ai_digest_effect_replay_journal",
+            journals: disk_journals(journal_base),
+            middleware: [],
+            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(backpressure_window)
+                .stall_timeout_ms(5_000),
+            effect_ports,
 
-        topology: {
-            seed |> digest;
-            digest |> collected;
-        }
-    }
+            stages: {
+                seed = source!(DigestSeed => seed);
+                digest = ai_map_reduce!(
+                    DigestSeed -> DigestOut => {
+                        map: [DigestItem] ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { ai_resilience() }
+                        } DigestPartial => map_role,
+                        reduce: (DigestSeed, [DigestPartial]) ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { ai_resilience() }
+                        } DigestOut => finalise_role,
+                    },
+                    chunking: by_budget {
+                        items: |seed: &DigestSeed| {
+                            (1..=seed.n)
+                                .map(|value| DigestItem { value })
+                                .collect::<Vec<_>>()
+                        },
+                        render: |item: &DigestItem, _ctx| item.value.to_string(),
+                        budget: TokenCount::new(100),
+                        max_items: Some(1),
+                        oversize: error,
+                    }
+                );
+                collected = sink!(DigestOut => collected);
+            },
+
+            topology: {
+                seed |> digest;
+                digest |> collected;
+            }
+        })
+    })
 }
 
 fn build_recovery_flow(
@@ -602,55 +609,62 @@ fn build_recovery_flow(
     effect_ports: EffectPortRegistry,
     map_policy: Box<dyn MiddlewareFactory>,
 ) -> FlowDefinition {
-    let chat = ChatBindingContract::from_resolved(target(), estimator())
-        .expect("test chat target and estimator models agree");
-    flow! {
-        name: "hn_ai_digest_recovery_composition",
-        journals: disk_journals(journal_base),
-        middleware: [],
-        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
-            .stall_timeout_ms(5_000),
-        effect_ports,
+    FlowDefinition::materialize(move |_runtime_config| {
+        let chat = ChatBindingContract::from_resolved(target(), estimator())
+            .expect("test chat target and estimator models agree");
+        let recovery_seed = OneSeed::with_count(1);
+        let map_role = MapRole {
+            fail_prepare: false,
+            fail_interpret: false,
+            prepare_calls: None,
+        };
+        let finalise_role = FinaliseRole;
+        let recovery_collected = CollectOut { outputs };
 
-        stages: {
-            recovery_seed = source!(DigestSeed => OneSeed::with_count(1));
-            recovery_digest = ai_map_reduce!(
-                DigestSeed -> DigestOut => {
-                    map: [DigestItem] ->{
-                        at_least_once(ChatCompletion)
-                            via chat
-                            with { map_policy }
-                    } DigestPartial => MapRole {
-                        fail_prepare: false,
-                        fail_interpret: false,
-                        prepare_calls: None,
-                    },
-                    reduce: (DigestSeed, [DigestPartial]) ->{
-                        at_least_once(ChatCompletion)
-                            via chat
-                            with { ai_resilience() }
-                    } DigestOut => FinaliseRole,
-                },
-                chunking: by_budget {
-                    items: |seed: &DigestSeed| {
-                        (1..=seed.n)
-                            .map(|value| DigestItem { value })
-                            .collect::<Vec<_>>()
-                    },
-                    render: |item: &DigestItem, _ctx| item.value.to_string(),
-                    budget: TokenCount::new(100),
-                    max_items: Some(1),
-                    oversize: error,
-                }
-            );
-            recovery_collected = sink!(DigestOut => CollectOut { outputs });
-        },
+        Ok(flow! {
+            name: "hn_ai_digest_recovery_composition",
+            journals: disk_journals(journal_base),
+            middleware: [],
+            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
+                .stall_timeout_ms(5_000),
+            effect_ports,
 
-        topology: {
-            recovery_seed |> recovery_digest;
-            recovery_digest |> recovery_collected;
-        }
-    }
+            stages: {
+                recovery_seed = source!(DigestSeed => recovery_seed);
+                recovery_digest = ai_map_reduce!(
+                    DigestSeed -> DigestOut => {
+                        map: [DigestItem] ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { map_policy }
+                        } DigestPartial => map_role,
+                        reduce: (DigestSeed, [DigestPartial]) ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { ai_resilience() }
+                        } DigestOut => finalise_role,
+                    },
+                    chunking: by_budget {
+                        items: |seed: &DigestSeed| {
+                            (1..=seed.n)
+                                .map(|value| DigestItem { value })
+                                .collect::<Vec<_>>()
+                        },
+                        render: |item: &DigestItem, _ctx| item.value.to_string(),
+                        budget: TokenCount::new(100),
+                        max_items: Some(1),
+                        oversize: error,
+                    }
+                );
+                recovery_collected = sink!(DigestOut => recovery_collected);
+            },
+
+            topology: {
+                recovery_seed |> recovery_digest;
+                recovery_digest |> recovery_collected;
+            }
+        })
+    })
 }
 
 fn build_credit_flow(
@@ -659,55 +673,62 @@ fn build_credit_flow(
     effect_ports: EffectPortRegistry,
     prepare_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
-    let chat = ChatBindingContract::from_resolved(target(), estimator())
-        .expect("test chat target and estimator models agree");
-    flow! {
-        name: "hn_ai_digest_credit_composition",
-        journals: disk_journals(journal_base),
-        middleware: [],
-        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
-            .stall_timeout_ms(5_000),
-        effect_ports,
+    FlowDefinition::materialize(move |_runtime_config| {
+        let chat = ChatBindingContract::from_resolved(target(), estimator())
+            .expect("test chat target and estimator models agree");
+        let credit_seed = OneSeed::with_count(2);
+        let map_role = MapRole {
+            fail_prepare: false,
+            fail_interpret: false,
+            prepare_calls: Some(prepare_calls),
+        };
+        let finalise_role = FinaliseRole;
+        let credit_collected = CollectOut { outputs };
 
-        stages: {
-            credit_seed = source!(DigestSeed => OneSeed::with_count(2));
-            credit_digest = ai_map_reduce!(
-                DigestSeed -> DigestOut => {
-                    map: [DigestItem] ->{
-                        at_least_once(ChatCompletion)
-                            via chat
-                            with { ai_resilience() }
-                    } DigestPartial => MapRole {
-                        fail_prepare: false,
-                        fail_interpret: false,
-                        prepare_calls: Some(prepare_calls),
-                    },
-                    reduce: (DigestSeed, [DigestPartial]) ->{
-                        at_least_once(ChatCompletion)
-                            via chat
-                            with { ai_resilience() }
-                    } DigestOut => FinaliseRole,
-                },
-                chunking: by_budget {
-                    items: |seed: &DigestSeed| {
-                        (1..=seed.n)
-                            .map(|value| DigestItem { value })
-                            .collect::<Vec<_>>()
-                    },
-                    render: |item: &DigestItem, _ctx| item.value.to_string(),
-                    budget: TokenCount::new(100),
-                    max_items: Some(1),
-                    oversize: error,
-                }
-            );
-            credit_collected = sink!(DigestOut => CollectOut { outputs });
-        },
+        Ok(flow! {
+            name: "hn_ai_digest_credit_composition",
+            journals: disk_journals(journal_base),
+            middleware: [],
+            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
+                .stall_timeout_ms(5_000),
+            effect_ports,
 
-        topology: {
-            credit_seed |> credit_digest;
-            credit_digest |> credit_collected;
-        }
-    }
+            stages: {
+                credit_seed = source!(DigestSeed => credit_seed);
+                credit_digest = ai_map_reduce!(
+                    DigestSeed -> DigestOut => {
+                        map: [DigestItem] ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { ai_resilience() }
+                        } DigestPartial => map_role,
+                        reduce: (DigestSeed, [DigestPartial]) ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { ai_resilience() }
+                        } DigestOut => finalise_role,
+                    },
+                    chunking: by_budget {
+                        items: |seed: &DigestSeed| {
+                            (1..=seed.n)
+                                .map(|value| DigestItem { value })
+                                .collect::<Vec<_>>()
+                        },
+                        render: |item: &DigestItem, _ctx| item.value.to_string(),
+                        budget: TokenCount::new(100),
+                        max_items: Some(1),
+                        oversize: error,
+                    }
+                );
+                credit_collected = sink!(DigestOut => credit_collected);
+            },
+
+            topology: {
+                credit_seed |> credit_digest;
+                credit_digest |> credit_collected;
+            }
+        })
+    })
 }
 
 fn latest_run_dir(base: &Path) -> PathBuf {

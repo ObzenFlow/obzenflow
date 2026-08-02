@@ -14,7 +14,7 @@ use obzenflow_adapters::middleware::CircuitBreaker;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{TypedPayload, WriterId};
-use obzenflow_dsl::{async_transform, flow, sink, source};
+use obzenflow_dsl::{async_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -86,31 +86,40 @@ impl SinkHandler for NullSink {
 
 #[tokio::test]
 async fn breaker_handler_shell_is_rejected_before_shutdown_contracts_exist() {
-    let result = flow! {
-        name: "breaker_shutdown_contracts",
-        journals: disk_journals(std::path::PathBuf::from(
-            "target/breaker_shutdown_contracts",
-        )),
-        middleware: [],
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let one_shot_source = OneShotSource {
+            emitted: false,
+            writer_id: WriterId::from(obzenflow_core::StageId::new()),
+        };
+        let async_passthrough = AsyncPassthrough;
+        let null_sink = NullSink;
+        let breaker_policy = breaker(2);
 
-        stages: {
-            source = source!(BreakerTestEvent => OneShotSource {
-                emitted: false,
-                writer_id: WriterId::from(obzenflow_core::StageId::new()),
-            });
-            failing_transform = async_transform!(BreakerTestEvent -> BreakerTestEvent => AsyncPassthrough, [
-                breaker(2)
-            ]);
-            sink = sink!(BreakerTestEvent => NullSink);
-        },
+        Ok(flow! {
+            name: "breaker_shutdown_contracts",
+            journals: disk_journals(std::path::PathBuf::from(
+                "target/breaker_shutdown_contracts",
+            )),
+            middleware: [],
 
-        topology: {
-            source |> failing_transform;
-            failing_transform |> sink;
-        }
-    }
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await;
+            stages: {
+                source = source!(BreakerTestEvent => one_shot_source);
+                failing_transform = async_transform!(BreakerTestEvent -> BreakerTestEvent => async_passthrough, [
+                    breaker_policy
+                ]);
+                sink = sink!(BreakerTestEvent => null_sink);
+            },
+
+            topology: {
+                source |> failing_transform;
+                failing_transform |> sink;
+            }
+        })
+    });
+
+    let result = flow_definition
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await;
 
     let error = match result {
         Ok(_) => panic!("a breaker must not regain the retired async-handler shell"),

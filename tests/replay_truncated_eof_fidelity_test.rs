@@ -17,7 +17,7 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainEventContent, EventEnvelope};
 use obzenflow_core::{id::StageId, TypedPayload, WriterId};
-use obzenflow_dsl::{flow, sink, source, stateful, transform};
+use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
@@ -210,22 +210,28 @@ async fn synthesized_kinds(run_dir: &Path) -> Vec<Option<EofKind>> {
 
 macro_rules! linear_flow {
     ($journal_base:expr, $delivered:expr, $source:expr) => {
-        flow! {
-            name: "truncated_fidelity_linear",
-            journals: disk_journals($journal_base),
-            middleware: [],
+        FlowDefinition::materialize(move |_runtime_config| {
+            let ticks = $source;
+            let summer = SumHandler::new();
+            let out = SinkTyped::with_delivery(counting::<SumResult>($delivered)).idempotent();
 
-            stages: {
-                ticks = source!(Tick => $source);
-                summer = stateful!(Tick -> SumResult => SumHandler::new());
-                out = sink!(SumResult => SinkTyped::with_delivery(counting::<SumResult>($delivered)).idempotent());
-            },
+            Ok(flow! {
+                name: "truncated_fidelity_linear",
+                journals: disk_journals($journal_base),
+                middleware: [],
 
-            topology: {
-                ticks |> summer;
-                summer |> out;
-            }
-        }
+                stages: {
+                    ticks = source!(Tick => ticks);
+                    summer = stateful!(Tick -> SumResult => summer);
+                    out = sink!(SumResult => out);
+                },
+
+                topology: {
+                    ticks |> summer;
+                    summer |> out;
+                }
+            })
+        })
     };
 }
 
@@ -455,24 +461,31 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
     // Source A seals (commits a Natural EOF); source B stalls mid-stream.
     macro_rules! fan_in_flow {
         ($base:expr, $delivered:expr) => {
-            flow! {
-                name: "truncated_fidelity_fan_in",
-                journals: disk_journals($base),
-                middleware: [],
+            FlowDefinition::materialize(move |_runtime_config| {
+                let fast = Ticks::sealing(3);
+                let slow = Ticks::stalling(4);
+                let summer = SumHandler::new();
+                let out = SinkTyped::with_delivery(counting::<SumResult>($delivered)).idempotent();
 
-                stages: {
-                    fast = source!(Tick => Ticks::sealing(3));
-                    slow = source!(Tick => Ticks::stalling(4));
-                    summer = stateful!(Tick -> SumResult => SumHandler::new());
-                    out = sink!(SumResult => SinkTyped::with_delivery(counting::<SumResult>($delivered)).idempotent());
-                },
+                Ok(flow! {
+                    name: "truncated_fidelity_fan_in",
+                    journals: disk_journals($base),
+                    middleware: [],
 
-                topology: {
-                    fast |> summer;
-                    slow |> summer;
-                    summer |> out;
-                }
-            }
+                    stages: {
+                        fast = source!(Tick => fast);
+                        slow = source!(Tick => slow);
+                        summer = stateful!(Tick -> SumResult => summer);
+                        out = sink!(SumResult => out);
+                    },
+
+                    topology: {
+                        fast |> summer;
+                        slow |> summer;
+                        summer |> out;
+                    }
+                })
+            })
         };
     }
 
@@ -665,25 +678,36 @@ async fn cycle_flow_truncated_replay_terminates_without_error() {
 
     macro_rules! cycle_flow {
         ($base:expr, $delivered:expr) => {
-            flow! {
-                name: "truncated_fidelity_cycle",
-                journals: disk_journals($base),
-                middleware: [],
+            FlowDefinition::materialize(move |_runtime_config| {
+                let seeds = Ticks::stalling(2);
+                let entry = CycleEntry {
+                    writer_id: WriterId::from(StageId::new()),
+                };
+                let iter = CycleIter {
+                    writer_id: WriterId::from(StageId::new()),
+                };
+                let out = SinkTyped::with_delivery(counting::<Tick>($delivered)).idempotent();
 
-                stages: {
-                    seeds = source!(Tick => Ticks::stalling(2));
-                    entry = transform!(Tick -> Tick => CycleEntry { writer_id: WriterId::from(StageId::new()) });
-                    iter = transform!(Tick -> Tick => CycleIter { writer_id: WriterId::from(StageId::new()) });
-                    out = sink!(Tick => SinkTyped::with_delivery(counting::<Tick>($delivered)).idempotent());
-                },
+                Ok(flow! {
+                    name: "truncated_fidelity_cycle",
+                    journals: disk_journals($base),
+                    middleware: [],
 
-                topology: {
-                    seeds |> entry;
-                    entry |> iter;
-                    entry <| iter;
-                    entry |> out;
-                }
-            }
+                    stages: {
+                        seeds = source!(Tick => seeds);
+                        entry = transform!(Tick -> Tick => entry);
+                        iter = transform!(Tick -> Tick => iter);
+                        out = sink!(Tick => out);
+                    },
+
+                    topology: {
+                        seeds |> entry;
+                        entry |> iter;
+                        entry <| iter;
+                        entry |> out;
+                    }
+                })
+            })
         };
     }
 

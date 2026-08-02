@@ -347,40 +347,49 @@ impl Probes {
 }
 
 fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>, probes: &Probes) -> FlowDefinition {
-    let paid = probe(&probes.paid);
-    let cancelled = probe(&probes.cancelled);
-    let review = probe(&probes.review);
-    flow! {
-        name: "replay_provenance_labelling",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    let paid = probes.paid.clone();
+    let cancelled = probes.cancelled.clone();
+    let review = probes.review.clone();
+    FlowDefinition::materialize(move |_runtime_config| {
+        let order_source = OrderSource::new();
+        let validate_order = ValidateOrder;
+        let authorize_payment = AuthorizePayment { calls };
+        let paid_orders = SinkTyped::with_delivery(probe(&paid)).idempotent();
+        let cancelled_orders = SinkTyped::with_delivery(probe(&cancelled)).idempotent();
+        let manual_review = SinkTyped::with_delivery(probe(&review)).idempotent();
 
-        stages: {
-            orders = source!(OrderPlaced => OrderSource::new());
-            validate = effectful_transform!(
-                OrderPlaced -> { ValidatedOrder, OrderCancelled } => ValidateOrder,
-                effects: [],
-                middleware: []
-            );
-            authorize = effectful_transform!(
-                ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } => AuthorizePayment { calls },
-                effects: [AuthorizeEffect],
-                middleware: []
-            );
-            paid_orders = sink!(OrderAuthorized => SinkTyped::with_delivery(paid).idempotent());
-            cancelled_orders = sink!(OrderCancelled => SinkTyped::with_delivery(cancelled).idempotent());
-            manual_review = sink!(AuthorizationUnavailable => SinkTyped::with_delivery(review).idempotent());
-        },
+        Ok(flow! {
+            name: "replay_provenance_labelling",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            orders |> validate;
-            validate |> authorize;
-            authorize |> paid_orders;
-            authorize |> manual_review;
-            validate |> cancelled_orders;
-            authorize |> cancelled_orders;
-        }
-    }
+            stages: {
+                orders = source!(OrderPlaced => order_source);
+                validate = effectful_transform!(
+                    OrderPlaced -> { ValidatedOrder, OrderCancelled } => validate_order,
+                    effects: [],
+                    middleware: []
+                );
+                authorize = effectful_transform!(
+                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } => authorize_payment,
+                    effects: [AuthorizeEffect],
+                    middleware: []
+                );
+                paid_orders = sink!(OrderAuthorized => paid_orders);
+                cancelled_orders = sink!(OrderCancelled => cancelled_orders);
+                manual_review = sink!(AuthorizationUnavailable => manual_review);
+            },
+
+            topology: {
+                orders |> validate;
+                validate |> authorize;
+                authorize |> paid_orders;
+                authorize |> manual_review;
+                validate |> cancelled_orders;
+                authorize |> cancelled_orders;
+            }
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------

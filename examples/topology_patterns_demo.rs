@@ -34,7 +34,7 @@ use obzenflow_core::{
     id::StageId,
     TypedPayload, WriterId,
 };
-use obzenflow_dsl::{flow, sink, source, stateful, transform};
+use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
@@ -394,94 +394,101 @@ fn main() -> Result<()> {
 
     FlowApplication::builder()
         .with_presentation(presentation)
-        .run_blocking(flow! {
-            name: "topology_patterns",
-            journals: disk_journals(journal_path.clone()),
-            middleware: [],
-
-            stages: {
-                // FAN-IN: Three sources feeding into one aggregator
-                kafka_source = source!(RawDataEvent => sources::finite_from_fn({
-                    let source = "kafka".to_string();
-                    move |index| {
-                        if index >= 5 {
-                            return None;
-                        }
-                        let id = index + 1;
-                        Some(RawDataEvent {
-                            source: source.clone(),
-                            id,
-                            value: (id * 20) as i64,
-                        })
+        .run_blocking(FlowDefinition::materialize(move |_runtime_config| {
+            let kafka_source_handler = sources::finite_from_fn({
+                let source = "kafka".to_string();
+                move |index| {
+                    if index >= 5 {
+                        return None;
                     }
-                }));
-                api_source = source!(RawDataEvent => sources::finite_from_fn({
-                    let source = "api".to_string();
-                    move |index| {
-                        if index >= 4 {
-                            return None;
-                        }
-                        let id = index + 1;
-                        Some(RawDataEvent {
-                            source: source.clone(),
-                            id,
-                            value: (id * 20) as i64,
-                        })
+                    let id = index + 1;
+                    Some(RawDataEvent {
+                        source: source.clone(),
+                        id,
+                        value: (id * 20) as i64,
+                    })
+                }
+            });
+            let api_source_handler = sources::finite_from_fn({
+                let source = "api".to_string();
+                move |index| {
+                    if index >= 4 {
+                        return None;
                     }
-                }));
-                file_source = source!(RawDataEvent => sources::finite_from_fn({
-                    let source = "file".to_string();
-                    move |index| {
-                        if index >= 4 {
-                            return None;
-                        }
-                        let id = index + 1;
-                        Some(RawDataEvent {
-                            source: source.clone(),
-                            id,
-                            value: (id * 20) as i64,
-                        })
+                    let id = index + 1;
+                    Some(RawDataEvent {
+                        source: source.clone(),
+                        id,
+                        value: (id * 20) as i64,
+                    })
+                }
+            });
+            let file_source_handler = sources::finite_from_fn({
+                let source = "file".to_string();
+                move |index| {
+                    if index >= 4 {
+                        return None;
                     }
-                }));
+                    let id = index + 1;
+                    Some(RawDataEvent {
+                        source: source.clone(),
+                        id,
+                        value: (id * 20) as i64,
+                    })
+                }
+            });
+            let aggregator_handler = MultiSourceAggregator::new().with_expected({
+                let mut m = BTreeMap::new();
+                m.insert("kafka".to_string(), 5);
+                m.insert("api".to_string(), 4);
+                m.insert("file".to_string(), 4);
+                m
+            });
+            let router_handler = smart_router();
+            let low_sink_handler = PrioritySink::new("LOW", "low", low_counter_flow.clone());
+            let med_sink_handler = PrioritySink::new("MEDIUM", "medium", med_counter_flow.clone());
+            let high_sink_handler = PrioritySink::new("HIGH", "high", high_counter_flow.clone());
 
-                // Aggregator demonstrates fan-in with StatefulHandler
-                aggregator = stateful!(RawDataEvent -> RawDataEvent => MultiSourceAggregator::new().with_expected({
-                    let mut m = BTreeMap::new();
-                    m.insert("kafka".to_string(), 5);
-                    m.insert("api".to_string(), 4);
-                    m.insert("file".to_string(), 4);
-                    m
-                }));
+            Ok(flow! {
+                name: "topology_patterns",
+                journals: disk_journals(journal_path.clone()),
+                middleware: [],
 
-                // ✨ FLOWIP-080h: Router distributes to multiple sinks using Map helper
-                router = transform!(RawDataEvent -> RawDataEvent => smart_router());
+                stages: {
+                    // FAN-IN: Three sources feeding into one aggregator
+                    kafka_source = source!(RawDataEvent => kafka_source_handler);
+                    api_source = source!(RawDataEvent => api_source_handler);
+                    file_source = source!(RawDataEvent => file_source_handler);
 
-                // FAN-OUT: Three sinks receiving from one router
-                low_sink = sink!(RawDataEvent => PrioritySink::new("LOW", "low", low_counter_flow.clone()));
-                med_sink = sink!(RawDataEvent => PrioritySink::new(
-                    "MEDIUM",
-                    "medium",
-                    med_counter_flow.clone()
-                ));
-                high_sink = sink!(RawDataEvent => PrioritySink::new("HIGH", "high", high_counter_flow.clone()));
-            },
+                    // Aggregator demonstrates fan-in with StatefulHandler
+                    aggregator = stateful!(RawDataEvent -> RawDataEvent => aggregator_handler);
 
-            topology: {
-                // FAN-IN: Multiple sources to single aggregator
-                kafka_source |> aggregator;
-                api_source |> aggregator;
-                file_source |> aggregator;
+                    // ✨ FLOWIP-080h: Router distributes to multiple sinks using Map helper
+                    router = transform!(RawDataEvent -> RawDataEvent => router_handler);
 
-                // Processing chain
-                aggregator |> router;
+                    // FAN-OUT: Three sinks receiving from one router
+                    low_sink = sink!(RawDataEvent => low_sink_handler);
+                    med_sink = sink!(RawDataEvent => med_sink_handler);
+                    high_sink = sink!(RawDataEvent => high_sink_handler);
+                },
 
-                // FAN-OUT: Single router to multiple sinks
-                // Each sink creates its own independent journal reader
-                router |> low_sink;
-                router |> med_sink;
-                router |> high_sink;
-            }
-        })?;
+                topology: {
+                    // FAN-IN: Multiple sources to single aggregator
+                    kafka_source |> aggregator;
+                    api_source |> aggregator;
+                    file_source |> aggregator;
+
+                    // Processing chain
+                    aggregator |> router;
+
+                    // FAN-OUT: Single router to multiple sinks
+                    // Each sink creates its own independent journal reader
+                    router |> low_sink;
+                    router |> med_sink;
+                    router |> high_sink;
+                }
+            })
+        }))?;
 
     Ok(())
 }

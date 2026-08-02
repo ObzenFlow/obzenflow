@@ -212,28 +212,35 @@ impl SinkHandler for DropSink {
 }
 
 fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
-    flow! {
-        name: "effectful_fan_in_envelope",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let source_a = ChannelSource::new("a", 4);
+        let source_b = ChannelSource::new("b", 3);
+        let effectful_merge = EffectfulMerge { calls };
+        let collector = DropSink;
 
-        stages: {
-            source_a = source!(EnvelopeInput => ChannelSource::new("a", 4));
-            source_b = source!(EnvelopeInput => ChannelSource::new("b", 3));
-            effectful_merge = effectful_transform!(
-                EnvelopeInput -> { EnvelopeOutput, EnvelopeEffectValue } => EffectfulMerge { calls },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            collector = sink!(EnvelopeOutput => DropSink);
-        },
+        Ok(flow! {
+            name: "effectful_fan_in_envelope",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            source_a |> effectful_merge;
-            source_b |> effectful_merge;
-            effectful_merge |> collector;
-        }
-    }
+            stages: {
+                source_a = source!(EnvelopeInput => source_a);
+                source_b = source!(EnvelopeInput => source_b);
+                effectful_merge = effectful_transform!(
+                    EnvelopeInput -> { EnvelopeOutput, EnvelopeEffectValue } => effectful_merge,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                collector = sink!(EnvelopeOutput => collector);
+            },
+
+            topology: {
+                source_a |> effectful_merge;
+                source_b |> effectful_merge;
+                effectful_merge |> collector;
+            }
+        })
+    })
 }
 
 /// The cursor-and-outcome witness for one run: every effect-provenance row of

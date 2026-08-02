@@ -33,7 +33,7 @@ use obzenflow::typed::sources;
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
@@ -166,40 +166,48 @@ fn main() -> Result<()> {
     FlowApplication::builder()
         .with_config_file(CONFIG_FILE)
         .with_presentation(presentation)
-        .run_blocking(flow! {
-            name: "middleware_config_demo",
-            journals: disk_journals(journal_path.clone()),
-            middleware: [],
+        .run_blocking(FlowDefinition::materialize(move |_runtime_config| {
+            let fast_source_handler = sources::finite_from_fn(|index| {
+                if index >= 120 {
+                    return None;
+                }
 
-            stages: {
-                // Source intake is a live I/O unit, so rate limiting belongs here.
-                fast_source = source!(CounterEvent => sources::finite_from_fn(|index| {
-                    if index >= 120 {
-                        return None;
-                    }
+                let count = index + 1;
 
-                    let count = index + 1;
+                // Log progress every 20 events
+                if count % 20 == 0 {
+                    println!("[SOURCE] Generated {count} events");
+                }
 
-                    // Log progress every 20 events
-                    if count % 20 == 0 {
-                        println!("[SOURCE] Generated {count} events");
-                    }
+                Some(CounterEvent { count })
+            });
+            let throttled_transform_handler = PassthroughTransform::new();
+            let counting_sink_handler = CountingSink::new();
 
-                    Some(CounterEvent { count })
-                }), [RateLimiterBuilder::new(10.0).build()]);
+            Ok(flow! {
+                name: "middleware_config_demo",
+                journals: disk_journals(journal_path.clone()),
+                middleware: [],
 
-                // Deterministic transform with no policy middleware.
-                throttled_transform = transform!(CounterEvent -> CounterEvent => PassthroughTransform::new());
+                stages: {
+                    // Source intake is a live I/O unit, so rate limiting belongs here.
+                    fast_source = source!(CounterEvent => fast_source_handler, [
+                        RateLimiterBuilder::new(10.0).build()
+                    ]);
 
-                // Sink
-                counting_sink = sink!(CounterEvent => CountingSink::new());
-            },
+                    // Deterministic transform with no policy middleware.
+                    throttled_transform = transform!(CounterEvent -> CounterEvent => throttled_transform_handler);
 
-            topology: {
-                fast_source |> throttled_transform;
-                throttled_transform |> counting_sink;
-            }
-        })?;
+                    // Sink
+                    counting_sink = sink!(CounterEvent => counting_sink_handler);
+                },
+
+                topology: {
+                    fast_source |> throttled_transform;
+                    throttled_transform |> counting_sink;
+                }
+            })
+        }))?;
 
     Ok(())
 }

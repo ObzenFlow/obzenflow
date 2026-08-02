@@ -307,30 +307,38 @@ fn build_flow(
     let fin_count = ranges.fin_count;
     let inf_first = ranges.inf_first;
     let inf_count = ranges.inf_count;
-    flow! {
-        name: "resume_mixed",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let finite_handler = FiniteChannelSource::new("f", fin_first, fin_count);
+        let infinite_handler = InfiniteChannelSource::new("i", inf_first, inf_count);
+        let merge_handler = MergeTransform::new();
+        let effectful_handler = EffectfulTail { calls };
+        let collect_handler = CountingSink { delivered };
 
-        stages: {
-            fin = source!(ChannelTick => FiniteChannelSource::new("f", fin_first, fin_count));
-            inf = infinite_source!(ChannelTick => InfiniteChannelSource::new("i", inf_first, inf_count));
-            merge = transform!(ChannelTick -> Merged => MergeTransform::new());
-            effectful = effectful_transform!(
-                Merged -> { MixedOutput, EffectValue } => EffectfulTail { calls },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            collect = sink!(MixedOutput => CountingSink { delivered });
-        },
+        Ok(flow! {
+            name: "resume_mixed",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            fin |> merge;
-            inf |> merge;
-            merge |> effectful;
-            effectful |> collect;
-        }
-    }
+            stages: {
+                fin = source!(ChannelTick => finite_handler);
+                inf = infinite_source!(ChannelTick => infinite_handler);
+                merge = transform!(ChannelTick -> Merged => merge_handler);
+                effectful = effectful_transform!(
+                    Merged -> { MixedOutput, EffectValue } => effectful_handler,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                collect = sink!(MixedOutput => collect_handler);
+            },
+
+            topology: {
+                fin |> merge;
+                inf |> merge;
+                merge |> effectful;
+                effectful |> collect;
+            }
+        })
+    })
 }
 
 async fn wait_for_running(handle: &FlowHandle) -> Result<()> {

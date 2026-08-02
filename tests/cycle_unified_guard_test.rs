@@ -10,7 +10,9 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{ChainEvent, CycleDepth, StageId, WriterId};
-use obzenflow_dsl::{async_source, flow, sink, source, stateful, test_flow, transform};
+use obzenflow_dsl::{
+    async_source, flow, sink, source, stateful, test_flow, transform, FlowDefinition,
+};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -235,27 +237,35 @@ fn count_log_lines(run_dir: &Path) -> Result<usize> {
 
 #[tokio::test]
 async fn cycle_guard_rejects_cycles_with_non_transform_members() {
-    let result = flow! {
-        name: "cycle_guard_reject_stateful_cycle",
-        journals: disk_journals(std::path::PathBuf::from("target/cycle_guard_reject_stateful_cycle")),
-        middleware: [],
+    let definition = FlowDefinition::materialize(move |_runtime_config| {
+        let source = TestEventSource::new(1);
+        let stateful = NoopStateful;
+        let transform = IdentityTransform;
+        let (sink, _count) = EventCounterSink::new();
 
-        stages: {
-            src = source!(SeedEvent => TestEventSource::new(1));
-            agg = stateful!(SeedEvent -> SeedEvent => NoopStateful);
-            tr = transform!(SeedEvent -> SeedEvent => IdentityTransform);
-            snk = sink!(SeedEvent => EventCounterSink::new().0);
-        },
+        Ok(flow! {
+            name: "cycle_guard_reject_stateful_cycle",
+            journals: disk_journals(std::path::PathBuf::from("target/cycle_guard_reject_stateful_cycle")),
+            middleware: [],
 
-        topology: {
-            src |> agg;
-            agg |> tr;
-            agg <| tr;
-            tr |> snk;
-        }
-    }
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await;
+            stages: {
+                src = source!(SeedEvent => source);
+                agg = stateful!(SeedEvent -> SeedEvent => stateful);
+                tr = transform!(SeedEvent -> SeedEvent => transform);
+                snk = sink!(SeedEvent => sink);
+            },
+
+            topology: {
+                src |> agg;
+                agg |> tr;
+                agg <| tr;
+                tr |> snk;
+            }
+        })
+    });
+    let result = definition
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await;
 
     let err = match result {
         Ok(_) => panic!("expected cycle topology validation to fail"),
@@ -276,30 +286,39 @@ async fn cycle_guard_rejects_stateful_emit_within_cycle() {
         const EVENT_TYPE: &'static str = "cycle.stateful_emit_within.count";
     }
 
-    let result = flow! {
-        name: "cycle_guard_reject_emit_within",
-        journals: disk_journals(std::path::PathBuf::from("target/cycle_guard_reject_emit_within")),
-        middleware: [],
+    let definition = FlowDefinition::materialize(move |_runtime_config| {
+        let source = TestEventSource::new(1);
+        let window = typed_stateful::reduce(
+            WindowCount::default(),
+            |acc: &mut WindowCount, _ev: &SeedEvent| acc.count += 1,
+        )
+        .emit_within(Duration::from_millis(10));
+        let transform = IdentityTransform;
+        let (sink, _count) = EventCounterSink::new();
 
-        stages: {
-            src = source!(SeedEvent => TestEventSource::new(1));
-            win = stateful!(SeedEvent -> WindowCount => typed_stateful::reduce(
-                WindowCount::default(),
-                |acc: &mut WindowCount, _ev: &SeedEvent| { acc.count += 1; }
-            ).emit_within(Duration::from_millis(10)));
-            tr = transform!(WindowCount -> WindowCount => IdentityTransform);
-            snk = sink!(WindowCount => EventCounterSink::new().0);
-        },
+        Ok(flow! {
+            name: "cycle_guard_reject_emit_within",
+            journals: disk_journals(std::path::PathBuf::from("target/cycle_guard_reject_emit_within")),
+            middleware: [],
 
-        topology: {
-            src |> win;
-            win |> tr;
-            win <| tr;
-            tr |> snk;
-        }
-    }
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await;
+            stages: {
+                src = source!(SeedEvent => source);
+                win = stateful!(SeedEvent -> WindowCount => window);
+                tr = transform!(WindowCount -> WindowCount => transform);
+                snk = sink!(WindowCount => sink);
+            },
+
+            topology: {
+                src |> win;
+                win |> tr;
+                win <| tr;
+                tr |> snk;
+            }
+        })
+    });
+    let result = definition
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await;
 
     let err = match result {
         Ok(_) => panic!("expected cycle topology validation to fail"),
@@ -317,28 +336,35 @@ async fn cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
 
     let (counter_sink, counter) = EventCounterSink::new();
 
-    let handle = flow! {
-        name: "cycle_guard_bounds",
-        journals: disk_journals(base_for_flow),
-        middleware: [],
+    let definition = FlowDefinition::materialize(move |_runtime_config| {
+        let source = TestEventSource::new(5);
+        let transform_a = IdentityTransform;
+        let transform_b = DropAllTransform;
 
-        stages: {
-            src = source!(SeedEvent => TestEventSource::new(5));
-            a = transform!(SeedEvent -> SeedEvent => IdentityTransform);
-            b = transform!(SeedEvent -> SeedEvent => DropAllTransform);
-            snk = sink!(SeedEvent => counter_sink);
-        },
+        Ok(flow! {
+            name: "cycle_guard_bounds",
+            journals: disk_journals(base_for_flow),
+            middleware: [],
 
-        topology: {
-            src |> a;
-            a |> b;
-            a <| b;
-            b |> snk;
-        }
-    }
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await
-    .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
+            stages: {
+                src = source!(SeedEvent => source);
+                a = transform!(SeedEvent -> SeedEvent => transform_a);
+                b = transform!(SeedEvent -> SeedEvent => transform_b);
+                snk = sink!(SeedEvent => counter_sink);
+            },
+
+            topology: {
+                src |> a;
+                a |> b;
+                a <| b;
+                b |> snk;
+            }
+        })
+    });
+    let handle = definition
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
     tokio::time::timeout(Duration::from_secs(10), handle.run())
         .await
@@ -371,6 +397,9 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
     let base_for_flow = base.clone();
 
     let (counter_sink, counter) = EventCounterSink::new();
+    let source = CorrelatedEventSource::new(Duration::from_millis(500));
+    let transform_a = IdentityTransform;
+    let transform_b = IdentityTransform;
 
     let harness = test_flow! {
         name: "cycle_guard_bounds_data",
@@ -378,9 +407,9 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = async_source!(SeedEvent => CorrelatedEventSource::new(Duration::from_millis(500)));
-            a = transform!(SeedEvent -> SeedEvent => IdentityTransform);
-            b = transform!(SeedEvent -> SeedEvent => IdentityTransform);
+            src = async_source!(SeedEvent => source);
+            a = transform!(SeedEvent -> SeedEvent => transform_a);
+            b = transform!(SeedEvent -> SeedEvent => transform_b);
             snk = sink!(SeedEvent => counter_sink);
         },
 

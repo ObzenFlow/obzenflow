@@ -764,10 +764,9 @@ pub struct HttpPullConfig {
     /// Retry/backoff configuration.
     pub retry: HttpRetryConfig,
 
-    /// Suggested stage poll timeout for `async_source!` when no explicit timeout is provided.
+    /// Configured stage poll timeout for `async_source!`.
     ///
-    /// NOTE: This is a suggestion/hint. If `None`, async finite sources fall back to the
-    /// descriptor default poll timeout (currently 30s).
+    /// `Some(duration)` enables supervisor enforcement; `None` disables it.
     pub poll_timeout: Option<Duration>,
 }
 
@@ -780,9 +779,9 @@ pub struct HttpPollConfig {
     pub max_batch_size: usize,
     pub retry: HttpRetryConfig,
 
-    /// Suggested stage poll timeout for `async_source!` when no explicit timeout is provided.
+    /// Configured stage poll timeout for `async_infinite_source!`.
     ///
-    /// If `None`, async infinite sources keep the descriptor default of no poll timeout.
+    /// `Some(duration)` enables supervisor enforcement; `None` disables it.
     pub poll_timeout: Option<Duration>,
 
     /// Interval between polling cycles (enforced by source via tokio::sleep).
@@ -818,7 +817,7 @@ impl std::fmt::Debug for HttpPollConfig {
 ///
 /// NOTE: This builder defaults `poll_timeout` to 120s for finite sources because `HttpPullSource`
 /// may legitimately wait inside `next()` (e.g., honoring `Retry-After` and backoff). Override with
-/// [`Self::poll_timeout_opt(None)`] to inherit the descriptor default instead.
+/// [`Self::poll_timeout_opt(None)`] to disable supervisor poll-timeout enforcement.
 #[derive(Clone)]
 pub struct HttpPullConfigBuilder {
     client: Option<Arc<dyn HttpClient>>,
@@ -1035,8 +1034,8 @@ impl HttpPollConfig {
 /// Finite (EOF-terminating) HTTP pull source (FLOWIP-084e).
 ///
 /// NOTE: This source may perform in-handler waits (e.g., honoring `Retry-After` and backoff).
-/// Configure a suitable poll timeout via [`HttpPullConfig::builder()`] so `async_source!` can omit
-/// the timeout tuple, or override explicitly using `async_source!((source, Some(timeout)))`.
+/// Configure a suitable poll timeout via [`HttpPullConfig::builder()`]; poll timeout belongs to
+/// the source configuration and `async_source!` accepts only the configured source handler.
 #[derive(Debug, Clone)]
 pub struct HttpPullSource<D: PullDecoder> {
     inner: Arc<Mutex<HttpPullSourceInner<D>>>,
@@ -1316,7 +1315,7 @@ impl<D: PullDecoder> AsyncFiniteSourceHandler for HttpPullSource<D> {
         self.writer_id = Some(id);
     }
 
-    fn suggested_poll_timeout(&self) -> Option<Duration> {
+    fn poll_timeout(&self) -> Option<Duration> {
         self.config.poll_timeout
     }
 
@@ -1496,7 +1495,7 @@ impl<D: PullDecoder> AsyncInfiniteSourceHandler for HttpPollSource<D> {
         self.writer_id = Some(id);
     }
 
-    fn suggested_poll_timeout(&self) -> Option<Duration> {
+    fn poll_timeout(&self) -> Option<Duration> {
         self.config.poll_timeout
     }
 

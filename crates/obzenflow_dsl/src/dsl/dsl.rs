@@ -4,8 +4,9 @@
 
 //! Main flow! macro - the primary API for building ObzenFlow pipelines
 //!
-//! Stage declarations and topology remain separate, while any preparation for
-//! those declarations is ordinary Rust outside the macro.
+//! Stage declarations and topology remain separate. Builder-owned preparation
+//! is ordinary Rust outside the macro but inside the enclosing deferred
+//! materialiser.
 
 /// Parse topology edges supporting both |> and <| operators (single collector)
 /// Note: Join stages only accept stream inputs in topology.
@@ -150,30 +151,35 @@ macro_rules! __obzenflow_effect_ports_or_default {
 /// ## Minimal example
 ///
 /// ```rust,ignore
-/// use obzenflow_dsl::{flow, source, transform, sink};
+/// use obzenflow_dsl::{flow, source, transform, sink, FlowDefinition};
 /// use obzenflow_infra::journal::memory_journals;
 /// use obzenflow::typed::{sources, transforms};
+/// use obzenflow_runtime::stages::sink::SinkTyped;
 ///
-/// let input = sources::finite(vec![MyEvent { value: 1 }]);
-/// let double = transforms::map(|event: MyEvent| Doubled { value: event.value * 2 });
-/// let print = |event: Doubled| { println!("{}", event.value); };
+/// let pipeline = FlowDefinition::materialize(move |_runtime_config| {
+///     let input = sources::finite(vec![MyEvent { value: 1 }]);
+///     let double = transforms::map(|event: MyEvent| Doubled { value: event.value * 2 });
+///     let print = SinkTyped::new(|event: Doubled| async move {
+///         println!("{}", event.value);
+///     });
 ///
-/// let pipeline = flow! {
-///     name: "example",
-///     journals: memory_journals(),
-///     middleware: [],
+///     Ok(flow! {
+///         name: "example",
+///         journals: memory_journals(),
+///         middleware: [],
 ///
-///     stages: {
-///         src = source!(MyEvent => input);
-///         map = transform!(MyEvent -> Doubled => double);
-///         out = sink!(Doubled => print);
-///     },
+///         stages: {
+///             src = source!(MyEvent => input);
+///             map = transform!(MyEvent -> Doubled => double);
+///             out = sink!(Doubled => print);
+///         },
 ///
-///     topology: {
-///         src |> map;
-///         map |> out;
-///     }
-/// };
+///         topology: {
+///             src |> map;
+///             map |> out;
+///         }
+///     })
+/// });
 /// ```
 ///
 /// The `name:` section is optional. If omitted, the flow is named `"default"`.
@@ -525,8 +531,12 @@ macro_rules! flow {
 /// `name:` uses `"default"`; omitting the effect-port section uses an empty
 /// registry.
 ///
-/// Construction happens in ordinary Rust before the invocation. Tests that
-/// need the host's resolved snapshot can instead return an inner `flow!` from
+/// The invocation returns an `async move` future, so its descriptor expressions
+/// are not evaluated until that future is polled. Builder-owned handler
+/// construction must therefore sit immediately above the invocation inside an
+/// enclosing async block or async test body. Creating and dropping that outer
+/// future then remains cold. Tests that need the host's resolved snapshot can
+/// instead return an inner `flow!` from
 /// [`FlowDefinition::materialize`](crate::FlowDefinition::materialize) and call
 /// `build` with an explicit test context. The retired `bindings:` section is
 /// not accepted.

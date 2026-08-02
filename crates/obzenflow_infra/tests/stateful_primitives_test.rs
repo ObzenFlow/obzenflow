@@ -13,7 +13,7 @@ use obzenflow_core::{
     id::StageId,
     WriterId,
 };
-use obzenflow_dsl::{flow, sink, source, stateful};
+use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -99,18 +99,6 @@ struct CollectingSink {
     events: Arc<Mutex<Vec<ChainEvent>>>,
 }
 
-impl CollectingSink {
-    fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                events: events.clone(),
-            },
-            events,
-        )
-    }
-}
-
 #[async_trait]
 impl SinkHandler for CollectingSink {
     async fn consume(
@@ -127,38 +115,46 @@ impl SinkHandler for CollectingSink {
 
 #[tokio::test]
 async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
-    let (sink, events) = CollectingSink::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_flow = events.clone();
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let transaction_source = TransactionSource::new(10);
+        let sales_by_product = GroupByTyped::new(
+            |event: &TransactionEvent| event.product_id.clone(),
+            |stats: &mut ProductStats, event: &TransactionEvent| {
+                stats.quantity_sold += event.quantity;
+                stats.revenue += event.revenue;
+                stats.transaction_count += 1;
+            },
+        )
+        .emit_on_eof();
+        let collecting_sink = CollectingSink {
+            events: events_for_flow,
+        };
+
+        Ok(flow! {
+            name: "stateful_primitives_groupby_test",
+            journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_groupby")),
+            middleware: [],
+
+            stages: {
+                src = source!(TransactionEvent => transaction_source);
+                sales_by_product = stateful!(TransactionEvent -> ProductStats => sales_by_product);
+                sink = sink!(ProductStats => collecting_sink);
+            },
+
+            topology: {
+                src |> sales_by_product;
+                sales_by_product |> sink;
+            }
+        })
+    });
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(flow! {
-        name: "stateful_primitives_groupby_test",
-        journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_groupby")),
-        middleware: [],
-
-        stages: {
-            src = source!(TransactionEvent => TransactionSource::new(10));
-            sales_by_product = stateful!(
-                TransactionEvent -> ProductStats => GroupByTyped::new(
-                    |event: &TransactionEvent| event.product_id.clone(),
-                    |stats: &mut ProductStats, event: &TransactionEvent| {
-                    stats.quantity_sold += event.quantity;
-                    stats.revenue += event.revenue;
-                    stats.transaction_count += 1;
-                    }
-                )
-                .emit_on_eof()
-            );
-            sink = sink!(ProductStats => sink);
-        },
-
-        topology: {
-            src |> sales_by_product;
-            sales_by_product |> sink;
-        }
-    })
-    .await
-    .expect("flow should complete");
+        .run_async(flow_definition)
+        .await
+        .expect("flow should complete");
 
     let results = events.lock().unwrap();
     let aggregates: Vec<_> = results
@@ -182,38 +178,50 @@ impl TypedPayload for TotalStats {
 
 #[tokio::test]
 async fn reduce_with_on_eof_emits_single_total() {
-    let (sink, events) = CollectingSink::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_flow = events.clone();
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let transaction_source = TransactionSource::new(5);
+        let totals = ReduceTyped::new(
+            TotalStats {
+                total_revenue: 0.0,
+                total_transactions: 0,
+                total_quantity: 0,
+            },
+            |stats: &mut TotalStats, event: &TransactionEvent| {
+                stats.total_revenue += event.revenue;
+                stats.total_quantity += event.quantity;
+                stats.total_transactions += 1;
+            },
+        )
+        .emit_on_eof();
+        let collecting_sink = CollectingSink {
+            events: events_for_flow,
+        };
+
+        Ok(flow! {
+            name: "stateful_primitives_reduce_test",
+            journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_reduce")),
+            middleware: [],
+
+            stages: {
+                src = source!(TransactionEvent => transaction_source);
+                totals = stateful!(TransactionEvent -> TotalStats => totals);
+                sink = sink!(TotalStats => collecting_sink);
+            },
+
+            topology: {
+                src |> totals;
+                totals |> sink;
+            }
+        })
+    });
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(flow! {
-        name: "stateful_primitives_reduce_test",
-        journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_reduce")),
-        middleware: [],
-
-        stages: {
-            src = source!(TransactionEvent => TransactionSource::new(5));
-            totals = stateful!(
-                TransactionEvent -> TotalStats => ReduceTyped::new(
-                    TotalStats { total_revenue: 0.0, total_transactions: 0, total_quantity: 0 },
-                    |stats: &mut TotalStats, event: &TransactionEvent| {
-                        stats.total_revenue += event.revenue;
-                        stats.total_quantity += event.quantity;
-                        stats.total_transactions += 1;
-                    }
-                )
-                .emit_on_eof()
-            );
-            sink = sink!(TotalStats => sink);
-        },
-
-        topology: {
-            src |> totals;
-            totals |> sink;
-        }
-    })
-    .await
-    .expect("flow should complete");
+        .run_async(flow_definition)
+        .await
+        .expect("flow should complete");
 
     let results = events.lock().unwrap();
     let reduced: Vec<_> = results
@@ -225,31 +233,38 @@ async fn reduce_with_on_eof_emits_single_total() {
 
 #[tokio::test]
 async fn conflate_emits_latest_value_per_key() {
-    let (sink, events) = CollectingSink::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_flow = events.clone();
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let transaction_source = TransactionSource::new(8);
+        let latest_by_product = Conflate::new("product_id").emit_within(Duration::from_millis(1));
+        let collecting_sink = CollectingSink {
+            events: events_for_flow,
+        };
+
+        Ok(flow! {
+            name: "stateful_primitives_conflate_test",
+            journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_conflate")),
+            middleware: [],
+
+            stages: {
+                src = source!(TransactionEvent => transaction_source);
+                latest_by_product = stateful!(TransactionEvent -> TransactionEvent => latest_by_product);
+                sink = sink!(TransactionEvent => collecting_sink);
+            },
+
+            topology: {
+                src |> latest_by_product;
+                latest_by_product |> sink;
+            }
+        })
+    });
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(flow! {
-        name: "stateful_primitives_conflate_test",
-        journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_conflate")),
-        middleware: [],
-
-        stages: {
-            src = source!(TransactionEvent => TransactionSource::new(8));
-            latest_by_product = stateful!(
-                TransactionEvent -> TransactionEvent => Conflate::new("product_id")
-                    .emit_within(Duration::from_millis(1))
-            );
-            sink = sink!(TransactionEvent => sink);
-        },
-
-        topology: {
-            src |> latest_by_product;
-            latest_by_product |> sink;
-        }
-    })
-    .await
-    .expect("flow should complete");
+        .run_async(flow_definition)
+        .await
+        .expect("flow should complete");
 
     let results = events.lock().unwrap();
     assert!(!results.is_empty());

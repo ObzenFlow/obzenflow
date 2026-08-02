@@ -6,7 +6,7 @@
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -150,25 +150,31 @@ async fn test_dsl_pipeline() -> Result<()> {
 
     // Create shared state
     let total = Arc::new(AtomicU64::new(0));
-    let summer = Summer::new(total.clone());
+    let summer_total = total.clone();
 
     // Run pipeline with DSL
-    let handle = flow! {
-        name: "dsl_transformation_test",
-        journals: disk_journals(PathBuf::from("target/advanced_tests")),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let generator_handler = EventGenerator::new();
+        let doubler_handler = Doubler::new();
+        let summer_handler = Summer::new(summer_total);
 
-        stages: {
-            generator = source!(AdvancedTestEvent => EventGenerator::new());
-            doubler = transform!(AdvancedTestEvent -> AdvancedTestEvent => Doubler::new());
-            summer = sink!(AdvancedTestEvent => summer);
-        },
+        Ok(flow! {
+            name: "dsl_transformation_test",
+            journals: disk_journals(PathBuf::from("target/advanced_tests")),
+            middleware: [],
 
-        topology: {
-            generator |> doubler;
-            doubler |> summer;
-        }
-    }
+            stages: {
+                generator = source!(AdvancedTestEvent => generator_handler);
+                doubler = transform!(AdvancedTestEvent -> AdvancedTestEvent => doubler_handler);
+                summer = sink!(AdvancedTestEvent => summer_handler);
+            },
+
+            topology: {
+                generator |> doubler;
+                doubler |> summer;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;

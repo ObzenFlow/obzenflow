@@ -14,7 +14,7 @@ use obzenflow::sources::CsvSource;
 use obzenflow::typed::joins;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, join, sink, source, transform};
+use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -101,52 +101,55 @@ fn build_flow(
     tickets: CsvSource<Ticket>,
     output_sink: CsvSink,
     journals_dir: PathBuf,
-) -> obzenflow_dsl::FlowDefinition {
-    let join_handler = joins::inner(
-        |c: &Customer| c.customer_id.clone(),
-        |t: &TriagedTicket| t.customer_id.clone(),
-        |customer: Customer, ticket: TriagedTicket| {
-            let cap_hours = plan_sla_cap_hours(&customer.plan);
-            let effective_sla_hours = ticket.priority_sla_hours.min(cap_hours);
-            let due_bucket = due_bucket(effective_sla_hours).to_string();
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let join_handler = joins::inner(
+            |c: &Customer| c.customer_id.clone(),
+            |t: &TriagedTicket| t.customer_id.clone(),
+            |customer: Customer, ticket: TriagedTicket| {
+                let cap_hours = plan_sla_cap_hours(&customer.plan);
+                let effective_sla_hours = ticket.priority_sla_hours.min(cap_hours);
+                let due_bucket = due_bucket(effective_sla_hours).to_string();
 
-            EnrichedTicket {
-                ticket_id: ticket.ticket_id,
-                customer_id: ticket.customer_id,
-                plan: customer.plan,
-                region: customer.region,
-                created_at: ticket.created_at,
-                priority: ticket.priority,
-                category: ticket.category,
-                priority_sla_hours: ticket.priority_sla_hours,
-                effective_sla_hours,
-                due_bucket,
+                EnrichedTicket {
+                    ticket_id: ticket.ticket_id,
+                    customer_id: ticket.customer_id,
+                    plan: customer.plan,
+                    region: customer.region,
+                    created_at: ticket.created_at,
+                    priority: ticket.priority,
+                    category: ticket.category,
+                    priority_sla_hours: ticket.priority_sla_hours,
+                    effective_sla_hours,
+                    due_bucket,
+                }
+            },
+        );
+        let triage_handler = TicketTriage::new();
+
+        Ok(flow! {
+            name: "csv_demo_support_sla",
+            journals: disk_journals(journals_dir),
+            middleware: [],
+
+            stages: {
+                customers = source!(Customer => customers);
+                tickets = source!(Ticket => tickets);
+
+                triage = transform!(Ticket -> TriagedTicket => triage_handler);
+
+                enrich = join!(catalog customers: Customer, TriagedTicket -> EnrichedTicket => join_handler);
+
+                csv_out = sink!(EnrichedTicket => output_sink);
+            },
+
+            topology: {
+                tickets |> triage;
+                triage |> enrich;
+                enrich |> csv_out;
             }
-        },
-    );
-
-    flow! {
-        name: "csv_demo_support_sla",
-        journals: disk_journals(journals_dir),
-        middleware: [],
-
-        stages: {
-            customers = source!(Customer => customers);
-            tickets = source!(Ticket => tickets);
-
-            triage = transform!(Ticket -> TriagedTicket => TicketTriage::new());
-
-            enrich = join!(catalog customers: Customer, TriagedTicket -> EnrichedTicket => join_handler);
-
-            csv_out = sink!(EnrichedTicket => output_sink);
-        },
-
-        topology: {
-            tickets |> triage;
-            triage |> enrich;
-            enrich |> csv_out;
-        }
-    }
+        })
+    })
 }
 
 pub fn run_example(paths: DemoPaths, presentation: Presentation) -> Result<()> {

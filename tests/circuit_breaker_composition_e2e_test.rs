@@ -287,53 +287,53 @@ fn build_retry_flow(
     calls: Arc<Mutex<BTreeMap<u64, usize>>>,
     outputs: Arc<Mutex<Vec<CompOutput>>>,
 ) -> FlowDefinition {
-    let source_breaker = CircuitBreaker::builder()
-        .consecutive_failures(5)
-        .build()
-        .expect("source breaker configuration");
-    let effect_resilience = EffectResilience::with_breaker(
-        CircuitBreaker::builder()
-            .consecutive_failures(2)
+    FlowDefinition::materialize(move |_runtime_config| {
+        let source_breaker = CircuitBreaker::builder()
+            .consecutive_failures(5)
             .build()
-            .expect("effect breaker configuration"),
-    )
-    .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(2))
-    .build()
-    .expect("effect resilience configuration");
-    let sink_breaker = CircuitBreaker::builder()
-        .consecutive_failures(5)
+            .expect("source breaker configuration");
+        let effect_resilience = EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .consecutive_failures(2)
+                .build()
+                .expect("effect breaker configuration"),
+        )
+        .retry(Retry::fixed(Duration::from_millis(1)).max_attempts(2))
         .build()
-        .expect("sink breaker configuration");
-    flow! {
-        name: "circuit_breaker_composition",
-        journals: disk_journals(journal_base),
-        middleware: [],
+        .expect("effect resilience configuration");
+        let sink_breaker = CircuitBreaker::builder()
+            .consecutive_failures(5)
+            .build()
+            .expect("sink breaker configuration");
+        let source_handler = CompSource::new(source_calls);
+        let fan_out_handler = FanOutTransform::new();
+        let effectful_handler = RetryTransform { calls };
+        let collector_handler = CollectSink { outputs };
 
-        stages: {
-            // Source breaker (stays closed; the scripted source never fails) proves
-            // the breaker binds onto the source-poll surface and is replay-safe.
-            inputs = source!(CompInput => CompSource::new(source_calls), [source_breaker]);
-            // Fan-out: one source event becomes two downstream inputs.
-            fan_out = transform!(CompInput -> CompInput => FanOutTransform::new());
-            // Every derived cursor times out once and then recovers. Intermediate
-            // failures are physical breaker samples; the threshold permits the
-            // immediate retry, whose success resets the consecutive count.
-            effectful = effectful_transform!(
-                CompInput -> { CompOutput, CompEffectValue } => RetryTransform { calls },
-                effects: [RetryOnceEffect with [effect_resilience]],
-                middleware: []
-            );
-            // Sink breaker (stays closed; deliveries succeed) proves the breaker
-            // binds onto the sink-delivery boundary and is replay-safe.
-            collector = sink!(CompOutput => CollectSink { outputs }, middleware: [sink_breaker]);
-        },
+        Ok(flow! {
+            name: "circuit_breaker_composition",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            inputs |> fan_out;
-            fan_out |> effectful;
-            effectful |> collector;
-        }
-    }
+            stages: {
+                // Source breaker stays closed; the scripted source never fails.
+                inputs = source!(CompInput => source_handler, [source_breaker]);
+                fan_out = transform!(CompInput -> CompInput => fan_out_handler);
+                effectful = effectful_transform!(
+                    CompInput -> { CompOutput, CompEffectValue } => effectful_handler,
+                    effects: [RetryOnceEffect with [effect_resilience]],
+                    middleware: []
+                );
+                collector = sink!(CompOutput => collector_handler, middleware: [sink_breaker]);
+            },
+
+            topology: {
+                inputs |> fan_out;
+                fan_out |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 fn latest_run_dir(base: &Path) -> PathBuf {

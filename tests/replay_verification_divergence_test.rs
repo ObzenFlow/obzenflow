@@ -162,49 +162,61 @@ where
 }
 
 fn build_flow(journal_base: PathBuf, nondeterministic: bool) -> FlowDefinition {
-    flow! {
-        name: "replay_verification_divergence",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let numbers_handler = Numbers::new();
+        let stamp_handler = Stamp { nondeterministic };
+        let out_handler = SinkTyped::with_delivery(discard::<Stamped>()).idempotent();
 
-        stages: {
-            numbers = source!(Input => Numbers::new());
-            stamp = effectful_transform!(
-                Input -> { Stamped } => Stamp { nondeterministic },
-                effects: [],
-                middleware: []
-            );
-            out = sink!(Stamped => SinkTyped::with_delivery(discard::<Stamped>()).idempotent());
-        },
+        Ok(flow! {
+            name: "replay_verification_divergence",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            numbers |> stamp;
-            stamp |> out;
-        }
-    }
+            stages: {
+                numbers = source!(Input => numbers_handler);
+                stamp = effectful_transform!(
+                    Input -> { Stamped } => stamp_handler,
+                    effects: [],
+                    middleware: []
+                );
+                out = sink!(Stamped => out_handler);
+            },
+
+            topology: {
+                numbers |> stamp;
+                stamp |> out;
+            }
+        })
+    })
 }
 
 fn build_flow_v2(journal_base: PathBuf) -> FlowDefinition {
-    flow! {
-        name: "replay_verification_divergence",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let numbers_handler = Numbers::new();
+        let stamp_handler = StampV2;
+        let out_handler = SinkTyped::with_delivery(discard::<Stamped>()).idempotent();
 
-        stages: {
-            numbers = source!(Input => Numbers::new());
-            stamp = effectful_transform!(
-                Input -> { Stamped } => StampV2,
-                effects: [],
-                middleware: []
-            );
-            out = sink!(Stamped => SinkTyped::with_delivery(discard::<Stamped>()).idempotent());
-        },
+        Ok(flow! {
+            name: "replay_verification_divergence",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            numbers |> stamp;
-            stamp |> out;
-        }
-    }
+            stages: {
+                numbers = source!(Input => numbers_handler);
+                stamp = effectful_transform!(
+                    Input -> { Stamped } => stamp_handler,
+                    effects: [],
+                    middleware: []
+                );
+                out = sink!(Stamped => out_handler);
+            },
+
+            topology: {
+                numbers |> stamp;
+                stamp |> out;
+            }
+        })
+    })
 }
 
 fn latest_run_dir(base: &Path) -> PathBuf {

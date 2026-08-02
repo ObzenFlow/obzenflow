@@ -13,7 +13,7 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -120,14 +120,8 @@ struct CollectorSink {
 }
 
 impl CollectorSink {
-    fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                events: events.clone(),
-            },
-            events,
-        )
+    fn new(events: Arc<Mutex<Vec<ChainEvent>>>) -> Self {
+        Self { events }
     }
 }
 
@@ -159,30 +153,34 @@ async fn test_dropped_events_detection() -> Result<()> {
 
     println!("\n=== Dropped Events Detection Test ===\n");
 
-    // Create handlers
-    let source = CorrelatedSource::new(10); // Emit 10 events
-    let transform = DroppingTransform::new(vec![3, 5, 7]); // Drop events 3, 5, 7
-    let (sink, collected_events) = CollectorSink::new();
+    let collected_events = Arc::new(Mutex::new(Vec::new()));
+    let collected_events_for_flow = Arc::clone(&collected_events);
 
     println!("Building flow that will drop some events...");
 
     // Build flow
-    let flow_handle = flow! {
-        name: "correlation_test_flow",
-        journals: disk_journals(std::path::PathBuf::from("target/dropped_events_test")),
-        middleware: [],
+    let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source = CorrelatedSource::new(10); // Emit 10 events
+        let transform = DroppingTransform::new(vec![3, 5, 7]); // Drop events 3, 5, 7
+        let sink = CollectorSink::new(collected_events_for_flow);
 
-        stages: {
-            correlated_source = source!(CorrelatedTestEvent => source);
-            dropping_transform = transform!(CorrelatedTestEvent -> CorrelatedTestEvent => transform);
-            collector_sink = sink!(CorrelatedTestEvent => sink);
-        },
+        Ok(flow! {
+            name: "correlation_test_flow",
+            journals: disk_journals(std::path::PathBuf::from("target/dropped_events_test")),
+            middleware: [],
 
-        topology: {
-            correlated_source |> dropping_transform;
-            dropping_transform |> collector_sink;
-        }
-    }
+            stages: {
+                correlated_source = source!(CorrelatedTestEvent => source);
+                dropping_transform = transform!(CorrelatedTestEvent -> CorrelatedTestEvent => transform);
+                collector_sink = sink!(CorrelatedTestEvent => sink);
+            },
+
+            topology: {
+                correlated_source |> dropping_transform;
+                dropping_transform |> collector_sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;

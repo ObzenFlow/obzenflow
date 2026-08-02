@@ -204,30 +204,38 @@ where
 }
 
 fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
-    flow! {
-        name: "replay_verification_multi_source",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let web_orders_handler = Channel::new(vec![1, 3, 5]);
+        let store_orders_handler = Channel::new(vec![2, 4, 6]);
+        let intake_handler = Intake::new();
+        let charge_handler = ChargeOrders { calls };
+        let receipts_handler = SinkTyped::with_delivery(discard::<Charged>()).idempotent();
 
-        stages: {
-            web_orders = source!(OrderPlaced => Channel::new(vec![1, 3, 5]));
-            store_orders = source!(OrderPlaced => Channel::new(vec![2, 4, 6]));
-            intake = transform!(OrderPlaced -> OrderPlaced => Intake::new());
-            charge = effectful_transform!(
-                OrderPlaced -> { Charged } => ChargeOrders { calls },
-                effects: [ChargeEffect],
-                middleware: []
-            );
-            receipts = sink!(Charged => SinkTyped::with_delivery(discard::<Charged>()).idempotent());
-        },
+        Ok(flow! {
+            name: "replay_verification_multi_source",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            web_orders |> charge;
-            store_orders |> intake;
-            intake |> charge;
-            charge |> receipts;
-        }
-    }
+            stages: {
+                web_orders = source!(OrderPlaced => web_orders_handler);
+                store_orders = source!(OrderPlaced => store_orders_handler);
+                intake = transform!(OrderPlaced -> OrderPlaced => intake_handler);
+                charge = effectful_transform!(
+                    OrderPlaced -> { Charged } => charge_handler,
+                    effects: [ChargeEffect],
+                    middleware: []
+                );
+                receipts = sink!(Charged => receipts_handler);
+            },
+
+            topology: {
+                web_orders |> charge;
+                store_orders |> intake;
+                intake |> charge;
+                charge |> receipts;
+            }
+        })
+    })
 }
 
 fn latest_run_dir(base: &Path) -> PathBuf {

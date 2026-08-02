@@ -504,13 +504,15 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
 
     let sync_finite_observer_log = Arc::new(ObserverLog::default());
     let sync_finite_observer_for_flow = sync_finite_observer_log.clone();
+    let source = SyncFiniteOnce::new();
+    let sink = NoopSink;
     let sync_finite = test_flow! {
         name: "flowip_115g_sync_finite_timing",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            src = source!(PollingEvent => SyncFiniteOnce::new(), [
+            src = source!(PollingEvent => source, [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
@@ -520,7 +522,7 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
                 ),
                 SourceContractObserverFactory { log: sync_finite_observer_for_flow }
             ]);
-            snk = sink!(PollingEvent => NoopSink);
+            snk = sink!(PollingEvent => sink);
         },
 
         topology: {
@@ -542,17 +544,19 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
 
     let async_finite_observer_log = Arc::new(ObserverLog::default());
     let async_finite_observer_for_flow = async_finite_observer_log.clone();
+    let source = AsyncFiniteOnce {
+        emitted: false,
+        writer_id: WriterId::from(StageId::new()),
+        raw_delay: async_raw_delay,
+    };
+    let sink = NoopSink;
     let async_finite = test_flow! {
         name: "flowip_115g_async_finite_timing",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            src = async_source!(PollingEvent => AsyncFiniteOnce {
-                emitted: false,
-                writer_id: WriterId::from(StageId::new()),
-                raw_delay: async_raw_delay,
-            }, [
+            src = async_source!(PollingEvent => source, [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
@@ -562,7 +566,7 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
                 ),
                 SourceContractObserverFactory { log: async_finite_observer_for_flow }
             ]);
-            snk = sink!(PollingEvent => NoopSink);
+            snk = sink!(PollingEvent => sink);
         },
 
         topology: {
@@ -585,16 +589,18 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
     let sync_infinite_observer_log = Arc::new(ObserverLog::default());
     let sync_infinite_observer_for_flow = sync_infinite_observer_log.clone();
     let sync_infinite_calls = Arc::new(AtomicUsize::new(0));
+    let source = SyncInfiniteOnce {
+        calls: sync_infinite_calls,
+        writer_id: WriterId::from(StageId::new()),
+    };
+    let sink = NoopSink;
     let sync_infinite = test_flow! {
         name: "flowip_115g_sync_infinite_timing",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            src = infinite_source!(PollingEvent => SyncInfiniteOnce {
-                calls: sync_infinite_calls,
-                writer_id: WriterId::from(StageId::new()),
-            }, [
+            src = infinite_source!(PollingEvent => source, [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
@@ -604,7 +610,7 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
                 ),
                 SourceContractObserverFactory { log: sync_infinite_observer_for_flow }
             ]);
-            snk = sink!(PollingEvent => NoopSink);
+            snk = sink!(PollingEvent => sink);
         },
 
         topology: {
@@ -623,17 +629,19 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
     let async_infinite_observer_log = Arc::new(ObserverLog::default());
     let async_infinite_observer_for_flow = async_infinite_observer_log.clone();
     let async_infinite_calls = Arc::new(AtomicUsize::new(0));
+    let source = AsyncInfiniteOnce {
+        calls: async_infinite_calls,
+        writer_id: WriterId::from(StageId::new()),
+        raw_delay: async_raw_delay,
+    };
+    let sink = NoopSink;
     let async_infinite = test_flow! {
         name: "flowip_115g_async_infinite_timing",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            src = async_infinite_source!(PollingEvent => AsyncInfiniteOnce {
-                calls: async_infinite_calls,
-                writer_id: WriterId::from(StageId::new()),
-                raw_delay: async_raw_delay,
-            }, [
+            src = async_infinite_source!(PollingEvent => source, [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
@@ -643,7 +651,7 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
                 ),
                 SourceContractObserverFactory { log: async_infinite_observer_for_flow }
             ]);
-            snk = sink!(PollingEvent => NoopSink);
+            snk = sink!(PollingEvent => sink);
         },
 
         topology: {
@@ -670,7 +678,7 @@ struct TimeoutThenEof {
 
 #[async_trait]
 impl AsyncFiniteSourceHandler for TimeoutThenEof {
-    fn suggested_poll_timeout(&self) -> Option<Duration> {
+    fn poll_timeout(&self) -> Option<Duration> {
         Some(self.timeout)
     }
 
@@ -681,6 +689,41 @@ impl AsyncFiniteSourceHandler for TimeoutThenEof {
             Ok(None)
         }
     }
+}
+
+#[test]
+fn test_flow_handler_construction_stays_cold_inside_its_enclosing_async_future() {
+    let constructor_calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&constructor_calls);
+
+    let build = async move {
+        observed_calls.fetch_add(1, Ordering::SeqCst);
+        let source = TimeoutThenEof {
+            calls: Arc::new(AtomicUsize::new(0)),
+            timeout: Duration::from_secs(1),
+        };
+        let sink = NoopSink;
+
+        test_flow! {
+            name: "flowip_133a_test_flow_cold_probe",
+            journals: memory_journals(),
+            middleware: [],
+
+            stages: {
+                src = async_source!(PollingEvent => source);
+                snk = sink!(PollingEvent => sink);
+            },
+
+            topology: {
+                src |> snk;
+            }
+        }
+        .await
+    };
+
+    assert_eq!(constructor_calls.load(Ordering::SeqCst), 0);
+    drop(build);
+    assert_eq!(constructor_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -694,16 +737,18 @@ async fn timeout_duration_and_error_normalisation_are_inside_the_raw_poll_execut
     let policy_log_for_flow = policy_log.clone();
     let observer_log_for_flow = observer_log.clone();
     let calls_for_flow = calls.clone();
+    let source = TimeoutThenEof {
+        calls: calls_for_flow,
+        timeout,
+    };
+    let sink = NoopSink;
     let harness = test_flow! {
         name: "flowip_115g_timeout_normalisation",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            src = async_source!(PollingEvent => TimeoutThenEof {
-                calls: calls_for_flow,
-                timeout,
-            }, [
+            src = async_source!(PollingEvent => source, [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
@@ -713,7 +758,7 @@ async fn timeout_duration_and_error_normalisation_are_inside_the_raw_poll_execut
                 ),
                 SourceContractObserverFactory { log: observer_log_for_flow }
             ]);
-            snk = sink!(PollingEvent => NoopSink);
+            snk = sink!(PollingEvent => sink);
         },
 
         topology: {
@@ -757,6 +802,89 @@ async fn timeout_duration_and_error_normalisation_are_inside_the_raw_poll_execut
         2,
         "the source resumes after the normalized timeout and reaches EOF"
     );
+
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct DisabledTimeoutThenEof {
+    calls: Arc<AtomicUsize>,
+    writer_id: WriterId,
+    raw_delay: Duration,
+}
+
+#[async_trait]
+impl AsyncFiniteSourceHandler for DisabledTimeoutThenEof {
+    fn poll_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            tokio::time::sleep(self.raw_delay).await;
+            Ok(Some(vec![data_event(self.writer_id, 1)]))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn configured_none_disables_the_finite_source_poll_timeout() -> Result<()> {
+    let raw_delay = Duration::from_secs(31);
+    let policy_log = Arc::new(PolicyLog::default());
+    let observer_log = Arc::new(ObserverLog::default());
+    let policy_log_for_flow = Arc::clone(&policy_log);
+    let observer_log_for_flow = Arc::clone(&observer_log);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let source = DisabledTimeoutThenEof {
+        calls: Arc::clone(&calls),
+        writer_id: WriterId::from(StageId::new()),
+        raw_delay,
+    };
+    let sink = NoopSink;
+    let harness = test_flow! {
+        name: "flowip_133a_disabled_poll_timeout",
+        journals: memory_journals(),
+        middleware: [],
+
+        stages: {
+            src = async_source!(PollingEvent => source, [
+                SourceContractPolicyFactory::new(
+                    PolicySettings::default(),
+                    policy_log_for_flow,
+                ),
+                SourceContractObserverFactory { log: observer_log_for_flow }
+            ]);
+            snk = sink!(PollingEvent => sink);
+        },
+
+        topology: {
+            src |> snk;
+        }
+    }
+    .await
+    .map_err(|error| anyhow!("disabled-timeout flow failed to build: {error}"))?;
+
+    harness
+        .into_inner()
+        .run()
+        .await
+        .map_err(|error| anyhow!("disabled-timeout flow failed: {error}"))?;
+
+    assert_eq!(
+        policy_log.snapshot()[0],
+        PolicyObservation {
+            outcome: PolicyOutcomeKind::Delivered {
+                event_count: 1,
+                has_error_marked: false,
+            },
+            poll_duration: Some(raw_delay),
+        },
+        "a poll longer than the finite default must complete when the handler disables enforcement"
+    );
+    assert_eq!(observer_log.snapshot()[0].poll_duration, raw_delay);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     Ok(())
 }
@@ -857,27 +985,29 @@ fn custom_metric_names(events: &[obzenflow_core::EventEnvelope<ChainEvent>]) -> 
 async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Result<()> {
     let sync_poll_times = Arc::new(Mutex::new(Vec::new()));
     let sync_poll_times_for_flow = sync_poll_times.clone();
+    let source = SyncScriptedSource {
+        steps: vec![
+            ScriptStep::NonData,
+            ScriptStep::NonData,
+            ScriptStep::NonData,
+            ScriptStep::NonData,
+            ScriptStep::NonData,
+            ScriptStep::Data,
+            ScriptStep::NonData,
+            ScriptStep::Eof,
+        ],
+        index: 0,
+        writer_id: WriterId::from(StageId::new()),
+        poll_times: sync_poll_times_for_flow,
+    };
+    let sink = NoopSink;
     let sync_harness = test_flow! {
         name: "flowip_115g_sync_backoff",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            src = source!(PollingEvent => SyncScriptedSource {
-                steps: vec![
-                    ScriptStep::NonData,
-                    ScriptStep::NonData,
-                    ScriptStep::NonData,
-                    ScriptStep::NonData,
-                    ScriptStep::NonData,
-                    ScriptStep::Data,
-                    ScriptStep::NonData,
-                    ScriptStep::Eof,
-                ],
-                index: 0,
-                writer_id: WriterId::from(StageId::new()),
-                poll_times: sync_poll_times_for_flow,
-            }, [
+            src = source!(PollingEvent => source, [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_after_poll: true,
@@ -887,7 +1017,7 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
                 ),
                 SourceContractObserverFactory { log: Arc::new(ObserverLog::default()) }
             ]);
-            snk = sink!(PollingEvent => NoopSink);
+            snk = sink!(PollingEvent => sink);
         },
 
         topology: {
@@ -922,29 +1052,31 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
 
     let async_poll_times = Arc::new(Mutex::new(Vec::new()));
     let async_poll_times_for_flow = async_poll_times.clone();
+    let source = AsyncScriptedSource {
+        steps: vec![
+            ScriptStep::NonData,
+            ScriptStep::NonData,
+            ScriptStep::NonData,
+            ScriptStep::NonData,
+            ScriptStep::NonData,
+            ScriptStep::NonData,
+            ScriptStep::NonData,
+            ScriptStep::Data,
+            ScriptStep::NonData,
+            ScriptStep::Eof,
+        ],
+        index: 0,
+        writer_id: WriterId::from(StageId::new()),
+        poll_times: async_poll_times_for_flow,
+    };
+    let sink = NoopSink;
     let async_harness = test_flow! {
         name: "flowip_115g_async_backoff",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            src = async_source!(PollingEvent => AsyncScriptedSource {
-                steps: vec![
-                    ScriptStep::NonData,
-                    ScriptStep::NonData,
-                    ScriptStep::NonData,
-                    ScriptStep::NonData,
-                    ScriptStep::NonData,
-                    ScriptStep::NonData,
-                    ScriptStep::NonData,
-                    ScriptStep::Data,
-                    ScriptStep::NonData,
-                    ScriptStep::Eof,
-                ],
-                index: 0,
-                writer_id: WriterId::from(StageId::new()),
-                poll_times: async_poll_times_for_flow,
-            }, [
+            src = async_source!(PollingEvent => source, [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_after_poll: true,
@@ -954,7 +1086,7 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
                 ),
                 SourceContractObserverFactory { log: Arc::new(ObserverLog::default()) }
             ]);
-            snk = sink!(PollingEvent => NoopSink);
+            snk = sink!(PollingEvent => sink);
         },
 
         topology: {
@@ -1083,16 +1215,18 @@ async fn wait_for_custom_rows(
 async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed() -> Result<()> {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_for_flow = calls.clone();
+    let source = AsyncIdleInfiniteSource {
+        calls: calls_for_flow,
+        writer_id: WriterId::from(StageId::new()),
+    };
+    let sink = NoopSink;
     let harness = test_flow! {
         name: "flowip_115g_async_idle_interrupt",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            src = async_infinite_source!(PollingEvent => AsyncIdleInfiniteSource {
-                calls: calls_for_flow,
-                writer_id: WriterId::from(StageId::new()),
-            }, [
+            src = async_infinite_source!(PollingEvent => source, [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_after_poll: true,
@@ -1102,7 +1236,7 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
                 ),
                 SourceContractObserverFactory { log: Arc::new(ObserverLog::default()) }
             ]);
-            snk = sink!(PollingEvent => NoopSink);
+            snk = sink!(PollingEvent => sink);
         },
 
         topology: {
@@ -1193,13 +1327,17 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
     let eof_policy_log = Arc::new(PolicyLog::default());
     let eof_calls_for_flow = eof_calls.clone();
     let eof_policy_log_for_flow = eof_policy_log.clone();
+    let source = ImmediateEof {
+        calls: eof_calls_for_flow,
+    };
+    let sink = NoopSink;
     let eof_harness = test_flow! {
         name: "flowip_115g_eof_no_delay",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            src = source!(PollingEvent => ImmediateEof { calls: eof_calls_for_flow }, [
+            src = source!(PollingEvent => source, [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_on_observe: true,
@@ -1209,7 +1347,7 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
                 ),
                 SourceContractObserverFactory { log: Arc::new(ObserverLog::default()) }
             ]);
-            snk = sink!(PollingEvent => NoopSink);
+            snk = sink!(PollingEvent => sink);
         },
 
         topology: {
@@ -1236,13 +1374,17 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
     let rejected_observer_log = Arc::new(ObserverLog::default());
     let rejected_calls_for_flow = rejected_calls.clone();
     let rejected_observer_log_for_flow = rejected_observer_log.clone();
+    let source = ImmediateEof {
+        calls: rejected_calls_for_flow,
+    };
+    let sink = NoopSink;
     let rejected_harness = test_flow! {
         name: "flowip_115g_rejection_no_delay",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            src = source!(PollingEvent => ImmediateEof { calls: rejected_calls_for_flow }, [
+            src = source!(PollingEvent => source, [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         reject: true,
@@ -1252,7 +1394,7 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
                 ),
                 SourceContractObserverFactory { log: rejected_observer_log_for_flow }
             ]);
-            snk = sink!(PollingEvent => NoopSink);
+            snk = sink!(PollingEvent => sink);
         },
 
         topology: {

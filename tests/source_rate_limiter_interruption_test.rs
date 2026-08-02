@@ -24,7 +24,7 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
 use obzenflow_core::{StageId, TypedPayload, WriterId};
-use obzenflow_dsl::{async_source, flow, sink};
+use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -178,25 +178,31 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
     // in that wait.
     let journal_base = unique_journal_dir("source_rate_limiter_interruption");
     let journal_base_for_flow = journal_base.clone();
-    let handle = flow! {
-        name: "source_rate_limiter_interruption",
-        journals: disk_journals(journal_base_for_flow),
-        middleware: [],
+    let definition = FlowDefinition::materialize(move |_runtime_config| {
+        let source = DripSource::new();
+        let sink = NoopSink;
 
-        stages: {
-            src = async_source!(DripEvent => DripSource::new(), [
-                rate_limit_with_burst(0.2, 1.0)
-            ]);
-            snk = sink!(DripEvent => NoopSink);
-        },
+        Ok(flow! {
+            name: "source_rate_limiter_interruption",
+            journals: disk_journals(journal_base_for_flow),
+            middleware: [],
 
-        topology: {
-            src |> snk;
-        }
-    }
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await
-    .map_err(|e| anyhow!("failed to create interruption flow: {e:?}"))?;
+            stages: {
+                src = async_source!(DripEvent => source, [
+                    rate_limit_with_burst(0.2, 1.0)
+                ]);
+                snk = sink!(DripEvent => sink);
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    });
+    let handle = definition
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow!("failed to create interruption flow: {e:?}"))?;
 
     wait_for_running(&handle).await?;
 

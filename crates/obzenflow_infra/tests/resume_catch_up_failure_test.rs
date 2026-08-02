@@ -266,30 +266,38 @@ fn build_flow(
     let a_count = ranges.a_count;
     let b_first = ranges.b_first;
     let b_count = ranges.b_count;
-    flow! {
-        name: "resume_abort",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let channel_a = ChannelTicker::new("a", a_first, a_count);
+        let channel_b = ChannelTicker::new("b", b_first, b_count);
+        let merge_transform = MergeTransform::new();
+        let effectful_tail = EffectfulTail { calls };
+        let counting_sink = CountingSink { delivered };
 
-        stages: {
-            src_a = infinite_source!(ChannelTick => ChannelTicker::new("a", a_first, a_count));
-            src_b = infinite_source!(ChannelTick => ChannelTicker::new("b", b_first, b_count));
-            merge = transform!(ChannelTick -> Merged => MergeTransform::new());
-            effectful = effectful_transform!(
-                Merged -> { AbortOutput, EffectValue } => EffectfulTail { calls },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            collect = sink!(AbortOutput => CountingSink { delivered });
-        },
+        Ok(flow! {
+            name: "resume_abort",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            src_a |> merge;
-            src_b |> merge;
-            merge |> effectful;
-            effectful |> collect;
-        }
-    }
+            stages: {
+                src_a = infinite_source!(ChannelTick => channel_a);
+                src_b = infinite_source!(ChannelTick => channel_b);
+                merge = transform!(ChannelTick -> Merged => merge_transform);
+                effectful = effectful_transform!(
+                    Merged -> { AbortOutput, EffectValue } => effectful_tail,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                collect = sink!(AbortOutput => counting_sink);
+            },
+
+            topology: {
+                src_a |> merge;
+                src_b |> merge;
+                merge |> effectful;
+                effectful |> collect;
+            }
+        })
+    })
 }
 
 async fn wait_for_running(handle: &FlowHandle) -> Result<()> {

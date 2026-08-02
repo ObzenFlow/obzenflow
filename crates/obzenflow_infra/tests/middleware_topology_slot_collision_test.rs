@@ -11,7 +11,7 @@ use obzenflow_adapters::middleware::{
     MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_runtime::stages::observer::StageLifecycleObserver;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -94,31 +94,33 @@ impl MiddlewareFactory for SlotFactory {
 
 #[tokio::test]
 async fn topology_config_slot_collisions_are_configuration_errors() {
-    let built = flow! {
-        name: "topology_slot_collision",
-        journals: obzenflow_infra::journal::memory_journals(),
-        middleware: [
-            SlotFactory {
-                label: "slot.a",
-                key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
-                slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
+    let built = FlowDefinition::materialize(move |_runtime_config| {
+        Ok(flow! {
+            name: "topology_slot_collision",
+            journals: obzenflow_infra::journal::memory_journals(),
+            middleware: [
+                SlotFactory {
+                    label: "slot.a",
+                    key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
+                    slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
+                },
+                SlotFactory {
+                    label: "slot.b",
+                    key: MiddlewareOverrideKey::of::<FamilyB>("family.b"),
+                    slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
+                }
+            ],
+
+            stages: {
+                src = source!(TestEvent => placeholder!());
+                snk = sink!(TestEvent => placeholder!());
             },
-            SlotFactory {
-                label: "slot.b",
-                key: MiddlewareOverrideKey::of::<FamilyB>("family.b"),
-                slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
+
+            topology: {
+                src |> snk;
             }
-        ],
-
-        stages: {
-            src = source!(TestEvent => placeholder!());
-            snk = sink!(TestEvent => placeholder!());
-        },
-
-        topology: {
-            src |> snk;
-        }
-    }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 

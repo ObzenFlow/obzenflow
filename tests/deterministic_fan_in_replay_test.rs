@@ -388,30 +388,38 @@ fn build_two_channel_flow_with_jitter(
     calls: Arc<AtomicUsize>,
     jitter_ms: u64,
 ) -> FlowDefinition {
-    flow! {
-        name: "deterministic_fan_in",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let source_a = ChannelSource::with_jitter("a", 4, jitter_ms);
+        let source_b = ChannelSource::with_jitter("b", 3, jitter_ms);
+        let merge = MergeTransform::new();
+        let effectful = EffectfulTail { calls };
+        let collector = DropSink;
 
-        stages: {
-            source_a = source!(FanInInput => ChannelSource::with_jitter("a", 4, jitter_ms));
-            source_b = source!(FanInInput => ChannelSource::with_jitter("b", 3, jitter_ms));
-            merge = transform!(FanInInput -> MergedRecord => MergeTransform::new());
-            effectful = effectful_transform!(
-                MergedRecord -> { FanInOutput, FanInEffectValue } => EffectfulTail { calls },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            collector = sink!(FanInOutput => DropSink);
-        },
+        Ok(flow! {
+            name: "deterministic_fan_in",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            source_a |> merge;
-            source_b |> merge;
-            merge |> effectful;
-            effectful |> collector;
-        }
-    }
+            stages: {
+                source_a = source!(FanInInput => source_a);
+                source_b = source!(FanInInput => source_b);
+                merge = transform!(FanInInput -> MergedRecord => merge);
+                effectful = effectful_transform!(
+                    MergedRecord -> { FanInOutput, FanInEffectValue } => effectful,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                collector = sink!(FanInOutput => collector);
+            },
+
+            topology: {
+                source_a |> merge;
+                source_b |> merge;
+                merge |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 /// Skip-level topology: `source_a` feeds both the tap and the merge directly,
@@ -426,31 +434,39 @@ fn build_skip_level_flow_with_delay(
     calls: Arc<AtomicUsize>,
     delay_ms: u64,
 ) -> FlowDefinition {
-    flow! {
-        name: "deterministic_fan_in_skip_level",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let source_a = ChannelSource::with_delay("a", 4, delay_ms);
+        let tap = TapTransform::new();
+        let merge = MergeTransform::new();
+        let effectful = EffectfulTail { calls };
+        let collector = DropSink;
 
-        stages: {
-            source_a = source!(FanInInput => ChannelSource::with_delay("a", 4, delay_ms));
-            tap = transform!(FanInInput -> FanInInput => TapTransform::new());
-            merge = transform!(FanInInput -> MergedRecord => MergeTransform::new());
-            effectful = effectful_transform!(
-                MergedRecord -> { FanInOutput, FanInEffectValue } => EffectfulTail { calls },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            collector = sink!(FanInOutput => DropSink);
-        },
+        Ok(flow! {
+            name: "deterministic_fan_in_skip_level",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            source_a |> tap;
-            source_a |> merge;
-            tap |> merge;
-            merge |> effectful;
-            effectful |> collector;
-        }
-    }
+            stages: {
+                source_a = source!(FanInInput => source_a);
+                tap = transform!(FanInInput -> FanInInput => tap);
+                merge = transform!(FanInInput -> MergedRecord => merge);
+                effectful = effectful_transform!(
+                    MergedRecord -> { FanInOutput, FanInEffectValue } => effectful,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                collector = sink!(FanInOutput => collector);
+            },
+
+            topology: {
+                source_a |> tap;
+                source_a |> merge;
+                tap |> merge;
+                merge |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 /// FLOWIP-095m: two channels fan into `merge`, whose only descendant is a
@@ -458,26 +474,34 @@ fn build_skip_level_flow_with_delay(
 /// availability-scheduled; 095m marks it because the stateful stage observes
 /// order, so `merge` runs the canonical deterministic merge.
 fn build_two_channel_stateful_flow(journal_base: PathBuf) -> FlowDefinition {
-    flow! {
-        name: "stateful_fan_in",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let source_a = ChannelSource::with_jitter("a", 4, 0);
+        let source_b = ChannelSource::with_jitter("b", 3, 0);
+        let merge = MergeTransform::new();
+        let counter = OrderedListStateful::new();
+        let collector = DropSink;
 
-        stages: {
-            source_a = source!(FanInInput => ChannelSource::with_jitter("a", 4, 0));
-            source_b = source!(FanInInput => ChannelSource::with_jitter("b", 3, 0));
-            merge = transform!(FanInInput -> MergedRecord => MergeTransform::new());
-            counter = stateful!(MergedRecord -> OrderedList => OrderedListStateful::new());
-            collector = sink!(OrderedList => DropSink);
-        },
+        Ok(flow! {
+            name: "stateful_fan_in",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            source_a |> merge;
-            source_b |> merge;
-            merge |> counter;
-            counter |> collector;
-        }
-    }
+            stages: {
+                source_a = source!(FanInInput => source_a);
+                source_b = source!(FanInInput => source_b);
+                merge = transform!(FanInInput -> MergedRecord => merge);
+                counter = stateful!(MergedRecord -> OrderedList => counter);
+                collector = sink!(OrderedList => collector);
+            },
+
+            topology: {
+                source_a |> merge;
+                source_b |> merge;
+                merge |> counter;
+                counter |> collector;
+            }
+        })
+    })
 }
 
 async fn run_live(journal_base: &PathBuf, flow: FlowDefinition) {

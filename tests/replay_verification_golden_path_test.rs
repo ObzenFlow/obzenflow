@@ -293,37 +293,49 @@ where
 }
 
 fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
-    flow! {
-        name: "replay_verification_golden_path",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let orders_handler = OrderSource::new();
+        let validate_handler = ValidateOrder;
+        let authorize_handler = AuthorizePayment { calls };
+        let paid_orders_handler =
+            SinkTyped::with_delivery(discard::<OrderAuthorized>()).idempotent();
+        let cancelled_orders_handler =
+            SinkTyped::with_delivery(discard::<OrderCancelled>()).idempotent();
+        let manual_review_handler =
+            SinkTyped::with_delivery(discard::<AuthorizationUnavailable>()).idempotent();
 
-        stages: {
-            orders = source!(OrderPlaced => OrderSource::new());
-            validate = effectful_transform!(
-                OrderPlaced -> { ValidatedOrder, OrderCancelled } => ValidateOrder,
-                effects: [],
-                middleware: []
-            );
-            authorize = effectful_transform!(
-                ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } => AuthorizePayment { calls },
-                effects: [AuthorizeEffect],
-                middleware: []
-            );
-            paid_orders = sink!(OrderAuthorized => SinkTyped::with_delivery(discard::<OrderAuthorized>()).idempotent());
-            cancelled_orders = sink!(OrderCancelled => SinkTyped::with_delivery(discard::<OrderCancelled>()).idempotent());
-            manual_review = sink!(AuthorizationUnavailable => SinkTyped::with_delivery(discard::<AuthorizationUnavailable>()).idempotent());
-        },
+        Ok(flow! {
+            name: "replay_verification_golden_path",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            orders |> validate;
-            validate |> authorize;
-            authorize |> paid_orders;
-            authorize |> manual_review;
-            validate |> cancelled_orders;
-            authorize |> cancelled_orders;
-        }
-    }
+            stages: {
+                orders = source!(OrderPlaced => orders_handler);
+                validate = effectful_transform!(
+                    OrderPlaced -> { ValidatedOrder, OrderCancelled } => validate_handler,
+                    effects: [],
+                    middleware: []
+                );
+                authorize = effectful_transform!(
+                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } => authorize_handler,
+                    effects: [AuthorizeEffect],
+                    middleware: []
+                );
+                paid_orders = sink!(OrderAuthorized => paid_orders_handler);
+                cancelled_orders = sink!(OrderCancelled => cancelled_orders_handler);
+                manual_review = sink!(AuthorizationUnavailable => manual_review_handler);
+            },
+
+            topology: {
+                orders |> validate;
+                validate |> authorize;
+                authorize |> paid_orders;
+                authorize |> manual_review;
+                validate |> cancelled_orders;
+                authorize |> cancelled_orders;
+            }
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------

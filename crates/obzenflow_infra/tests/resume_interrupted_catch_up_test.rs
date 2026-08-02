@@ -163,22 +163,28 @@ fn build_flow(
     delay_ms: u64,
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
-    flow! {
-        name: "resume_interrupted",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let ticker = BoundedTicker::new(first_n, count);
+        let slow_double = SlowDouble::new(delay_ms);
+        let counting_sink = CountingSink { delivered };
 
-        stages: {
-            src = infinite_source!(Tick => BoundedTicker::new(first_n, count));
-            xform = transform!(Tick -> Doubled => SlowDouble::new(delay_ms));
-            snk = sink!(Doubled => CountingSink { delivered });
-        },
+        Ok(flow! {
+            name: "resume_interrupted",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            src |> xform;
-            xform |> snk;
-        }
-    }
+            stages: {
+                src = infinite_source!(Tick => ticker);
+                xform = transform!(Tick -> Doubled => slow_double);
+                snk = sink!(Doubled => counting_sink);
+            },
+
+            topology: {
+                src |> xform;
+                xform |> snk;
+            }
+        })
+    })
 }
 
 async fn wait_for_running(handle: &FlowHandle) -> Result<()> {

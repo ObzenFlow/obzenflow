@@ -273,59 +273,74 @@ fn join_fn(reference: RefItem, stream: StreamItem) -> JoinedItem {
 
 /// Hydrating join (FiniteEof): the structural orderer, no merge machinery.
 fn build_hydrating_flow(journal_base: PathBuf) -> FlowDefinition {
-    flow! {
-        name: "join_phase_transition_hydrating",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let reference_source = RefSource::new();
+        let stream_source = StreamSource::new();
+        let joined = joins::inner::<RefItem, StreamItem, JoinedItem, _, _, _, _>(
+            |r: &RefItem| r.key.clone(),
+            |s: &StreamItem| s.key.clone(),
+            join_fn,
+        );
+        let collector = DropSink;
 
-        stages: {
-            ref_src = source!(RefItem => RefSource::new());
-            stream_src = source!(StreamItem => StreamSource::new());
-            joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joins::inner(
-                |r: &RefItem| r.key.clone(),
-                |s: &StreamItem| s.key.clone(),
-                join_fn
-            ));
-            collector = sink!(JoinedItem => DropSink);
-        },
+        Ok(flow! {
+            name: "join_phase_transition_hydrating",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            stream_src |> joined;
-            joined |> collector;
-        }
-    }
+            stages: {
+                ref_src = source!(RefItem => reference_source);
+                stream_src = source!(StreamItem => stream_source);
+                joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joined);
+                collector = sink!(JoinedItem => collector);
+            },
+
+            topology: {
+                stream_src |> joined;
+                joined |> collector;
+            }
+        })
+    })
 }
 
 /// Live join with an effectful descendant: the enablement walk marks the join
 /// and it runs the canonical cross-side merge.
 fn build_live_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
-    flow! {
-        name: "join_phase_transition_live",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let reference_source = RefSource::new();
+        let stream_source = StreamSource::new();
+        let joined = joins::inner_live::<RefItem, StreamItem, JoinedItem, _, _, _, _>(
+            |r: &RefItem| r.key.clone(),
+            |s: &StreamItem| s.key.clone(),
+            join_fn,
+        );
+        let effectful = EffectfulTail { calls };
+        let collector = DropSink;
 
-        stages: {
-            ref_src = source!(RefItem => RefSource::new());
-            stream_src = source!(StreamItem => StreamSource::new());
-            joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joins::inner_live(
-                |r: &RefItem| r.key.clone(),
-                |s: &StreamItem| s.key.clone(),
-                join_fn
-            ));
-            effectful = effectful_transform!(
-                JoinedItem -> { FinalOutput, JoinEffectValue } => EffectfulTail { calls },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            collector = sink!(FinalOutput => DropSink);
-        },
+        Ok(flow! {
+            name: "join_phase_transition_live",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            stream_src |> joined;
-            joined |> effectful;
-            effectful |> collector;
-        }
-    }
+            stages: {
+                ref_src = source!(RefItem => reference_source);
+                stream_src = source!(StreamItem => stream_source);
+                joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joined);
+                effectful = effectful_transform!(
+                    JoinedItem -> { FinalOutput, JoinEffectValue } => effectful,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                collector = sink!(FinalOutput => collector);
+            },
+
+            topology: {
+                stream_src |> joined;
+                joined |> effectful;
+                effectful |> collector;
+            }
+        })
+    })
 }
 
 async fn run_live(flow: FlowDefinition) {
@@ -483,27 +498,34 @@ async fn live_join_canonical_merge_reproduces_under_replay() {
 /// availability-scheduled; 095m marks it because a live join observes its own
 /// interleaving, so it runs the canonical cross-side dispatch.
 fn build_live_flow_no_effect(journal_base: PathBuf) -> FlowDefinition {
-    flow! {
-        name: "join_phase_transition_live_no_effect",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let reference_source = RefSource::new();
+        let stream_source = StreamSource::new();
+        let joined = joins::inner_live::<RefItem, StreamItem, JoinedItem, _, _, _, _>(
+            |r: &RefItem| r.key.clone(),
+            |s: &StreamItem| s.key.clone(),
+            join_fn,
+        );
+        let collector = DropSink;
 
-        stages: {
-            ref_src = source!(RefItem => RefSource::new());
-            stream_src = source!(StreamItem => StreamSource::new());
-            joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joins::inner_live(
-                |r: &RefItem| r.key.clone(),
-                |s: &StreamItem| s.key.clone(),
-                join_fn
-            ));
-            collector = sink!(JoinedItem => DropSink);
-        },
+        Ok(flow! {
+            name: "join_phase_transition_live_no_effect",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            stream_src |> joined;
-            joined |> collector;
-        }
-    }
+            stages: {
+                ref_src = source!(RefItem => reference_source);
+                stream_src = source!(StreamItem => stream_source);
+                joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joined);
+                collector = sink!(JoinedItem => collector);
+            },
+
+            topology: {
+                stream_src |> joined;
+                joined |> collector;
+            }
+        })
+    })
 }
 
 /// FLOWIP-095m: a live join with no effect below it is marked on its own and

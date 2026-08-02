@@ -127,11 +127,12 @@ where
     /// reconstructed during replay (FLOWIP-120i).
     ///
     /// ```ignore
-    /// paid_orders = sink!(PaymentAuthorized => SinkTyped::with_delivery(
+    /// let paid_orders_handler = SinkTyped::with_delivery(
     ///     |authorized: PaymentAuthorized, delivery| async move {
     ///         send_to_shipping(authorized, delivery.provenance());
     ///     }
-    /// ));
+    /// );
+    /// paid_orders = sink!(PaymentAuthorized => paid_orders_handler);
     /// ```
     pub fn with_delivery<G, FutG>(handler: G) -> SinkTypedWithDelivery<T, G, FutG>
     where

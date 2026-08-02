@@ -55,7 +55,73 @@ pub fn build_flow(
 ) -> FlowDefinition {
     // This function takes only typed sources, not `HttpIngress<T>` bundles.
     // The runner owns HTTP hosting; the flow owns pipeline topology.
-    flow! {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let post_entry = joins::inner_live::<AccountOpened, LedgerEntry, PostedEntry, _, _, _, _>(
+            |account| account.account_id.clone(),
+            |entry| entry.account_id.clone(),
+            |account, entry| PostedEntry {
+                account_id: entry.account_id,
+                owner: account.owner,
+                kind: entry.kind,
+                amount_cents: entry.amount_cents,
+                initial_balance_cents: account.initial_balance_cents,
+                note: entry.note,
+            },
+        );
+        let checkbook_handler = Checkbook::new().with_emission(EmitAlways);
+        let printer_sink = sinks::console::<CheckbookSnapshot, _>(
+            SnapshotTableFormatter::new(
+                &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],
+                |snapshot: &CheckbookSnapshot| {
+                    snapshot
+                        .transactions
+                        .iter()
+                        .map(|entry| {
+                            let amount = format_unsigned_cents(entry.amount_cents);
+                            let (credit, debit) = match entry.kind {
+                                EntryKind::Credit => (amount.clone(), String::new()),
+                                EntryKind::Debit => (String::new(), amount.clone()),
+                            };
+
+                            let kind_label = match entry.kind {
+                                EntryKind::Credit => "Credit",
+                                EntryKind::Debit => "Debit",
+                            };
+
+                            vec![
+                                entry.index.to_string(),
+                                kind_label.to_string(),
+                                amount,
+                                credit,
+                                debit,
+                                format_cents(entry.balance_cents),
+                                entry.note.as_deref().unwrap_or("").to_string(),
+                            ]
+                        })
+                        .collect()
+                },
+            )
+            .with_header(|snapshot: &CheckbookSnapshot| {
+                vec![
+                    format!("Account: {} ({})", snapshot.account_id, snapshot.owner,),
+                    format!(
+                        "Current: {} | Available: {}",
+                        format_cents(snapshot.current_balance_cents),
+                        format_cents(snapshot.available_balance_cents),
+                    ),
+                ]
+            })
+            .with_footer(|snapshot: &CheckbookSnapshot| {
+                vec![format!(
+                    "Credits: {} | Debits: {} | Tx: {}",
+                    format_cents(snapshot.total_credits_cents),
+                    format_cents(snapshot.total_debits_cents),
+                    snapshot.transactions.len(),
+                )]
+            }),
+        );
+
+        Ok(flow! {
         name: "http_ingestion_piggy_bank_demo",
         journals: disk_journals(PathBuf::from("target/http-ingestion-piggy-bank-demo-logs")),
         middleware: [],
@@ -64,79 +130,11 @@ pub fn build_flow(
             accounts = async_infinite_source!(AccountOpened => accounts_source);
             tx = async_infinite_source!(LedgerEntry => tx_source);
 
-            posted = join!(
-                catalog accounts: AccountOpened,
-                LedgerEntry -> PostedEntry => joins::inner_live(
-                    |account| account.account_id.clone(),
-                    |entry| entry.account_id.clone(),
-                    |account, entry| PostedEntry {
-                        account_id: entry.account_id,
-                        owner: account.owner,
-                        kind: entry.kind,
-                        amount_cents: entry.amount_cents,
-                        initial_balance_cents: account.initial_balance_cents,
-                        note: entry.note,
-                    },
-                )
-            );
+            posted = join!(catalog accounts: AccountOpened, LedgerEntry -> PostedEntry => post_entry);
 
-            checkbook = stateful!(PostedEntry -> CheckbookSnapshot => Checkbook::new().with_emission(EmitAlways));
+            checkbook = stateful!(PostedEntry -> CheckbookSnapshot => checkbook_handler);
 
-            printer = sink!(CheckbookSnapshot => sinks::console(
-                SnapshotTableFormatter::new(
-                    &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],
-                    |snapshot: &CheckbookSnapshot| {
-                        snapshot
-                            .transactions
-                            .iter()
-                            .map(|entry| {
-                                let amount = format_unsigned_cents(entry.amount_cents);
-                                let (credit, debit) = match entry.kind {
-                                    EntryKind::Credit => (amount.clone(), String::new()),
-                                    EntryKind::Debit => (String::new(), amount.clone()),
-                                };
-
-                                let kind_label = match entry.kind {
-                                    EntryKind::Credit => "Credit",
-                                    EntryKind::Debit => "Debit",
-                                };
-
-                                vec![
-                                    entry.index.to_string(),
-                                    kind_label.to_string(),
-                                    amount,
-                                    credit,
-                                    debit,
-                                    format_cents(entry.balance_cents),
-                                    entry.note.as_deref().unwrap_or("").to_string(),
-                                ]
-                            })
-                            .collect()
-                    },
-                )
-                .with_header(|snapshot: &CheckbookSnapshot| {
-                    vec![
-                        format!(
-                            "Account: {} ({})",
-                            snapshot.account_id,
-                            snapshot.owner,
-                        ),
-                        format!(
-                            "Current: {} | Available: {}",
-                            format_cents(snapshot.current_balance_cents),
-                            format_cents(snapshot.available_balance_cents),
-                        ),
-                    ]
-                })
-                .with_footer(|snapshot: &CheckbookSnapshot| {
-                    vec![format!(
-                        "Credits: {} | Debits: {} | Tx: {}",
-                        format_cents(snapshot.total_credits_cents),
-                        format_cents(snapshot.total_debits_cents),
-                        snapshot.transactions.len(),
-                    )]
-                })
-            ));
+            printer = sink!(CheckbookSnapshot => printer_sink);
         },
 
         topology: {
@@ -144,5 +142,6 @@ pub fn build_flow(
             posted |> checkbook;
             checkbook |> printer;
         }
-    }
+        })
+    })
 }

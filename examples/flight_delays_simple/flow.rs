@@ -14,31 +14,19 @@ use super::fixtures;
 use super::handlers::*;
 use anyhow::Result;
 use obzenflow::typed::{joins, sinks, sources};
-use obzenflow_dsl::{flow, join, sink, source, stateful, transform};
+use obzenflow_dsl::{flow, join, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 
 pub fn run_example() -> Result<()> {
-    let carriers = fixtures::carriers();
-    let flights = fixtures::flights();
-
-    FlowApplication::builder().run_blocking(flow! {
-        name: "flight_delays",
-        journals: disk_journals(std::path::PathBuf::from("target/flight-delays-logs")),
-        middleware: [],
-
-        stages: {
-            carriers = source!(CarrierDetails => sources::finite(carriers));
-            flights = source!(FlightRecord => sources::finite(flights));
-
-            val = transform!(FlightRecord -> FlightRecord => FlightValidator::new());
-            // DelayCalculator adds delay_category on the raw record, before the
-            // enricher joins carrier details, so it is FlightRecord -> FlightRecord.
-            calc = transform!(FlightRecord -> FlightRecord => DelayCalculator::new());
-
-            enricher = join!(
-                catalog carriers: CarrierDetails,
-                FlightRecord -> EnrichedFlight => joins::inner(
+    FlowApplication::builder().run_blocking(FlowDefinition::materialize(
+        move |_runtime_config| {
+            let carriers_handler = sources::finite(fixtures::carriers());
+            let flights_handler = sources::finite(fixtures::flights());
+            let validator_handler = FlightValidator::new();
+            let calculator_handler = DelayCalculator::new();
+            let enricher_handler =
+                joins::inner::<CarrierDetails, FlightRecord, EnrichedFlight, _, _, _, _>(
                     |carrier| carrier.carrier_code.clone(),
                     |flight| flight.carrier.clone(),
                     |carrier, flight| EnrichedFlight {
@@ -53,13 +41,11 @@ pub fn run_example() -> Result<()> {
                         flight_number: flight.flight_number.clone(),
                         delay_category: flight.delay_category.clone(),
                     },
-                )
-            );
-
-            agg = stateful!(EnrichedFlight -> CarrierStatistics => CarrierAggregator::new());
-            printer = sink!(CarrierStatistics => sinks::table(
+                );
+            let aggregator_handler = CarrierAggregator::new();
+            let printer_handler = sinks::table::<CarrierStatistics, _>(
                 &["status", "carrier", "avg_delay", "flights"],
-                |stats| {
+                |stats: &CarrierStatistics| {
                     let status = if stats.average_delay < 10.0 {
                         "🟢"
                     } else if stats.average_delay < 30.0 {
@@ -75,17 +61,41 @@ pub fn run_example() -> Result<()> {
                         stats.flight_count.to_string(),
                     ]
                 },
-            ));
-        },
+            );
 
-        topology: {
-            flights |> val;
-            val |> calc;
-            calc |> enricher;
-            enricher |> agg;
-            agg |> printer;
-        }
-    })?;
+            Ok(flow! {
+                name: "flight_delays",
+                journals: disk_journals(std::path::PathBuf::from("target/flight-delays-logs")),
+                middleware: [],
+
+                stages: {
+                    carriers = source!(CarrierDetails => carriers_handler);
+                    flights = source!(FlightRecord => flights_handler);
+
+                    val = transform!(FlightRecord -> FlightRecord => validator_handler);
+                    // DelayCalculator adds delay_category on the raw record, before the
+                    // enricher joins carrier details, so it is FlightRecord -> FlightRecord.
+                    calc = transform!(FlightRecord -> FlightRecord => calculator_handler);
+
+                    enricher = join!(
+                        catalog carriers: CarrierDetails,
+                        FlightRecord -> EnrichedFlight => enricher_handler
+                    );
+
+                    agg = stateful!(EnrichedFlight -> CarrierStatistics => aggregator_handler);
+                    printer = sink!(CarrierStatistics => printer_handler);
+                },
+
+                topology: {
+                    flights |> val;
+                    val |> calc;
+                    calc |> enricher;
+                    enricher |> agg;
+                    agg |> printer;
+                }
+            })
+        },
+    ))?;
 
     Ok(())
 }

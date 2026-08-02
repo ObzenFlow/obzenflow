@@ -32,12 +32,13 @@ use obzenflow::typed::{sources, stateful as typed_stateful, transforms as typed_
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
-use obzenflow_dsl::{flow, sink, source, stateful, transform};
+use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::SinkHandler;
+use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::transform::TryMapWithTyped;
 use obzenflow_runtime::typing::SinkTyping;
 use serde::{Deserialize, Serialize};
@@ -192,61 +193,38 @@ fn main() -> Result<()> {
         .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation)
-        .run_blocking(flow! {
-            name: "prometheus_demo",
-            journals: disk_journals(std::path::PathBuf::from("target/prometheus_demo_journal")),
-            middleware: [],
+        .run_blocking(FlowDefinition::materialize(move |_runtime_config| {
+            let high_volume_source_handler = sources::finite_from_fn(move |index| {
+                if index >= total_events {
+                    println!("🏁 Source complete: Generated {index} total events");
+                    return None;
+                }
 
-            stages: {
-                // Source generating the configured event volume. Source intake
-                // is the live I/O boundary where rate limiting belongs under
-                // FLOWIP-120c H1.
-                high_volume_source = source!(DataRequest =>
-                    sources::finite_from_fn(move |index| {
-                        if index >= total_events {
-                            println!("🏁 Source complete: Generated {index} total events");
-                            return None;
-                        }
+                let current_id = index;
+                let next_count = index + 1;
 
-                        let current_id = index;
-                        let next_count = index + 1;
+                if next_count.is_multiple_of(10_000) {
+                    println!("📊 Generated {next_count} events...");
+                }
 
-                        if next_count.is_multiple_of(10_000) {
-                            println!("📊 Generated {next_count} events...");
-                        }
-
-                        Some(DataRequest {
-                            id: current_id,
-                            should_fail: current_id % 100 == 0,
-                            batch: current_id / 100,
-                        })
-                    }),
-                    [RateLimiterBuilder::new(1000.0).build()]
-                );
-
-                // Error-prone transform (every 100th event fails)
-                // FLOWIP-114b: typed `In -> Out` form so the topology API carries
-                // input/output type contracts for this stage.
-                error_processor = transform!(DataRequest -> ProcessedEvent =>
-                    error_prone_transform()
-                );
-
-                // Fan-out branch 1: Type-safe event counter (FLOWIP-080j)
-                // Replaces 59-line EventCounter StatefulHandler with ReduceTyped!
-                // Counts ProcessedEvent domain objects from the stream
-                event_counter = stateful!(ProcessedEvent -> EventCountState =>
-                    typed_stateful::reduce(
-                        EventCountState::default(),
-                        |state: &mut EventCountState, _event: &ProcessedEvent| {
-                            state.event_count += 1;
-                            // Log progress every 10k events
-                            if state.event_count.is_multiple_of(10_000) {
-                                println!("📊 Counted {} events so far...", state.event_count);
-                            }
-                        }
-                    ).emit_on_eof()
-                );
-                summary_sink = sink!(move |summary: EventCountState| {
+                Some(DataRequest {
+                    id: current_id,
+                    should_fail: current_id % 100 == 0,
+                    batch: current_id / 100,
+                })
+            });
+            let error_processor_handler = error_prone_transform();
+            let event_counter_handler = typed_stateful::reduce(
+                EventCountState::default(),
+                |state: &mut EventCountState, _event: &ProcessedEvent| {
+                    state.event_count += 1;
+                    if state.event_count.is_multiple_of(10_000) {
+                        println!("📊 Counted {} events so far...", state.event_count);
+                    }
+                },
+            )
+            .emit_on_eof();
+            let summary_sink_handler = SinkTyped::new(move |summary: EventCountState| async move {
                     let count = summary.event_count;
                     let errors = total_events.saturating_sub(count);
 
@@ -268,24 +246,34 @@ fn main() -> Result<()> {
                     println!("   2. Visit http://localhost:9090/metrics");
                     println!("   3. See detailed per-stage metrics, errors, latencies, etc.");
                     println!("=====================================");
-                }, delivery: idempotent);
+                })
+                .idempotent();
+            let completion_sink_handler = CompletionSink::new();
 
-                // Fan-out branch 2: Completion sink (typed input contract).
-                completion_sink = sink!(ProcessedEvent => CompletionSink::new());
-            },
+            Ok(flow! {
+                name: "prometheus_demo",
+                journals: disk_journals(std::path::PathBuf::from("target/prometheus_demo_journal")),
+                middleware: [],
 
-            topology: {
-                // Linear processing
-                high_volume_source |> error_processor;
+                stages: {
+                    // Source intake is the live I/O boundary where rate limiting belongs.
+                    high_volume_source = source!(DataRequest => high_volume_source_handler, [
+                        RateLimiterBuilder::new(1000.0).build()
+                    ]);
+                    error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);
+                    event_counter = stateful!(ProcessedEvent -> EventCountState => event_counter_handler);
+                    summary_sink = sink!(EventCountState => summary_sink_handler);
+                    completion_sink = sink!(ProcessedEvent => completion_sink_handler);
+                },
 
-                // Fan-out: processor feeds both branches
-                error_processor |> event_counter;
-                error_processor |> completion_sink;
-
-                // Counter emits summary to its sink
-                event_counter |> summary_sink;
-            }
-        })?;
+                topology: {
+                    high_volume_source |> error_processor;
+                    error_processor |> event_counter;
+                    error_processor |> completion_sink;
+                    event_counter |> summary_sink;
+                }
+            })
+        }))?;
 
     Ok(())
 }

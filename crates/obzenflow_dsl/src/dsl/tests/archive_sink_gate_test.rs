@@ -159,7 +159,7 @@ mod tests {
         }
         // The refusal names all four declaration homes.
         assert!(
-            message.contains("`delivery: idempotent` on a sink! closure"),
+            message.contains("`delivery: idempotent` on its `sink!` row"),
             "{message}"
         );
         assert!(
@@ -206,10 +206,11 @@ mod tests {
     }
 
     #[test]
-    fn sink_macro_delivery_clause_snapshots_through_the_typed_wrapper() {
+    fn sink_macro_delivery_clause_snapshots_through_bound_typed_adapters() {
+        let idempotent_sink = SinkTyped::new(|_value: SinkInput| async move {});
         let idempotent = crate::sink!(
             name: "declared_idempotent",
-            SinkInput => SinkTyped::new(|_value: SinkInput| async move {}),
+            SinkInput => idempotent_sink,
             delivery: idempotent
         );
         assert_eq!(
@@ -217,9 +218,10 @@ mod tests {
             Some(SinkDeliverySafety::IdempotentProjection)
         );
 
+        let non_idempotent_sink = SinkTyped::new(|_value: SinkInput| async move {});
         let non_idempotent = crate::sink!(
             name: "declared_non_idempotent",
-            SinkInput => SinkTyped::new(|_value: SinkInput| async move {}),
+            SinkInput => non_idempotent_sink,
             delivery: non_idempotent
         );
         assert_eq!(
@@ -227,19 +229,21 @@ mod tests {
             Some(SinkDeliverySafety::NonIdempotentExternal)
         );
 
-        let closure_form = crate::sink!(
-            name: "closure_declared",
-            |_value: SinkInput| {},
+        let adapter_sink = SinkTyped::new(|_value: SinkInput| async move {});
+        let adapter_form = crate::sink!(
+            name: "adapter_declared",
+            SinkInput => adapter_sink,
             delivery: idempotent
         );
         assert_eq!(
-            closure_form.sink_delivery_safety(),
+            adapter_form.sink_delivery_safety(),
             Some(SinkDeliverySafety::IdempotentProjection)
         );
 
+        let undeclared_sink = SinkTyped::new(|_value: SinkInput| async move {});
         let undeclared = crate::sink!(
             name: "undeclared",
-            SinkInput => SinkTyped::new(|_value: SinkInput| async move {})
+            SinkInput => undeclared_sink
         );
         assert_eq!(undeclared.sink_delivery_safety(), None);
     }

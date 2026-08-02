@@ -314,7 +314,7 @@ mod tests {
     use obzenflow_core::StageId;
 
     use crate::journal::MemoryJournal;
-    use obzenflow_dsl::{async_infinite_source, flow, sink};
+    use obzenflow_dsl::{async_infinite_source, flow, sink, FlowDefinition};
     use obzenflow_fsm::FsmAction;
     use obzenflow_runtime::metrics::{
         MetricsAggregatorAction, MetricsAggregatorContext, MetricsStore,
@@ -1493,27 +1493,31 @@ mod tests {
 
         let delivered = Arc::new(AtomicUsize::new(0));
         let notify = Arc::new(Notify::new());
-        let sink = NotifyingSink {
-            delivered: delivered.clone(),
-            notify: notify.clone(),
-        };
-
         let journal_root = unique_journal_dir("flowip_084h_ingestion_journal_absence");
         let journal_root_for_flow = journal_root.clone();
-        let handle = flow! {
-            name: "flowip_084h_ingestion_journal_absence",
-            journals: disk_journals(journal_root_for_flow),
-            middleware: [],
+        let delivered_for_flow = Arc::clone(&delivered);
+        let notify_for_flow = Arc::clone(&notify);
+        let handle = FlowDefinition::materialize(move |_runtime_config| {
+            let sink = NotifyingSink {
+                delivered: delivered_for_flow,
+                notify: notify_for_flow,
+            };
 
-            stages: {
-                source = async_infinite_source!(TestPayload => source);
-                sink = sink!(TestPayload => sink);
-            },
+            Ok(flow! {
+                name: "flowip_084h_ingestion_journal_absence",
+                journals: disk_journals(journal_root_for_flow),
+                middleware: [],
 
-            topology: {
-                source |> sink;
-            }
-        }
+                stages: {
+                    source = async_infinite_source!(TestPayload => source);
+                    sink = sink!(TestPayload => sink);
+                },
+
+                topology: {
+                    source |> sink;
+                }
+            })
+        })
         .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .expect("build flow");
@@ -1601,32 +1605,36 @@ mod tests {
 
         let delivered = Arc::new(AtomicUsize::new(0));
         let notify = Arc::new(Notify::new());
-        let sink = NotifyingSink {
-            delivered: delivered.clone(),
-            notify: notify.clone(),
-        };
-
         let journal_root = unique_journal_dir("flowip_115d_ingress_refusal_fact");
         let journal_root_for_flow = journal_root.clone();
-        let handle = flow! {
-            name: "flowip_115d_ingress_refusal_fact",
-            journals: disk_journals(journal_root_for_flow),
-            middleware: [],
+        let delivered_for_flow = Arc::clone(&delivered);
+        let notify_for_flow = Arc::clone(&notify);
+        let handle = FlowDefinition::materialize(move |_runtime_config| {
+            let sink = NotifyingSink {
+                delivered: delivered_for_flow,
+                notify: notify_for_flow,
+            };
 
-            stages: {
-                // Capacity 1 with a negligible refill: the first POST consumes the
-                // single burst token, the second is fail-fast rate-limited. The
-                // limiter routes to Ingress (AC42), not the internal source poll.
-                source = async_infinite_source!(OrderPayload => source, [
-                    rate_limit_with_burst(0.001, 1.0)
-                ]);
-                sink = sink!(OrderPayload => sink);
-            },
+            Ok(flow! {
+                name: "flowip_115d_ingress_refusal_fact",
+                journals: disk_journals(journal_root_for_flow),
+                middleware: [],
 
-            topology: {
-                source |> sink;
-            }
-        }
+                stages: {
+                    // Capacity 1 with a negligible refill: the first POST consumes the
+                    // single burst token, the second is fail-fast rate-limited. The
+                    // limiter routes to Ingress (AC42), not the internal source poll.
+                    source = async_infinite_source!(OrderPayload => source, [
+                        rate_limit_with_burst(0.001, 1.0)
+                    ]);
+                    sink = sink!(OrderPayload => sink);
+                },
+
+                topology: {
+                    source |> sink;
+                }
+            })
+        })
         .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .expect("build flow");

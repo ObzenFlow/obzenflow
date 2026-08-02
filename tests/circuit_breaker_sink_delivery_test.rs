@@ -20,7 +20,7 @@ use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     StageId, TypedPayload, WriterId,
 };
-use obzenflow_dsl::{flow, sink, source};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
@@ -107,28 +107,32 @@ async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
     const TOTAL_EVENTS: u64 = 12;
     const THRESHOLD: usize = 3;
 
-    let source = BurstSource::new(TOTAL_EVENTS);
     let calls = Arc::new(AtomicUsize::new(0));
-    let sink_handler = AlwaysFailingSink {
-        calls: calls.clone(),
-    };
+    let calls_for_flow = Arc::clone(&calls);
 
-    let flow_handle = flow! {
-        name: "circuit_breaker_sink_delivery_test",
-        journals: disk_journals(std::path::PathBuf::from("target/cb_sink_delivery")),
-        middleware: [],
+    let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source = BurstSource::new(TOTAL_EVENTS);
+        let sink_handler = AlwaysFailingSink {
+            calls: calls_for_flow,
+        };
 
-        stages: {
-            cb_source = source!(SinkBreakerEvent => source);
-            cb_sink = sink!(SinkBreakerEvent => sink_handler, middleware: [
-                breaker(THRESHOLD)
-            ]);
-        },
+        Ok(flow! {
+            name: "circuit_breaker_sink_delivery_test",
+            journals: disk_journals(std::path::PathBuf::from("target/cb_sink_delivery")),
+            middleware: [],
 
-        topology: {
-            cb_source |> cb_sink;
-        }
-    }
+            stages: {
+                cb_source = source!(SinkBreakerEvent => source);
+                cb_sink = sink!(SinkBreakerEvent => sink_handler, middleware: [
+                    breaker(THRESHOLD)
+                ]);
+            },
+
+            topology: {
+                cb_source |> cb_sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;

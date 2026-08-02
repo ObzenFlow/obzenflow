@@ -10,7 +10,9 @@ use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{CycleDepth, StageId, WriterId};
-use obzenflow_dsl::{async_source, async_transform, flow, sink, source, test_flow, transform};
+use obzenflow_dsl::{
+    async_source, async_transform, flow, sink, source, test_flow, transform, FlowDefinition,
+};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -293,6 +295,9 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     let entry_processed_for_flow = entry_processed.clone();
     let iter_processed_for_flow = iter_processed.clone();
     let (sink, done_count) = DoneCounterSink::new();
+    let source = SingleSeedSource::new(target_iterations);
+    let entry = EntryConvergeTransform::new(entry_processed_for_flow);
+    let iter = IterationTransform::new(iter_processed_for_flow, iter_delay);
 
     let harness = test_flow! {
         name: "cycle_buffers_external_eof_until_scc_quiescent",
@@ -300,9 +305,9 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!(SeedEvent => SingleSeedSource::new(target_iterations));
-            entry = transform!(SeedEvent -> SeedEvent => EntryConvergeTransform::new(entry_processed_for_flow));
-            iter = async_transform!(SeedEvent -> SeedEvent => IterationTransform::new(iter_processed_for_flow, iter_delay));
+            src = source!(SeedEvent => source);
+            entry = transform!(SeedEvent -> SeedEvent => entry);
+            iter = async_transform!(SeedEvent -> SeedEvent => iter);
             snk = sink!(SeedEvent => sink);
         },
 
@@ -488,6 +493,9 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let entry_processed_for_flow = entry_processed.clone();
     let iter_processed_for_flow = iter_processed.clone();
     let (sink, done_count) = DoneCounterSink::new();
+    let source = SeedThenDrainSource::new(target_iterations, drain_delay);
+    let entry = EntryConvergeTransform::new(entry_processed_for_flow);
+    let iter = IterationTransform::new(iter_processed_for_flow, iter_delay);
 
     let harness = test_flow! {
         name: "cycle_buffers_drain_until_scc_quiescent",
@@ -495,9 +503,9 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = async_source!(SeedEvent => SeedThenDrainSource::new(target_iterations, drain_delay));
-            entry = transform!(SeedEvent -> SeedEvent => EntryConvergeTransform::new(entry_processed_for_flow));
-            iter = async_transform!(SeedEvent -> SeedEvent => IterationTransform::new(iter_processed_for_flow, iter_delay));
+            src = async_source!(SeedEvent => source);
+            entry = transform!(SeedEvent -> SeedEvent => entry);
+            iter = async_transform!(SeedEvent -> SeedEvent => iter);
             snk = sink!(SeedEvent => sink);
         },
 
@@ -587,28 +595,35 @@ async fn cycle_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
     let converge_target = 2u64;
     let diverge_target = 1_000u64;
 
-    let handle = flow! {
-        name: "cycle_max_iterations_exceeded_routes_to_error_journal",
-        journals: disk_journals(journal_root_for_flow),
-        middleware: [],
+    let definition = FlowDefinition::materialize(move |_runtime_config| {
+        let source = DualSeedSource::new(converge_target, diverge_target);
+        let entry = EntryConvergeTransform::new(entry_processed_for_flow);
+        let iter = IterationTransform::new(iter_processed_for_flow, Duration::ZERO);
 
-        stages: {
-            src = source!(SeedEvent => DualSeedSource::new(converge_target, diverge_target));
-            entry = transform!(SeedEvent -> SeedEvent => EntryConvergeTransform::new(entry_processed_for_flow));
-            iter = async_transform!(SeedEvent -> SeedEvent => IterationTransform::new(iter_processed_for_flow, Duration::ZERO));
-            snk = sink!(SeedEvent => sink);
-        },
+        Ok(flow! {
+            name: "cycle_max_iterations_exceeded_routes_to_error_journal",
+            journals: disk_journals(journal_root_for_flow),
+            middleware: [],
 
-        topology: {
-            src |> entry;
-            entry |> iter;
-            entry <| iter;
-            entry |> snk;
-        }
-    }
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await
-    .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
+            stages: {
+                src = source!(SeedEvent => source);
+                entry = transform!(SeedEvent -> SeedEvent => entry);
+                iter = async_transform!(SeedEvent -> SeedEvent => iter);
+                snk = sink!(SeedEvent => sink);
+            },
+
+            topology: {
+                src |> entry;
+                entry |> iter;
+                entry <| iter;
+                entry |> snk;
+            }
+        })
+    });
+    let handle = definition
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
     tokio::time::timeout(Duration::from_secs(10), handle.run())
         .await
@@ -642,29 +657,38 @@ async fn cycle_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
 
 #[tokio::test]
 async fn cycle_rejects_sccs_with_multiple_entry_points() {
-    let result = flow! {
-        name: "cycle_reject_multi_entry_scc",
-        journals: disk_journals(unique_journal_dir("cycle_reject_multi_entry_scc")),
-        middleware: [],
+    let definition = FlowDefinition::materialize(move |_runtime_config| {
+        let source_a = SingleSeedSource::new(1);
+        let source_b = SingleSeedSource::new(1);
+        let transform_a = EntryConvergeTransform::new(Arc::new(AtomicU64::new(0)));
+        let transform_b = EntryConvergeTransform::new(Arc::new(AtomicU64::new(0)));
+        let (sink, _done_count) = DoneCounterSink::new();
 
-        stages: {
-            src1 = source!(SeedEvent => SingleSeedSource::new(1));
-            src2 = source!(SeedEvent => SingleSeedSource::new(1));
-            a = transform!(SeedEvent -> SeedEvent => EntryConvergeTransform::new(Arc::new(AtomicU64::new(0))));
-            b = transform!(SeedEvent -> SeedEvent => EntryConvergeTransform::new(Arc::new(AtomicU64::new(0))));
-            snk = sink!(SeedEvent => DoneCounterSink::new().0);
-        },
+        Ok(flow! {
+            name: "cycle_reject_multi_entry_scc",
+            journals: disk_journals(unique_journal_dir("cycle_reject_multi_entry_scc")),
+            middleware: [],
 
-        topology: {
-            src1 |> a;
-            src2 |> b;
-            a |> b;
-            a <| b;
-            b |> snk;
-        }
-    }
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await;
+            stages: {
+                src1 = source!(SeedEvent => source_a);
+                src2 = source!(SeedEvent => source_b);
+                a = transform!(SeedEvent -> SeedEvent => transform_a);
+                b = transform!(SeedEvent -> SeedEvent => transform_b);
+                snk = sink!(SeedEvent => sink);
+            },
+
+            topology: {
+                src1 |> a;
+                src2 |> b;
+                a |> b;
+                a <| b;
+                b |> snk;
+            }
+        })
+    });
+    let result = definition
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await;
 
     let err = match result {
         Ok(_) => panic!("expected multi-entry SCC validation to fail"),

@@ -8,7 +8,7 @@ use obzenflow_core::event::{ChainEvent, ChainEventFactory, SystemEvent, SystemEv
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{async_source, flow, join, sink, source};
+use obzenflow_dsl::{async_source, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::prelude::FlowHandle;
@@ -220,23 +220,30 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
         tokio::spawn(async {})
     });
 
-    let flow_definition = flow! {
-        name: "liveness_join_fan_in",
-        journals: memory_journals(),
-        middleware: [],
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let reference_source = OneRefEventSource::new();
+        let stream_source = DelayedStreamSource::new();
+        let slow_join = SlowJoin;
+        let noop_sink = NoopSink;
 
-        stages: {
-            ref_src = source!(CatalogRecord => OneRefEventSource::new());
-            stream_src = async_source!(LiveEvent => DelayedStreamSource::new());
-            joiner = join!(catalog ref_src: CatalogRecord, LiveEvent -> EnrichedRecord => SlowJoin);
-            snk = sink!(EnrichedRecord => NoopSink);
-        },
+        Ok(flow! {
+            name: "liveness_join_fan_in",
+            journals: memory_journals(),
+            middleware: [],
 
-        topology: {
-            stream_src |> joiner;
-            joiner |> snk;
-        }
-    };
+            stages: {
+                ref_src = source!(CatalogRecord => reference_source);
+                stream_src = async_source!(LiveEvent => stream_source);
+                joiner = join!(catalog ref_src: CatalogRecord, LiveEvent -> EnrichedRecord => slow_join);
+                snk = sink!(EnrichedRecord => noop_sink);
+            },
+
+            topology: {
+                stream_src |> joiner;
+                joiner |> snk;
+            }
+        })
+    });
 
     let run_handle = tokio::spawn(async move {
         FlowApplication::builder()

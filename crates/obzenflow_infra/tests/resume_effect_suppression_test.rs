@@ -199,26 +199,32 @@ fn build_flow(
     calls: Arc<AtomicUsize>,
     delivered: Arc<AtomicU64>,
 ) -> FlowDefinition {
-    flow! {
-        name: "resume_effects",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    FlowDefinition::materialize(move |_runtime_config| {
+        let reader = BoundedReader::new(first_value, count);
+        let enrich_transform = EnrichTransform { calls };
+        let counting_sink = CountingSink { delivered };
 
-        stages: {
-            src = infinite_source!(Reading => BoundedReader::new(first_value, count));
-            enrich = effectful_transform!(
-                Reading -> { Enriched, EffectValue } => EnrichTransform { calls },
-                effects: [CountingEffect],
-                middleware: []
-            );
-            snk = sink!(Enriched => CountingSink { delivered });
-        },
+        Ok(flow! {
+            name: "resume_effects",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            src |> enrich;
-            enrich |> snk;
-        }
-    }
+            stages: {
+                src = infinite_source!(Reading => reader);
+                enrich = effectful_transform!(
+                    Reading -> { Enriched, EffectValue } => enrich_transform,
+                    effects: [CountingEffect],
+                    middleware: []
+                );
+                snk = sink!(Enriched => counting_sink);
+            },
+
+            topology: {
+                src |> enrich;
+                enrich |> snk;
+            }
+        })
+    })
 }
 
 async fn wait_for_running(handle: &FlowHandle) -> Result<()> {

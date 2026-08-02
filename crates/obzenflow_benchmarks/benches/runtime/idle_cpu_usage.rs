@@ -13,7 +13,7 @@ use obzenflow_benchmarks::prelude::*;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -157,128 +157,51 @@ async fn build_pipeline(
     sink: TimestampedSink,
     journals_base_path: std::path::PathBuf,
 ) -> anyhow::Result<FlowHandle> {
-    let handle = match stage_count {
-        1 => flow! {
-            journals: disk_journals(journals_base_path.clone()),
-            middleware: [],
+    if !matches!(stage_count, 1 | 10 | 20 | 100) {
+        return Err(anyhow::anyhow!("Unsupported stage count: {stage_count}"));
+    }
 
-            stages: {
-                src = source!(BenchEvent => source);
-                snk = sink!(BenchEvent => sink);
-            },
-
-            topology: {
-                src |> snk;
-            }
-        }
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?,
-        10 => flow! {
-            journals: disk_journals(journals_base_path.clone()),
-            middleware: [],
-
-            stages: {
-                src = source!(BenchEvent => source);
-                s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
-                s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
-                s3 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage3"));
-                s4 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage4"));
-                s5 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage5"));
-                s6 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage6"));
-                s7 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage7"));
-                s8 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage8"));
-                s9 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage9"));
-                snk = sink!(BenchEvent => sink);
-            },
-
-            topology: {
-                src |> s1;
-                s1 |> s2;
-                s2 |> s3;
-                s3 |> s4;
-                s4 |> s5;
-                s5 |> s6;
-                s6 |> s7;
-                s7 |> s8;
-                s8 |> s9;
-                s9 |> snk;
-            }
-        }
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?,
-        20 => flow! {
-            journals: disk_journals(journals_base_path.clone()),
-            middleware: [],
-
-            stages: {
-                src = source!(BenchEvent => source);
-                s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
-                s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
-                s3 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage3"));
-                s4 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage4"));
-                s5 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage5"));
-                s6 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage6"));
-                s7 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage7"));
-                s8 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage8"));
-                s9 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage9"));
-                s10 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage10"));
-                s11 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage11"));
-                s12 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage12"));
-                s13 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage13"));
-                s14 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage14"));
-                s15 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage15"));
-                s16 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage16"));
-                s17 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage17"));
-                s18 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage18"));
-                s19 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage19"));
-                snk = sink!(BenchEvent => sink);
-            },
-
-            topology: {
-                src |> s1;
-                s1 |> s2;
-                s2 |> s3;
-                s3 |> s4;
-                s4 |> s5;
-                s5 |> s6;
-                s6 |> s7;
-                s7 |> s8;
-                s8 |> s9;
-                s9 |> s10;
-                s10 |> s11;
-                s11 |> s12;
-                s12 |> s13;
-                s13 |> s14;
-                s14 |> s15;
-                s15 |> s16;
-                s16 |> s17;
-                s17 |> s18;
-                s18 |> s19;
-                s19 |> snk;
-            }
-        }
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?,
-        100 => {
-            // For 100 stages, simplify to 10 stages for maintainability
-            flow! {
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let definition = match stage_count {
+            1 => flow! {
                 journals: disk_journals(journals_base_path.clone()),
                 middleware: [],
 
                 stages: {
                     src = source!(BenchEvent => source);
-                    s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
-                    s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
-                    s3 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage3"));
-                    s4 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage4"));
-                    s5 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage5"));
-                    s6 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage6"));
-                    s7 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage7"));
-                    s8 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage8"));
-                    s9 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage9"));
+                    snk = sink!(BenchEvent => sink);
+                },
+
+                topology: {
+                    src |> snk;
+                }
+            },
+            10 => {
+                let s1_handler = PassthroughStage::new("stage1");
+                let s2_handler = PassthroughStage::new("stage2");
+                let s3_handler = PassthroughStage::new("stage3");
+                let s4_handler = PassthroughStage::new("stage4");
+                let s5_handler = PassthroughStage::new("stage5");
+                let s6_handler = PassthroughStage::new("stage6");
+                let s7_handler = PassthroughStage::new("stage7");
+                let s8_handler = PassthroughStage::new("stage8");
+                let s9_handler = PassthroughStage::new("stage9");
+
+                flow! {
+                journals: disk_journals(journals_base_path.clone()),
+                middleware: [],
+
+                stages: {
+                    src = source!(BenchEvent => source);
+                    s1 = transform!(BenchEvent -> BenchEvent => s1_handler);
+                    s2 = transform!(BenchEvent -> BenchEvent => s2_handler);
+                    s3 = transform!(BenchEvent -> BenchEvent => s3_handler);
+                    s4 = transform!(BenchEvent -> BenchEvent => s4_handler);
+                    s5 = transform!(BenchEvent -> BenchEvent => s5_handler);
+                    s6 = transform!(BenchEvent -> BenchEvent => s6_handler);
+                    s7 = transform!(BenchEvent -> BenchEvent => s7_handler);
+                    s8 = transform!(BenchEvent -> BenchEvent => s8_handler);
+                    s9 = transform!(BenchEvent -> BenchEvent => s9_handler);
                     snk = sink!(BenchEvent => sink);
                 },
 
@@ -294,13 +217,135 @@ async fn build_pipeline(
                     s8 |> s9;
                     s9 |> snk;
                 }
+                }
             }
-            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?
-        }
-        _ => return Err(anyhow::anyhow!("Unsupported stage count: {stage_count}")),
-    };
+            20 => {
+                let s1_handler = PassthroughStage::new("stage1");
+                let s2_handler = PassthroughStage::new("stage2");
+                let s3_handler = PassthroughStage::new("stage3");
+                let s4_handler = PassthroughStage::new("stage4");
+                let s5_handler = PassthroughStage::new("stage5");
+                let s6_handler = PassthroughStage::new("stage6");
+                let s7_handler = PassthroughStage::new("stage7");
+                let s8_handler = PassthroughStage::new("stage8");
+                let s9_handler = PassthroughStage::new("stage9");
+                let s10_handler = PassthroughStage::new("stage10");
+                let s11_handler = PassthroughStage::new("stage11");
+                let s12_handler = PassthroughStage::new("stage12");
+                let s13_handler = PassthroughStage::new("stage13");
+                let s14_handler = PassthroughStage::new("stage14");
+                let s15_handler = PassthroughStage::new("stage15");
+                let s16_handler = PassthroughStage::new("stage16");
+                let s17_handler = PassthroughStage::new("stage17");
+                let s18_handler = PassthroughStage::new("stage18");
+                let s19_handler = PassthroughStage::new("stage19");
+
+                flow! {
+                journals: disk_journals(journals_base_path.clone()),
+                middleware: [],
+
+                stages: {
+                    src = source!(BenchEvent => source);
+                    s1 = transform!(BenchEvent -> BenchEvent => s1_handler);
+                    s2 = transform!(BenchEvent -> BenchEvent => s2_handler);
+                    s3 = transform!(BenchEvent -> BenchEvent => s3_handler);
+                    s4 = transform!(BenchEvent -> BenchEvent => s4_handler);
+                    s5 = transform!(BenchEvent -> BenchEvent => s5_handler);
+                    s6 = transform!(BenchEvent -> BenchEvent => s6_handler);
+                    s7 = transform!(BenchEvent -> BenchEvent => s7_handler);
+                    s8 = transform!(BenchEvent -> BenchEvent => s8_handler);
+                    s9 = transform!(BenchEvent -> BenchEvent => s9_handler);
+                    s10 = transform!(BenchEvent -> BenchEvent => s10_handler);
+                    s11 = transform!(BenchEvent -> BenchEvent => s11_handler);
+                    s12 = transform!(BenchEvent -> BenchEvent => s12_handler);
+                    s13 = transform!(BenchEvent -> BenchEvent => s13_handler);
+                    s14 = transform!(BenchEvent -> BenchEvent => s14_handler);
+                    s15 = transform!(BenchEvent -> BenchEvent => s15_handler);
+                    s16 = transform!(BenchEvent -> BenchEvent => s16_handler);
+                    s17 = transform!(BenchEvent -> BenchEvent => s17_handler);
+                    s18 = transform!(BenchEvent -> BenchEvent => s18_handler);
+                    s19 = transform!(BenchEvent -> BenchEvent => s19_handler);
+                    snk = sink!(BenchEvent => sink);
+                },
+
+                topology: {
+                    src |> s1;
+                    s1 |> s2;
+                    s2 |> s3;
+                    s3 |> s4;
+                    s4 |> s5;
+                    s5 |> s6;
+                    s6 |> s7;
+                    s7 |> s8;
+                    s8 |> s9;
+                    s9 |> s10;
+                    s10 |> s11;
+                    s11 |> s12;
+                    s12 |> s13;
+                    s13 |> s14;
+                    s14 |> s15;
+                    s15 |> s16;
+                    s16 |> s17;
+                    s17 |> s18;
+                    s18 |> s19;
+                    s19 |> snk;
+                }
+                }
+            }
+            100 => {
+                // For 100 stages, simplify to 10 stages for maintainability
+                let s1_handler = PassthroughStage::new("stage1");
+                let s2_handler = PassthroughStage::new("stage2");
+                let s3_handler = PassthroughStage::new("stage3");
+                let s4_handler = PassthroughStage::new("stage4");
+                let s5_handler = PassthroughStage::new("stage5");
+                let s6_handler = PassthroughStage::new("stage6");
+                let s7_handler = PassthroughStage::new("stage7");
+                let s8_handler = PassthroughStage::new("stage8");
+                let s9_handler = PassthroughStage::new("stage9");
+
+                flow! {
+                    journals: disk_journals(journals_base_path.clone()),
+                    middleware: [],
+
+                    stages: {
+                        src = source!(BenchEvent => source);
+                        s1 = transform!(BenchEvent -> BenchEvent => s1_handler);
+                        s2 = transform!(BenchEvent -> BenchEvent => s2_handler);
+                        s3 = transform!(BenchEvent -> BenchEvent => s3_handler);
+                        s4 = transform!(BenchEvent -> BenchEvent => s4_handler);
+                        s5 = transform!(BenchEvent -> BenchEvent => s5_handler);
+                        s6 = transform!(BenchEvent -> BenchEvent => s6_handler);
+                        s7 = transform!(BenchEvent -> BenchEvent => s7_handler);
+                        s8 = transform!(BenchEvent -> BenchEvent => s8_handler);
+                        s9 = transform!(BenchEvent -> BenchEvent => s9_handler);
+                        snk = sink!(BenchEvent => sink);
+                    },
+
+                    topology: {
+                        src |> s1;
+                        s1 |> s2;
+                        s2 |> s3;
+                        s3 |> s4;
+                        s4 |> s5;
+                        s5 |> s6;
+                        s6 |> s7;
+                        s7 |> s8;
+                        s8 |> s9;
+                        s9 |> snk;
+                    }
+                }
+            }
+            _ => unreachable!("stage count validated above"),
+        };
+
+        Ok(definition)
+    });
+
+    let handle = flow_definition
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     Ok(handle)
 }
@@ -309,26 +354,29 @@ async fn build_pipeline(
 async fn measure_idle_cpu() -> anyhow::Result<f64> {
     let (journals_base_path, _temp_dir) = create_temp_journals_base("idle_cpu")?;
 
-    // Create pipeline with non-emitting source
-    let idle_source = IdleSource::new();
-    let (sink, _) = TimestampedSink::new(0);
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let idle_source = IdleSource::new();
+        let (timestamped_sink, _) = TimestampedSink::new(0);
 
-    let handle = flow! {
-        journals: disk_journals(journals_base_path),
-        middleware: [],
+        Ok(flow! {
+            journals: disk_journals(journals_base_path),
+            middleware: [],
 
-        stages: {
-            src = source!(BenchEvent => idle_source);
-            snk = sink!(BenchEvent => sink);
-        },
+            stages: {
+                src = source!(BenchEvent => idle_source);
+                snk = sink!(BenchEvent => timestamped_sink);
+            },
 
-        topology: {
-            src |> snk;
-        }
-    }
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
+            topology: {
+                src |> snk;
+            }
+        })
+    });
+
+    let handle = flow_definition
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     // Start the pipeline (do not await completion; we want to measure idle CPU while running)
     handle

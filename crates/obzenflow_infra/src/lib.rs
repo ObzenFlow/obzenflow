@@ -5,9 +5,10 @@
 //! Outermost infrastructure layer for ObzenFlow. Provides durable journal
 //! backends (disk-based, in-memory), an optional Warp web server for metrics
 //! and topology endpoints, and the [`application::FlowApplication`] runner
-//! that turns a `flow! { ... }` definition into a managed process with CLI
-//! parsing, observability, and graceful shutdown. Most capabilities are gated
-//! behind feature flags (see `Cargo.toml`).
+//! that turns a deferred `FlowDefinition` (normally built with
+//! `FlowDefinition::materialize` around a `flow! { ... }` declaration) into a
+//! managed process with CLI parsing, observability, and graceful shutdown.
+//! Most capabilities are gated behind feature flags (see `Cargo.toml`).
 //!
 #![doc = include_str!("../README.md")]
 

@@ -15,7 +15,7 @@ use obzenflow_adapters::middleware::CircuitBreaker;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::TypedPayload;
 use obzenflow_core::WriterId;
-use obzenflow_dsl::{async_transform, flow, sink, source, transform};
+use obzenflow_dsl::{async_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -110,29 +110,33 @@ impl SinkHandler for NullSink {
 
 #[tokio::test]
 async fn flow_level_policy_middleware_is_rejected_at_build() {
-    let result = flow! {
-        name: "policy_guard_flow_scope",
-        journals: disk_journals(std::path::PathBuf::from(
-            "target/policy-guard-logs/flow-scope",
-        )),
-        middleware: [
-            breaker(3)
-        ],
+    let result = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = OneShotSource {
+            emitted: false,
+            writer_id: WriterId::from(obzenflow_core::StageId::new()),
+        };
+        let transform_handler = SyncPassthrough;
+        let sink_handler = NullSink;
 
-        stages: {
-            guard_source = source!(GuardEvent => OneShotSource {
-                emitted: false,
-                writer_id: WriterId::from(obzenflow_core::StageId::new()),
-            });
-            guarded = transform!(GuardEvent -> GuardEvent => SyncPassthrough);
-            guard_sink = sink!(GuardEvent => NullSink);
-        },
+        Ok(flow! {
+            name: "policy_guard_flow_scope",
+            journals: disk_journals(std::path::PathBuf::from(
+                "target/policy-guard-logs/flow-scope",
+            )),
+            middleware: [breaker(3)],
 
-        topology: {
-            guard_source |> guarded;
-            guarded |> guard_sink;
-        }
-    }
+            stages: {
+                guard_source = source!(GuardEvent => source_handler);
+                guarded = transform!(GuardEvent -> GuardEvent => transform_handler);
+                guard_sink = sink!(GuardEvent => sink_handler);
+            },
+
+            topology: {
+                guard_source |> guarded;
+                guarded |> guard_sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
@@ -148,29 +152,35 @@ async fn flow_level_policy_middleware_is_rejected_at_build() {
 
 #[tokio::test]
 async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
-    let result = flow! {
-        name: "policy_guard_pure_sync",
-        journals: disk_journals(std::path::PathBuf::from(
-            "target/policy-guard-logs/pure-sync",
-        )),
-        middleware: [],
+    let result = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = OneShotSource {
+            emitted: false,
+            writer_id: WriterId::from(obzenflow_core::StageId::new()),
+        };
+        let transform_handler = SyncPassthrough;
+        let sink_handler = NullSink;
 
-        stages: {
-            guard_source = source!(GuardEvent => OneShotSource {
-                emitted: false,
-                writer_id: WriterId::from(obzenflow_core::StageId::new()),
-            });
-            guarded = transform!(GuardEvent -> GuardEvent => SyncPassthrough, [
-                breaker(3)
-            ]);
-            guard_sink = sink!(GuardEvent => NullSink);
-        },
+        Ok(flow! {
+            name: "policy_guard_pure_sync",
+            journals: disk_journals(std::path::PathBuf::from(
+                "target/policy-guard-logs/pure-sync",
+            )),
+            middleware: [],
 
-        topology: {
-            guard_source |> guarded;
-            guarded |> guard_sink;
-        }
-    }
+            stages: {
+                guard_source = source!(GuardEvent => source_handler);
+                guarded = transform!(GuardEvent -> GuardEvent => transform_handler, [
+                    breaker(3)
+                ]);
+                guard_sink = sink!(GuardEvent => sink_handler);
+            },
+
+            topology: {
+                guard_source |> guarded;
+                guarded |> guard_sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
@@ -186,29 +196,35 @@ async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
 
 #[tokio::test]
 async fn policy_middleware_on_async_non_effect_stage_is_rejected_at_build() {
-    let result = flow! {
-        name: "policy_guard_async",
-        journals: disk_journals(std::path::PathBuf::from(
-            "target/policy-guard-logs/async-surface",
-        )),
-        middleware: [],
+    let result = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = OneShotSource {
+            emitted: false,
+            writer_id: WriterId::from(obzenflow_core::StageId::new()),
+        };
+        let transform_handler = AsyncPassthrough;
+        let sink_handler = NullSink;
 
-        stages: {
-            guard_source = source!(GuardEvent => OneShotSource {
-                emitted: false,
-                writer_id: WriterId::from(obzenflow_core::StageId::new()),
-            });
-            guarded = async_transform!(GuardEvent -> GuardEvent => AsyncPassthrough, [
-                breaker(3)
-            ]);
-            guard_sink = sink!(GuardEvent => NullSink);
-        },
+        Ok(flow! {
+            name: "policy_guard_async",
+            journals: disk_journals(std::path::PathBuf::from(
+                "target/policy-guard-logs/async-surface",
+            )),
+            middleware: [],
 
-        topology: {
-            guard_source |> guarded;
-            guarded |> guard_sink;
-        }
-    }
+            stages: {
+                guard_source = source!(GuardEvent => source_handler);
+                guarded = async_transform!(GuardEvent -> GuardEvent => transform_handler, [
+                    breaker(3)
+                ]);
+                guard_sink = sink!(GuardEvent => sink_handler);
+            },
+
+            topology: {
+                guard_source |> guarded;
+                guarded |> guard_sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 

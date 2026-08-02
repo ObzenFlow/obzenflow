@@ -33,7 +33,7 @@
 
 use anyhow::Result;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, stateful, transform};
+use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use serde::{Deserialize, Serialize};
@@ -85,24 +85,28 @@ fn main() -> Result<()> {
         std::env::set_var("RUST_LOG", "warn");
     }
 
-    FlowApplication::builder().run_blocking(flow! {
-        name: "char_transform_skeleton",
-        journals: disk_journals(PathBuf::from("target/char-transform-skeleton-logs")),
-        middleware: [],
+    FlowApplication::builder().run_blocking(FlowDefinition::materialize(
+        move |_runtime_config| {
+            Ok(flow! {
+                name: "char_transform_skeleton",
+                journals: disk_journals(PathBuf::from("target/char-transform-skeleton-logs")),
+                middleware: [],
 
-        stages: {
-            characters = source!(CharInput => placeholder!());
-            transform_text = transform!(CharInput -> TextChunk => placeholder!());
-            collect_text = stateful!(TextChunk -> TransformedText => placeholder!());
-            output = sink!(TransformedText => placeholder!());
+                stages: {
+                    characters = source!(CharInput => placeholder!());
+                    transform_text = transform!(CharInput -> TextChunk => placeholder!());
+                    collect_text = stateful!(TextChunk -> TransformedText => placeholder!());
+                    output = sink!(TransformedText => placeholder!());
+                },
+
+                topology: {
+                    characters |> transform_text;
+                    transform_text |> collect_text;
+                    collect_text |> output;
+                }
+            })
         },
-
-        topology: {
-            characters |> transform_text;
-            transform_text |> collect_text;
-            collect_text |> output;
-        }
-    })?;
+    ))?;
 
     Ok(())
 }

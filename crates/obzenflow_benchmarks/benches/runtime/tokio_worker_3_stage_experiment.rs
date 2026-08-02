@@ -19,7 +19,7 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::WriterId;
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -121,17 +121,11 @@ struct LatencySink {
 }
 
 impl LatencySink {
-    fn new(expected_count: u64) -> (Self, Arc<tokio::sync::Mutex<Vec<Duration>>>) {
-        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
-            expected_count as usize,
-        )));
-        (
-            Self {
-                received: Arc::new(AtomicU64::new(0)),
-                latencies: latencies.clone(),
-            },
+    fn new(received: Arc<AtomicU64>, latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>) -> Self {
+        Self {
+            received,
             latencies,
-        )
+        }
     }
 }
 
@@ -178,27 +172,37 @@ async fn run_3_stage_pipeline_with_runtime(
             let journals_base_path = temp_dir.path().join(format!("three_stage_{runtime_name}"));
             std::fs::create_dir_all(&journals_base_path).unwrap();
 
-            let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
-            let (sink, latencies) = LatencySink::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
-            let sink_clone = sink.clone();
+            let received = Arc::new(AtomicU64::new(0));
+            let received_for_flow = received.clone();
+            let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
+                (WARMUP_EVENT_COUNT + TEST_EVENT_COUNT) as usize,
+            )));
+            let latencies_for_flow = latencies.clone();
 
-            let handle = flow! {
-                journals: disk_journals(journals_base_path),
-                middleware: [],
+            let handle = FlowDefinition::materialize(move |_runtime_config| {
+                let source_handler = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
+                let stage1_handler = PassthroughStage::new("stage1");
+                let stage2_handler = PassthroughStage::new("stage2");
+                let sink_handler = LatencySink::new(received_for_flow, latencies_for_flow);
 
-                stages: {
-                    src = source!(BenchEvent => source);
-                    s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
-                    s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
-                    snk = sink!(BenchEvent => sink);
-                },
+                Ok(flow! {
+                    journals: disk_journals(journals_base_path),
+                    middleware: [],
 
-                topology: {
-                    src |> s1;
-                    s1 |> s2;
-                    s2 |> snk;
-                }
-            }
+                    stages: {
+                        src = source!(BenchEvent => source_handler);
+                        s1 = transform!(BenchEvent -> BenchEvent => stage1_handler);
+                        s2 = transform!(BenchEvent -> BenchEvent => stage2_handler);
+                        snk = sink!(BenchEvent => sink_handler);
+                    },
+
+                    topology: {
+                        src |> s1;
+                        s1 |> s2;
+                        s2 |> snk;
+                    }
+                })
+            })
             .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
             .await
             .unwrap();
@@ -210,9 +214,7 @@ async fn run_3_stage_pipeline_with_runtime(
             let timeout = Duration::from_secs(60); // Increased timeout for runtime experiments
             let start = Instant::now();
 
-            while sink_clone.received.load(Ordering::Relaxed)
-                < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT
-            {
+            while received.load(Ordering::Relaxed) < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT {
                 if start.elapsed() > timeout {
                     break;
                 }
@@ -369,31 +371,44 @@ fn bench_5_stage_control(c: &mut Criterion) {
                 let journals_base_path = temp_dir.path().join("five_stage_control");
                 std::fs::create_dir_all(&journals_base_path).unwrap();
 
-                let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
-                let (sink, latencies) = LatencySink::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
-                let sink_clone = sink.clone();
+                let received = Arc::new(AtomicU64::new(0));
+                let received_for_flow = received.clone();
+                let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
+                    (WARMUP_EVENT_COUNT + TEST_EVENT_COUNT) as usize,
+                )));
+                let latencies_for_flow = latencies.clone();
 
-                let handle = flow! {
-                    journals: disk_journals(journals_base_path),
-                    middleware: [],
+                let handle = FlowDefinition::materialize(move |_runtime_config| {
+                    let source_handler =
+                        TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
+                    let stage1_handler = PassthroughStage::new("stage1");
+                    let stage2_handler = PassthroughStage::new("stage2");
+                    let stage3_handler = PassthroughStage::new("stage3");
+                    let stage4_handler = PassthroughStage::new("stage4");
+                    let sink_handler = LatencySink::new(received_for_flow, latencies_for_flow);
 
-                    stages: {
-                        src = source!(BenchEvent => source);
-                        s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
-                        s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
-                        s3 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage3"));
-                        s4 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage4"));
-                        snk = sink!(BenchEvent => sink);
-                    },
+                    Ok(flow! {
+                        journals: disk_journals(journals_base_path),
+                        middleware: [],
 
-                    topology: {
-                        src |> s1;
-                        s1 |> s2;
-                        s2 |> s3;
-                        s3 |> s4;
-                        s4 |> snk;
-                    }
-                }
+                        stages: {
+                            src = source!(BenchEvent => source_handler);
+                            s1 = transform!(BenchEvent -> BenchEvent => stage1_handler);
+                            s2 = transform!(BenchEvent -> BenchEvent => stage2_handler);
+                            s3 = transform!(BenchEvent -> BenchEvent => stage3_handler);
+                            s4 = transform!(BenchEvent -> BenchEvent => stage4_handler);
+                            snk = sink!(BenchEvent => sink_handler);
+                        },
+
+                        topology: {
+                            src |> s1;
+                            s1 |> s2;
+                            s2 |> s3;
+                            s3 |> s4;
+                            s4 |> snk;
+                        }
+                    })
+                })
                 .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
                 .await
                 .unwrap();
@@ -405,9 +420,7 @@ fn bench_5_stage_control(c: &mut Criterion) {
                 let timeout = Duration::from_secs(60); // Increased timeout for 5-stage control
                 let start = Instant::now();
 
-                while sink_clone.received.load(Ordering::Relaxed)
-                    < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT
-                {
+                while received.load(Ordering::Relaxed) < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT {
                     if start.elapsed() > timeout {
                         break;
                     }

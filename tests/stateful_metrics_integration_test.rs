@@ -274,6 +274,8 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let (sink_handler, sink_events) = CollectingSink::new();
     let journal_dir = unique_journal_dir("stateful_metrics");
     let journal_dir_for_flow = journal_dir.clone();
+    let source = BurstSource::new(total_events);
+    let accumulator = SlowAccumulator::new(sleep_per_event);
 
     let test_handle = test_flow! {
         name: "stateful_metrics",
@@ -281,8 +283,8 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!(MetricEvent => BurstSource::new(total_events));
-            counter = stateful!(MetricEvent -> AggregateMetricEvent => SlowAccumulator::new(sleep_per_event));
+            src = source!(MetricEvent => source);
+            counter = stateful!(MetricEvent -> AggregateMetricEvent => accumulator);
             snk = sink!(AggregateMetricEvent => sink_handler);
         },
 
@@ -507,6 +509,12 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
 
     let reference_events: usize = 10;
     let stream_events: usize = 0;
+    let reference_source =
+        BurstSource::with_event_type(reference_events, RefMetricEvent::versioned_event_type());
+    let stream_source =
+        BurstSource::with_event_type(stream_events, StreamMetricEvent::versioned_event_type());
+    let joiner = NoopJoin;
+    let (sink, _events) = CollectingSink::new();
 
     let test_handle = test_flow! {
         name: "stateful_join_metrics",
@@ -514,10 +522,10 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
         middleware: [],
 
         stages: {
-            ref_src = source!(RefMetricEvent => BurstSource::with_event_type(reference_events, RefMetricEvent::versioned_event_type()));
-            stream_src = source!(StreamMetricEvent => BurstSource::with_event_type(stream_events, StreamMetricEvent::versioned_event_type()));
-            joiner = join!(catalog ref_src: RefMetricEvent, StreamMetricEvent -> JoinedMetricEvent => NoopJoin);
-            snk = sink!(JoinedMetricEvent => CollectingSink::new().0);
+            ref_src = source!(RefMetricEvent => reference_source);
+            stream_src = source!(StreamMetricEvent => stream_source);
+            joiner = join!(catalog ref_src: RefMetricEvent, StreamMetricEvent -> JoinedMetricEvent => joiner);
+            snk = sink!(JoinedMetricEvent => sink);
         },
 
         topology: {

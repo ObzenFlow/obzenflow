@@ -16,7 +16,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::WriterId;
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -120,22 +120,6 @@ struct TimestampedSink {
     latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
 }
 
-impl TimestampedSink {
-    fn new(expected_count: u64) -> (Self, Arc<tokio::sync::Mutex<Vec<Duration>>>) {
-        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
-            expected_count as usize,
-        )));
-        let received = Arc::new(AtomicU64::new(0));
-        (
-            Self {
-                received: received.clone(),
-                latencies: latencies.clone(),
-            },
-            latencies,
-        )
-    }
-}
-
 #[async_trait]
 impl SinkHandler for TimestampedSink {
     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
@@ -184,88 +168,87 @@ fn create_temp_journals_base(test_name: &str) -> anyhow::Result<(std::path::Path
 /// Build pipeline with specified stage count
 async fn build_pipeline(
     stage_count: usize,
-    source: TimestampedSource,
-    sink: TimestampedSink,
+    total_events: u64,
+    received: Arc<AtomicU64>,
+    latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
     journals_base_path: std::path::PathBuf,
 ) -> anyhow::Result<FlowHandle> {
     let handle = match stage_count {
-        1 => flow! {
-            journals: disk_journals(journals_base_path.clone()),
-            middleware: [],
+        1 => FlowDefinition::materialize(move |_runtime_config| {
+            let source = TimestampedSource::new(total_events);
+            let sink = TimestampedSink {
+                received,
+                latencies,
+            };
 
-            stages: {
-                src = source!(BenchEvent => source);
-                snk = sink!(BenchEvent => sink);
-            },
-
-            topology: {
-                src |> snk;
-            }
-        }
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create 1-stage flow: {e:?}"))?,
-        3 => flow! {
-            journals: disk_journals(journals_base_path.clone()),
-            middleware: [],
-
-            stages: {
-                src = source!(BenchEvent => source);
-                s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
-                s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
-                snk = sink!(BenchEvent => sink);
-            },
-
-            topology: {
-                src |> s1;
-                s1 |> s2;
-                s2 |> snk;
-            }
-        }
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create 3-stage flow: {e:?}"))?,
-        5 => flow! {
-            journals: disk_journals(journals_base_path.clone()),
-            middleware: [],
-
-            stages: {
-                src = source!(BenchEvent => source);
-                s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
-                s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
-                s3 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage3"));
-                s4 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage4"));
-                snk = sink!(BenchEvent => sink);
-            },
-
-            topology: {
-                src |> s1;
-                s1 |> s2;
-                s2 |> s3;
-                s3 |> s4;
-                s4 |> snk;
-            }
-        }
-        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create 5-stage flow: {e:?}"))?,
-        10 => {
-            // For larger pipelines, build stages programmatically
-            let handle = flow! {
+            Ok(flow! {
                 journals: disk_journals(journals_base_path.clone()),
                 middleware: [],
 
                 stages: {
                     src = source!(BenchEvent => source);
-                    s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
-                    s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
-                    s3 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage3"));
-                    s4 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage4"));
-                    s5 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage5"));
-                    s6 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage6"));
-                    s7 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage7"));
-                    s8 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage8"));
-                    s9 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage9"));
+                    snk = sink!(BenchEvent => sink);
+                },
+
+                topology: {
+                    src |> snk;
+                }
+            })
+        })
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create 1-stage flow: {e:?}"))?,
+        3 => FlowDefinition::materialize(move |_runtime_config| {
+            let source = TimestampedSource::new(total_events);
+            let sink = TimestampedSink {
+                received,
+                latencies,
+            };
+            let stage1_handler = PassthroughStage::new("stage1");
+            let stage2_handler = PassthroughStage::new("stage2");
+
+            Ok(flow! {
+                journals: disk_journals(journals_base_path.clone()),
+                middleware: [],
+
+                stages: {
+                    src = source!(BenchEvent => source);
+                    s1 = transform!(BenchEvent -> BenchEvent => stage1_handler);
+                    s2 = transform!(BenchEvent -> BenchEvent => stage2_handler);
+                    snk = sink!(BenchEvent => sink);
+                },
+
+                topology: {
+                    src |> s1;
+                    s1 |> s2;
+                    s2 |> snk;
+                }
+            })
+        })
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create 3-stage flow: {e:?}"))?,
+        5 => FlowDefinition::materialize(move |_runtime_config| {
+            let source = TimestampedSource::new(total_events);
+            let sink = TimestampedSink {
+                received,
+                latencies,
+            };
+            let stage1_handler = PassthroughStage::new("stage1");
+            let stage2_handler = PassthroughStage::new("stage2");
+            let stage3_handler = PassthroughStage::new("stage3");
+            let stage4_handler = PassthroughStage::new("stage4");
+
+            Ok(flow! {
+                journals: disk_journals(journals_base_path.clone()),
+                middleware: [],
+
+                stages: {
+                    src = source!(BenchEvent => source);
+                    s1 = transform!(BenchEvent -> BenchEvent => stage1_handler);
+                    s2 = transform!(BenchEvent -> BenchEvent => stage2_handler);
+                    s3 = transform!(BenchEvent -> BenchEvent => stage3_handler);
+                    s4 = transform!(BenchEvent -> BenchEvent => stage4_handler);
                     snk = sink!(BenchEvent => sink);
                 },
 
@@ -274,14 +257,63 @@ async fn build_pipeline(
                     s1 |> s2;
                     s2 |> s3;
                     s3 |> s4;
-                    s4 |> s5;
-                    s5 |> s6;
-                    s6 |> s7;
-                    s7 |> s8;
-                    s8 |> s9;
-                    s9 |> snk;
+                    s4 |> snk;
                 }
-            }
+            })
+        })
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create 5-stage flow: {e:?}"))?,
+        10 => {
+            // For larger pipelines, build stages programmatically
+            let handle = FlowDefinition::materialize(move |_runtime_config| {
+                let source = TimestampedSource::new(total_events);
+                let sink = TimestampedSink {
+                    received,
+                    latencies,
+                };
+                let stage1_handler = PassthroughStage::new("stage1");
+                let stage2_handler = PassthroughStage::new("stage2");
+                let stage3_handler = PassthroughStage::new("stage3");
+                let stage4_handler = PassthroughStage::new("stage4");
+                let stage5_handler = PassthroughStage::new("stage5");
+                let stage6_handler = PassthroughStage::new("stage6");
+                let stage7_handler = PassthroughStage::new("stage7");
+                let stage8_handler = PassthroughStage::new("stage8");
+                let stage9_handler = PassthroughStage::new("stage9");
+
+                Ok(flow! {
+                    journals: disk_journals(journals_base_path.clone()),
+                    middleware: [],
+
+                    stages: {
+                        src = source!(BenchEvent => source);
+                        s1 = transform!(BenchEvent -> BenchEvent => stage1_handler);
+                        s2 = transform!(BenchEvent -> BenchEvent => stage2_handler);
+                        s3 = transform!(BenchEvent -> BenchEvent => stage3_handler);
+                        s4 = transform!(BenchEvent -> BenchEvent => stage4_handler);
+                        s5 = transform!(BenchEvent -> BenchEvent => stage5_handler);
+                        s6 = transform!(BenchEvent -> BenchEvent => stage6_handler);
+                        s7 = transform!(BenchEvent -> BenchEvent => stage7_handler);
+                        s8 = transform!(BenchEvent -> BenchEvent => stage8_handler);
+                        s9 = transform!(BenchEvent -> BenchEvent => stage9_handler);
+                        snk = sink!(BenchEvent => sink);
+                    },
+
+                    topology: {
+                        src |> s1;
+                        s1 |> s2;
+                        s2 |> s3;
+                        s3 |> s4;
+                        s4 |> s5;
+                        s5 |> s6;
+                        s6 |> s7;
+                        s7 |> s8;
+                        s8 |> s9;
+                        s9 |> snk;
+                    }
+                })
+            })
             .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create 10-stage flow: {e:?}"))?;
@@ -304,19 +336,27 @@ async fn run_throughput_test(stage_count: usize) -> anyhow::Result<f64> {
     let (journals_base_path, _temp_dir) = create_temp_journals_base(&test_name)?;
 
     let total_events = THROUGHPUT_WARMUP + THROUGHPUT_EVENT_COUNT;
-    let source = TimestampedSource::new(total_events);
-    let (sink, _latencies) = TimestampedSink::new(total_events);
-    let sink_clone = sink.clone();
+    let received = Arc::new(AtomicU64::new(0));
+    let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
+        total_events as usize,
+    )));
 
     // Build pipeline
-    let handle = build_pipeline(stage_count, source, sink, journals_base_path).await?;
+    let handle = build_pipeline(
+        stage_count,
+        total_events,
+        Arc::clone(&received),
+        latencies,
+        journals_base_path,
+    )
+    .await?;
 
     // Start timing after warmup events
     let timeout = Duration::from_secs(60);
     let start_time = Instant::now();
 
     // Wait for warmup
-    while sink_clone.received.load(Ordering::Relaxed) < THROUGHPUT_WARMUP {
+    while received.load(Ordering::Relaxed) < THROUGHPUT_WARMUP {
         if start_time.elapsed() > timeout {
             eprintln!("WARNING: Timeout during warmup");
             break;
@@ -326,14 +366,14 @@ async fn run_throughput_test(stage_count: usize) -> anyhow::Result<f64> {
 
     // Now measure throughput timing
     let measurement_start = Instant::now();
-    let measurement_start_count = sink_clone.received.load(Ordering::Relaxed);
+    let measurement_start_count = received.load(Ordering::Relaxed);
 
     // Wait for all events
-    while sink_clone.received.load(Ordering::Relaxed) < total_events {
+    while received.load(Ordering::Relaxed) < total_events {
         if start_time.elapsed() > timeout {
             eprintln!(
                 "WARNING: Timeout waiting for events. Received {} of {}",
-                sink_clone.received.load(Ordering::Relaxed),
+                received.load(Ordering::Relaxed),
                 total_events
             );
             break;
@@ -342,7 +382,7 @@ async fn run_throughput_test(stage_count: usize) -> anyhow::Result<f64> {
     }
 
     let measurement_elapsed = measurement_start.elapsed();
-    let events_processed = sink_clone.received.load(Ordering::Relaxed) - measurement_start_count;
+    let events_processed = received.load(Ordering::Relaxed) - measurement_start_count;
 
     // Note: handle.run() was already called in build_pipeline
 

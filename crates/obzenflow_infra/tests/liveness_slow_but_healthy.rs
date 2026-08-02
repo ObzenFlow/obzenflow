@@ -10,7 +10,7 @@ use obzenflow_core::event::{
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{async_transform, flow, sink, source};
+use obzenflow_dsl::{async_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::prelude::FlowHandle;
@@ -150,22 +150,28 @@ async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
         tokio::spawn(async {})
     });
 
-    let flow_definition = flow! {
-        name: "liveness_slow_but_healthy",
-        journals: memory_journals(),
-        middleware: [],
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let numbers_handler = TwoEventSource::new();
+        let slow_ai_handler = SlowAiTransform::new();
+        let sink_handler = NoopSink;
 
-        stages: {
-            numbers = source!(ProbeEvent => TwoEventSource::new());
-            slow_ai = async_transform!(ProbeEvent -> ProbeOutputEvent => SlowAiTransform::new());
-            sink = sink!(ProbeOutputEvent => NoopSink);
-        },
+        Ok(flow! {
+            name: "liveness_slow_but_healthy",
+            journals: memory_journals(),
+            middleware: [],
 
-        topology: {
-            numbers |> slow_ai;
-            slow_ai |> sink;
-        }
-    };
+            stages: {
+                numbers = source!(ProbeEvent => numbers_handler);
+                slow_ai = async_transform!(ProbeEvent -> ProbeOutputEvent => slow_ai_handler);
+                sink = sink!(ProbeOutputEvent => sink_handler);
+            },
+
+            topology: {
+                numbers |> slow_ai;
+                slow_ai |> sink;
+            }
+        })
+    });
 
     let mut run_task = tokio_test::task::spawn(async move {
         FlowApplication::builder()

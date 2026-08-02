@@ -31,9 +31,9 @@ fn archive_sink_refusal(verb: &ReplayVerb, stage: &str, undeclared: bool) -> Str
         format!(
             "{flag} refused: sink '{stage}' has no declared delivery safety; \
              {re_execution}, and the gate fails closed on undeclared sinks \
-             (FLOWIP-120n F16, FLOWIP-120v). Declare it where the handler lives: \
-             `delivery: idempotent` on a sink! closure, `.idempotent()` / \
-             `.non_idempotent()` on a typed sink handler expression, \
+             (FLOWIP-120n F16, FLOWIP-120v). Bind the sink before `flow!`, then use \
+             `delivery: idempotent` on its `sink!` row, `.idempotent()` / \
+             `.non_idempotent()` while constructing a typed sink handler, \
              `SinkHandler::delivery_safety()` on a custom handler type, or `SAFETY` \
              on a typed `Delivery`. A non-idempotent external write belongs behind \
              the effect boundary (effectful transform plus plain sink). Or pass \

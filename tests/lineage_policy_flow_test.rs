@@ -13,8 +13,8 @@ mod replay_testkit;
 
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{TypedPayload, WriterId};
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
@@ -97,31 +97,44 @@ async fn file_configured_lineage_depth_caps_journalled_parent_ids() {
     let snapshot = Arc::new(ResolvedRuntimeConfig::new(candidates));
 
     let journal_base = base.clone();
-    let handle = flow! {
-        name: "lineage_policy_flow",
-        journals: disk_journals(journal_base),
-        middleware: [],
+    let definition = FlowDefinition::materialize(move |_runtime_config| {
+        let source = OneShotSource {
+            emitted: false,
+            writer_id: WriterId::from(StageId::new()),
+        };
+        let t1 = MapTyped::new(|i: Item| Item { index: i.index + 1 });
+        let t2 = MapTyped::new(|i: Item| Item { index: i.index + 1 });
+        let t3 = MapTyped::new(|i: Item| Item { index: i.index + 1 });
+        let t4 = MapTyped::new(|i: Item| Item { index: i.index + 1 });
+        let sink = NullSink;
 
-        stages: {
-            src = source!(Item => OneShotSource { emitted: false, writer_id: WriterId::from(StageId::new()) });
-            t1 = transform!(Item -> Item => MapTyped::new(|i: Item| Item { index: i.index + 1 }));
-            t2 = transform!(Item -> Item => MapTyped::new(|i: Item| Item { index: i.index + 1 }));
-            t3 = transform!(Item -> Item => MapTyped::new(|i: Item| Item { index: i.index + 1 }));
-            t4 = transform!(Item -> Item => MapTyped::new(|i: Item| Item { index: i.index + 1 }));
-            snk = sink!(Item => NullSink);
-        },
+        Ok(flow! {
+            name: "lineage_policy_flow",
+            journals: disk_journals(journal_base),
+            middleware: [],
 
-        topology: {
-            src |> t1;
-            t1 |> t2;
-            t2 |> t3;
-            t3 |> t4;
-            t4 |> snk;
-        }
-    }
-    .build(FlowBuildContext::new(snapshot))
-    .await
-    .expect("flow must build");
+            stages: {
+                src = source!(Item => source);
+                t1 = transform!(Item -> Item => t1);
+                t2 = transform!(Item -> Item => t2);
+                t3 = transform!(Item -> Item => t3);
+                t4 = transform!(Item -> Item => t4);
+                snk = sink!(Item => sink);
+            },
+
+            topology: {
+                src |> t1;
+                t1 |> t2;
+                t2 |> t3;
+                t3 |> t4;
+                t4 |> snk;
+            }
+        })
+    });
+    let handle = definition
+        .build(FlowBuildContext::new(snapshot))
+        .await
+        .expect("flow must build");
 
     tokio::time::timeout(Duration::from_secs(20), handle.run())
         .await

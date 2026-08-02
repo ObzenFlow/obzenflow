@@ -6,7 +6,7 @@
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -50,14 +50,8 @@ struct EventCounterSink {
 }
 
 impl EventCounterSink {
-    fn new() -> (Self, Arc<AtomicU64>) {
-        let count = Arc::new(AtomicU64::new(0));
-        (
-            Self {
-                count: count.clone(),
-            },
-            count,
-        )
+    fn new(count: Arc<AtomicU64>) -> Self {
+        Self { count }
     }
 }
 
@@ -118,23 +112,29 @@ impl FiniteSourceHandler for TestEventSource {
 
 #[tokio::test]
 async fn test_basic_flow() -> Result<()> {
-    let (counter_sink, counter) = EventCounterSink::new();
+    let counter = Arc::new(AtomicU64::new(0));
+    let counter_for_flow = counter.clone();
 
     // Create a simple flow
-    let handle = flow! {
-        name: "basic_flow_test",
-        journals: disk_journals(std::path::PathBuf::from("target/basic_streaming_basic")),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = TestEventSource::new(10);
+        let sink_handler = EventCounterSink::new(counter_for_flow);
 
-        stages: {
-            source = source!(StreamItem => TestEventSource::new(10));
-            sink = sink!(StreamItem => counter_sink);
-        },
+        Ok(flow! {
+            name: "basic_flow_test",
+            journals: disk_journals(std::path::PathBuf::from("target/basic_streaming_basic")),
+            middleware: [],
 
-        topology: {
-            source |> sink;
-        }
-    }
+            stages: {
+                source = source!(StreamItem => source_handler);
+                sink = sink!(StreamItem => sink_handler);
+            },
+
+            topology: {
+                source |> sink;
+            }
+        })
+    })
     .build(FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
@@ -176,24 +176,31 @@ impl TransformHandler for Doubler {
 
 #[tokio::test]
 async fn test_multi_stage_flow() -> Result<()> {
-    let (counter_sink, counter) = EventCounterSink::new();
+    let counter = Arc::new(AtomicU64::new(0));
+    let counter_for_flow = counter.clone();
 
-    let handle = flow! {
-        name: "multi_stage_flow_test",
-        journals: disk_journals(std::path::PathBuf::from("target/basic_streaming_multi")),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = TestEventSource::new(5);
+        let doubler_handler = Doubler::new();
+        let sink_handler = EventCounterSink::new(counter_for_flow);
 
-        stages: {
-            source = source!(StreamItem => TestEventSource::new(5));
-            doubler = transform!(StreamItem -> StreamItem => Doubler::new());
-            sink = sink!(StreamItem => counter_sink);
-        },
+        Ok(flow! {
+            name: "multi_stage_flow_test",
+            journals: disk_journals(std::path::PathBuf::from("target/basic_streaming_multi")),
+            middleware: [],
 
-        topology: {
-            source |> doubler;
-            doubler |> sink;
-        }
-    }
+            stages: {
+                source = source!(StreamItem => source_handler);
+                doubler = transform!(StreamItem -> StreamItem => doubler_handler);
+                sink = sink!(StreamItem => sink_handler);
+            },
+
+            topology: {
+                source |> doubler;
+                doubler |> sink;
+            }
+        })
+    })
     .build(FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
@@ -287,9 +294,8 @@ struct SumSink {
 }
 
 impl SumSink {
-    fn new() -> (Self, Arc<AtomicU64>) {
-        let sum = Arc::new(AtomicU64::new(0));
-        (Self { sum: sum.clone() }, sum)
+    fn new(sum: Arc<AtomicU64>) -> Self {
+        Self { sum }
     }
 }
 
@@ -311,29 +317,36 @@ impl SinkHandler for SumSink {
 
 #[tokio::test]
 async fn test_pipeline_topology() -> Result<()> {
-    let (sum_sink, sum) = SumSink::new();
+    let sum = Arc::new(AtomicU64::new(0));
+    let sum_for_flow = sum.clone();
 
     // Pipeline: Source(1,2,3) -> Doubler(2,4,6) -> Sum
     // If topology filtering works, Sum should be 12 (2+4+6)
     // If it doesn't work (broadcast), Sum would be 21 (1+2+3+2+4+6)
-    let handle = flow! {
-        name: "pipeline_topology_test",
-        journals: disk_journals(std::path::PathBuf::from(
-            "target/basic_streaming_topology",
-        )),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = NumberSource::new(3);
+        let doubler_handler = NumberDoubler::new();
+        let sink_handler = SumSink::new(sum_for_flow);
 
-        stages: {
-            source = source!(NumberItem => NumberSource::new(3));
-            doubler = transform!(NumberItem -> NumberItem => NumberDoubler::new());
-            sink = sink!(NumberItem => sum_sink);
-        },
+        Ok(flow! {
+            name: "pipeline_topology_test",
+            journals: disk_journals(std::path::PathBuf::from(
+                "target/basic_streaming_topology",
+            )),
+            middleware: [],
 
-        topology: {
-            source |> doubler;
-            doubler |> sink;
-        }
-    }
+            stages: {
+                source = source!(NumberItem => source_handler);
+                doubler = transform!(NumberItem -> NumberItem => doubler_handler);
+                sink = sink!(NumberItem => sink_handler);
+            },
+
+            topology: {
+                source |> doubler;
+                doubler |> sink;
+            }
+        })
+    })
     .build(FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;

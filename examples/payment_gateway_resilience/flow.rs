@@ -58,6 +58,7 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::stages::sink::SinkTyped;
 use std::time::Duration;
 
 const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
@@ -124,181 +125,190 @@ pub fn assemble_flow(
     gateway_calls_per_second: f64,
     journal_root: std::path::PathBuf,
 ) -> obzenflow_dsl::FlowDefinition {
-    // One effect-only resilience attachment owns the gateway's health,
-    // optional recovery, and per-physical-attempt admission policy. Its fixed
-    // ordering keeps limiter wait outside the dependency clock and prevents a
-    // stale breaker decision from surviving the queue.
-    let gateway_breaker = CircuitBreaker::builder()
-        .count_window(5)
-        .minimum_calls(5)
-        .failure_rate_threshold(0.6)
-        .slow_call_duration(Duration::from_millis(250))
-        .slow_call_rate_threshold(0.5)
-        .open_for(Duration::from_secs(5))
-        .probes(1)
-        .build()
-        .expect("gateway circuit-breaker configuration must be valid");
-    let gateway_limiter = RateLimiter::per_second(gateway_calls_per_second)
-        .expect("gateway rate-limiter configuration must be valid");
-    let gateway_resilience = EffectResilience::with_breaker(gateway_breaker)
-        .retry(gateway_retry)
-        .rate_limit_each_attempt(gateway_limiter)
-        .build()
-        .expect("gateway resilience configuration must be valid");
+    obzenflow_dsl::FlowDefinition::materialize(move |_runtime_config| {
+        // One effect-only resilience attachment owns the gateway's health,
+        // optional recovery, and per-physical-attempt admission policy. Its fixed
+        // ordering keeps limiter wait outside the dependency clock and prevents a
+        // stale breaker decision from surviving the queue.
+        let gateway_breaker = CircuitBreaker::builder()
+            .count_window(5)
+            .minimum_calls(5)
+            .failure_rate_threshold(0.6)
+            .slow_call_duration(Duration::from_millis(250))
+            .slow_call_rate_threshold(0.5)
+            .open_for(Duration::from_secs(5))
+            .probes(1)
+            .build()
+            .expect("gateway circuit-breaker configuration must be valid");
+        let gateway_limiter = RateLimiter::per_second(gateway_calls_per_second)
+            .expect("gateway rate-limiter configuration must be valid");
+        let gateway_resilience = EffectResilience::with_breaker(gateway_breaker)
+            .retry(gateway_retry)
+            .rate_limit_each_attempt(gateway_limiter)
+            .build()
+            .expect("gateway resilience configuration must be valid");
 
-    flow! {
-        name: "payment_gateway_resilience_demo",
-        journals: disk_journals(journal_root),
-        middleware: [],
+        let web_orders_feed = typed_sources::finite_from_fn(move |index| {
+            let order = scripted_web_orders.get(index).cloned();
+            if order.is_some() {
+                demo_jitter("web", index);
+            }
+            order
+        });
+        let store_orders_feed = typed_sources::finite_from_fn(move |index| {
+            let order = scripted_store_orders.get(index).cloned();
+            if order.is_some() {
+                demo_jitter("store", index);
+            }
+            order
+        });
+        let validate_order = validation::ValidateOrder;
+        let shipping_handoff = ShippingHandoff::new();
+        let record_cancelled =
+            SinkTyped::with_delivery(|cancelled: OrderCancelled, delivery| async move {
+                console::record_cancelled_order(cancelled, delivery.provenance());
+            });
+        let record_unavailable = SinkTyped::with_delivery(
+            |unavailable: PaymentAuthorizationUnavailable, delivery| async move {
+                console::record_authorization_unavailable(unavailable, delivery.provenance());
+            },
+        );
 
-        stages: {
-            // Sources: two scripted order channels across three phases
-            // (warmup, outage, recovery), of deliberately unequal length.
-            //
-            // The flow reacts to these facts. On replay the runtime injects
-            // journaled source events instead of polling these sources again.
-            // Optional jitter (PAYMENT_DEMO_SOURCE_JITTER_MS) varies arrival
-            // timing without changing the merged delivery order, because the
-            // canonical merge at validate_order orders by stream content.
-            //
-            // The source rate limiter is the source-boundary example
-            // (FLOWIP-115a). These are local scripted fixtures, so a source
-            // circuit breaker would be misleading here; the breaker belongs
-            // on external dependencies such as the gateway effect below.
-            web_orders = source!(CustomerOrderPlaced => typed_sources::finite_from_fn(move |index| {
-                let order = scripted_web_orders.get(index).cloned();
-                if order.is_some() {
-                    demo_jitter("web", index);
-                }
-                order
-            }), [
-                RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
-                    .with_burst(SOURCE_RATE_LIMIT_BURST)
-                    .build()
-            ]);
-            store_orders = source!(CustomerOrderPlaced => typed_sources::finite_from_fn(move |index| {
-                let order = scripted_store_orders.get(index).cloned();
-                if order.is_some() {
-                    demo_jitter("store", index);
-                }
-                order
-            }), [
-                RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
-                    .with_burst(SOURCE_RATE_LIMIT_BURST)
-                    .build()
-            ]);
+        Ok(flow! {
+            name: "payment_gateway_resilience_demo",
+            journals: disk_journals(journal_root),
+            middleware: [],
 
-            // Local validation: deterministic checks with no external I/O,
-            // classified exactly once by one multi-type stage. This is typed
-            // business classification, not exception handling: a valid order
-            // becomes `ValidatedOrder`, an invalid order records the
-            // `InvalidOrder` fact and its derived `OrderCancelled` consequence.
-            // Its typed carrier lowers directly to the declared flat facts;
-            // no effect cursor or effect provenance is involved.
-            validate_order = transform!(
-                CustomerOrderPlaced -> {
-                    ValidatedOrder,
-                    InvalidOrder,
-                    OrderCancelled
-                } => validation::ValidateOrder
-            );
+            stages: {
+                // Sources: two scripted order channels across three phases
+                // (warmup, outage, recovery), of deliberately unequal length.
+                //
+                // The flow reacts to these facts. On replay the runtime injects
+                // journaled source events instead of polling these sources again.
+                // Optional jitter (PAYMENT_DEMO_SOURCE_JITTER_MS) varies arrival
+                // timing without changing the merged delivery order, because the
+                // canonical merge at validate_order orders by stream content.
+                //
+                // The source rate limiter is the source-boundary example
+                // (FLOWIP-115a). These are local scripted fixtures, so a source
+                // circuit breaker would be misleading here; the breaker belongs
+                // on external dependencies such as the gateway effect below.
+                web_orders = source!(CustomerOrderPlaced => web_orders_feed, [
+                    RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
+                        .with_burst(SOURCE_RATE_LIMIT_BURST)
+                        .build()
+                ]);
+                store_orders = source!(CustomerOrderPlaced => store_orders_feed, [
+                    RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
+                        .with_burst(SOURCE_RATE_LIMIT_BURST)
+                        .build()
+                ]);
 
-            // Payment authorization: the only stage that touches the outside
-            // world, expressed as the `AuthorizePayment` effect. The runtime
-            // runs it once, records the result, and suppresses it on replay.
-            // This is the authorization (hold) leg of authorize-then-capture;
-            // capture after fulfilment belongs to the checkout saga capstone.
-            //
-            // The circuit breaker is the live-run safety layer on top:
-            //   - opens when >= 60% of the last 5 gateway calls fail,
-            //   - also counts calls slower than 250ms toward opening,
-            //   - while open, fails fast: the prevented call surfaces as a
-            //     recorded rejection error, never a synthesized fact, with a
-            //     single half-open probe.
-            // The breaker attaches inline to the effect it guards
-            // (FLOWIP-120c H7): one policy instance per protected
-            // dependency. A prevented call is recorded under the effect
-            // cursor like any other failure, so contracts stay strict with
-            // no breaker-aware compensation: every admitted input has a
-            // journaled outcome whether the gateway ran or the breaker
-            // refused the call, and the handler routes the refusal to
-            // manual review.
-            authorize_payment = effectful_transform!(
-                ValidatedOrder -> {
-                    PaymentAuthorized,
-                    PaymentDeclined,
-                    OrderCancelled,
-                    PaymentAuthorizationUnavailable
-                } => gateway_transform,
-                effects: [AuthorizePayment with [gateway_resilience]],
-                // Record a per-execution service-level-indicator sample for the
-                // authorization handler. This is end-to-end handler wall time, so it
-                // includes effect-boundary admission, dependency execution, recovery,
-                // and rejection routing. Breaker attempt rows separately report raw
-                // dependency and admission-wait time. This sample is observe-only; it
-                // never changes whether the payment succeeds, retries, or routes. The
-                // objective (e.g. "under five seconds"), and aggregation into
-                // percentiles and SLOs, are FLOWIP-115l's job, applied at read time
-                // over these journalled samples rather than baked into the wide event.
-                middleware: [
-                    indicator()
-                        .operation("payment.authorization")
-                        .kind(IndicatorKind::Latency)
-                        .indicator("authorization.latency")
-                        .tag("dependency", "payment_gateway")
-                ]
-            );
+                // Local validation: deterministic checks with no external I/O,
+                // classified exactly once by one multi-type stage. This is typed
+                // business classification, not exception handling: a valid order
+                // becomes `ValidatedOrder`, an invalid order records the
+                // `InvalidOrder` fact and its derived `OrderCancelled` consequence.
+                // Its typed carrier lowers directly to the declared flat facts;
+                // no effect cursor or effect provenance is involved.
+                validate_order = transform!(
+                    CustomerOrderPlaced -> {
+                        ValidatedOrder,
+                        InvalidOrder,
+                        OrderCancelled
+                    } => validate_order
+                );
 
-            // Paid-order sink, tier 3: a typed delivery. `ShippingHandoff`
-            // carries its destination identity, duplicate-safety, and
-            // behaviour on the type; the receipt's journalled destination is
-            // its DELIVERY_TYPE ("shipping.handoff"), and resume needs no
-            // operator flag because SAFETY is declared at compile time.
-            paid_orders = sink!(PaymentAuthorized => ShippingHandoff::new());
+                // Payment authorization: the only stage that touches the outside
+                // world, expressed as the `AuthorizePayment` effect. The runtime
+                // runs it once, records the result, and suppresses it on replay.
+                // This is the authorization (hold) leg of authorize-then-capture;
+                // capture after fulfilment belongs to the checkout saga capstone.
+                //
+                // The circuit breaker is the live-run safety layer on top:
+                //   - opens when >= 60% of the last 5 gateway calls fail,
+                //   - also counts calls slower than 250ms toward opening,
+                //   - while open, fails fast: the prevented call surfaces as a
+                //     recorded rejection error, never a synthesized fact, with a
+                //     single half-open probe.
+                // The breaker attaches inline to the effect it guards
+                // (FLOWIP-120c H7): one policy instance per protected
+                // dependency. A prevented call is recorded under the effect
+                // cursor like any other failure, so contracts stay strict with
+                // no breaker-aware compensation: every admitted input has a
+                // journaled outcome whether the gateway ran or the breaker
+                // refused the call, and the handler routes the refusal to
+                // manual review.
+                authorize_payment = effectful_transform!(
+                    ValidatedOrder -> {
+                        PaymentAuthorized,
+                        PaymentDeclined,
+                        OrderCancelled,
+                        PaymentAuthorizationUnavailable
+                    } => gateway_transform,
+                    effects: [AuthorizePayment with [gateway_resilience]],
+                    // Record a per-execution service-level-indicator sample for the
+                    // authorization handler. This is end-to-end handler wall time, so it
+                    // includes effect-boundary admission, dependency execution, recovery,
+                    // and rejection routing. Breaker attempt rows separately report raw
+                    // dependency and admission-wait time. This sample is observe-only; it
+                    // never changes whether the payment succeeds, retries, or routes. The
+                    // objective (e.g. "under five seconds"), and aggregation into
+                    // percentiles and SLOs, are FLOWIP-115l's job, applied at read time
+                    // over these journalled samples rather than baked into the wide event.
+                    middleware: [
+                        indicator()
+                            .operation("payment.authorization")
+                            .kind(IndicatorKind::Latency)
+                            .indicator("authorization.latency")
+                            .tag("dependency", "payment_gateway")
+                    ]
+                );
 
-            // Cancelled-order sink, tier 2: a declared closure. The order's
-            // fate converges from both producers (local validation failures
-            // and gateway declines). `InvalidOrder` and `PaymentDeclined`
-            // stay journal-recorded facts with no dedicated sink; this
-            // delivery carries the lifecycle consequence wherever it
-            // originated. The second closure argument is the per-delivery
-            // provenance context (FLOWIP-120i): labelling only, never a
-            // reason to skip the write.
-            cancelled_orders = sink!(
-                OrderCancelled => |cancelled, delivery| {
-                    console::record_cancelled_order(cancelled, delivery.provenance());
-                },
-                delivery: idempotent
-            );
+                // Paid-order sink, tier 3: a typed delivery. `ShippingHandoff`
+                // carries its destination identity, duplicate-safety, and
+                // behaviour on the type; the receipt's journalled destination is
+                // its DELIVERY_TYPE ("shipping.handoff"), and resume needs no
+                // operator flag because SAFETY is declared at compile time.
+                paid_orders = sink!(PaymentAuthorized => shipping_handoff);
 
-            // Unavailable-authorization sink, tier 2 with middleware: failed
-            // gateway call or breaker refusal. No payment decision was
-            // reached, so the order is not cancelled; it goes to retry or
-            // manual review.
-            manual_review = sink!(
-                PaymentAuthorizationUnavailable => |unavailable, delivery| {
-                    console::record_authorization_unavailable(unavailable, delivery.provenance());
-                },
-                delivery: idempotent,
-                middleware: [
-                    // Publish journalled operator-handoff evidence for each
-                    // unavailable-authorization delivery. Observe-only: it does
-                    // not change routing or delivery. The stage data journal is
-                    // the source of truth, with a tracing mirror for local
-                    // visibility.
-                    log().prefix("manual_review")
-                ]
-            );
-        },
+                // Cancelled-order sink, tier 2: a declared closure. The order's
+                // fate converges from both producers (local validation failures
+                // and gateway declines). `InvalidOrder` and `PaymentDeclined`
+                // stay journal-recorded facts with no dedicated sink; this
+                // delivery carries the lifecycle consequence wherever it
+                // originated. The second closure argument is the per-delivery
+                // provenance context (FLOWIP-120i): labelling only, never a
+                // reason to skip the write.
+                cancelled_orders = sink!(OrderCancelled => record_cancelled, delivery: idempotent);
 
-        topology: {
-            web_orders |> validate_order;
-            store_orders |> validate_order;
-            validate_order |> authorize_payment;
-            authorize_payment |> paid_orders;
-            validate_order |> cancelled_orders;
-            authorize_payment |> cancelled_orders;
-            authorize_payment |> manual_review;
-        }
-    }
+                // Unavailable-authorization sink, tier 2 with middleware: failed
+                // gateway call or breaker refusal. No payment decision was
+                // reached, so the order is not cancelled; it goes to retry or
+                // manual review.
+                manual_review = sink!(
+                    PaymentAuthorizationUnavailable => record_unavailable,
+                    delivery: idempotent,
+                    middleware: [
+                        // Publish journalled operator-handoff evidence for each
+                        // unavailable-authorization delivery. Observe-only: it does
+                        // not change routing or delivery. The stage data journal is
+                        // the source of truth, with a tracing mirror for local
+                        // visibility.
+                        log().prefix("manual_review")
+                    ]
+                );
+            },
+
+            topology: {
+                web_orders |> validate_order;
+                store_orders |> validate_order;
+                validate_order |> authorize_payment;
+                authorize_payment |> paid_orders;
+                validate_order |> cancelled_orders;
+                authorize_payment |> cancelled_orders;
+                authorize_payment |> manual_review;
+            }
+        })
+    })
 }

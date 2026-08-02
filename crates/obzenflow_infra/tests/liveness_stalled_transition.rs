@@ -10,7 +10,7 @@ use obzenflow_core::event::{
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{async_transform, flow, sink, source};
+use obzenflow_dsl::{async_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::prelude::FlowHandle;
@@ -132,22 +132,28 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
         tokio::spawn(async {})
     });
 
-    let flow_definition = flow! {
-        name: "liveness_stalled_transition",
-        journals: memory_journals(),
-        middleware: [],
+    let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
+        let numbers_handler = OneEventSource::new();
+        let slow_handler = StallingTransform::new();
+        let sink_handler = NoopSink;
 
-        stages: {
-            numbers = source!(ProbeEvent => OneEventSource::new());
-            slow = async_transform!(ProbeEvent -> ProbeOutputEvent => StallingTransform::new());
-            sink = sink!(ProbeOutputEvent => NoopSink);
-        },
+        Ok(flow! {
+            name: "liveness_stalled_transition",
+            journals: memory_journals(),
+            middleware: [],
 
-        topology: {
-            numbers |> slow;
-            slow |> sink;
-        }
-    };
+            stages: {
+                numbers = source!(ProbeEvent => numbers_handler);
+                slow = async_transform!(ProbeEvent -> ProbeOutputEvent => slow_handler);
+                sink = sink!(ProbeOutputEvent => sink_handler);
+            },
+
+            topology: {
+                numbers |> slow;
+                slow |> sink;
+            }
+        })
+    });
 
     let mut run_task = tokio_test::task::spawn(async move {
         FlowApplication::builder()

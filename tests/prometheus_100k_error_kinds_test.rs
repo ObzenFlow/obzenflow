@@ -23,7 +23,7 @@ use obzenflow_dsl::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor}
 use obzenflow_dsl::dsl::typing::{
     wrap_typed_descriptor, BoundTransform, StageTypingMetadata, TypeHint,
 };
-use obzenflow_dsl::{flow, sink, source};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
@@ -183,53 +183,55 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
     // Use a dedicated journal directory for this test run.
     let journal_root = std::path::PathBuf::from("target/prometheus_100k_error_kinds_test_journal");
 
-    // Build a minimal flow that mirrors the prometheus_100k_demo core path:
-    // high_volume_source -> error_processor -> completion_sink.
-    let source = HighVolumeSource::new(TOTAL_EVENTS);
-    let transform = error_prone_transform();
-    // This raw transform deliberately authors a processing-error event, not
-    // merely a typed fact payload. Keep it on the ordinary TransformHandler
-    // path and attach its multi-output metadata explicitly; the typed carrier
-    // adapter is for deterministic fact classification and cannot encode an
-    // ErrorKind-bearing ChainEvent.
-    let transform = BoundTransform::<DataRequest, ProcessedEvent, _>::new(transform);
-    let transform: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
-        name: "error_processor".to_string(),
-        handler: transform,
-        middleware: Vec::new(),
-        backpressure: None,
-    });
-    let transform = wrap_typed_descriptor(
-        transform,
-        StageTypingMetadata::transform(
-            TypeHint::exact_payload::<DataRequest>(),
-            TypeHint::exact_payload::<ProcessedEvent>(),
-            false,
-            None,
-        )
-        .with_output_contract(vec![
-            TypeHint::exact_payload::<ProcessedEvent>(),
-            TypeHint::exact_payload::<ErrorEvent>(),
-        ]),
-    );
-    let sink = CompletionSink::new();
+    let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
+        // Build a minimal flow that mirrors the prometheus_100k_demo core path:
+        // high_volume_source -> error_processor -> completion_sink.
+        let source = HighVolumeSource::new(TOTAL_EVENTS);
+        let transform = error_prone_transform();
+        // This raw transform deliberately authors a processing-error event, not
+        // merely a typed fact payload. Keep it on the ordinary TransformHandler
+        // path and attach its multi-output metadata explicitly; the typed carrier
+        // adapter is for deterministic fact classification and cannot encode an
+        // ErrorKind-bearing ChainEvent.
+        let transform = BoundTransform::<DataRequest, ProcessedEvent, _>::new(transform);
+        let transform: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
+            name: "error_processor".to_string(),
+            handler: transform,
+            middleware: Vec::new(),
+            backpressure: None,
+        });
+        let transform = wrap_typed_descriptor(
+            transform,
+            StageTypingMetadata::transform(
+                TypeHint::exact_payload::<DataRequest>(),
+                TypeHint::exact_payload::<ProcessedEvent>(),
+                false,
+                None,
+            )
+            .with_output_contract(vec![
+                TypeHint::exact_payload::<ProcessedEvent>(),
+                TypeHint::exact_payload::<ErrorEvent>(),
+            ]),
+        );
+        let sink = CompletionSink::new();
 
-    let flow_handle = flow! {
-        name: "prometheus_100k_demo",
-        journals: disk_journals(journal_root.clone()),
-        middleware: [],
+        Ok(flow! {
+            name: "prometheus_100k_demo",
+            journals: disk_journals(journal_root),
+            middleware: [],
 
-        stages: {
-            high_volume_source = source!(DataRequest => source);
-            error_processor = transform;
-            completion_sink = sink!(ProcessedEvent => sink);
-        },
+            stages: {
+                high_volume_source = source!(DataRequest => source);
+                error_processor = transform;
+                completion_sink = sink!(ProcessedEvent => sink);
+            },
 
-        topology: {
-            high_volume_source |> error_processor;
-            error_processor |> completion_sink;
-        }
-    }
+            topology: {
+                high_volume_source |> error_processor;
+                error_processor |> completion_sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;

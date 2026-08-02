@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{TypedPayload, WriterId};
-use obzenflow_dsl::{flow, sink, source};
+use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -69,10 +69,8 @@ struct CountingSink {
 }
 
 impl CountingSink {
-    fn new() -> Self {
-        Self {
-            received: Arc::new(AtomicU64::new(0)),
-        }
+    fn new(received: Arc<AtomicU64>) -> Self {
+        Self { received }
     }
 }
 
@@ -89,24 +87,28 @@ impl SinkHandler for CountingSink {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn memory_journals_flow_runs_to_completion() {
     let total_events = 10;
-    let source = TestSource::new(total_events);
-    let sink = CountingSink::new();
-    let sink_clone = sink.clone();
+    let received = Arc::new(AtomicU64::new(0));
+    let received_for_flow = Arc::clone(&received);
 
     let handle = tokio::time::timeout(Duration::from_secs(10), async {
-        flow! {
-            journals: memory_journals(),
-            middleware: [],
+        FlowDefinition::materialize(move |_runtime_config| {
+            let source = TestSource::new(total_events);
+            let sink = CountingSink::new(received_for_flow);
 
-            stages: {
-                src = source!(SmokeEvent => source);
-                snk = sink!(SmokeEvent => sink);
-            },
+            Ok(flow! {
+                journals: memory_journals(),
+                middleware: [],
 
-            topology: {
-                src |> snk;
-            }
-        }
+                stages: {
+                    src = source!(SmokeEvent => source);
+                    snk = sink!(SmokeEvent => sink);
+                },
+
+                topology: {
+                    src |> snk;
+                }
+            })
+        })
         .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
     })
@@ -120,7 +122,7 @@ async fn memory_journals_flow_runs_to_completion() {
 
     let wait_for_sink = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if sink_clone.received.load(Ordering::Relaxed) >= total_events {
+            if received.load(Ordering::Relaxed) >= total_events {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -131,7 +133,7 @@ async fn memory_journals_flow_runs_to_completion() {
     if wait_for_sink.is_err() {
         eprintln!(
             "sink did not receive all events in time (received={}, expected={})",
-            sink_clone.received.load(Ordering::Relaxed),
+            received.load(Ordering::Relaxed),
             total_events
         );
         eprintln!(
@@ -165,7 +167,7 @@ async fn memory_journals_flow_runs_to_completion() {
         .expect("flow run failed");
 
     assert_eq!(
-        sink_clone.received.load(Ordering::Relaxed),
+        received.load(Ordering::Relaxed),
         total_events,
         "sink did not receive expected event count"
     );

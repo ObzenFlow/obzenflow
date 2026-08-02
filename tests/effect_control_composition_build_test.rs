@@ -402,54 +402,62 @@ impl EffectPolicy for OrdinaryControl {
 
 macro_rules! single_effect_flow {
     (middleware: [$($middleware:expr),* $(,)?], policies: [$($policy:expr),* $(,)?]) => {
-        flow! {
-            name: "effect_control_composition_single",
-            journals: memory_journals(),
-            middleware: [],
+        FlowDefinition::materialize(move |_runtime_config| {
+            let guarded_handler = OneEffectHandler;
 
-            stages: {
-                input = source!(CompositionInput => placeholder!());
-                guarded = effectful_transform!(
-                    CompositionInput -> CompositionFact => OneEffectHandler,
-                    effects: [EffectA with [$($policy),*]],
-                    middleware: [$($middleware),*]
-                );
-                output = sink!(CompositionFact => placeholder!());
-            },
+            Ok(flow! {
+                name: "effect_control_composition_single",
+                journals: memory_journals(),
+                middleware: [],
 
-            topology: {
-                input |> guarded;
-                guarded |> output;
-            }
-        }
+                stages: {
+                    input = source!(CompositionInput => placeholder!());
+                    guarded = effectful_transform!(
+                        CompositionInput -> CompositionFact => guarded_handler,
+                        effects: [EffectA with [$($policy),*]],
+                        middleware: [$($middleware),*]
+                    );
+                    output = sink!(CompositionFact => placeholder!());
+                },
+
+                topology: {
+                    input |> guarded;
+                    guarded |> output;
+                }
+            })
+        })
     };
 }
 
 macro_rules! two_effect_flow {
     (effect_a: [$($effect_a:expr),* $(,)?], effect_b: [$($effect_b:expr),* $(,)?]) => {
-        flow! {
-            name: "effect_control_composition_two_effects",
-            journals: memory_journals(),
-            middleware: [],
+        FlowDefinition::materialize(move |_runtime_config| {
+            let guarded_handler = TwoEffectHandler;
 
-            stages: {
-                input = source!(CompositionInput => placeholder!());
-                guarded = effectful_transform!(
-                    CompositionInput -> CompositionFact => TwoEffectHandler,
-                    effects: [
-                        EffectA with [$($effect_a),*],
-                        EffectB with [$($effect_b),*]
-                    ],
-                    middleware: []
-                );
-                output = sink!(CompositionFact => placeholder!());
-            },
+            Ok(flow! {
+                name: "effect_control_composition_two_effects",
+                journals: memory_journals(),
+                middleware: [],
 
-            topology: {
-                input |> guarded;
-                guarded |> output;
-            }
-        }
+                stages: {
+                    input = source!(CompositionInput => placeholder!());
+                    guarded = effectful_transform!(
+                        CompositionInput -> CompositionFact => guarded_handler,
+                        effects: [
+                            EffectA with [$($effect_a),*],
+                            EffectB with [$($effect_b),*]
+                        ],
+                        middleware: []
+                    );
+                    output = sink!(CompositionFact => placeholder!());
+                },
+
+                topology: {
+                    input |> guarded;
+                    guarded |> output;
+                }
+            })
+        })
     };
 }
 

@@ -17,29 +17,43 @@ The composition root for flow construction. The `flow!` macro turns a declarativ
 Most applications should run flows through `FlowApplication` rather than awaiting `FlowHandle` directly:
 
 ```rust,ignore
-use obzenflow_dsl::{flow, source, sink};
+use obzenflow_dsl::{flow, source, sink, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 
-FlowApplication::run(flow! {
-    name: "my_flow",
-    journals: disk_journals("target/my-flow-logs".into()),
-    middleware: [],
+fn build_flow() -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let my_source = build_source();
+        let my_sink = build_sink();
 
-    stages: {
-        // Every stage declares its types. After FLOWIP-114c, untyped macro
-        // forms fail to compile. See `examples/multi_source_ingest_demo/`
-        // for the canonical heterogeneous-fan-in pattern.
-        src = source!(MyPayload => my_source);
-        out = sink!(MyPayload => my_sink);
-    },
+        Ok(flow! {
+            name: "my_flow",
+            journals: disk_journals("target/my-flow-logs".into()),
+            middleware: [],
 
-    topology: {
-        src |> out;
-    }
-})
-.await?;
+            stages: {
+                // Every stage declares its types. After FLOWIP-114c, untyped macro
+                // forms fail to compile. See `examples/multi_source_ingest_demo/`
+                // for the canonical heterogeneous-fan-in pattern.
+                src = source!(MyPayload => my_source);
+                out = sink!(MyPayload => my_sink);
+            },
+
+            topology: {
+                src |> out;
+            }
+        })
+    })
+}
+
+FlowApplication::run(build_flow()).await?;
 ```
+
+Supported handler and AI-role slots take a local name or identifier-only qualified
+path. Construct builder-owned handlers and sink adapters inside the deferred
+materialiser immediately above `flow!`; calls, closures, builder chains, and struct
+literals are rejected in the slots. Async-source poll timeout is handler
+configuration exposed through `poll_timeout()`, not stage syntax.
 
 The DSL has five sections: `name` (flow identifier), `journals` (persistence backend), `middleware` (flow-level defaults), `stages` (let-bindings producing stage descriptors), and `topology` (edges connecting stages with `|>` and `<|` operators).
 

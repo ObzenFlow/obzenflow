@@ -21,7 +21,7 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{DeliveryContract, EventId, StageId, SystemId, WriterId};
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
@@ -176,14 +176,8 @@ struct CountingSink {
 }
 
 impl CountingSink {
-    fn new() -> (Self, Arc<AtomicU64>) {
-        let count = Arc::new(AtomicU64::new(0));
-        (
-            Self {
-                count: count.clone(),
-            },
-            count,
-        )
+    fn new(count: Arc<AtomicU64>) -> Self {
+        Self { count }
     }
 }
 
@@ -212,15 +206,11 @@ struct BufferedCountingSink {
 }
 
 impl BufferedCountingSink {
-    fn new() -> (Self, Arc<AtomicU64>) {
-        let count = Arc::new(AtomicU64::new(0));
-        (
-            Self {
-                count: count.clone(),
-                pending: Arc::new(Mutex::new(Vec::new())),
-            },
+    fn new(count: Arc<AtomicU64>) -> Self {
+        Self {
             count,
-        )
+            pending: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 }
 
@@ -343,7 +333,8 @@ async fn assert_delivery_contract_pass(base_path: &Path) -> Result<()> {
 
 #[tokio::test]
 async fn sink_edge_emits_passed_delivery_contract_result() -> Result<()> {
-    let (sink_handler, delivered_count) = CountingSink::new();
+    let delivered_count = Arc::new(AtomicU64::new(0));
+    let delivered_count_for_flow = delivered_count.clone();
 
     // Use a unique base path to avoid interference when tests run in parallel.
     let base_path = PathBuf::from(format!(
@@ -352,20 +343,25 @@ async fn sink_edge_emits_passed_delivery_contract_result() -> Result<()> {
     ));
     let journals_base = base_path.clone();
 
-    let handle = flow! {
-        name: "delivery_contract_wiring",
-        journals: disk_journals(journals_base),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = TestEventSource::new(10);
+        let sink_handler = CountingSink::new(delivered_count_for_flow);
 
-        stages: {
-            source = source!(DeliveryTestEvent => TestEventSource::new(10));
-            sink = sink!(DeliveryTestEvent => sink_handler);
-        },
+        Ok(flow! {
+            name: "delivery_contract_wiring",
+            journals: disk_journals(journals_base),
+            middleware: [],
 
-        topology: {
-            source |> sink;
-        }
-    }
+            stages: {
+                source = source!(DeliveryTestEvent => source_handler);
+                sink = sink!(DeliveryTestEvent => sink_handler);
+            },
+
+            topology: {
+                source |> sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
@@ -382,7 +378,8 @@ async fn sink_edge_emits_passed_delivery_contract_result() -> Result<()> {
 
 #[tokio::test]
 async fn buffered_sink_edge_emits_passed_delivery_contract_result_after_flush() -> Result<()> {
-    let (sink_handler, delivered_count) = BufferedCountingSink::new();
+    let delivered_count = Arc::new(AtomicU64::new(0));
+    let delivered_count_for_flow = delivered_count.clone();
 
     let base_path = PathBuf::from(format!(
         "target/delivery_contract_wiring_buffered_{}",
@@ -390,20 +387,25 @@ async fn buffered_sink_edge_emits_passed_delivery_contract_result_after_flush() 
     ));
     let journals_base = base_path.clone();
 
-    let handle = flow! {
-        name: "delivery_contract_wiring_buffered",
-        journals: disk_journals(journals_base),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = TestEventSource::new(10);
+        let sink_handler = BufferedCountingSink::new(delivered_count_for_flow);
 
-        stages: {
-            source = source!(DeliveryTestEvent => TestEventSource::new(10));
-            sink = sink!(DeliveryTestEvent => sink_handler);
-        },
+        Ok(flow! {
+            name: "delivery_contract_wiring_buffered",
+            journals: disk_journals(journals_base),
+            middleware: [],
 
-        topology: {
-            source |> sink;
-        }
-    }
+            stages: {
+                source = source!(DeliveryTestEvent => source_handler);
+                sink = sink!(DeliveryTestEvent => sink_handler);
+            },
+
+            topology: {
+                source |> sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
@@ -425,7 +427,8 @@ async fn fan_out_before_buffered_sink_emits_passed_delivery_contract_result() ->
     let source_events = 10;
     let expected_events = (fan_out * source_events) as u64;
 
-    let (sink_handler, delivered_count) = BufferedCountingSink::new();
+    let delivered_count = Arc::new(AtomicU64::new(0));
+    let delivered_count_for_flow = delivered_count.clone();
 
     let base_path = PathBuf::from(format!(
         "target/delivery_contract_wiring_fanout_buffered_{}",
@@ -433,22 +436,28 @@ async fn fan_out_before_buffered_sink_emits_passed_delivery_contract_result() ->
     ));
     let journals_base = base_path.clone();
 
-    let handle = flow! {
-        name: "delivery_contract_wiring_fanout_buffered",
-        journals: disk_journals(journals_base),
-        middleware: [],
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = CorrelatedTestEventSource::new(source_events);
+        let transform_handler = FanOutTransform::new(fan_out);
+        let sink_handler = BufferedCountingSink::new(delivered_count_for_flow);
 
-        stages: {
-            source = source!(DeliveryTestEvent => CorrelatedTestEventSource::new(source_events));
-            transform = transform!(DeliveryTestEvent -> FanOutTestEvent => FanOutTransform::new(fan_out));
-            sink = sink!(FanOutTestEvent => sink_handler);
-        },
+        Ok(flow! {
+            name: "delivery_contract_wiring_fanout_buffered",
+            journals: disk_journals(journals_base),
+            middleware: [],
 
-        topology: {
-            source |> transform;
-            transform |> sink;
-        }
-    }
+            stages: {
+                source = source!(DeliveryTestEvent => source_handler);
+                transform = transform!(DeliveryTestEvent -> FanOutTestEvent => transform_handler);
+                sink = sink!(FanOutTestEvent => sink_handler);
+            },
+
+            topology: {
+                source |> transform;
+                transform |> sink;
+            }
+        })
+    })
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
