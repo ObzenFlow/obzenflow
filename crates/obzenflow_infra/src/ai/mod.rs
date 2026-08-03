@@ -21,6 +21,9 @@ mod chat_effect_binding;
 #[cfg(feature = "ai-rig")]
 mod embedding_effect_binding;
 
+#[cfg(feature = "ai-rig")]
+mod native_embedding_client;
+
 mod model_profile;
 mod token_estimation;
 
@@ -46,3 +49,6 @@ pub use chat_effect_binding::{ChatEffectBinding, ChatEffectBindingError, ChatEff
 pub use embedding_effect_binding::{
     EmbeddingEffectBinding, EmbeddingEffectBindingError, EmbeddingEffectRegistration,
 };
+
+#[cfg(feature = "ai-rig")]
+pub use native_embedding_client::NativeEmbeddingClient;

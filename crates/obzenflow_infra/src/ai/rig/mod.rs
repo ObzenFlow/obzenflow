@@ -2,15 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Rig.rs-backed AI clients.
+//! Rig.rs-backed chat clients.
 //!
-//! This module implements the `obzenflow_core::ai` port traits using `rig` as the
-//! provider substrate.
+//! Embeddings use the native provider-wire client exported from [`crate::ai`].
 
 mod chat_client;
-mod embedding_client;
 mod error_mapping;
 mod preflight;
 
 pub use chat_client::RigChatClient;
-pub use embedding_client::RigEmbeddingClient;

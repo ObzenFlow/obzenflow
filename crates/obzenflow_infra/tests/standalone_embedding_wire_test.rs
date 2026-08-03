@@ -10,7 +10,7 @@ use obzenflow_core::ai::{
     AiProvider, EmbeddingClient, EmbeddingDimensions, EmbeddingParams, EmbeddingRequest,
 };
 use obzenflow_core::http_client::Url;
-use obzenflow_infra::ai::rig::RigEmbeddingClient;
+use obzenflow_infra::ai::NativeEmbeddingClient;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -131,7 +131,7 @@ async fn ollama_and_openai_send_default_and_explicit_dimensions_natively() {
         })
     })
     .await;
-    let ollama = RigEmbeddingClient::ollama("fixture-embedding", Some(ollama_url)).unwrap();
+    let ollama = NativeEmbeddingClient::ollama("fixture-embedding", Some(ollama_url)).unwrap();
     let default = ollama
         .embed(request("ollama", "fixture-embedding", None))
         .await
@@ -180,7 +180,7 @@ async fn ollama_and_openai_send_default_and_explicit_dimensions_natively() {
     .await;
     let openai_url = openai_root.join("v1/").unwrap();
     let openai =
-        RigEmbeddingClient::openai_compatible("fixture-embedding", "fixture-secret", openai_url)
+        NativeEmbeddingClient::openai_compatible("fixture-embedding", "fixture-secret", openai_url)
             .unwrap();
     let default = openai
         .embed(request("openai_compatible", "fixture-embedding", None))
@@ -220,7 +220,7 @@ async fn native_adapters_reject_bad_cardinality_order_and_width_without_retrying
     ];
     for (index, response) in cases.into_iter().enumerate() {
         let (url, captured, task) = fixture_server(1, move |_| response.clone()).await;
-        let client = RigEmbeddingClient::ollama("fixture", Some(url)).unwrap();
+        let client = NativeEmbeddingClient::ollama("fixture", Some(url)).unwrap();
         let requested = (index == 3).then(|| EmbeddingDimensions::try_from(2).unwrap());
         let result = client.embed(request("ollama", "fixture", requested)).await;
         assert!(result.is_err());
@@ -238,7 +238,7 @@ async fn native_adapters_reject_bad_cardinality_order_and_width_without_retrying
     })
     .await;
     let client =
-        RigEmbeddingClient::openai_compatible("fixture", "secret", root.join("v1/").unwrap())
+        NativeEmbeddingClient::openai_compatible("fixture", "secret", root.join("v1/").unwrap())
             .unwrap();
     let result = client
         .embed(request("openai_compatible", "fixture", None))

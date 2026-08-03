@@ -8,7 +8,7 @@ use super::endpoint_identity::{
     bound_embedding_target, default_ollama_base_url, default_openai_base_url,
     endpoint_has_credentials,
 };
-use crate::ai::rig::RigEmbeddingClient;
+use crate::ai::NativeEmbeddingClient;
 use obzenflow_core::ai::{
     AiProvider, EmbeddingBindingContract, EmbeddingClient, EmbeddingTarget, EMBEDDING_CLIENT_PORT,
 };
@@ -199,7 +199,7 @@ impl EmbeddingEffectRegistration {
         let result =
             catch_unwind(AssertUnwindSafe(|| match &self.provider {
                 DeferredProvider::Ollama { base_url } => {
-                    RigEmbeddingClient::ollama(self.target.model.clone(), base_url.clone())
+                    NativeEmbeddingClient::ollama(self.target.model.clone(), base_url.clone())
                 }
                 DeferredProvider::OpenAi { api_key } => {
                     let secret = api_key.resolve().map_err(|error| {
@@ -207,7 +207,7 @@ impl EmbeddingEffectRegistration {
                             message: error.to_string(),
                         }
                     })?;
-                    RigEmbeddingClient::openai(self.target.model.clone(), secret.expose())
+                    NativeEmbeddingClient::openai(self.target.model.clone(), secret.expose())
                 }
                 DeferredProvider::OpenAiCompatible { api_key, base_url } => {
                     let secret = api_key.resolve().map_err(|error| {
@@ -215,7 +215,7 @@ impl EmbeddingEffectRegistration {
                             message: error.to_string(),
                         }
                     })?;
-                    RigEmbeddingClient::openai_compatible(
+                    NativeEmbeddingClient::openai_compatible(
                         self.target.model.clone(),
                         secret.expose(),
                         base_url.clone(),
@@ -227,7 +227,7 @@ impl EmbeddingEffectRegistration {
             Ok(Ok(client)) => Ok(Arc::new(client)),
             Ok(Err(error)) => Err(EffectPortResolutionError::failed(error.to_string())),
             Err(_) => Err(EffectPortResolutionError::failed(
-                "Rig embedding client construction panicked",
+                "native embedding client construction panicked",
             )),
         }
     }

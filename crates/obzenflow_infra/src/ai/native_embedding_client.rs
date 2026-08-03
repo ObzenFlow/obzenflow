@@ -5,7 +5,6 @@
 use crate::ai::endpoint_identity::{
     bound_embedding_target, default_ollama_base_url, default_openai_base_url,
 };
-use crate::ai::rig::preflight::{preflight_ollama, preflight_openai_models};
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     AiClientError, AiProvider, EmbeddingClient, EmbeddingDimensions, EmbeddingRequest,
@@ -31,16 +30,16 @@ enum NativeEmbeddingBackend {
 
 /// Native provider-wire implementation of the framework embedding port.
 ///
-/// The name remains stable for infrastructure users, but embedding transport
-/// is deliberately native: Rig 0.34 does not put explicit Ollama dimensions
-/// on the wire. Requests own dimensions and no adapter-local retry is used.
+/// Rig 0.34 does not put explicit Ollama dimensions on the wire, so this
+/// transport deliberately speaks the provider protocols directly. Requests
+/// own dimensions and no adapter-local retry is used.
 #[derive(Clone)]
-pub struct RigEmbeddingClient {
+pub struct NativeEmbeddingClient {
     target: EmbeddingTarget,
     backend: NativeEmbeddingBackend,
 }
 
-impl RigEmbeddingClient {
+impl NativeEmbeddingClient {
     pub fn ollama(model: impl Into<String>, base_url: Option<Url>) -> Result<Self, AiClientError> {
         let model = model.into();
         let endpoint = base_url.unwrap_or_else(default_ollama_base_url);
@@ -51,21 +50,6 @@ impl RigEmbeddingClient {
                 endpoint,
             },
         })
-    }
-
-    /// Create a native Ollama embedding client after an explicit provider/model preflight.
-    ///
-    /// Standalone effect bindings deliberately use [`Self::ollama`] so replay
-    /// materialisation never performs this live check. This method remains a
-    /// low-level infrastructure opt-in for direct adapter users.
-    pub async fn ollama_checked(
-        model: impl Into<String>,
-        base_url: Option<Url>,
-    ) -> Result<Self, AiClientError> {
-        let model = model.into();
-        let endpoint = base_url.unwrap_or_else(default_ollama_base_url);
-        preflight_ollama(&endpoint, Some(&model)).await?;
-        Self::ollama(model, Some(endpoint))
     }
 
     pub fn openai(
@@ -86,30 +70,6 @@ impl RigEmbeddingClient {
         base_url: Url,
     ) -> Result<Self, AiClientError> {
         Self::openai_at("openai_compatible", model.into(), api_key.into(), base_url)
-    }
-
-    /// Create a native OpenAI-compatible embedding client after an explicit preflight.
-    pub async fn openai_compatible_checked(
-        model: impl Into<String>,
-        api_key: impl Into<String>,
-        base_url: Url,
-    ) -> Result<Self, AiClientError> {
-        let model = model.into();
-        let api_key = api_key.into();
-        preflight_openai_models(&base_url, &api_key, Some(&model)).await?;
-        Self::openai_compatible(model, api_key, base_url)
-    }
-
-    /// Create a native OpenAI embedding client after an explicit preflight.
-    pub async fn openai_checked(
-        model: impl Into<String>,
-        api_key: impl Into<String>,
-    ) -> Result<Self, AiClientError> {
-        let model = model.into();
-        let api_key = api_key.into();
-        let endpoint = default_openai_base_url();
-        preflight_openai_models(&endpoint, &api_key, Some(&model)).await?;
-        Self::openai(model, api_key)
     }
 
     pub fn provider(&self) -> &AiProvider {
@@ -138,7 +98,7 @@ impl RigEmbeddingClient {
 }
 
 #[async_trait]
-impl EmbeddingClient for RigEmbeddingClient {
+impl EmbeddingClient for NativeEmbeddingClient {
     fn target(&self) -> &EmbeddingTarget {
         &self.target
     }
@@ -420,7 +380,7 @@ mod tests {
 
     #[test]
     fn validates_provider_and_model_match() {
-        let client = RigEmbeddingClient::ollama("nomic-embed-text", None).unwrap();
+        let client = NativeEmbeddingClient::ollama("nomic-embed-text", None).unwrap();
         let request = EmbeddingRequest {
             provider: AiProvider::new("ollama"),
             model: "nomic-embed-text".to_string(),

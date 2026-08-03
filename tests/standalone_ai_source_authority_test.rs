@@ -4,20 +4,47 @@
 
 //! FLOWIP-128b T1/T5 source authority and contraction guard.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn rust_sources_beneath(directory: &Path, sources: &mut Vec<PathBuf>) {
+    if !directory.exists() {
+        return;
+    }
+    for entry in std::fs::read_dir(directory).expect("guarded source directory") {
+        let path = entry.expect("guarded source entry").path();
+        if path.is_dir() {
+            rust_sources_beneath(&path, sources);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            sources.push(path);
+        }
+    }
+}
+
+fn guarded_standalone_sources() -> Vec<PathBuf> {
+    let ai = root().join("crates/obzenflow_adapters/src/ai");
+    let mut sources = Vec::new();
+    rust_sources_beneath(&ai.join("transforms"), &mut sources);
+    rust_sources_beneath(&ai.join("builders"), &mut sources);
+    sources.push(ai.join("builders.rs"));
+    sources.sort();
+    sources
+}
+
 #[test]
 fn standalone_handlers_and_builders_have_no_direct_provider_call_authority() {
-    for relative in [
-        "crates/obzenflow_adapters/src/ai/builders.rs",
-        "crates/obzenflow_adapters/src/ai/transforms/chat.rs",
-        "crates/obzenflow_adapters/src/ai/transforms/embedding.rs",
-    ] {
-        let source = std::fs::read_to_string(root().join(relative)).unwrap();
+    let root = root();
+    let guarded = guarded_standalone_sources();
+    assert!(
+        guarded.len() >= 4,
+        "the recursive guard must cover builders.rs and the complete transform module"
+    );
+    for path in guarded {
+        let relative = path.strip_prefix(&root).unwrap().display();
+        let source = std::fs::read_to_string(&path).unwrap();
         for forbidden in [
             ".chat(",
             ".embed(",
@@ -29,10 +56,12 @@ fn standalone_handlers_and_builders_have_no_direct_provider_call_authority() {
                 "{relative} regained direct provider authority through {forbidden}"
             );
         }
-        assert!(
-            source.contains(".perform(effect)") || relative.ends_with("builders.rs"),
-            "standalone handlers must cross the typed effect facade"
-        );
+        if source.contains("EffectfulTransformHandler for") {
+            assert!(
+                source.contains(".perform(effect)"),
+                "standalone handler {relative} must cross the typed effect facade"
+            );
+        }
     }
 }
 

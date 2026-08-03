@@ -16,8 +16,5 @@ pub use builders::{ChatTransformBuilder, EmbeddingTransformBuilder};
 pub use effects::{
     ChatCompletion, ChatCompletionBuildError, EmbeddingGeneration, EmbeddingGenerationBuildError,
 };
-pub use error_mapping::{
-    ai_client_error_to_handler_error, ai_client_error_to_handler_error_with_context,
-    effect_error_to_handler_error,
-};
+pub use error_mapping::effect_error_to_handler_error;
 pub use transforms::{ChatTransform, EmbeddingTransform};

@@ -598,3 +598,6 @@ async fn descriptor_drift_fails_before_live_authority_is_resolved() {
         assert_eq!(replay_counters.embedding_calls.load(Ordering::SeqCst), 0);
     }
 }
+
+#[path = "support/standalone_ai_gap_proofs.rs"]
+mod gap_proofs;
