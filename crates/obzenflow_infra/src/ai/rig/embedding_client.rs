@@ -2,295 +2,445 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::error_mapping::map_rig_error;
-use super::preflight::{preflight_ollama, preflight_openai_models};
+use crate::ai::endpoint_identity::{
+    bound_embedding_target, default_ollama_base_url, default_openai_base_url,
+};
+use crate::ai::rig::preflight::{preflight_ollama, preflight_openai_models};
 use async_trait::async_trait;
 use obzenflow_core::ai::{
-    AiClientError, AiProvider, EmbeddingClient, EmbeddingRequest, EmbeddingResponse,
+    AiClientError, AiProvider, EmbeddingClient, EmbeddingDimensions, EmbeddingRequest,
+    EmbeddingResponse, EmbeddingTarget, Usage, UsageSource,
 };
-use rig_rs::client::{EmbeddingsClient, Nothing};
-use rig_rs::embeddings::EmbeddingModel;
-use rig_rs::providers::{ollama, openai};
-use std::sync::Arc;
+use reqwest::StatusCode;
+use serde::Deserialize;
+use serde_json::json;
 use url::Url;
 
-const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434/";
-const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1/";
-
 #[derive(Clone)]
-enum RigEmbeddingBackend {
+enum NativeEmbeddingBackend {
     Ollama {
-        client: Arc<ollama::Client>,
-        dimensions: Option<usize>,
+        client: reqwest::Client,
+        endpoint: Url,
     },
     OpenAi {
-        client: Arc<openai::Client>,
-        dimensions: Option<usize>,
+        client: reqwest::Client,
+        endpoint: Url,
+        api_key: String,
     },
 }
 
-/// Rig-backed implementation of `EmbeddingClient`.
+/// Native provider-wire implementation of the framework embedding port.
 ///
-/// Embedding vector dimensionality is configured at client construction time.
-/// Per-request `EmbeddingParams.dimensions` is ignored (FLOWIP-086r D13).
+/// The name remains stable for infrastructure users, but embedding transport
+/// is deliberately native: Rig 0.34 does not put explicit Ollama dimensions
+/// on the wire. Requests own dimensions and no adapter-local retry is used.
 #[derive(Clone)]
 pub struct RigEmbeddingClient {
-    provider: AiProvider,
-    model: String,
-    backend: RigEmbeddingBackend,
+    target: EmbeddingTarget,
+    backend: NativeEmbeddingBackend,
 }
 
 impl RigEmbeddingClient {
-    pub fn ollama(
-        model: impl Into<String>,
-        base_url: Option<Url>,
-        dimensions: Option<usize>,
-    ) -> Result<Self, AiClientError> {
-        let client = match base_url {
-            None => ollama::Client::new(Nothing).map_err(|err| AiClientError::InvalidRequest {
-                message: err.to_string(),
-            })?,
-            Some(url) => ollama::Client::builder()
-                .api_key(Nothing)
-                // rig-core's Provider::build_uri appends a trailing `/` to `base_url`.
-                // `url::Url::as_str()` includes `/` for the root path, which would otherwise
-                // produce `//api/...` and can trigger redirects/method changes on some servers.
-                .base_url(url.as_str().trim_end_matches('/'))
-                .build()
-                .map_err(|err| AiClientError::InvalidRequest {
-                    message: err.to_string(),
-                })?,
-        };
-
+    pub fn ollama(model: impl Into<String>, base_url: Option<Url>) -> Result<Self, AiClientError> {
+        let model = model.into();
+        let endpoint = base_url.unwrap_or_else(default_ollama_base_url);
         Ok(Self {
-            provider: AiProvider::new("ollama"),
-            model: model.into(),
-            backend: RigEmbeddingBackend::Ollama {
-                client: Arc::new(client),
-                dimensions,
+            target: bound_embedding_target("ollama", model, &endpoint),
+            backend: NativeEmbeddingBackend::Ollama {
+                client: build_http_client()?,
+                endpoint,
             },
         })
     }
 
-    /// Create an Ollama-backed embedding client and fail fast if the provider/model is not available.
+    /// Create a native Ollama embedding client after an explicit provider/model preflight.
     ///
-    /// This performs a lightweight preflight call to the Ollama server (no inference)
-    /// and verifies the requested model exists in `/api/tags`.
+    /// Standalone effect bindings deliberately use [`Self::ollama`] so replay
+    /// materialisation never performs this live check. This method remains a
+    /// low-level infrastructure opt-in for direct adapter users.
     pub async fn ollama_checked(
         model: impl Into<String>,
         base_url: Option<Url>,
-        dimensions: Option<usize>,
     ) -> Result<Self, AiClientError> {
         let model = model.into();
-        let base_url = base_url.unwrap_or_else(|| {
-            Url::parse(DEFAULT_OLLAMA_BASE_URL).expect("default ollama base url parses")
-        });
+        let endpoint = base_url.unwrap_or_else(default_ollama_base_url);
+        preflight_ollama(&endpoint, Some(&model)).await?;
+        Self::ollama(model, Some(endpoint))
+    }
 
-        preflight_ollama(&base_url, Some(model.as_str())).await?;
-        Self::ollama(model, Some(base_url), dimensions)
+    pub fn openai(
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Result<Self, AiClientError> {
+        Self::openai_at(
+            "openai",
+            model.into(),
+            api_key.into(),
+            default_openai_base_url(),
+        )
     }
 
     pub fn openai_compatible(
         model: impl Into<String>,
         api_key: impl Into<String>,
         base_url: Url,
-        dimensions: Option<usize>,
     ) -> Result<Self, AiClientError> {
-        let client = openai::Client::builder()
-            .api_key(api_key.into())
-            // See note in `ollama()` about trailing slashes.
-            .base_url(base_url.as_str().trim_end_matches('/'))
-            .build()
-            .map_err(|err| AiClientError::InvalidRequest {
-                message: err.to_string(),
-            })?;
-
-        Ok(Self {
-            provider: AiProvider::new("openai_compatible"),
-            model: model.into(),
-            backend: RigEmbeddingBackend::OpenAi {
-                client: Arc::new(client),
-                dimensions,
-            },
-        })
+        Self::openai_at("openai_compatible", model.into(), api_key.into(), base_url)
     }
 
-    /// Create an OpenAI-compatible-backed embedding client and fail fast if the endpoint is not reachable.
-    ///
-    /// This preflights `GET /models` against the supplied base URL (no inference).
+    /// Create a native OpenAI-compatible embedding client after an explicit preflight.
     pub async fn openai_compatible_checked(
         model: impl Into<String>,
         api_key: impl Into<String>,
         base_url: Url,
-        dimensions: Option<usize>,
     ) -> Result<Self, AiClientError> {
         let model = model.into();
         let api_key = api_key.into();
-
-        preflight_openai_models(&base_url, api_key.as_str(), Some(model.as_str())).await?;
-        Self::openai_compatible(model, api_key, base_url, dimensions)
+        preflight_openai_models(&base_url, &api_key, Some(&model)).await?;
+        Self::openai_compatible(model, api_key, base_url)
     }
 
-    pub fn openai(
-        model: impl Into<String>,
-        api_key: impl Into<String>,
-        dimensions: Option<usize>,
-    ) -> Result<Self, AiClientError> {
-        let client =
-            openai::Client::new(api_key.into()).map_err(|err| AiClientError::InvalidRequest {
-                message: err.to_string(),
-            })?;
-
-        Ok(Self {
-            provider: AiProvider::new("openai"),
-            model: model.into(),
-            backend: RigEmbeddingBackend::OpenAi {
-                client: Arc::new(client),
-                dimensions,
-            },
-        })
-    }
-
-    /// Create an OpenAI-backed embedding client and fail fast if the endpoint is not reachable.
-    ///
-    /// This preflights `GET /models` against the default OpenAI base URL (no inference).
+    /// Create a native OpenAI embedding client after an explicit preflight.
     pub async fn openai_checked(
         model: impl Into<String>,
         api_key: impl Into<String>,
-        dimensions: Option<usize>,
     ) -> Result<Self, AiClientError> {
         let model = model.into();
         let api_key = api_key.into();
-        let base_url = Url::parse(DEFAULT_OPENAI_BASE_URL).expect("default openai base url parses");
-
-        preflight_openai_models(&base_url, api_key.as_str(), Some(model.as_str())).await?;
-        Self::openai(model, api_key, dimensions)
+        let endpoint = default_openai_base_url();
+        preflight_openai_models(&endpoint, &api_key, Some(&model)).await?;
+        Self::openai(model, api_key)
     }
 
     pub fn provider(&self) -> &AiProvider {
-        &self.provider
+        &self.target.provider
     }
 
     pub fn model(&self) -> &str {
-        &self.model
+        &self.target.model
+    }
+
+    fn openai_at(
+        provider: &'static str,
+        model: String,
+        api_key: String,
+        endpoint: Url,
+    ) -> Result<Self, AiClientError> {
+        Ok(Self {
+            target: bound_embedding_target(provider, model, &endpoint),
+            backend: NativeEmbeddingBackend::OpenAi {
+                client: build_http_client()?,
+                endpoint,
+                api_key,
+            },
+        })
     }
 }
 
 #[async_trait]
 impl EmbeddingClient for RigEmbeddingClient {
-    async fn embed(&self, req: EmbeddingRequest) -> Result<EmbeddingResponse, AiClientError> {
-        validate_request_target(&req, &self.provider, &self.model)?;
+    fn target(&self) -> &EmbeddingTarget {
+        &self.target
+    }
 
-        if req.inputs.is_empty() {
+    async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, AiClientError> {
+        validate_request_target(&request, &self.target)?;
+        if request.inputs.is_empty() {
             return Err(AiClientError::InvalidRequest {
                 message: "embedding request requires at least one input".to_string(),
             });
         }
 
-        if !req.params.extras.is_empty() {
-            tracing::warn!(
-                extras_len = req.params.extras.len(),
-                "embedding params extras are ignored by rig"
-            );
+        match &self.backend {
+            NativeEmbeddingBackend::Ollama { client, endpoint } => {
+                embed_ollama(client, endpoint, &request).await
+            }
+            NativeEmbeddingBackend::OpenAi {
+                client,
+                endpoint,
+                api_key,
+            } => embed_openai(client, endpoint, api_key, &request).await,
         }
-
-        let (embeddings, vector_dim) = match &self.backend {
-            RigEmbeddingBackend::Ollama { client, dimensions } => {
-                let model = match dimensions {
-                    Some(ndims) => client.embedding_model_with_ndims(self.model.as_str(), *ndims),
-                    None => client.embedding_model(self.model.as_str()),
-                };
-                let ndims = model.ndims();
-                let embeddings = model
-                    .embed_texts(req.inputs.clone())
-                    .await
-                    .map_err(map_rig_error)?;
-                (embeddings, ndims)
-            }
-            RigEmbeddingBackend::OpenAi { client, dimensions } => {
-                let model = match dimensions {
-                    Some(ndims) => client.embedding_model_with_ndims(self.model.as_str(), *ndims),
-                    None => client.embedding_model(self.model.as_str()),
-                };
-                let ndims = model.ndims();
-                let embeddings = model
-                    .embed_texts(req.inputs.clone())
-                    .await
-                    .map_err(map_rig_error)?;
-                (embeddings, ndims)
-            }
-        };
-
-        let vectors = embeddings
-            .into_iter()
-            .map(|embedding| embedding.vec.into_iter().map(|v| v as f32).collect())
-            .collect::<Vec<Vec<f32>>>();
-
-        Ok(EmbeddingResponse {
-            vectors,
-            vector_dim,
-            usage: None,
-            raw: None,
-        })
     }
 }
 
-fn validate_request_target(
-    req: &EmbeddingRequest,
-    provider: &AiProvider,
-    model: &str,
-) -> Result<(), AiClientError> {
-    if req.provider != *provider {
-        return Err(AiClientError::InvalidRequest {
-            message: format!(
-                "request provider '{}' does not match RigEmbeddingClient provider '{}'",
-                req.provider.as_str(),
-                provider.as_str()
-            ),
-        });
-    }
-    if req.model != model {
-        return Err(AiClientError::InvalidRequest {
-            message: format!(
-                "request model '{}' does not match RigEmbeddingClient model '{}'",
-                req.model, model
-            ),
-        });
+fn build_http_client() -> Result<reqwest::Client, AiClientError> {
+    reqwest::Client::builder()
+        .build()
+        .map_err(|error| AiClientError::Other {
+            message: format!("embedding HTTP client construction failed: {error}"),
+        })
+}
+
+async fn embed_ollama(
+    client: &reqwest::Client,
+    endpoint: &Url,
+    request: &EmbeddingRequest,
+) -> Result<EmbeddingResponse, AiClientError> {
+    let url = provider_url(endpoint, "api/embed")?;
+    let mut body = json!({
+        "model": request.model,
+        "input": request.inputs,
+    });
+    if let Some(dimensions) = request.params.dimensions {
+        body["dimensions"] = json!(dimensions.get());
     }
 
+    let response = client
+        .post(url)
+        .header("content-type", "application/json")
+        .body(
+            serde_json::to_vec(&body).map_err(|error| AiClientError::InvalidRequest {
+                message: error.to_string(),
+            })?,
+        )
+        .send()
+        .await
+        .map_err(map_reqwest_error)?;
+    let bytes = checked_body(response).await?;
+    let response: OllamaEmbeddingResponse =
+        serde_json::from_slice(&bytes).map_err(|error| AiClientError::Remote {
+            message: format!("invalid Ollama embedding response: {error}"),
+        })?;
+
+    normalise_vectors(
+        &request.inputs,
+        request.params.dimensions,
+        response.embeddings,
+        response.prompt_eval_count.map(|input_tokens| Usage {
+            source: UsageSource::Provider,
+            input_tokens,
+            output_tokens: 0,
+            total_tokens: input_tokens,
+        }),
+    )
+}
+
+async fn embed_openai(
+    client: &reqwest::Client,
+    endpoint: &Url,
+    api_key: &str,
+    request: &EmbeddingRequest,
+) -> Result<EmbeddingResponse, AiClientError> {
+    let url = provider_url(endpoint, "embeddings")?;
+    let mut body = json!({
+        "model": request.model,
+        "input": request.inputs,
+        "encoding_format": "float",
+    });
+    if let Some(dimensions) = request.params.dimensions {
+        body["dimensions"] = json!(dimensions.get());
+    }
+
+    let response = client
+        .post(url)
+        .bearer_auth(api_key)
+        .header("content-type", "application/json")
+        .body(
+            serde_json::to_vec(&body).map_err(|error| AiClientError::InvalidRequest {
+                message: error.to_string(),
+            })?,
+        )
+        .send()
+        .await
+        .map_err(map_reqwest_error)?;
+    let bytes = checked_body(response).await?;
+    let response: OpenAiEmbeddingResponse =
+        serde_json::from_slice(&bytes).map_err(|error| AiClientError::Remote {
+            message: format!("invalid OpenAI embedding response: {error}"),
+        })?;
+
+    if response.data.len() != request.inputs.len() {
+        return Err(invalid_provider_response(format!(
+            "embedding response cardinality mismatch: expected {}, observed {}",
+            request.inputs.len(),
+            response.data.len()
+        )));
+    }
+    for (position, item) in response.data.iter().enumerate() {
+        if item.index != position {
+            return Err(invalid_provider_response(format!(
+                "embedding response order mismatch at position {position}: observed index {}",
+                item.index
+            )));
+        }
+    }
+
+    let vectors = response
+        .data
+        .into_iter()
+        .map(|item| item.embedding)
+        .collect();
+    let usage = response.usage.map(|usage| Usage {
+        source: UsageSource::Provider,
+        input_tokens: usage.prompt_tokens,
+        output_tokens: 0,
+        total_tokens: usage.total_tokens,
+    });
+    normalise_vectors(&request.inputs, request.params.dimensions, vectors, usage)
+}
+
+fn normalise_vectors(
+    inputs: &[String],
+    requested_dimensions: Option<EmbeddingDimensions>,
+    vectors: Vec<Vec<f32>>,
+    usage: Option<Usage>,
+) -> Result<EmbeddingResponse, AiClientError> {
+    if vectors.len() != inputs.len() {
+        return Err(invalid_provider_response(format!(
+            "embedding response cardinality mismatch: expected {}, observed {}",
+            inputs.len(),
+            vectors.len()
+        )));
+    }
+    let width = vectors.first().map(Vec::len).unwrap_or_default();
+    let width = u32::try_from(width)
+        .ok()
+        .and_then(|width| EmbeddingDimensions::try_from(width).ok())
+        .ok_or_else(|| {
+            invalid_provider_response("embedding response vectors must have non-zero width")
+        })?;
+    if vectors
+        .iter()
+        .any(|vector| vector.len() != width.get() as usize)
+    {
+        return Err(invalid_provider_response(
+            "embedding response vectors must have one common width",
+        ));
+    }
+    if let Some(requested) = requested_dimensions {
+        if requested != width {
+            return Err(invalid_provider_response(format!(
+                "embedding response width mismatch: requested {requested}, observed {width}"
+            )));
+        }
+    }
+
+    Ok(EmbeddingResponse {
+        vectors,
+        vector_dim: width,
+        usage,
+    })
+}
+
+fn validate_request_target(
+    request: &EmbeddingRequest,
+    target: &EmbeddingTarget,
+) -> Result<(), AiClientError> {
+    if !request.logically_targets(target) {
+        return Err(AiClientError::InvalidRequest {
+            message: format!(
+                "embedding request target '{}/{}' does not match bound target '{}'",
+                request.provider, request.model, target
+            ),
+        });
+    }
     Ok(())
+}
+
+fn provider_url(endpoint: &Url, route: &str) -> Result<Url, AiClientError> {
+    let mut base = endpoint.clone();
+    let mut path = base.path().trim_end_matches('/').to_string();
+    path.push('/');
+    base.set_path(&path);
+    base.join(route)
+        .map_err(|error| AiClientError::InvalidRequest {
+            message: format!("invalid embedding endpoint: {error}"),
+        })
+}
+
+async fn checked_body(response: reqwest::Response) -> Result<Vec<u8>, AiClientError> {
+    let status = response.status();
+    let bytes = response.bytes().await.map_err(map_reqwest_error)?;
+    if status.is_success() {
+        return Ok(bytes.to_vec());
+    }
+
+    let mut message = String::from_utf8_lossy(&bytes).into_owned();
+    message.truncate(message.floor_char_boundary(2_048));
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(AiClientError::Auth { message }),
+        StatusCode::TOO_MANY_REQUESTS => Err(AiClientError::RateLimited {
+            message,
+            retry_after: None,
+        }),
+        status if status.is_client_error() => Err(AiClientError::InvalidRequest { message }),
+        _ => Err(AiClientError::Remote { message }),
+    }
+}
+
+fn map_reqwest_error(error: reqwest::Error) -> AiClientError {
+    if error.is_timeout() {
+        AiClientError::Timeout {
+            message: error.to_string(),
+        }
+    } else {
+        AiClientError::Remote {
+            message: error.to_string(),
+        }
+    }
+}
+
+fn invalid_provider_response(message: impl Into<String>) -> AiClientError {
+    AiClientError::Remote {
+        message: message.into(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaEmbeddingResponse {
+    embeddings: Vec<Vec<f32>>,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiEmbeddingResponse {
+    data: Vec<OpenAiEmbeddingData>,
+    #[serde(default)]
+    usage: Option<OpenAiEmbeddingUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiEmbeddingData {
+    embedding: Vec<f32>,
+    index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiEmbeddingUsage {
+    prompt_tokens: u64,
+    total_tokens: u64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::ai::EmbeddingParams;
+    use obzenflow_core::ai::{AiProvider, EmbeddingParams};
 
     #[test]
     fn validates_provider_and_model_match() {
-        let req = EmbeddingRequest {
-            provider: AiProvider::new("openai"),
-            model: "text-embedding-3-small".to_string(),
-            inputs: vec!["hello".to_string()],
-            params: EmbeddingParams::default(),
-        };
-
-        validate_request_target(&req, &AiProvider::new("openai"), "text-embedding-3-small")
-            .expect("should accept matching provider+model");
-    }
-
-    #[test]
-    fn rejects_mismatched_provider() {
-        let req = EmbeddingRequest {
+        let client = RigEmbeddingClient::ollama("nomic-embed-text", None).unwrap();
+        let request = EmbeddingRequest {
             provider: AiProvider::new("ollama"),
             model: "nomic-embed-text".to_string(),
             inputs: vec!["hello".to_string()],
             params: EmbeddingParams::default(),
         };
+        validate_request_target(&request, client.target()).unwrap();
+    }
 
-        let err = validate_request_target(&req, &AiProvider::new("openai"), "nomic-embed-text")
-            .expect_err("should reject mismatched provider");
-
-        assert!(matches!(err, AiClientError::InvalidRequest { .. }));
+    #[test]
+    fn rejects_zero_mixed_and_requested_width_mismatch() {
+        let requested = EmbeddingDimensions::try_from(2).unwrap();
+        assert!(normalise_vectors(&["a".into()], None, vec![vec![]], None).is_err());
+        assert!(normalise_vectors(
+            &["a".into(), "b".into()],
+            None,
+            vec![vec![1.0], vec![2.0, 3.0]],
+            None
+        )
+        .is_err());
+        assert!(normalise_vectors(&["a".into()], Some(requested), vec![vec![1.0]], None).is_err());
     }
 }

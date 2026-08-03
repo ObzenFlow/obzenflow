@@ -7,12 +7,17 @@
 //! This module contains runtime-facing handler implementations (transforms),
 //! and error mapping for AI provider calls.
 
+mod builders;
 pub mod effects;
 pub mod error_mapping;
 pub mod transforms;
 
-pub use effects::{ChatCompletion, ChatCompletionBuildError};
+pub use builders::{ChatTransformBuilder, EmbeddingTransformBuilder};
+pub use effects::{
+    ChatCompletion, ChatCompletionBuildError, EmbeddingGeneration, EmbeddingGenerationBuildError,
+};
 pub use error_mapping::{
     ai_client_error_to_handler_error, ai_client_error_to_handler_error_with_context,
+    effect_error_to_handler_error,
 };
 pub use transforms::{ChatTransform, EmbeddingTransform};

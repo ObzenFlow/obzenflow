@@ -1,0 +1,29 @@
+error[E0432]: unresolved imports `obzenflow::ai::ChatRequestTemplate`, `obzenflow::ai::ChatTransformBuilderWithContext`, `obzenflow::ai::ChatTransformExt`, `obzenflow::ai::EmbeddingTransformExt`, `obzenflow::ai::ModelChatBuilder`, `obzenflow::ai::ModelChatBuilderWithContext`
+ --> tests/compile_fail/standalone_ai_removed_types.rs:2:5
+  |
+2 |     ChatRequestTemplate, ChatTransformBuilderWithContext, ChatTransformExt,
+  |     ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^ no `ChatTransformExt` in `ai`
+  |     |                    |
+  |     |                    no `ChatTransformBuilderWithContext` in `ai`
+  |     no `ChatRequestTemplate` in `ai`
+3 |     EmbeddingTransformExt, ModelChatBuilder, ModelChatBuilderWithContext,
+  |     ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ModelChatBuilderWithContext` in `ai`
+  |     |                      |
+  |     |                      no `ModelChatBuilder` in `ai`
+  |     no `EmbeddingTransformExt` in `ai`
+  |
+help: a similar name exists in the module
+  |
+2 -     ChatRequestTemplate, ChatTransformBuilderWithContext, ChatTransformExt,
+2 +     ChatBudgetTemplate, ChatTransformBuilderWithContext, ChatTransformExt,
+  |
+help: a similar name exists in the module
+  |
+2 -     ChatRequestTemplate, ChatTransformBuilderWithContext, ChatTransformExt,
+2 +     ChatRequestTemplate, ChatTransformBuilderWithContext, ChatTransform,
+  |
+help: a similar name exists in the module
+  |
+3 -     EmbeddingTransformExt, ModelChatBuilder, ModelChatBuilderWithContext,
+3 +     EmbeddingTransform, ModelChatBuilder, ModelChatBuilderWithContext,
+  |

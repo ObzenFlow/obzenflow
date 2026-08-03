@@ -1,0 +1,89 @@
+error[E0599]: no function or associated item named `new` found for struct `EmbeddingTransformBuilder` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:25:40
+   |
+25 |     let _ = EmbeddingTransformBuilder::new();
+   |                                        ^^^ function or associated item not found in `EmbeddingTransformBuilder`
+   |
+note: if you're trying to build a new `EmbeddingTransformBuilder`, consider using `EmbeddingTransformBuilder::from_binding` which returns `EmbeddingTransformBuilder`
+  --> crates/obzenflow_adapters/src/ai/builders.rs
+   |
+   |     pub fn from_binding(binding: EmbeddingBindingContract) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `EmbeddingTransformBuilder: std::default::Default` is not satisfied
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:26:40
+   |
+26 |     let _: EmbeddingTransformBuilder = Default::default();
+   |                                        ^^^^^^^^^^^^^^^^^^ the trait `std::default::Default` is not implemented for `EmbeddingTransformBuilder`
+
+error[E0599]: no method named `ollama` found for struct `EmbeddingTransformBuilder` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:27:23
+   |
+27 |     let _ = builder().ollama("model");
+   |                       ^^^^^^ method not found in `EmbeddingTransformBuilder`
+
+error[E0599]: no method named `openai` found for struct `EmbeddingTransformBuilder` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:28:23
+   |
+28 |     let _ = builder().openai("model", "secret");
+   |                       ^^^^^^ method not found in `EmbeddingTransformBuilder`
+
+error[E0599]: no method named `openai_compatible` found for struct `EmbeddingTransformBuilder` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:29:23
+   |
+29 |     let _ = builder().openai_compatible("model", "secret", "http://localhost/v1");
+   |                       ^^^^^^^^^^^^^^^^^ method not found in `EmbeddingTransformBuilder`
+
+error[E0599]: no method named `base_url` found for struct `EmbeddingTransformBuilder` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:30:23
+   |
+30 |     let _ = builder().base_url("http://localhost");
+   |                       ^^^^^^^^ method not found in `EmbeddingTransformBuilder`
+
+error[E0599]: no method named `provider_label` found for struct `EmbeddingTransformBuilder` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:31:23
+   |
+31 |     let _ = builder().provider_label();
+   |                       ^^^^^^^^^^^^^^ method not found in `EmbeddingTransformBuilder`
+
+error[E0599]: no method named `model_label` found for struct `EmbeddingTransformBuilder` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:32:23
+   |
+32 |     let _ = builder().model_label();
+   |                       ^^^^^^^^^^^ method not found in `EmbeddingTransformBuilder`
+
+error[E0599]: no method named `output_mapper` found for struct `EmbeddingTransformBuilder` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:33:23
+   |
+33 |     let _ = builder().output_mapper(
+   |             ----------^^^^^^^^^^^^^ method not found in `EmbeddingTransformBuilder`
+
+error[E0599]: no method named `build` found for struct `EmbeddingTransformBuilder` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:38:23
+   |
+38 |     let _ = builder().build(|_: &ChainEvent| Ok(Vec::new()));
+   |                       ^^^^^ method not found in `EmbeddingTransformBuilder`
+
+error[E0599]: no method named `build_lazy` found for struct `EmbeddingTransformBuilder` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:39:23
+   |
+39 |     let _ = builder().build_lazy(|_: &ChainEvent| Ok(Vec::new()));
+   |                       ^^^^^^^^^^ method not found in `EmbeddingTransformBuilder`
+
+error[E0599]: no method named `with_output_mapper` found for struct `EmbeddingTransform<In, Out>` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:44:23
+   |
+44 |     let _ = transform.with_output_mapper(
+   |             ----------^^^^^^^^^^^^^^^^^^ method not found in `EmbeddingTransform<support::Input, support::Output>`
+
+error[E0599]: no function or associated item named `builder` found for struct `EmbeddingTransform<In, Out>` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:49:50
+   |
+49 |     let _ = EmbeddingTransform::<Input, Output>::builder();
+   |                                                  ^^^^^^^ function or associated item not found in `EmbeddingTransform<support::Input, support::Output>`
+
+error[E0599]: no function or associated item named `new` found for struct `EmbeddingTransform<In, Out>` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:50:50
+   |
+50 |     let _ = EmbeddingTransform::<Input, Output>::new((), ());
+   |                                                  ^^^ function or associated item not found in `EmbeddingTransform<support::Input, support::Output>`

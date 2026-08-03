@@ -10,15 +10,12 @@ use super::stage_descriptor::{
 };
 use super::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
 use async_trait::async_trait;
-use obzenflow_adapters::ai::ChatCompletion;
+use obzenflow_adapters::ai::{effect_error_to_handler_error, ChatCompletion};
 use obzenflow_adapters::middleware::MiddlewareFactory;
 use obzenflow_core::ai::{AiInferenceRole, ChatBindingContract};
-use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{
-    Effect, EffectDeclaration, EffectError, Effects, StageCompletion,
-};
-use obzenflow_runtime::stages::common::handler_error::{HandlerError, StageFatal};
+use obzenflow_runtime::effects::{Effect, EffectDeclaration, Effects, StageCompletion};
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use std::fmt;
 use std::marker::PhantomData;
@@ -49,80 +46,6 @@ impl<Input, Out, Role> fmt::Debug for GeneratedInferenceHandler<Input, Out, Role
             .debug_struct("GeneratedInferenceHandler")
             .field("chat_binding", &self.chat_binding)
             .finish_non_exhaustive()
-    }
-}
-
-fn fatal(
-    code: StageFatalCode,
-    reason: StageFatalReason,
-    detail: impl Into<String>,
-) -> HandlerError {
-    HandlerError::Fatal(StageFatal::new(code, reason, detail))
-}
-
-fn effect_handler_error(error: EffectError) -> HandlerError {
-    match error {
-        EffectError::MissingEffectPort { name, .. } => fatal(
-            StageFatalCode::Configuration,
-            StageFatalReason::EffectPortRegistrationMissing,
-            format!("required effect port '{name}' is not registered"),
-        ),
-        EffectError::EffectPortResolutionFailed { name, message, .. } => fatal(
-            StageFatalCode::Configuration,
-            StageFatalReason::EffectPortResolutionFailed,
-            format!("effect port '{name}' failed to resolve: {message}"),
-        ),
-        EffectError::EffectPortBindingMismatch {
-            port,
-            expected,
-            observed,
-        } => fatal(
-            StageFatalCode::Configuration,
-            StageFatalReason::EffectPortBindingMismatch,
-            format!(
-                "effect port '{port}' binding mismatch: expected {expected}, observed {observed}"
-            ),
-        ),
-        EffectError::EffectPortBindingInvariantViolation {
-            port,
-            expected,
-            observed,
-        } => fatal(
-            StageFatalCode::Configuration,
-            StageFatalReason::EffectPortTargetInvariantViolation,
-            format!(
-                "effect port '{port}' target invariant failed: expected {expected}, observed {observed}"
-            ),
-        ),
-        error @ (EffectError::MissingRecordedEffect { .. }
-        | EffectError::EffectInDoubt { .. }
-        | EffectError::DuplicateRecordedEffect { .. }
-        | EffectError::DescriptorMismatch { .. }
-        | EffectError::IncompleteOutcomeGroup { .. }) => fatal(
-            StageFatalCode::Replay,
-            StageFatalReason::ReplayDivergence,
-            error.to_string(),
-        ),
-        EffectError::Serialization(message)
-        | EffectError::EffectProvenanceMismatch(message)
-        | EffectError::ReplayArchive(message) => fatal(
-            StageFatalCode::Replay,
-            StageFatalReason::ReplayDivergence,
-            message,
-        ),
-        EffectError::Journal(message) => fatal(
-            StageFatalCode::Journal,
-            StageFatalReason::JournalFailure,
-            message,
-        ),
-        EffectError::DependencyFailed { message, .. }
-        | EffectError::BoundaryRejected { message, .. }
-        | EffectError::RecoveryAbandoned { message, .. }
-        | EffectError::RecordedFailure {
-            error_message: message,
-            ..
-        } => HandlerError::Remote(message),
-        other => HandlerError::Other(other.to_string()),
     }
 }
 
@@ -157,14 +80,16 @@ where
             GeneratedChatInvocationError::Build(error) => {
                 HandlerError::Validation(error.to_string())
             }
-            GeneratedChatInvocationError::Effect(error) => effect_handler_error(error),
+            GeneratedChatInvocationError::Effect(error) => effect_error_to_handler_error(error),
         })?;
         let output = self
             .role
             .interpret(input, request, reply)
             .map_err(|error| HandlerError::Domain(format!("{error:?}")))?;
-        fx.emit(output).await.map_err(effect_handler_error)?;
-        fx.complete().map_err(effect_handler_error)
+        fx.emit(output)
+            .await
+            .map_err(effect_error_to_handler_error)?;
+        fx.complete().map_err(effect_error_to_handler_error)
     }
 
     fn stage_logic_version(&self) -> &str {

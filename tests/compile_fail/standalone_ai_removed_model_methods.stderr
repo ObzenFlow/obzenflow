@@ -1,0 +1,11 @@
+error[E0599]: no method named `chat_builder` found for struct `ModelConfig` in the current scope
+ --> tests/compile_fail/standalone_ai_removed_model_methods.rs:5:20
+  |
+5 |     let _ = config.chat_builder();
+  |                    ^^^^^^^^^^^^ method not found in `ModelConfig`
+
+error[E0599]: no method named `chat` found for struct `ModelConfig` in the current scope
+ --> tests/compile_fail/standalone_ai_removed_model_methods.rs:6:20
+  |
+6 |     let _ = config.chat();
+  |                    ^^^^ method not found in `ModelConfig`

@@ -2936,6 +2936,32 @@ mod tests {
         assert!(err.contains("without an idempotency-key strategy"));
     }
 
+    #[test]
+    fn effect_declaration_validation_requires_explicit_at_least_once_acknowledgement() {
+        let declaration = EffectDeclaration {
+            effect_type: "obzenflow.ai.chat_completion",
+            safety: EffectSafety::NonIdempotentAtLeastOnce,
+            idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
+            required_ports: Vec::new(),
+            transactional_executor: None,
+            outcome_kind: obzenflow_runtime::effects::EffectOutcomeKind::RecordedReply,
+            public_outcome_fact_types: Vec::new(),
+        };
+
+        let error = validate_effect_declarations(
+            "standalone_chat",
+            &[declaration],
+            &EffectPortRegistry::new(),
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
+        )
+        .expect_err("a bare paid effect must be rejected");
+        assert_eq!(
+            error,
+            "Effectful stage 'standalone_chat' declares paid non-idempotent effect \
+             'obzenflow.ai.chat_completion' without explicit at_least_once(...) acknowledgement"
+        );
+    }
+
     #[derive(Clone, Debug)]
     struct DemoDuplicateEffect;
 

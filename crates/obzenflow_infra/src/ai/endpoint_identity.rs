@@ -4,7 +4,10 @@
 
 //! Credential-free endpoint identity for bound chat clients.
 
-use obzenflow_core::ai::{chat_binding_fingerprint, AiProvider, ChatTarget};
+use obzenflow_core::ai::{
+    chat_binding_fingerprint, embedding_binding_fingerprint, AiProvider, ChatTarget,
+    EmbeddingTarget,
+};
 use url::Url;
 
 pub(crate) const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434/";
@@ -31,6 +34,25 @@ pub(crate) fn bound_chat_target(
         model.clone(),
         chat_binding_fingerprint(&provider, &model, &endpoint),
     )
+}
+
+pub(crate) fn bound_embedding_target(
+    provider: impl Into<AiProvider>,
+    model: impl Into<String>,
+    endpoint: &Url,
+) -> EmbeddingTarget {
+    let provider = provider.into();
+    let model = model.into();
+    let endpoint = normalised_endpoint_identity(endpoint);
+    EmbeddingTarget::new(
+        provider.clone(),
+        model.clone(),
+        embedding_binding_fingerprint(&provider, &model, &endpoint),
+    )
+}
+
+pub(crate) fn endpoint_has_credentials(endpoint: &Url) -> bool {
+    !endpoint.username().is_empty() || endpoint.password().is_some()
 }
 
 pub(crate) fn normalised_endpoint_identity(endpoint: &Url) -> String {
@@ -63,5 +85,19 @@ mod tests {
             bound_chat_target("openai_compatible", "model", &left),
             bound_chat_target("openai_compatible", "model", &right)
         );
+        assert_eq!(
+            bound_embedding_target("openai_compatible", "model", &left),
+            bound_embedding_target("openai_compatible", "model", &right)
+        );
+    }
+
+    #[test]
+    fn identifies_url_user_info_as_credentials() {
+        assert!(endpoint_has_credentials(
+            &Url::parse("https://user:password@example.com/v1").unwrap()
+        ));
+        assert!(!endpoint_has_credentials(
+            &Url::parse("https://example.com/v1").unwrap()
+        ));
     }
 }

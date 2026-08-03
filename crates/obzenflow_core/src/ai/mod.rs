@@ -33,10 +33,11 @@ pub use chunking::{
 };
 pub use error::{AiClientError, StructuredOutputError};
 pub use hashing::{
-    chat_binding_fingerprint, params_hash_for_chat, params_hash_for_embedding,
-    prompt_hash_for_chat, prompt_hash_for_embedding_inputs, schema_hash_for_response_format,
-    schema_hash_from_json, schema_hash_from_text, AiHashError,
-    CHAT_BINDING_FINGERPRINT_VERSION_SHA256_V1, LLM_HASH_VERSION_SHA256_V1,
+    chat_binding_fingerprint, embedding_binding_fingerprint, params_hash_for_chat,
+    params_hash_for_embedding, prompt_hash_for_chat, prompt_hash_for_embedding_inputs,
+    schema_hash_for_response_format, schema_hash_from_json, schema_hash_from_text, AiHashError,
+    CHAT_BINDING_FINGERPRINT_VERSION_SHA256_V1, EMBEDDING_BINDING_FINGERPRINT_VERSION_SHA256_V1,
+    LLM_HASH_VERSION_SHA256_V1,
 };
 pub use map_reduce::{
     AiFinaliseRole, AiInferenceRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed,
@@ -60,7 +61,9 @@ pub use token_estimation::{
 pub use types::{
     AiProvider, CanonicalizationComponent, ChatBindingContract, ChatBindingContractError,
     ChatBindingFingerprint, ChatCompletionReply, ChatMessage, ChatParams, ChatRequest,
-    ChatRequestSpec, ChatResponse, ChatResponseFormat, ChatRole, ChatTarget, EmbeddingParams,
-    EmbeddingRequest, EmbeddingResponse, SystemPrompt, ToolCall, ToolDefinition, Usage,
-    UsageSource, UserPrompt, CHAT_CLIENT_PORT,
+    ChatRequestSpec, ChatResponse, ChatResponseFormat, ChatRole, ChatTarget,
+    EmbeddingBindingContract, EmbeddingBindingFingerprint, EmbeddingDimensions,
+    EmbeddingDimensionsError, EmbeddingGenerationReply, EmbeddingParams, EmbeddingRequest,
+    EmbeddingRequestSpec, EmbeddingResponse, EmbeddingTarget, SystemPrompt, ToolCall,
+    ToolDefinition, Usage, UsageSource, UserPrompt, CHAT_CLIENT_PORT, EMBEDDING_CLIENT_PORT,
 };

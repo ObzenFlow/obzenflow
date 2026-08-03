@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use super::ResolvedTokenEstimator;
@@ -15,6 +16,9 @@ use super::ResolvedTokenEstimator;
 /// User-facing AI syntax selects a [`ChatBindingContract`] lexically. It does
 /// not select or manufacture a runtime registry coordinate.
 pub const CHAT_CLIENT_PORT: &str = "chat";
+
+/// The sealed runtime coordinate for ObzenFlow's concrete embedding capability.
+pub const EMBEDDING_CLIENT_PORT: &str = "embedding";
 
 /// Provider identifier for AI requests.
 ///
@@ -509,12 +513,162 @@ pub struct ChatCompletionReply {
     pub observability: super::LlmObservability,
 }
 
+/// Requested or observed embedding vector width.
+///
+/// A zero-width vector has no valid embedding meaning, so the invalid state is
+/// excluded from request, response, and durable effect evidence alike.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(transparent)]
+pub struct EmbeddingDimensions(NonZeroU32);
+
+impl EmbeddingDimensions {
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+impl TryFrom<u32> for EmbeddingDimensions {
+    type Error = EmbeddingDimensionsError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        NonZeroU32::new(value)
+            .map(Self)
+            .ok_or(EmbeddingDimensionsError)
+    }
+}
+
+impl From<NonZeroU32> for EmbeddingDimensions {
+    fn from(value: NonZeroU32) -> Self {
+        Self(value)
+    }
+}
+
+impl From<EmbeddingDimensions> for NonZeroU32 {
+    fn from(value: EmbeddingDimensions) -> Self {
+        value.0
+    }
+}
+
+impl fmt::Display for EmbeddingDimensions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+#[error("embedding dimensions must be non-zero")]
+pub struct EmbeddingDimensionsError;
+
+/// Non-reversible identity of the physical endpoint bound to an embedding target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct EmbeddingBindingFingerprint(String);
+
+impl EmbeddingBindingFingerprint {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for EmbeddingBindingFingerprint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Credential-free identity of one immutable embedding binding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct EmbeddingTarget {
+    pub provider: AiProvider,
+    pub model: String,
+    pub binding_fingerprint: EmbeddingBindingFingerprint,
+}
+
+impl EmbeddingTarget {
+    pub fn new(
+        provider: impl Into<AiProvider>,
+        model: impl Into<String>,
+        binding_fingerprint: EmbeddingBindingFingerprint,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+            binding_fingerprint,
+        }
+    }
+
+    pub fn logically_matches(&self, other: &Self) -> bool {
+        self.provider == other.provider && self.model == other.model
+    }
+}
+
+impl fmt::Display for EmbeddingTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}/{}#{}",
+            self.provider, self.model, self.binding_fingerprint
+        )
+    }
+}
+
+#[derive(Clone)]
+pub struct EmbeddingBindingContract(Arc<EmbeddingTarget>);
+
+impl EmbeddingBindingContract {
+    /// Infrastructure-only construction seam. This creates no client or live
+    /// invocation authority.
+    #[doc(hidden)]
+    pub fn from_target(target: EmbeddingTarget) -> Self {
+        Self(Arc::new(target))
+    }
+
+    pub fn target(&self) -> &EmbeddingTarget {
+        &self.0
+    }
+
+    #[doc(hidden)]
+    pub fn shares_construction_origin(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl fmt::Debug for EmbeddingBindingContract {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EmbeddingBindingContract")
+            .field("target", &self.0)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct EmbeddingParams {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub dimensions: Option<usize>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extras: BTreeMap<String, Value>,
+    pub dimensions: Option<EmbeddingDimensions>,
+}
+
+/// Target-free embedding input prepared by a standalone handler.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EmbeddingRequestSpec {
+    pub inputs: Vec<String>,
+    #[serde(default)]
+    pub params: EmbeddingParams,
+}
+
+impl EmbeddingRequestSpec {
+    pub fn bind_target(&self, target: &EmbeddingTarget) -> EmbeddingRequest {
+        EmbeddingRequest {
+            provider: target.provider.clone(),
+            model: target.model.clone(),
+            inputs: self.inputs.clone(),
+            params: self.params.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -526,14 +680,27 @@ pub struct EmbeddingRequest {
     pub params: EmbeddingParams,
 }
 
+impl EmbeddingRequest {
+    pub fn logically_targets(&self, target: &EmbeddingTarget) -> bool {
+        self.provider == target.provider && self.model == target.model
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmbeddingResponse {
     pub vectors: Vec<Vec<f32>>,
-    pub vector_dim: usize,
+    pub vector_dim: EmbeddingDimensions,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw: Option<Value>,
+}
+
+/// Durable framework-owned reply of the replay-safe embedding effect.
+///
+/// This is replay evidence, not a public stage fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EmbeddingGenerationReply {
+    pub response: EmbeddingResponse,
+    pub observability: super::LlmObservability,
 }
 
 #[cfg(test)]
@@ -626,5 +793,45 @@ mod tests {
                 estimator_model: "estimator-model".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn embedding_dimensions_exclude_zero_and_round_trip_as_a_number() {
+        assert_eq!(
+            EmbeddingDimensions::try_from(0),
+            Err(EmbeddingDimensionsError)
+        );
+        let dimensions = EmbeddingDimensions::try_from(768).unwrap();
+        assert_eq!(dimensions.get(), 768);
+        assert_eq!(
+            serde_json::to_value(dimensions).unwrap(),
+            serde_json::json!(768)
+        );
+        assert_eq!(
+            serde_json::from_value::<EmbeddingDimensions>(serde_json::json!(768)).unwrap(),
+            dimensions
+        );
+    }
+
+    #[test]
+    fn embedding_request_binding_preserves_order_duplicates_and_exact_text() {
+        let fingerprint = EmbeddingBindingFingerprint::new("sha256:v1:fixture");
+        let target = EmbeddingTarget::new("ollama", "nomic-embed-text", fingerprint);
+        let spec = EmbeddingRequestSpec {
+            inputs: vec![
+                " same ".to_string(),
+                "same".to_string(),
+                " same ".to_string(),
+            ],
+            params: EmbeddingParams {
+                dimensions: Some(EmbeddingDimensions::try_from(3).unwrap()),
+            },
+        };
+
+        let request = spec.bind_target(&target);
+        assert_eq!(request.inputs, spec.inputs);
+        assert_eq!(request.params, spec.params);
+        assert_eq!(request.provider, target.provider);
+        assert_eq!(request.model, target.model);
     }
 }
