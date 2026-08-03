@@ -77,3 +77,8 @@ obzenflow-fsm = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }
+
+[[test]]
+name = "standalone_embedding_wire_test"
+path = "tests/standalone_embedding_wire_test.rs"
+required-features = ["ai-rig"]

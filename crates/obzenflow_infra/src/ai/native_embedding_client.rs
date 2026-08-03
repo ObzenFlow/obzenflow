@@ -380,14 +380,15 @@ mod tests {
 
     #[test]
     fn validates_provider_and_model_match() {
-        let client = NativeEmbeddingClient::ollama("nomic-embed-text", None).unwrap();
+        let target =
+            bound_embedding_target("ollama", "nomic-embed-text", &default_ollama_base_url());
         let request = EmbeddingRequest {
             provider: AiProvider::new("ollama"),
             model: "nomic-embed-text".to_string(),
             inputs: vec!["hello".to_string()],
             params: EmbeddingParams::default(),
         };
-        validate_request_target(&request, client.target()).unwrap();
+        validate_request_target(&request, &target).unwrap();
     }
 
     #[test]
