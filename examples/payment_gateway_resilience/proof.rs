@@ -9,14 +9,13 @@
 //! one-call-per-second limiter. The opt-in environment profiles remain useful
 //! accelerated developer checks, but they are not release evidence. Everything
 //! proof-shaped lives here so `flow.rs` stays the tutorial; all entry points
-//! share `flow::assemble_flow`.
+//! share its topology assembly.
 
-#[cfg(test)]
 use super::domain::CustomerOrderPlaced;
 use super::fixtures;
 use super::flow;
 use super::gateway::{GatewayRetryProof, GatewayTransform};
-use obzenflow_adapters::middleware::Retry;
+use obzenflow_adapters::middleware::{EffectResilience, Retry};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -63,6 +62,33 @@ fn retry_proof_profile() -> Option<RetryProofProfile> {
             "unknown PAYMENT_DEMO_RETRY_PROOF value '{value}'; expected 'control', 'treatment', 'healthy', or 'open-rejection'"
         ),
     }
+}
+
+fn assemble_proof_flow(
+    orders: Vec<CustomerOrderPlaced>,
+    gateway_transform: GatewayTransform,
+    gateway_retry: Option<Retry>,
+    gateway_calls_per_second: f64,
+    journal_root: std::path::PathBuf,
+) -> obzenflow_dsl::FlowDefinition {
+    flow::assemble_flow_with_resilience(
+        orders,
+        Vec::new(),
+        gateway_transform,
+        move |gateway_breaker, gateway_limiter| {
+            let resilience = EffectResilience::with_breaker(gateway_breaker)
+                .rate_limit_each_attempt(gateway_limiter);
+            let resilience = match gateway_retry {
+                Some(retry) => resilience.retry(retry),
+                None => resilience,
+            };
+            resilience
+                .build()
+                .expect("gateway resilience proof configuration must be valid")
+        },
+        gateway_calls_per_second,
+        journal_root,
+    )
 }
 
 /// The binary's flow entry point: the tutorial flow, or the retry-proof rig
@@ -124,9 +150,8 @@ pub fn build_flow_for_profile(
         | RetryProofProfile::Treatment
         | RetryProofProfile::OpenRejection => 1_000.0,
     };
-    flow::assemble_flow(
+    assemble_proof_flow(
         orders,
-        Vec::new(),
         gateway_transform,
         gateway_retry,
         calls_per_second,
@@ -151,9 +176,8 @@ pub fn build_flow_for_release_policy(
         ReleasePolicy::BreakerOnly => None,
         ReleasePolicy::BreakerRecovery => Some(canonical_recovery()),
     };
-    flow::assemble_flow(
+    assemble_proof_flow(
         orders,
-        Vec::new(),
         GatewayTransform::with_retry_proof(retry_proof),
         gateway_retry,
         RELEASE_GATEWAY_CALLS_PER_SECOND,

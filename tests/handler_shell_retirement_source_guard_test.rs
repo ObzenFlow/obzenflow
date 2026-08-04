@@ -169,7 +169,7 @@ fn retry_contracts_with_live_non_middleware_owners_stay_present() {
             "crates/obzenflow_adapters/src/middleware/control/resilience.rs",
             vec![
                 "pub struct EffectResilienceBuilder",
-                "pub fn retry(",
+                "pub fn retry(mut self, retry: Retry) -> Self",
                 "BackoffStrategy",
             ],
         ),
@@ -205,6 +205,28 @@ fn retry_contracts_with_live_non_middleware_owners_stay_present() {
                 "live retry contract {token:?} disappeared from {relative}"
             );
         }
+    }
+}
+
+#[test]
+fn payment_tutorial_omits_retry_while_proof_keeps_positive_configuration() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let tutorial = fs::read_to_string(root.join("examples/payment_gateway_resilience/flow.rs"))
+        .expect("read payment tutorial flow");
+    for forbidden in ["Retry", "retry", "gateway_retry", ".retry("] {
+        assert!(
+            !tutorial.contains(forbidden),
+            "payment tutorial flow must represent absent retry by omission; found {forbidden:?}"
+        );
+    }
+
+    let proof = fs::read_to_string(root.join("examples/payment_gateway_resilience/proof.rs"))
+        .expect("read payment resilience proof");
+    for required in ["Retry::fixed(", "Some(retry) => resilience.retry(retry)"] {
+        assert!(
+            proof.contains(required),
+            "configured payment proof must retain positive retry authoring {required:?}"
+        );
     }
 }
 

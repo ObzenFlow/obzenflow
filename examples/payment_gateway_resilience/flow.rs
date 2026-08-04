@@ -54,7 +54,7 @@ use super::validation;
 use obzenflow::typed::sources as typed_sources;
 use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
 use obzenflow_adapters::middleware::{
-    CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder, Retry,
+    CircuitBreaker, EffectResilience, MiddlewareFactory, RateLimiter, RateLimiterBuilder,
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -97,7 +97,7 @@ fn demo_jitter(channel: &str, index: usize) {
 }
 
 /// Build the tutorial flow: the scripted three-phase order channels, the real
-/// gateway transform, and the breaker with no retry section.
+/// gateway transform, and its breaker-plus-per-attempt-limiter policy.
 ///
 /// Gentle source and gateway-effect rate limits keep logs and metrics readable,
 /// so you can watch source-boundary and effect-boundary policy metrics change
@@ -107,29 +107,56 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
         fixtures::scripted_web_orders(),
         fixtures::scripted_store_orders(),
         GatewayTransform::default(),
-        None,
         GATEWAY_CALLS_PER_SECOND,
         std::path::PathBuf::from(DEMO_JOURNAL_ROOT),
     )
 }
 
-/// Assemble the flow from its variable ingredients. The tutorial calls it with
-/// the defaults above; the acceptance rig in `proof.rs` swaps in its scripted
-/// order, instrumented gateway, and retry section without touching the
-/// topology.
+/// Assemble the tutorial flow from its variable ingredients.
+///
+/// Journal tests reuse this entry point with their own orders, gateway, pacing,
+/// and journal root while retaining the tutorial's breaker-plus-limiter policy.
 pub fn assemble_flow(
     scripted_web_orders: Vec<CustomerOrderPlaced>,
     scripted_store_orders: Vec<CustomerOrderPlaced>,
     gateway_transform: GatewayTransform,
-    gateway_retry: Option<Retry>,
     gateway_calls_per_second: f64,
     journal_root: std::path::PathBuf,
 ) -> obzenflow_dsl::FlowDefinition {
+    assemble_flow_with_resilience(
+        scripted_web_orders,
+        scripted_store_orders,
+        gateway_transform,
+        |gateway_breaker, gateway_limiter| {
+            EffectResilience::with_breaker(gateway_breaker)
+                .rate_limit_each_attempt(gateway_limiter)
+                .build()
+                .expect("gateway resilience configuration must be valid")
+        },
+        gateway_calls_per_second,
+        journal_root,
+    )
+}
+
+/// Injected-policy assembly seam. The tutorial owns the topology and its
+/// default policy; `proof.rs` supplies configured proof variants without
+/// changing that topology.
+pub(super) fn assemble_flow_with_resilience<F>(
+    scripted_web_orders: Vec<CustomerOrderPlaced>,
+    scripted_store_orders: Vec<CustomerOrderPlaced>,
+    gateway_transform: GatewayTransform,
+    build_gateway_resilience: F,
+    gateway_calls_per_second: f64,
+    journal_root: std::path::PathBuf,
+) -> obzenflow_dsl::FlowDefinition
+where
+    F: FnOnce(CircuitBreaker, RateLimiter) -> Box<dyn MiddlewareFactory> + Send + 'static,
+{
     obzenflow_dsl::FlowDefinition::materialize(move |_runtime_config| {
         // One effect-only resilience attachment owns the gateway's health,
-        // optional recovery, and per-physical-attempt admission policy. Its fixed
-        // ordering keeps limiter wait outside the dependency clock and prevents a
-        // stale breaker decision from surviving the queue.
+        // recovery policy, and per-physical-attempt admission. Its fixed ordering
+        // keeps limiter wait outside the dependency clock and prevents a stale
+        // breaker decision from surviving the queue.
         let gateway_breaker = CircuitBreaker::builder()
             .count_window(5)
             .minimum_calls(5)
@@ -142,11 +169,7 @@ pub fn assemble_flow(
             .expect("gateway circuit-breaker configuration must be valid");
         let gateway_limiter = RateLimiter::per_second(gateway_calls_per_second)
             .expect("gateway rate-limiter configuration must be valid");
-        let gateway_resilience = EffectResilience::with_breaker(gateway_breaker)
-            .retry(gateway_retry)
-            .rate_limit_each_attempt(gateway_limiter)
-            .build()
-            .expect("gateway resilience configuration must be valid");
+        let gateway_resilience = build_gateway_resilience(gateway_breaker, gateway_limiter);
 
         let web_orders_feed = typed_sources::finite_from_fn(move |index| {
             let order = scripted_web_orders.get(index).cloned();
@@ -284,8 +307,8 @@ pub fn assemble_flow(
 
                 // Unavailable-authorization sink, tier 2 with middleware: failed
                 // gateway call or breaker refusal. No payment decision was
-                // reached, so the order is not cancelled; it goes to retry or
-                // manual review.
+                // reached, so the order is not cancelled; it goes to manual
+                // review.
                 manual_review = sink!(
                     PaymentAuthorizationUnavailable => record_unavailable,
                     delivery: idempotent,

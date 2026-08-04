@@ -27,7 +27,6 @@ fn build_validation_journal_proof_flow(journal_root: PathBuf) -> obzenflow_dsl::
         vec![valid, invalid],
         Vec::new(),
         support::gateway::GatewayTransform::default(),
-        None,
         1_000.0,
         journal_root,
     )

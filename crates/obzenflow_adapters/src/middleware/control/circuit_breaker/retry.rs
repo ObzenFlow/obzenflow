@@ -5,7 +5,7 @@
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 use std::time::Duration;
 
-/// Inert retry configuration for `EffectResilience`.
+/// Retry configuration for `EffectResilience`.
 #[derive(Debug, Clone)]
 pub struct Retry {
     pub(in crate::middleware::control) policy: CircuitBreakerRetryPolicy,
