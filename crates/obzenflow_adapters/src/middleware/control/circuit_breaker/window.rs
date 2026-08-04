@@ -47,6 +47,12 @@ impl FailureWindowState {
         }
     }
 
+    pub(super) fn clear(&mut self) {
+        self.samples.fill(None);
+        self.index = 0;
+        self.count = 0;
+    }
+
     pub(super) fn iter<'a>(&'a self) -> impl Iterator<Item = CallSample> + 'a {
         let cap = self.capacity();
         (0..self.count).filter_map(move |i| {

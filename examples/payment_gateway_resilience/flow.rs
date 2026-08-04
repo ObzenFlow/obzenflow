@@ -27,8 +27,9 @@
 //! OrderCancelled }`. Its handler-side `ValidationOutcome` carrier is proven
 //! leaf-equal and never journalled; the `authorize_payment` stage performs the
 //! `AuthorizePayment` effect (see
-//! `gateway.rs`). On a live run the effect executes once and the runtime
-//! journals its result; on a replay the runtime returns that recorded gateway
+//! `gateway.rs`). On a live run the configured resilience policy may make up
+//! to three breaker-governed physical calls before the runtime journals one
+//! terminal result; on replay the runtime returns that recorded gateway
 //! decision without calling the gateway again. The stage then emits the named
 //! payment fact that happened, deriving `OrderCancelled` from declines.
 //!
@@ -36,11 +37,12 @@
 //! dedicated sink: the journal is the record, sinks are external deliveries.
 //! The cancelled-orders sink converges cancellations from both producers.
 //!
-//! The circuit breaker on the authorize_payment stage is the second,
-//! independent layer: it watches the live effect boundary and, once the
-//! dependency looks unhealthy, fails fast with a recorded rejection instead
-//! of hammering it. Unavailability deliberately does not cancel; no decision
-//! was reached, so those orders go to manual review. See `README.md`.
+//! The resilience unit on the authorize_payment stage is the second,
+//! independent layer: bounded retry handles transient failures, the circuit
+//! breaker fails fast once the dependency looks unhealthy, and a per-attempt
+//! limiter governs every physical gateway call. Unavailability deliberately
+//! does not cancel; no decision was reached, so those orders go to manual
+//! review. See `README.md`.
 
 use super::console;
 use super::deliveries::ShippingHandoff;
@@ -64,9 +66,10 @@ use std::time::Duration;
 const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
 const SOURCE_RATE_LIMIT_BURST: f64 = 1.0;
 const GATEWAY_CALLS_PER_SECOND: f64 = 1.0;
+const GATEWAY_BREAKER_OPEN_FOR: Duration = Duration::from_secs(5);
+const FIRST_RECOVERY_PAUSE: Duration = Duration::from_millis(5_250);
 
-/// Where the demo binary journals its runs. The acceptance rig in `proof.rs`
-/// shares it so `--replay-from` paths printed by one entry point work for both.
+/// Where the demo binary journals its runs.
 pub(super) const DEMO_JOURNAL_ROOT: &str = "target/payment-gateway-logs";
 
 /// Optional per-source pacing jitter (FLOWIP-095d demo knob).
@@ -97,7 +100,7 @@ fn demo_jitter(channel: &str, index: usize) {
 }
 
 /// Build the tutorial flow: the scripted three-phase order channels, the real
-/// gateway transform, and the breaker with no retry section.
+/// gateway transform, and its breaker-retry-limiter policy.
 ///
 /// Gentle source and gateway-effect rate limits keep logs and metrics readable,
 /// so you can watch source-boundary and effect-boundary policy metrics change
@@ -106,42 +109,43 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
     assemble_flow(
         fixtures::scripted_web_orders(),
         fixtures::scripted_store_orders(),
-        GatewayTransform::default(),
-        None,
+        GatewayTransform::with_first_recovery_pause(FIRST_RECOVERY_PAUSE),
         GATEWAY_CALLS_PER_SECOND,
         std::path::PathBuf::from(DEMO_JOURNAL_ROOT),
     )
 }
 
-/// Assemble the flow from its variable ingredients. The tutorial calls it with
-/// the defaults above; the acceptance rig in `proof.rs` swaps in its scripted
-/// order, instrumented gateway, and retry section without touching the
-/// topology.
+/// Assemble the tutorial flow from its variable ingredients.
+///
+/// Journal tests reuse this entry point with their own orders, gateway pacing,
+/// and journal root while retaining the tutorial's configured resilience policy.
 pub fn assemble_flow(
     scripted_web_orders: Vec<CustomerOrderPlaced>,
     scripted_store_orders: Vec<CustomerOrderPlaced>,
     gateway_transform: GatewayTransform,
-    gateway_retry: Option<Retry>,
     gateway_calls_per_second: f64,
     journal_root: std::path::PathBuf,
 ) -> obzenflow_dsl::FlowDefinition {
     obzenflow_dsl::FlowDefinition::materialize(move |_runtime_config| {
         // One effect-only resilience attachment owns the gateway's health,
-        // optional recovery, and per-physical-attempt admission policy. Its fixed
-        // ordering keeps limiter wait outside the dependency clock and prevents a
-        // stale breaker decision from surviving the queue.
+        // recovery policy, and per-physical-attempt admission. Its fixed ordering
+        // keeps limiter wait outside the dependency clock and prevents a stale
+        // breaker decision from surviving the queue.
         let gateway_breaker = CircuitBreaker::builder()
             .count_window(5)
             .minimum_calls(5)
             .failure_rate_threshold(0.6)
             .slow_call_duration(Duration::from_millis(250))
             .slow_call_rate_threshold(0.5)
-            .open_for(Duration::from_secs(5))
+            .open_for(GATEWAY_BREAKER_OPEN_FOR)
             .probes(1)
             .build()
             .expect("gateway circuit-breaker configuration must be valid");
         let gateway_limiter = RateLimiter::per_second(gateway_calls_per_second)
             .expect("gateway rate-limiter configuration must be valid");
+        let gateway_retry = Retry::fixed(Duration::from_millis(250))
+            .max_attempts(3)
+            .attempt_start_window(Duration::from_secs(30));
         let gateway_resilience = EffectResilience::with_breaker(gateway_breaker)
             .retry(gateway_retry)
             .rate_limit_each_attempt(gateway_limiter)
@@ -231,6 +235,8 @@ pub fn assemble_flow(
                 //   - while open, fails fast: the prevented call surfaces as a
                 //     recorded rejection error, never a synthesized fact, with a
                 //     single half-open probe.
+                // The finite demo pauses before its first live Recovery call so
+                // the real five-second open window expires before that probe.
                 // The breaker attaches inline to the effect it guards
                 // (FLOWIP-120c H7): one policy instance per protected
                 // dependency. A prevented call is recorded under the effect
@@ -250,12 +256,13 @@ pub fn assemble_flow(
                     // Record a per-execution service-level-indicator sample for the
                     // authorization handler. This is end-to-end handler wall time, so it
                     // includes effect-boundary admission, dependency execution, recovery,
-                    // and rejection routing. Breaker attempt rows separately report raw
-                    // dependency and admission-wait time. This sample is observe-only; it
-                    // never changes whether the payment succeeds, retries, or routes. The
-                    // objective (e.g. "under five seconds"), and aggregation into
-                    // percentiles and SLOs, are FLOWIP-115l's job, applied at read time
-                    // over these journalled samples rather than baked into the wide event.
+                    // rejection routing, and the demo's first-Recovery quiet period.
+                    // Breaker attempt rows separately report raw dependency and
+                    // admission-wait time. This sample is observe-only; it never changes
+                    // whether the payment succeeds, retries, or routes. The objective
+                    // (e.g. "under five seconds"), and aggregation into percentiles and
+                    // SLOs, are FLOWIP-115l's job, applied at read time over these
+                    // journalled samples rather than baked into the wide event.
                     middleware: [
                         indicator()
                             .operation("payment.authorization")
@@ -284,8 +291,8 @@ pub fn assemble_flow(
 
                 // Unavailable-authorization sink, tier 2 with middleware: failed
                 // gateway call or breaker refusal. No payment decision was
-                // reached, so the order is not cancelled; it goes to retry or
-                // manual review.
+                // reached, so the order is not cancelled; it goes to manual
+                // review.
                 manual_review = sink!(
                     PaymentAuthorizationUnavailable => record_unavailable,
                     delivery: idempotent,

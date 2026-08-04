@@ -467,7 +467,7 @@ impl CircuitBreakerMiddleware {
                     // permitted_probes > 1, another probe may have already
                     // moved the state; only the CAS winner runs side effects.
                     if self.transition_to(CircuitState::Closed, ctx) {
-                        self.failure_count.store(0, Ordering::SeqCst);
+                        self.reset_health_after_successful_probe();
 
                         tracing::info!("Circuit breaker probe succeeded, circuit closed");
                     }

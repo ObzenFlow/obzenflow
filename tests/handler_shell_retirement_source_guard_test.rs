@@ -169,7 +169,7 @@ fn retry_contracts_with_live_non_middleware_owners_stay_present() {
             "crates/obzenflow_adapters/src/middleware/control/resilience.rs",
             vec![
                 "pub struct EffectResilienceBuilder",
-                "pub fn retry(",
+                "pub fn retry(mut self, retry: Retry) -> Self",
                 "BackoffStrategy",
             ],
         ),
@@ -205,6 +205,104 @@ fn retry_contracts_with_live_non_middleware_owners_stay_present() {
                 "live retry contract {token:?} disappeared from {relative}"
             );
         }
+    }
+}
+
+#[test]
+fn payment_tutorial_is_proof_free_and_uses_configured_retry() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let example_root = root.join("examples/payment_gateway_resilience");
+
+    assert!(
+        !example_root.join("proof.rs").exists(),
+        "FLOWIP release witnesses must not live in the user-facing example"
+    );
+
+    for relative in [
+        "console.rs",
+        "deliveries.rs",
+        "domain.rs",
+        "main.rs",
+        "flow.rs",
+        "gateway.rs",
+        "fixtures.rs",
+        "support.rs",
+        "validation.rs",
+        "obzenflow.toml",
+        "README.md",
+    ] {
+        let source = fs::read_to_string(example_root.join(relative))
+            .unwrap_or_else(|error| panic!("read payment tutorial {relative}: {error}"));
+        for forbidden in [
+            "PAYMENT_DEMO_RETRY_PROOF",
+            "GatewayRetryProof",
+            "RetryProofProfile",
+            "assemble_flow_with_resilience",
+            "build_gateway_resilience",
+            "with_retry_proof",
+            "retry_proof",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "payment tutorial {relative} must not contain release-witness machinery; found {forbidden:?}"
+            );
+        }
+    }
+
+    let flow =
+        fs::read_to_string(example_root.join("flow.rs")).expect("read payment tutorial flow");
+    for forbidden in [
+        "Option<Retry>",
+        ".retry(None)",
+        ".retry(Some(",
+        "MiddlewareFactory",
+        "FnOnce(",
+    ] {
+        assert!(
+            !flow.contains(forbidden),
+            "payment tutorial flow must use direct configured retry with no proof injection seam; found {forbidden:?}"
+        );
+    }
+    assert_eq!(
+        flow.matches("EffectResilience::with_breaker(gateway_breaker)")
+            .count(),
+        1,
+        "the tutorial must have one concrete resilience construction path"
+    );
+    for required in [
+        "let gateway_retry = Retry::fixed(Duration::from_millis(250))",
+        ".max_attempts(3)",
+        ".attempt_start_window(Duration::from_secs(30))",
+        "let gateway_resilience = EffectResilience::with_breaker(gateway_breaker)",
+        ".retry(gateway_retry)",
+        ".rate_limit_each_attempt(gateway_limiter)",
+    ] {
+        assert!(
+            flow.contains(required),
+            "payment tutorial must show the configured retry golden path; missing {required:?}"
+        );
+    }
+    assert_eq!(
+        flow.matches(".retry(").count(),
+        1,
+        "the tutorial must configure retry exactly once on its direct resilience path"
+    );
+
+    let main = fs::read_to_string(example_root.join("main.rs"))
+        .expect("read payment tutorial entry point");
+    assert!(main.contains(".run_blocking(flow::build_flow())"));
+
+    let witness =
+        fs::read_to_string(root.join("tests/test_support/payment_gateway_retry_fixture.rs"))
+            .expect("read test-only payment resilience witness");
+    for required in [
+        "Retry::fixed(",
+        "ReleasePolicy::BreakerRecovery => resilience.retry(canonical_recovery())",
+    ] {
+        assert!(
+            witness.contains(required),
+            "configured test witness must retain positive retry authoring {required:?}"
+        );
     }
 }
 

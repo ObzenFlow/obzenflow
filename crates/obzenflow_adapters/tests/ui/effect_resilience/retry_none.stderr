@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/effect_resilience/retry_none.rs:13:59
+   |
+13 |     let _ = EffectResilience::with_breaker(breaker).retry(None);
+   |                                                     ----- ^^^^ expected `Retry`, found `Option<_>`
+   |                                                     |
+   |                                                     arguments to this method are incorrect
+   |
+   = note: expected struct `Retry`
+                found enum `Option<_>`
+note: method defined here
+  --> src/middleware/control/resilience.rs
+   |
+   |     pub fn retry(mut self, retry: Retry) -> Self {
+   |            ^^^^^

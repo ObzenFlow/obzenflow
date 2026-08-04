@@ -6,10 +6,11 @@
 //!
 //! The gateway call is the one place this flow touches the outside world, so it
 //! is expressed as an [`Effect`] (a value the stage returns) rather than inline
-//! I/O. The runtime executes the effect once, journals the named outcome fact
+//! I/O. The runtime owns one logical effect invocation, applies its configured
+//! retry policy to live physical calls, journals the one terminal outcome fact
 //! that happened (`payment.authorized.v1` or `payment.declined.v1`), and on
-//! replay reconstructs that recorded outcome without calling the gateway
-//! again. That is the durable-execution property the tutorial teaches.
+//! replay reconstructs that recorded outcome without calling the gateway again.
+//! That is the durable-execution property the tutorial teaches.
 //!
 //! Each payment-gateway example is self-contained; the high-volume variant keeps
 //! its own copy of this logic and only swaps the source and the flow wiring.
@@ -26,8 +27,9 @@ use obzenflow_runtime::effects::{
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use serde_json::json;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The gateway authorization command, expressed as an effect.
 ///
@@ -39,122 +41,11 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct AuthorizePayment {
     pub order: ValidatedOrder,
-    retry_proof: Option<Arc<GatewayRetryProof>>,
 }
 
-/// Shared deterministic backend script used by the circuit-breaker acceptance
-/// profiles. Effect clones share this counter, so physical calls observe one
-/// process-wide dependency history across logical effect cursors.
-#[derive(Debug)]
-pub struct GatewayRetryProof {
-    calls: AtomicUsize,
-    #[cfg(test)]
-    invocations: AtomicUsize,
-    panic_on_call: bool,
-    behavior: GatewayProofBehavior,
-    #[cfg(test)]
-    pause_before_invocation: Option<InvocationPause>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum GatewayProofBehavior {
-    FailFirst(usize),
-    Healthy,
-    AlwaysFail,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy)]
-struct InvocationPause {
-    invocation: usize,
-    duration: std::time::Duration,
-}
-
-impl GatewayRetryProof {
-    /// Fail the first two physical calls, then recover. This preserves the
-    /// original retry control/treatment proof contract.
-    pub fn new(panic_on_call: bool) -> Self {
-        Self::fail_first(2, panic_on_call)
-    }
-
-    /// Fail the first `count` physical calls, then recover.
-    pub fn fail_first(count: usize, panic_on_call: bool) -> Self {
-        Self::with_behavior(panic_on_call, GatewayProofBehavior::FailFirst(count))
-    }
-
-    /// Succeed every physical call.
-    pub fn healthy(panic_on_call: bool) -> Self {
-        Self::with_behavior(panic_on_call, GatewayProofBehavior::Healthy)
-    }
-
-    /// Fail every physical call so the breaker opens deterministically.
-    pub fn always_fail(panic_on_call: bool) -> Self {
-        Self::with_behavior(panic_on_call, GatewayProofBehavior::AlwaysFail)
-    }
-
-    fn with_behavior(panic_on_call: bool, behavior: GatewayProofBehavior) -> Self {
-        Self {
-            calls: AtomicUsize::new(0),
-            #[cfg(test)]
-            invocations: AtomicUsize::new(0),
-            panic_on_call,
-            behavior,
-            #[cfg(test)]
-            pause_before_invocation: None,
-        }
-    }
-
-    /// Delay one logical invocation before breaker admission.
-    ///
-    /// The half-open release witness uses this example-local fixture to let the
-    /// real five-second cooldown expire. Strict replay skips the wall-clock
-    /// pause while retaining the same flow policy and scripted inputs.
-    #[cfg(test)]
-    pub fn pause_before_invocation(
-        mut self,
-        invocation: usize,
-        duration: std::time::Duration,
-    ) -> Self {
-        assert!(invocation > 0, "proof invocation ordinals are one-based");
-        self.pause_before_invocation = Some(InvocationPause {
-            invocation,
-            duration,
-        });
-        self
-    }
-
-    #[cfg(test)]
-    async fn prepare_invocation(&self) {
-        let invocation = self.invocations.fetch_add(1, Ordering::SeqCst) + 1;
-        if self.panic_on_call {
-            return;
-        }
-        if let Some(pause) = self.pause_before_invocation {
-            if pause.invocation == invocation {
-                tokio::time::sleep(pause.duration).await;
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
-
-    fn record_call(&self) -> usize {
-        assert!(
-            !self.panic_on_call,
-            "strict replay attempted a live payment gateway call"
-        );
-        self.calls.fetch_add(1, Ordering::SeqCst) + 1
-    }
-
-    fn should_timeout(&self, call: usize) -> bool {
-        match self.behavior {
-            GatewayProofBehavior::FailFirst(count) => call <= count,
-            GatewayProofBehavior::Healthy => false,
-            GatewayProofBehavior::AlwaysFail => true,
-        }
+impl AuthorizePayment {
+    fn for_order(order: ValidatedOrder) -> Self {
+        Self { order }
     }
 }
 
@@ -196,35 +87,26 @@ impl Effect for AuthorizePayment {
     }
 
     async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        if let Some(proof) = &self.retry_proof {
-            let call = proof.record_call();
-            if proof.should_timeout(call) {
-                return Err(EffectError::Timeout(
-                    "gateway_timeout_simulated".to_string(),
-                ));
-            }
-        } else {
-            // Latency comes from the deterministic, seeded RNG on the effect context
-            // rather than a wall clock, so a replay reconstructs the same timing.
-            let latency_ms: u64 = ctx.rng("gateway_latency").u64(50..=200);
-            ctx.sleep(std::time::Duration::from_millis(latency_ms))
-                .await;
+        // Latency comes from the deterministic, seeded RNG on the effect context
+        // rather than a wall clock, so a replay reconstructs the same timing.
+        let latency_ms: u64 = ctx.rng("gateway_latency").u64(50..=200);
+        ctx.sleep(std::time::Duration::from_millis(latency_ms))
+            .await;
 
-            if matches!(self.order.phase, TrafficPhase::Outage) {
-                // A degraded gateway hangs before timing out, so the enclosing
-                // authorization-handler latency sample is large (and the outcome is a
-                // failure). The hang is drawn from the same seeded RNG as the base
-                // latency. The breaker attempt row records raw dependency time, while
-                // the handler indicator records the wider operation duration; whether
-                // either counts as "slow" against an objective is a read-side question
-                // (FLOWIP-115l), not baked into the wide event.
-                let timeout_ms: u64 = ctx.rng("gateway_outage_hang").u64(2_000..=3_000);
-                ctx.sleep(std::time::Duration::from_millis(timeout_ms))
-                    .await;
-                return Err(EffectError::Timeout(
-                    "gateway_timeout_simulated".to_string(),
-                ));
-            }
+        if matches!(self.order.phase, TrafficPhase::Outage) {
+            // A degraded gateway hangs before timing out, so the enclosing
+            // authorization-handler latency sample is large (and the outcome is a
+            // failure). The hang is drawn from the same seeded RNG as the base
+            // latency. The breaker attempt row records raw dependency time, while
+            // the handler indicator records the wider operation duration; whether
+            // either counts as "slow" against an objective is a read-side question
+            // (FLOWIP-115l), not baked into the wide event.
+            let timeout_ms: u64 = ctx.rng("gateway_outage_hang").u64(2_000..=3_000);
+            ctx.sleep(std::time::Duration::from_millis(timeout_ms))
+                .await;
+            return Err(EffectError::Timeout(
+                "gateway_timeout_simulated".to_string(),
+            ));
         }
 
         let order = &self.order;
@@ -272,15 +154,16 @@ impl Effect for AuthorizePayment {
 
 /// Effectful transform that turns a `ValidatedOrder` into named gateway outcome facts.
 ///
-/// The handler body stays small and deterministic. The named payment facts
-/// (`PaymentAuthorized`, `PaymentDeclined`) ARE the recorded effect outcome
-/// group (FLOWIP-120m): `fx.perform` records whichever fact happened and
-/// returns the transient carrier, so the handler never re-emits them. The
-/// handler emits only derived consequences (`OrderCancelled`) and the
-/// non-performance fact (`PaymentAuthorizationUnavailable`).
-#[derive(Debug, Clone, Default)]
+/// The named payment facts (`PaymentAuthorized`, `PaymentDeclined`) ARE the
+/// recorded effect outcome group (FLOWIP-120m): `fx.perform` records whichever
+/// fact happened and returns the transient carrier, so the handler never
+/// re-emits them. The handler emits only derived consequences
+/// (`OrderCancelled`) and the non-performance fact
+/// (`PaymentAuthorizationUnavailable`).
+#[derive(Debug, Clone)]
 pub struct GatewayTransform {
-    retry_proof: Option<Arc<GatewayRetryProof>>,
+    first_recovery_pause: Option<Duration>,
+    recovery_pause_claimed: Arc<AtomicBool>,
 }
 
 type GatewayOutput = obzenflow_core::stage_fact_set![
@@ -292,9 +175,43 @@ type GatewayOutput = obzenflow_core::stage_fact_set![
 type GatewayAllowedEffects = obzenflow_runtime::effect_set![AuthorizePayment];
 
 impl GatewayTransform {
-    pub fn with_retry_proof(retry_proof: Arc<GatewayRetryProof>) -> Self {
+    /// Pace the first live recovery authorization after the scripted outage.
+    ///
+    /// A real order stream naturally has time between an outage and later
+    /// recovery traffic. This finite demo has every input ready immediately,
+    /// so its normal assembly adds that quiet period explicitly before breaker
+    /// admission. Replay skips the wall-clock wait and reconstructs the
+    /// recorded effect outcome as usual.
+    pub fn with_first_recovery_pause(pause: Duration) -> Self {
+        assert!(
+            !pause.is_zero(),
+            "the scripted recovery pause must be greater than zero"
+        );
         Self {
-            retry_proof: Some(retry_proof),
+            first_recovery_pause: Some(pause),
+            recovery_pause_claimed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    async fn pace_first_live_recovery(&self, order: &ValidatedOrder, is_replaying: bool) {
+        if is_replaying || !matches!(order.phase, TrafficPhase::Recovery) {
+            return;
+        }
+
+        let Some(pause) = self.first_recovery_pause else {
+            return;
+        };
+        if !self.recovery_pause_claimed.swap(true, Ordering::SeqCst) {
+            tokio::time::sleep(pause).await;
+        }
+    }
+}
+
+impl Default for GatewayTransform {
+    fn default() -> Self {
+        Self {
+            first_recovery_pause: None,
+            recovery_pause_claimed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -319,21 +236,14 @@ impl EffectfulTransformHandler for GatewayTransform {
             ));
         }
 
-        #[cfg(test)]
-        if let Some(proof) = &self.retry_proof {
-            proof.prepare_invocation().await;
-        }
-
-        // Plain fail-fast breaker path (FLOWIP-115n direction): when the
-        // breaker prevents the call, `perform` returns a recorded
-        // `BoundaryRejected` error; the breaker never synthesizes a fact to
-        // represent non-execution.
-        let outcome = fx
-            .perform(AuthorizePayment {
-                order: order.clone(),
-                retry_proof: self.retry_proof.clone(),
-            })
+        self.pace_first_live_recovery(&order, fx.is_replaying())
             .await;
+
+        // The configured resilience unit owns retry and breaker admission. If
+        // recovery exhausts or the breaker prevents an attempt, `perform`
+        // returns the one recorded terminal error; resilience never
+        // synthesizes a business fact to represent non-execution.
+        let outcome = fx.perform(AuthorizePayment::for_order(order.clone())).await;
 
         match outcome {
             Ok(AuthorizePaymentOutcome::Authorized(_)) => {
@@ -410,7 +320,7 @@ async fn emit_authorization_unavailable(
 
 #[cfg(test)]
 mod tests {
-    use super::{authorization_unavailable_reason, EffectError, GatewayRetryProof};
+    use super::{authorization_unavailable_reason, EffectError};
     use obzenflow_runtime::effects::RetryDisposition;
 
     /// FLOWIP-120i: the recorded payload carries the semantic reason, never
@@ -431,19 +341,5 @@ mod tests {
 
         assert_eq!(live_reason, "gateway_timeout_simulated");
         assert_eq!(replay_reason, live_reason);
-    }
-
-    #[test]
-    fn retry_proof_counts_physical_calls() {
-        let proof = GatewayRetryProof::new(false);
-        assert_eq!(proof.record_call(), 1);
-        assert_eq!(proof.record_call(), 2);
-        assert_eq!(proof.calls(), 2);
-    }
-
-    #[test]
-    #[should_panic(expected = "strict replay attempted a live payment gateway call")]
-    fn retry_proof_panics_on_replay_call() {
-        GatewayRetryProof::new(true).record_call();
     }
 }

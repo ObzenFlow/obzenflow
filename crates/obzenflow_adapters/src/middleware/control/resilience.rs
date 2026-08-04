@@ -123,8 +123,8 @@ impl EffectResilience {
 }
 
 impl EffectResilienceBuilder {
-    pub fn retry(mut self, retry: impl Into<Option<Retry>>) -> Self {
-        self.retry = retry.into();
+    pub fn retry(mut self, retry: Retry) -> Self {
+        self.retry = Some(retry);
         self
     }
 
@@ -565,12 +565,34 @@ impl MiddlewareFactory for EffectResilienceFactory {
     }
 
     fn config_snapshot(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({
-            "kind": "effect_resilience",
-            "breaker": self.breaker_defaults().into_iter().map(|d| (d.key_path.to_string(), d.value.to_json())).collect::<serde_json::Map<_, _>>(),
-            "retry": self.retry.as_ref().map(|_| self.retry_defaults().into_iter().map(|d| (d.key_path.to_string(), d.value.to_json())).collect::<serde_json::Map<_, _>>()),
-            "rate_limiter": self.rate_limiter.as_ref().map(|_| self.limiter_defaults().into_iter().map(|d| (d.key_path.to_string(), d.value.to_json())).collect::<serde_json::Map<_, _>>()),
-        }))
+        let defaults_snapshot = |defaults: Vec<DslConfigDefault>| {
+            defaults
+                .into_iter()
+                .map(|default| (default.key_path.to_string(), default.value.to_json()))
+                .collect::<serde_json::Map<_, _>>()
+        };
+        let mut snapshot = serde_json::Map::new();
+        snapshot.insert(
+            "kind".to_string(),
+            serde_json::Value::String("effect_resilience".to_string()),
+        );
+        snapshot.insert(
+            "breaker".to_string(),
+            serde_json::Value::Object(defaults_snapshot(self.breaker_defaults())),
+        );
+        if self.retry.is_some() {
+            snapshot.insert(
+                "retry".to_string(),
+                serde_json::Value::Object(defaults_snapshot(self.retry_defaults())),
+            );
+        }
+        if self.rate_limiter.is_some() {
+            snapshot.insert(
+                "rate_limiter".to_string(),
+                serde_json::Value::Object(defaults_snapshot(self.limiter_defaults())),
+            );
+        }
+        Some(serde_json::Value::Object(snapshot))
     }
 }
 
@@ -1987,6 +2009,18 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_builder_defaults_to_absent_retry_and_accepts_concrete_retry() {
+        let builder = EffectResilience::with_breaker(valid_breaker());
+        assert!(builder.retry.is_none());
+
+        let builder = builder.retry(Retry::fixed(Duration::from_millis(10)));
+        assert!(builder.retry.is_some());
+        builder
+            .build()
+            .expect("concrete retry configuration should build");
+    }
+
+    #[test]
     fn health_classification_cannot_veto_or_promote_retry() {
         assert!(retryable_error(&EffectError::Timeout("slow".to_string())));
         assert!(retryable_error(&EffectError::Transport(
@@ -2078,5 +2112,64 @@ mod tests {
         assert!(keys.contains(RESILIENCE_BREAKER_MODE_KEY));
         assert!(keys.contains(RESILIENCE_RETRY_MAX_ATTEMPTS_KEY));
         assert!(keys.contains(RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY));
+    }
+
+    fn aggregate_snapshot(with_retry: bool, with_limiter: bool) -> serde_json::Value {
+        let mut builder = EffectResilience::with_breaker(valid_breaker());
+        if with_retry {
+            builder = builder.retry(
+                Retry::fixed(Duration::from_millis(10))
+                    .max_attempts(3)
+                    .max_backoff(Duration::from_secs(1))
+                    .attempt_start_window(Duration::from_secs(2)),
+            );
+        }
+        if with_limiter {
+            builder = builder.rate_limit_each_attempt(RateLimiter::per_second(20.0).unwrap());
+        }
+        builder
+            .build()
+            .expect("snapshot aggregate should be valid")
+            .config_snapshot()
+            .expect("effect resilience exposes aggregate-local introspection")
+    }
+
+    #[test]
+    fn aggregate_snapshot_omits_absent_optional_components() {
+        let breaker_only = aggregate_snapshot(false, false);
+        assert_eq!(breaker_only["kind"], "effect_resilience");
+        assert!(breaker_only["breaker"].is_object());
+        assert!(breaker_only.get("retry").is_none());
+        assert!(breaker_only.get("rate_limiter").is_none());
+
+        let retry_only = aggregate_snapshot(true, false);
+        assert_eq!(retry_only["breaker"], breaker_only["breaker"]);
+        assert_eq!(
+            retry_only["retry"],
+            serde_json::json!({
+                (RESILIENCE_RETRY_KIND_KEY): "fixed",
+                (RESILIENCE_RETRY_FIXED_DELAY_MS_KEY): 10,
+                (RESILIENCE_RETRY_MAX_ATTEMPTS_KEY): 3,
+                (RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY): 1_000,
+                (RESILIENCE_RETRY_ATTEMPT_START_WINDOW_MS_KEY): 2_000,
+            })
+        );
+        assert!(retry_only.get("rate_limiter").is_none());
+
+        let limiter_only = aggregate_snapshot(false, true);
+        assert_eq!(limiter_only["breaker"], breaker_only["breaker"]);
+        assert!(limiter_only.get("retry").is_none());
+        assert_eq!(
+            limiter_only["rate_limiter"],
+            serde_json::json!({
+                (RESILIENCE_RATE_LIMITER_EVENTS_PER_SECOND_KEY): 20.0,
+                (RESILIENCE_RATE_LIMITER_COST_PER_ATTEMPT_KEY): 1.0,
+            })
+        );
+
+        let complete = aggregate_snapshot(true, true);
+        assert_eq!(complete["breaker"], breaker_only["breaker"]);
+        assert_eq!(complete["retry"], retry_only["retry"]);
+        assert_eq!(complete["rate_limiter"], limiter_only["rate_limiter"]);
     }
 }

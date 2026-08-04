@@ -5,8 +5,9 @@
 //! Payment Gateway Resilience: a durable-execution tutorial.
 //!
 //! The gateway call is modelled as a replay-suppressed effect, so a recorded run
-//! can be replayed with zero gateway calls and identical output. A circuit
-//! breaker on the same stage is the second, live-run layer of protection.
+//! can be replayed with zero gateway calls and identical output. Bounded retry,
+//! a circuit breaker, and a per-attempt limiter on the same stage form the
+//! second, live-run layer of protection.
 //!
 //! Run it:
 //!
@@ -29,7 +30,6 @@ mod domain;
 mod fixtures;
 mod flow;
 mod gateway;
-mod proof;
 mod validation;
 
 use obzenflow_infra::application::{
@@ -50,19 +50,19 @@ fn banner_for(mode: &RunMode) -> Banner {
                     format!("Source archive: {}", ctx.source_label()),
                     "Source config and env vars are ignored; recorded order events are re-admitted".to_string(),
                     "Gateway calls are suppressed; recorded effect outcomes are reused as facts".to_string(),
-                    "Circuit breaker and rate limiter are configured for topology validation only; no live counters move".to_string(),
+                    "Retry, circuit breaker, and rate limiter are configured for topology validation only; no live state moves".to_string(),
                     "Sink lines below are archived outcomes re-emitted deterministically, marked [replay]".to_string(),
                 ],
             )
             .config("journal_dir", "target/payment-gateway-logs"),
         _ => Banner::new("Payment Gateway Resilience Demo")
-            .description("The gateway call is a replay-suppressed effect; a circuit breaker is the second layer.")
+            .description("The gateway call is a replay-suppressed effect; retry, a circuit breaker, and a per-attempt limiter form the second layer.")
             .bullets(
                 "What to watch",
                 [
                     "validate_order classifies once and authors multiple named facts; invalid orders and gateway declines converge on the cancelled-orders delivery",
                     "InvalidOrder and PaymentDeclined are journal-recorded provenance facts with no sink; OrderCancelled carries the order's fate",
-                    "Gateway outages open the circuit breaker (obzenflow_circuit_breaker_*); once open it emits authorization-unavailable events, which do not cancel",
+                    "Transient gateway failures receive bounded retry; sustained outages open the circuit breaker (obzenflow_circuit_breaker_*), and terminal unavailability does not cancel",
                     "Re-run with --replay-from target/payment-gateway-logs/flows/<flow_id> to replay with zero gateway calls",
                 ],
             )
@@ -107,7 +107,7 @@ fn main() -> std::process::ExitCode {
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation)
         .with_config_file(config_file)
-        .run_blocking(proof::build_flow());
+        .run_blocking(flow::build_flow());
 
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -138,8 +138,8 @@ mod tests {
         let live = banner_for(&RunMode::Live).render_for_stdout().text;
         let replay = banner_for(&replay_mode()).render_for_stdout().text;
 
-        assert!(live.contains("Gateway outages open the circuit breaker"));
-        assert!(!replay.contains("Gateway outages open the circuit breaker"));
+        assert!(live.contains("sustained outages open the circuit breaker"));
+        assert!(!replay.contains("sustained outages open the circuit breaker"));
         assert!(replay.contains("strict replay"));
         assert!(replay.contains("flow_01SOURCE"));
         assert!(replay.contains("Gateway calls are suppressed"));

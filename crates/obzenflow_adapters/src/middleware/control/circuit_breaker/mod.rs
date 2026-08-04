@@ -299,6 +299,16 @@ impl CircuitBreakerMiddleware {
         self.writer_id
     }
 
+    fn reset_health_after_successful_probe(&self) {
+        self.failure_count.store(0, Ordering::SeqCst);
+        if let Some(rate_window) = &self.rate_window {
+            rate_window
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
+        }
+    }
+
     #[cfg(test)]
     pub(in crate::middleware::control) fn expire_effect_cooldown_for_test(&self) {
         let elapsed = self.cooldown.saturating_add(Duration::from_nanos(1));
@@ -851,7 +861,7 @@ impl CircuitBreakerMiddleware {
                         self.successes_total.fetch_add(1, Ordering::Relaxed);
                         let (transitioned, event) = self.transition_to_inner(CircuitState::Closed);
                         if transitioned {
-                            self.failure_count.store(0, Ordering::SeqCst);
+                            self.reset_health_after_successful_probe();
                         }
                         event
                     }
@@ -1101,6 +1111,65 @@ mod tests {
 
         assert_eq!(breaker.slow_total.load(Ordering::Relaxed), 1);
         assert_eq!(breaker.current_state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn successful_probe_starts_a_fresh_rate_window() {
+        let mut breaker = CircuitBreakerMiddleware::new(5);
+        breaker.failure_mode = CircuitBreakerFailureMode::RateBased {
+            window: FailureWindow::Count { size: 5 },
+            failure_rate_threshold: Some(
+                RateThreshold::checked(0.6, "failure_rate_threshold").unwrap(),
+            ),
+            slow_call_rate_threshold: None,
+            slow_call_duration_threshold: None,
+            minimum_calls: NonZeroU32::new(5).unwrap(),
+        };
+        breaker.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(5))));
+        let mut closed_ctx =
+            MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+
+        for _ in 0..2 {
+            breaker.settle_classified_call(&FailureClassification::Success, &mut closed_ctx);
+        }
+        for _ in 0..3 {
+            breaker
+                .settle_classified_call(&FailureClassification::TransientFailure, &mut closed_ctx);
+        }
+        assert_eq!(breaker.current_state(), CircuitState::Open);
+
+        breaker.expire_effect_cooldown_for_test();
+        let mut probe_ctx =
+            MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        let epoch = breaker.effect_precheck(&mut probe_ctx, None).unwrap();
+        assert!(matches!(
+            breaker.effect_admit(&mut probe_ctx, EffectAdmissionFence::new(epoch, epoch)),
+            crate::middleware::PolicyAdmission::Admit
+        ));
+        assert_eq!(breaker.current_state(), CircuitState::HalfOpen);
+
+        breaker.settle_classified_call(&FailureClassification::Success, &mut probe_ctx);
+        assert_eq!(breaker.current_state(), CircuitState::Closed);
+        assert_eq!(
+            breaker
+                .rate_window
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .iter()
+                .count(),
+            0
+        );
+
+        let mut next_ctx =
+            MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        breaker.settle_classified_call(&FailureClassification::Success, &mut next_ctx);
+        assert_eq!(
+            breaker.current_state(),
+            CircuitState::Closed,
+            "a successful call after recovery must not reopen on stale failures"
+        );
     }
 
     #[test]
