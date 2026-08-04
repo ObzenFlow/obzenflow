@@ -507,3 +507,77 @@ fn effectful_stateful_keeps_only_its_existing_typed_lowerer() {
         }
     }
 }
+
+#[test]
+fn default_http_source_transport_stays_cold_until_execute() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let facade = fs::read_to_string(root.join("src/sources.rs")).expect("read source facade");
+    let factory = fs::read_to_string(root.join("crates/obzenflow_infra/src/http_client/mod.rs"))
+        .expect("read default HTTP client factory");
+    let reqwest_source =
+        fs::read_to_string(root.join("crates/obzenflow_infra/src/http_client/reqwest_client.rs"))
+            .expect("read reqwest HTTP client");
+    let production_reqwest = reqwest_source
+        .split("#[cfg(test)]\nmod tests")
+        .next()
+        .expect("production reqwest source precedes its tests");
+
+    for (name, source) in [
+        ("source facade", facade.as_str()),
+        ("factory", factory.as_str()),
+    ] {
+        for forbidden in [
+            "reqwest::Client::new",
+            "reqwest::Client::builder",
+            "ReplayVerb",
+            "RuntimeMode",
+            "source_phase_for",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{name} must not perform concrete HTTP setup or branch on run mode; found {forbidden:?}"
+            );
+        }
+    }
+
+    assert!(factory.contains("Arc::new(ReqwestHttpClient::new())"));
+    assert!(production_reqwest.contains("state: Arc<OnceLock<ClientInitResult>>"));
+    assert!(production_reqwest.contains("self.state.get_or_init(|| self.initializer.run())"));
+    assert_eq!(
+        production_reqwest.matches("reqwest::Client::new").count(),
+        1,
+        "proxy-aware concrete construction must have one infra-owned initialiser"
+    );
+    assert_eq!(
+        production_reqwest
+            .matches("reqwest::Client::builder")
+            .count(),
+        1,
+        "the no-proxy recovery constructor must remain inside that initialiser"
+    );
+
+    let constructor_start = production_reqwest
+        .find("pub fn new() -> Self")
+        .expect("ReqwestHttpClient::new");
+    let execute_start = production_reqwest
+        .find("async fn execute(&self")
+        .expect("HttpClient::execute implementation");
+    let constructors = &production_reqwest[constructor_start..execute_start];
+    for forbidden in ["reqwest::Client::new", "reqwest::Client::builder"] {
+        assert!(
+            !constructors.contains(forbidden),
+            "default and preseeded wrapper construction must remain platform-cold; found {forbidden:?}"
+        );
+    }
+    assert!(constructors.contains("pub fn with_client(client: reqwest::Client)"));
+
+    let execute = &production_reqwest[execute_start..];
+    let acquire = execute
+        .find("let client = self.client()?")
+        .expect("lazy client acquisition");
+    let send = execute.find("builder.send().await").expect("request send");
+    assert!(
+        acquire < send,
+        "execute must acquire the one shared client verdict before request send"
+    );
+}
