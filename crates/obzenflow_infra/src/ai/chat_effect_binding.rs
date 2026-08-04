@@ -5,7 +5,7 @@
 //! Deferred, single-target chat-effect binding.
 
 use super::endpoint_identity::{
-    bound_chat_target, default_ollama_base_url, default_openai_base_url,
+    bound_chat_target, default_ollama_base_url, default_openai_base_url, endpoint_has_credentials,
 };
 use super::resolve_estimator_for_model;
 use crate::ai::rig::RigChatClient;
@@ -35,6 +35,8 @@ pub enum ChatEffectBindingError {
     MissingBaseUrl,
     #[error("invalid ai.models.base_url: {message}")]
     InvalidBaseUrl { message: String },
+    #[error("AI effect binding endpoints must not contain URL credentials")]
+    CredentialedBaseUrl,
     #[error(transparent)]
     InvalidContract(#[from] ChatBindingContractError),
 }
@@ -79,6 +81,47 @@ impl std::fmt::Debug for ChatEffectRegistration {
 }
 
 impl ChatEffectBinding {
+    pub fn ollama(
+        model: impl Into<String>,
+        base_url: Option<Url>,
+    ) -> Result<Self, ChatEffectBindingError> {
+        let model = required_model(model.into())?;
+        let endpoint = base_url.clone().unwrap_or_else(default_ollama_base_url);
+        validate_endpoint(&endpoint)?;
+        Self::new_bound(
+            "ollama",
+            model,
+            endpoint,
+            DeferredProvider::Ollama { base_url },
+        )
+    }
+
+    pub fn openai(
+        model: impl Into<String>,
+        api_key: SecretRef,
+    ) -> Result<Self, ChatEffectBindingError> {
+        Self::new_bound(
+            "openai",
+            required_model(model.into())?,
+            default_openai_base_url(),
+            DeferredProvider::OpenAi { api_key },
+        )
+    }
+
+    pub fn openai_compatible(
+        model: impl Into<String>,
+        api_key: SecretRef,
+        base_url: Url,
+    ) -> Result<Self, ChatEffectBindingError> {
+        validate_endpoint(&base_url)?;
+        Self::new_bound(
+            "openai_compatible",
+            required_model(model.into())?,
+            base_url.clone(),
+            DeferredProvider::OpenAiCompatible { api_key, base_url },
+        )
+    }
+
     pub fn from_config(config: &AiModelsConfig) -> Result<Self, ChatEffectBindingError> {
         let provider = config.provider.value.trim().to_ascii_lowercase();
         let model = config
@@ -93,6 +136,10 @@ impl ChatEffectBinding {
             .as_ref()
             .map(|resolved| parse_url(&resolved.value))
             .transpose()?;
+
+        if let Some(base_url) = &base_url {
+            validate_endpoint(base_url)?;
+        }
 
         let (deferred, endpoint) = match provider.as_str() {
             "ollama" => {
@@ -121,12 +168,7 @@ impl ChatEffectBinding {
                 })
             }
         };
-        let target = bound_chat_target(AiProvider::new(provider), model.clone(), &endpoint);
-        let estimator = resolve_estimator_for_model(&model);
-        Ok(Self {
-            contract: ChatBindingContract::from_resolved(target, estimator)?,
-            provider: deferred,
-        })
+        Self::new_bound(provider, model, endpoint, deferred)
     }
 
     pub fn into_parts(self) -> (ChatBindingContract, ChatEffectRegistration) {
@@ -138,6 +180,20 @@ impl ChatEffectBinding {
                 provider: self.provider,
             },
         )
+    }
+
+    fn new_bound(
+        provider: impl Into<AiProvider>,
+        model: String,
+        endpoint: Url,
+        deferred: DeferredProvider,
+    ) -> Result<Self, ChatEffectBindingError> {
+        let target = bound_chat_target(provider, model.clone(), &endpoint);
+        let estimator = resolve_estimator_for_model(&model);
+        Ok(Self {
+            contract: ChatBindingContract::from_resolved(target, estimator)?,
+            provider: deferred,
+        })
     }
 }
 
@@ -200,6 +256,23 @@ fn parse_url(raw: &str) -> Result<Url, ChatEffectBindingError> {
     Url::parse(raw).map_err(|error| ChatEffectBindingError::InvalidBaseUrl {
         message: error.to_string(),
     })
+}
+
+fn required_model(model: String) -> Result<String, ChatEffectBindingError> {
+    let model = model.trim();
+    if model.is_empty() {
+        Err(ChatEffectBindingError::MissingModel)
+    } else {
+        Ok(model.to_string())
+    }
+}
+
+fn validate_endpoint(endpoint: &Url) -> Result<(), ChatEffectBindingError> {
+    if endpoint_has_credentials(endpoint) {
+        Err(ChatEffectBindingError::CredentialedBaseUrl)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -325,5 +398,23 @@ mod tests {
             CHAT_CLIENT_PORT,
         );
         assert!(registry.contains_requirement(&requirement));
+    }
+
+    #[test]
+    fn programmatic_constructors_defer_secrets_and_reject_url_credentials() {
+        ChatEffectBinding::openai(
+            "fixture-model",
+            SecretRef::new("FLOWIP_128B_MISSING_OPENAI_KEY"),
+        )
+        .expect("constructing a binding does not resolve its secret");
+
+        let endpoint = Url::parse("https://user:password@example.com/v1").unwrap();
+        let error = ChatEffectBinding::openai_compatible(
+            "fixture-model",
+            SecretRef::new("FLOWIP_128B_MISSING_COMPAT_KEY"),
+            endpoint,
+        )
+        .unwrap_err();
+        assert_eq!(error, ChatEffectBindingError::CredentialedBaseUrl);
     }
 }

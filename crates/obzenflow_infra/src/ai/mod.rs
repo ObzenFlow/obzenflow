@@ -13,13 +13,16 @@ mod endpoint_identity;
 mod prompt;
 
 #[cfg(feature = "ai-rig")]
-mod rig_builder;
-
-#[cfg(feature = "ai-rig")]
 mod model_config;
 
 #[cfg(feature = "ai-rig")]
 mod chat_effect_binding;
+
+#[cfg(feature = "ai-rig")]
+mod embedding_effect_binding;
+
+#[cfg(feature = "ai-rig")]
+mod native_embedding_client;
 
 mod model_profile;
 mod token_estimation;
@@ -37,13 +40,15 @@ pub use token_estimation::{
 pub use tiktoken::TiktokenEstimator;
 
 #[cfg(feature = "ai-rig")]
-pub use rig_builder::{
-    ChatRequestTemplate, ChatTransformBuilder, ChatTransformBuilderWithContext, ChatTransformExt,
-    EmbeddingTransformBuilder, EmbeddingTransformExt,
-};
-
-#[cfg(feature = "ai-rig")]
-pub use model_config::{ModelChatBuilder, ModelChatBuilderWithContext, ModelConfig};
+pub use model_config::ModelConfig;
 
 #[cfg(feature = "ai-rig")]
 pub use chat_effect_binding::{ChatEffectBinding, ChatEffectBindingError, ChatEffectRegistration};
+
+#[cfg(feature = "ai-rig")]
+pub use embedding_effect_binding::{
+    EmbeddingEffectBinding, EmbeddingEffectBindingError, EmbeddingEffectRegistration,
+};
+
+#[cfg(feature = "ai-rig")]
+pub use native_embedding_client::NativeEmbeddingClient;

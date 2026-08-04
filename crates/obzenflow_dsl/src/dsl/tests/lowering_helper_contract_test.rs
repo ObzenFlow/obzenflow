@@ -105,5 +105,27 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(transactional_attachments.is_empty());
+
+        type AtLeastOnce = crate::__obzenflow_effect_manifest_types!(at_least_once(TxEffect));
+        let mut at_least_once = Vec::new();
+        let _at_least_once_attachments: Vec<crate::dsl::stage_descriptor::EffectPolicyAttachment> =
+            Vec::new();
+        crate::__obzenflow_effect_entries!(
+            @entry at_least_once,
+            _at_least_once_attachments,
+            [],
+            at_least_once(TxEffect)
+        );
+        assert_eq!(
+            <AtLeastOnce as EffectSet>::effect_types(),
+            at_least_once
+                .iter()
+                .map(|entry| entry.effect_type)
+                .collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            at_least_once[0].idempotency_key_policy,
+            obzenflow_runtime::effects::IdempotencyKeyPolicy::AtLeastOnceAcknowledged
+        ));
     }
 }

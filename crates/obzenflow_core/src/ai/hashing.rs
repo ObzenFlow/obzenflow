@@ -4,7 +4,7 @@
 
 use crate::ai::{
     AiProvider, ChatBindingFingerprint, ChatMessage, ChatParams, ChatRequest, ChatResponseFormat,
-    EmbeddingParams, EmbeddingRequest, ToolDefinition,
+    EmbeddingBindingFingerprint, EmbeddingParams, EmbeddingRequest, ToolDefinition,
 };
 use ring::digest::{digest, SHA256};
 use serde::Serialize;
@@ -12,6 +12,7 @@ use serde_json::Value;
 
 pub const LLM_HASH_VERSION_SHA256_V1: &str = "sha256:v1";
 pub const CHAT_BINDING_FINGERPRINT_VERSION_SHA256_V1: &str = "sha256:v1";
+pub const EMBEDDING_BINDING_FINGERPRINT_VERSION_SHA256_V1: &str = "sha256:v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum AiHashError {
@@ -151,6 +152,25 @@ pub fn chat_binding_fingerprint(
     ))
 }
 
+/// Hash a credential-free, normalised endpoint identity into the durable
+/// embedding-binding coordinate. The endpoint itself never enters the result.
+pub fn embedding_binding_fingerprint(
+    provider: &AiProvider,
+    model: &str,
+    normalised_endpoint: &str,
+) -> EmbeddingBindingFingerprint {
+    let material = format!(
+        "obzenflow.embedding_binding:v1\0{}\0{}\0{}",
+        provider.as_str(),
+        model,
+        normalised_endpoint
+    );
+    EmbeddingBindingFingerprint::new(format!(
+        "{EMBEDDING_BINDING_FINGERPRINT_VERSION_SHA256_V1}:{}",
+        sha256_hex(material.as_bytes())
+    ))
+}
+
 fn canonical_response_format<'a>(
     response_format: Option<&'a ChatResponseFormat>,
     schema_hash: Option<&'a str>,
@@ -227,6 +247,24 @@ mod tests {
         assert_ne!(hash_a, hash_b);
         assert_eq!(hash_a.len(), 64);
         assert_eq!(hash_b.len(), 64);
+    }
+
+    #[test]
+    fn embedding_binding_fingerprint_uses_the_locked_domain_and_separators() {
+        let provider = AiProvider::new("OLLAMA");
+        let model = "nomic-embed-text";
+        let endpoint = "http://localhost:11434";
+        let expected_material =
+            b"obzenflow.embedding_binding:v1\0ollama\0nomic-embed-text\0http://localhost:11434";
+
+        assert_eq!(
+            embedding_binding_fingerprint(&provider, model, endpoint).as_str(),
+            format!("sha256:v1:{}", sha256_hex(expected_material))
+        );
+        assert_ne!(
+            embedding_binding_fingerprint(&provider, model, endpoint),
+            embedding_binding_fingerprint(&provider, model, "http://localhost:11435")
+        );
     }
 
     #[test]

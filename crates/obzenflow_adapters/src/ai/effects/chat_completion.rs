@@ -2,13 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use crate::ai::error_mapping::ai_client_error_to_effect_error;
 use async_trait::async_trait;
 use obzenflow_core::ai::{
-    params_hash_for_chat, prompt_hash_for_chat, schema_hash_for_response_format, AiClientError,
+    params_hash_for_chat, prompt_hash_for_chat, schema_hash_for_response_format,
     CanonicalizationComponent, ChatClient, ChatCompletionReply, ChatRequest, ChatTarget, LlmHashes,
     LlmObservability, ResolvedTokenEstimator, CHAT_CLIENT_PORT,
 };
-use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectPortRequirement, EffectSafety, RecordedReply,
 };
@@ -129,10 +129,9 @@ impl Effect for ChatCompletion {
             .estimator
             .estimator()
             .estimate_chat_request(&self.request);
-        let response = client
-            .chat(self.request.clone())
-            .await
-            .map_err(map_client_error)?;
+        let response = client.chat(self.request.clone()).await.map_err(|error| {
+            ai_client_error_to_effect_error(error, CHAT_CLIENT_PORT, "chat_client")
+        })?;
 
         let mut observability = LlmObservability::new(
             self.request.provider.clone(),
@@ -163,34 +162,6 @@ fn canonicalization_error(
         detail.truncate(boundary);
     }
     ChatCompletionBuildError::RequestCanonicalization { component, detail }
-}
-
-fn map_client_error(error: AiClientError) -> EffectError {
-    match error {
-        AiClientError::TargetMismatch { requested, bound } => {
-            EffectError::EffectPortBindingInvariantViolation {
-                port: CHAT_CLIENT_PORT.to_string(),
-                expected: bound.to_string(),
-                observed: requested.to_string(),
-            }
-        }
-        AiClientError::Timeout { message } => dependency("timeout", message),
-        AiClientError::Remote { message } => dependency("remote", message),
-        AiClientError::RateLimited { message, .. } => dependency("rate_limited", message),
-        AiClientError::Auth { message } => dependency("authentication", message),
-        AiClientError::InvalidRequest { message } => dependency("invalid_request", message),
-        AiClientError::Unsupported { message } => dependency("unsupported", message),
-        AiClientError::Other { message } => dependency("other", message),
-    }
-}
-
-fn dependency(code: &'static str, message: String) -> EffectError {
-    EffectError::DependencyFailed {
-        failure_source: EffectFailureSource::new("chat_client"),
-        code: EffectFailureCode::new(code),
-        message,
-        retry: RetryDisposition::NotRetryable,
-    }
 }
 
 #[cfg(test)]

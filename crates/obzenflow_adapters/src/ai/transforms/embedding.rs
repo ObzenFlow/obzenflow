@@ -2,199 +2,115 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::ai::error_mapping::ai_client_error_to_handler_error_with_context;
+use crate::ai::{effect_error_to_handler_error, EmbeddingGeneration};
 use async_trait::async_trait;
 use obzenflow_core::ai::{
-    attach_llm_observability, params_hash_for_embedding, prompt_hash_for_embedding_inputs,
-    EmbeddingClient, EmbeddingRequest, EmbeddingResponse, LlmHashes, LlmObservability,
+    EmbeddingBindingContract, EmbeddingParams, EmbeddingRequestSpec, EmbeddingResponse,
 };
-use obzenflow_core::event::chain_event::ChainEventContent;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::TypedPayload;
+use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::AsyncTransformHandler;
-use serde_json::json;
+use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use std::fmt;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
-type EmbeddingRequestBuilder =
-    dyn Fn(&ChainEvent) -> Result<EmbeddingRequest, HandlerError> + Send + Sync + 'static;
-type EmbeddingOutputMapper = dyn Fn(&ChainEvent, EmbeddingResponse) -> Result<Vec<ChainEvent>, HandlerError>
-    + Send
-    + Sync
-    + 'static;
+pub const STANDALONE_EMBEDDING_GENERATION_LABEL: &str = "standalone.embedding_generation";
 
-/// Async transform handler that executes an embedding request through an injected `EmbeddingClient`.
-#[derive(Clone)]
-pub struct EmbeddingTransform {
-    client: Arc<dyn EmbeddingClient>,
-    request_builder: Arc<EmbeddingRequestBuilder>,
-    output_mapper: Arc<EmbeddingOutputMapper>,
+type InputsMapper<In> = dyn Fn(&In) -> Result<Vec<String>, HandlerError> + Send + Sync + 'static;
+type ResponseMapper<In, Out> =
+    dyn Fn(In, EmbeddingResponse) -> Result<Out, HandlerError> + Send + Sync + 'static;
+
+/// Typed standalone embedding handler whose only live authority is `fx.perform`.
+pub struct EmbeddingTransform<In, Out> {
+    binding: EmbeddingBindingContract,
+    params: EmbeddingParams,
+    input_to_inputs: Arc<InputsMapper<In>>,
+    response_to_output: Arc<ResponseMapper<In, Out>>,
+    logic_version: String,
+    _types: PhantomData<fn() -> (In, Out)>,
 }
 
-impl fmt::Debug for EmbeddingTransform {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EmbeddingTransform").finish()
-    }
-}
-
-impl EmbeddingTransform {
-    pub fn new<F>(client: Arc<dyn EmbeddingClient>, request_builder: F) -> Self
-    where
-        F: Fn(&ChainEvent) -> Result<EmbeddingRequest, HandlerError> + Send + Sync + 'static,
-    {
+impl<In, Out> EmbeddingTransform<In, Out> {
+    pub(crate) fn from_parts(
+        binding: EmbeddingBindingContract,
+        params: EmbeddingParams,
+        input_to_inputs: Arc<InputsMapper<In>>,
+        response_to_output: Arc<ResponseMapper<In, Out>>,
+        logic_version: String,
+    ) -> Self {
         Self {
-            client,
-            request_builder: Arc::new(request_builder),
-            output_mapper: Arc::new(default_embedding_output_mapper),
+            binding,
+            params,
+            input_to_inputs,
+            response_to_output,
+            logic_version,
+            _types: PhantomData,
         }
     }
+}
 
-    pub fn with_output_mapper<F>(mut self, output_mapper: F) -> Self
-    where
-        F: Fn(&ChainEvent, EmbeddingResponse) -> Result<Vec<ChainEvent>, HandlerError>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.output_mapper = Arc::new(output_mapper);
-        self
+impl<In, Out> Clone for EmbeddingTransform<In, Out> {
+    fn clone(&self) -> Self {
+        Self {
+            binding: self.binding.clone(),
+            params: self.params.clone(),
+            input_to_inputs: Arc::clone(&self.input_to_inputs),
+            response_to_output: Arc::clone(&self.response_to_output),
+            logic_version: self.logic_version.clone(),
+            _types: PhantomData,
+        }
+    }
+}
+
+impl<In, Out> fmt::Debug for EmbeddingTransform<In, Out> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EmbeddingTransform")
+            .field("binding", &self.binding)
+            .field("logic_version", &self.logic_version)
+            .finish_non_exhaustive()
     }
 }
 
 #[async_trait]
-impl AsyncTransformHandler for EmbeddingTransform {
-    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let request = (self.request_builder)(&event)?;
+impl<In, Out> EffectfulTransformHandler for EmbeddingTransform<In, Out>
+where
+    In: TypedPayload + Send + Sync + 'static,
+    Out: TypedPayload + Send + Sync + 'static,
+{
+    type Input = In;
+    type Output = Out;
+    type AllowedEffects = obzenflow_runtime::effect_set![EmbeddingGeneration];
 
-        let prompt_hash = prompt_hash_for_embedding_inputs(&request.inputs).map_err(|err| {
-            HandlerError::Validation(format!("embedding request canonicalization failed: {err}"))
-        })?;
-        let params_hash = params_hash_for_embedding(&request).map_err(|err| {
-            HandlerError::Validation(format!("embedding params canonicalization failed: {err}"))
-        })?;
-
-        let embed_result = self.client.embed(request.clone()).await;
-        let response = embed_result
-            .map_err(|err| ai_client_error_to_handler_error_with_context(err, Some("embedding")))?;
-
-        let usage = response.usage.clone();
-        let mut outputs = (self.output_mapper)(&event, response)?;
-
-        let hashes = LlmHashes::new(prompt_hash, params_hash);
-        let mut llm =
-            LlmObservability::new(request.provider.clone(), request.model.clone(), hashes);
-        llm.usage = usage;
-
-        for output in &mut outputs {
-            attach_llm_observability(output, llm.clone()).map_err(|err| {
-                HandlerError::Validation(format!("failed to attach llm metadata: {err}"))
-            })?;
-        }
-
-        Ok(outputs)
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
-    }
-}
-
-fn default_embedding_output_mapper(
-    input: &ChainEvent,
-    response: EmbeddingResponse,
-) -> Result<Vec<ChainEvent>, HandlerError> {
-    let mut out = input.clone();
-
-    match &mut out.content {
-        ChainEventContent::Data { payload, .. } => {
-            let first = response.vectors.first().cloned().unwrap_or_default();
-            payload["embedding"] = json!(first);
-            payload["embedding_vector_dim"] = json!(response.vector_dim);
-            payload["embedding_count"] = json!(response.vectors.len());
-            Ok(vec![out])
-        }
-        _ => Err(HandlerError::Validation(
-            "embedding transform expects data events".to_string(),
-        )),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use obzenflow_core::ai::{AiClientError, AiProvider, EmbeddingParams, Usage, UsageSource};
-    use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::{StageId, WriterId};
-    use std::collections::VecDeque;
-    use std::sync::Mutex;
-
-    #[derive(Debug, Default)]
-    struct QueueEmbeddingClient {
-        outcomes: Mutex<VecDeque<Result<EmbeddingResponse, AiClientError>>>,
-    }
-
-    impl QueueEmbeddingClient {
-        fn enqueue_ok(&self, response: EmbeddingResponse) {
-            self.outcomes
-                .lock()
-                .expect("poisoned")
-                .push_back(Ok(response));
-        }
-    }
-
-    #[async_trait]
-    impl EmbeddingClient for QueueEmbeddingClient {
-        async fn embed(&self, _req: EmbeddingRequest) -> Result<EmbeddingResponse, AiClientError> {
-            self.outcomes
-                .lock()
-                .expect("poisoned")
-                .pop_front()
-                .expect("test should enqueue outcomes")
-        }
-    }
-
-    fn test_event() -> ChainEvent {
-        ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "ticket.created",
-            json!({"id": "T-1", "text": "help"}),
+    async fn process(
+        &self,
+        input: Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+        let spec = EmbeddingRequestSpec {
+            inputs: (self.input_to_inputs)(&input)?,
+            params: self.params.clone(),
+        };
+        let request = spec.bind_target(self.binding.target());
+        let effect = EmbeddingGeneration::new(
+            STANDALONE_EMBEDDING_GENERATION_LABEL,
+            request,
+            self.binding.target().clone(),
         )
+        .map_err(|error| HandlerError::Validation(error.to_string()))?;
+        let reply = fx
+            .perform(effect)
+            .await
+            .map_err(effect_error_to_handler_error)?;
+        let output = (self.response_to_output)(input, reply.response)?;
+        fx.emit(output)
+            .await
+            .map_err(effect_error_to_handler_error)?;
+        fx.complete().map_err(effect_error_to_handler_error)
     }
 
-    #[tokio::test]
-    async fn embedding_transform_attaches_llm_metadata() {
-        let client = Arc::new(QueueEmbeddingClient::default());
-        client.enqueue_ok(EmbeddingResponse {
-            vectors: vec![vec![0.1, 0.2, 0.3]],
-            vector_dim: 3,
-            usage: Some(Usage {
-                source: UsageSource::Provider,
-                input_tokens: 8,
-                output_tokens: 0,
-                total_tokens: 8,
-            }),
-            raw: None,
-        });
-
-        let transform = EmbeddingTransform::new(client, |_event| {
-            Ok(EmbeddingRequest {
-                provider: AiProvider::new("openai"),
-                model: "text-embedding-3-small".to_string(),
-                inputs: vec!["help".to_string()],
-                params: EmbeddingParams::default(),
-            })
-        });
-
-        let outputs = transform
-            .process(test_event())
-            .await
-            .expect("embedding transform should succeed");
-
-        assert_eq!(outputs.len(), 1);
-        let llm = obzenflow_core::ai::read_llm_observability(&outputs[0])
-            .expect("llm read should parse")
-            .expect("llm metadata should exist");
-        assert_eq!(llm.provider.as_str(), "openai");
-        assert_eq!(llm.model, "text-embedding-3-small");
+    fn stage_logic_version(&self) -> &str {
+        &self.logic_version
     }
 }

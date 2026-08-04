@@ -2,530 +2,142 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::ai::error_mapping::ai_client_error_to_handler_error_with_context;
+use crate::ai::{effect_error_to_handler_error, ChatCompletion};
 use async_trait::async_trait;
 use obzenflow_core::ai::{
-    attach_llm_observability, params_hash_for_chat, prompt_hash_for_chat,
-    schema_hash_for_response_format, ChatClient, ChatRequest, ChatResponse, LlmHashes,
-    LlmObservability, ResolvedTokenEstimator, TokenEstimator, TokenEstimatorResolutionInfo,
+    ChatBindingContract, ChatMessage, ChatParams, ChatRequestSpec, ChatResponse,
+    ChatResponseFormat, ToolDefinition,
 };
-use obzenflow_core::event::chain_event::ChainEventContent;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::TypedPayload;
+use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::AsyncTransformHandler;
-use serde_json::json;
+use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use std::fmt;
+use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Instant;
 
-type ChatRequestBuilder =
-    dyn Fn(&ChainEvent) -> Result<ChatRequest, HandlerError> + Send + Sync + 'static;
-type ChatOutputMapper = dyn Fn(
-        &ChainEvent,
-        ChatResponse,
-        obzenflow_core::config::LineagePolicy,
-    ) -> Result<Vec<ChainEvent>, HandlerError>
-    + Send
-    + Sync
-    + 'static;
+pub const STANDALONE_CHAT_COMPLETION_LABEL: &str = "standalone.chat_completion";
 
-/// Async transform handler that executes a chat request through an injected `ChatClient`.
-#[derive(Clone)]
-pub struct ChatTransform {
-    client: Arc<dyn ChatClient>,
-    estimator: Option<Arc<dyn TokenEstimator>>,
-    estimator_resolution: Option<TokenEstimatorResolutionInfo>,
-    request_builder: Arc<ChatRequestBuilder>,
-    output_mapper: Arc<ChatOutputMapper>,
-    /// FLOWIP-010 §7: build-resolved, installed by the stage builder; passed
-    /// to the output mapper so derived outputs obey the configured cap.
-    lineage: obzenflow_core::config::LineagePolicy,
+type PromptMapper<In> = dyn Fn(&In) -> Result<String, HandlerError> + Send + Sync + 'static;
+type ResponseMapper<In, Out> =
+    dyn Fn(In, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static;
+
+pub(crate) struct ChatTransformSettings {
+    pub(crate) system: Option<String>,
+    pub(crate) params: ChatParams,
+    pub(crate) tools: Vec<ToolDefinition>,
+    pub(crate) response_format: Option<ChatResponseFormat>,
 }
 
-impl fmt::Debug for ChatTransform {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ChatTransform").finish()
-    }
+/// Typed standalone chat handler whose only live authority is `fx.perform`.
+pub struct ChatTransform<In, Out> {
+    binding: ChatBindingContract,
+    system: Option<String>,
+    params: ChatParams,
+    tools: Vec<ToolDefinition>,
+    response_format: Option<ChatResponseFormat>,
+    input_to_prompt: Arc<PromptMapper<In>>,
+    response_to_output: Arc<ResponseMapper<In, Out>>,
+    logic_version: String,
+    _types: PhantomData<fn() -> (In, Out)>,
 }
 
-impl ChatTransform {
-    pub fn new<F>(client: Arc<dyn ChatClient>, request_builder: F) -> Self
-    where
-        F: Fn(&ChainEvent) -> Result<ChatRequest, HandlerError> + Send + Sync + 'static,
-    {
+impl<In, Out> ChatTransform<In, Out> {
+    pub(crate) fn from_parts(
+        binding: ChatBindingContract,
+        settings: ChatTransformSettings,
+        input_to_prompt: Arc<PromptMapper<In>>,
+        response_to_output: Arc<ResponseMapper<In, Out>>,
+        logic_version: String,
+    ) -> Self {
         Self {
-            client,
-            estimator: None,
-            estimator_resolution: None,
-            request_builder: Arc::new(request_builder),
-            output_mapper: Arc::new(default_chat_output_mapper),
-            lineage: obzenflow_core::config::LineagePolicy::default(),
+            binding,
+            system: settings.system,
+            params: settings.params,
+            tools: settings.tools,
+            response_format: settings.response_format,
+            input_to_prompt,
+            response_to_output,
+            logic_version,
+            _types: PhantomData,
         }
     }
+}
 
-    pub fn with_estimator(mut self, estimator: Arc<dyn TokenEstimator>) -> Self {
-        self.estimator = Some(estimator);
-        self.estimator_resolution = None;
-        self
+impl<In, Out> Clone for ChatTransform<In, Out> {
+    fn clone(&self) -> Self {
+        Self {
+            binding: self.binding.clone(),
+            system: self.system.clone(),
+            params: self.params.clone(),
+            tools: self.tools.clone(),
+            response_format: self.response_format.clone(),
+            input_to_prompt: Arc::clone(&self.input_to_prompt),
+            response_to_output: Arc::clone(&self.response_to_output),
+            logic_version: self.logic_version.clone(),
+            _types: PhantomData,
+        }
     }
+}
 
-    pub fn with_resolved_estimator(mut self, resolved: ResolvedTokenEstimator) -> Self {
-        let (estimator, info) = resolved.into_parts();
-        self.estimator = Some(estimator);
-        self.estimator_resolution = Some(info);
-        self
-    }
-
-    pub fn with_output_mapper<F>(mut self, output_mapper: F) -> Self
-    where
-        F: Fn(&ChainEvent, ChatResponse) -> Result<Vec<ChainEvent>, HandlerError>
-            + Send
-            + Sync
-            + 'static,
-    {
-        // User mappers build their own events; the lineage policy applies to
-        // the lineage-aware internal mappers only.
-        self.output_mapper = Arc::new(
-            move |event: &ChainEvent,
-                  response: ChatResponse,
-                  _lineage: obzenflow_core::config::LineagePolicy| {
-                output_mapper(event, response)
-            },
-        );
-        self
-    }
-
-    /// FLOWIP-010 §7: mapper variant receiving the build-resolved lineage
-    /// policy, for mappers that derive their outputs from the input event.
-    pub fn with_lineage_aware_output_mapper<F>(mut self, output_mapper: F) -> Self
-    where
-        F: Fn(
-                &ChainEvent,
-                ChatResponse,
-                obzenflow_core::config::LineagePolicy,
-            ) -> Result<Vec<ChainEvent>, HandlerError>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.output_mapper = Arc::new(output_mapper);
-        self
+impl<In, Out> fmt::Debug for ChatTransform<In, Out> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChatTransform")
+            .field("binding", &self.binding)
+            .field("logic_version", &self.logic_version)
+            .finish_non_exhaustive()
     }
 }
 
 #[async_trait]
-impl AsyncTransformHandler for ChatTransform {
-    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
-        self.lineage = policy;
-    }
+impl<In, Out> EffectfulTransformHandler for ChatTransform<In, Out>
+where
+    In: TypedPayload + Send + Sync + 'static,
+    Out: TypedPayload + Send + Sync + 'static,
+{
+    type Input = In;
+    type Output = Out;
+    type AllowedEffects = obzenflow_runtime::effect_set![ChatCompletion];
 
-    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let request = (self.request_builder)(&event)?;
-        let input_event_id = event.id;
-        let input_event_type = event.event_type();
-        let provider = request.provider.clone();
-        let model = request.model.clone();
-        let message_count = request.messages.len();
-        let tool_count = request.tools.len();
+    async fn process(
+        &self,
+        input: Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+        let prompt = (self.input_to_prompt)(&input)?;
+        let mut messages = Vec::with_capacity(usize::from(self.system.is_some()) + 1);
+        if let Some(system) = &self.system {
+            messages.push(ChatMessage::system(system.clone()));
+        }
+        messages.push(ChatMessage::user(prompt));
 
-        let prompt_hash = prompt_hash_for_chat(&request.messages).map_err(|err| {
-            HandlerError::Validation(format!("chat request canonicalization failed: {err}"))
-        })?;
-        let params_hash = params_hash_for_chat(&request).map_err(|err| {
-            HandlerError::Validation(format!("chat params canonicalization failed: {err}"))
-        })?;
-        let schema_hash = schema_hash_for_response_format(request.response_format.as_ref())
-            .map_err(|err| {
-                HandlerError::Validation(format!("chat schema canonicalization failed: {err}"))
-            })?;
-
-        let estimated_input_tokens = self
-            .estimator
-            .as_ref()
-            .map(|estimator| estimator.estimate_chat_request(&request));
-        let estimated_input_token_count = estimated_input_tokens.as_ref().map(|e| e.tokens.get());
-        let estimated_input_source = estimated_input_tokens.as_ref().map(|e| e.source);
-        let estimator_backend = self
-            .estimator_resolution
-            .as_ref()
-            .and_then(|info| info.tokenizer_backend.as_deref());
-        let estimator_fallback_reason = self
-            .estimator_resolution
-            .as_ref()
-            .and_then(|info| info.fallback_reason.as_ref())
-            .map(|reason| reason.as_str());
-        let estimator_fallback_detail = self
-            .estimator_resolution
-            .as_ref()
-            .and_then(|info| info.fallback_detail.as_deref());
-
-        tracing::info!(
-            event_id = %input_event_id,
-            input_event_type = %input_event_type,
-            provider = %provider,
-            model = %model,
-            message_count,
-            tool_count,
-            estimated_input_tokens = estimated_input_token_count,
-            estimated_input_source = ?estimated_input_source,
-            estimator_backend = estimator_backend,
-            estimator_fallback_reason = estimator_fallback_reason,
-            estimator_fallback_detail = estimator_fallback_detail,
-            "AI chat request started"
-        );
-
-        let started_at = Instant::now();
-
-        let response = match self.client.chat(request.clone()).await {
-            Ok(response) => response,
-            Err(err) => {
-                tracing::warn!(
-                    event_id = %input_event_id,
-                    input_event_type = %input_event_type,
-                    provider = %provider,
-                    model = %model,
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    error = %err,
-                    "AI chat request failed"
-                );
-                return Err(ai_client_error_to_handler_error_with_context(
-                    err,
-                    Some("chat"),
-                ));
-            }
+        let spec = ChatRequestSpec {
+            messages,
+            params: self.params.clone(),
+            tools: self.tools.clone(),
+            response_format: self.response_format.clone(),
         };
-
-        let usage = response.usage.clone();
-        let response_text_bytes = response.text.len();
-        let tool_call_count = response.tool_calls.len();
-        let mut outputs = (self.output_mapper)(&event, response, self.lineage)?;
-
-        let mut hashes = LlmHashes::new(prompt_hash, params_hash);
-        hashes.schema_hash = schema_hash;
-
-        let mut llm =
-            LlmObservability::new(request.provider.clone(), request.model.clone(), hashes);
-        llm.usage = usage.clone();
-        llm.estimated_input_tokens = estimated_input_tokens;
-        llm.estimated_input_resolution = self.estimator_resolution.clone();
-
-        for output in &mut outputs {
-            attach_llm_observability(output, llm.clone()).map_err(|err| {
-                HandlerError::Validation(format!("failed to attach llm metadata: {err}"))
-            })?;
-        }
-
-        tracing::info!(
-            event_id = %input_event_id,
-            input_event_type = %input_event_type,
-            provider = %provider,
-            model = %model,
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            output_event_count = outputs.len(),
-            response_text_bytes,
-            tool_call_count,
-            usage_input_tokens = usage.as_ref().map(|u| u.input_tokens),
-            usage_output_tokens = usage.as_ref().map(|u| u.output_tokens),
-            usage_total_tokens = usage.as_ref().map(|u| u.total_tokens),
-            "AI chat request completed"
-        );
-
-        Ok(outputs)
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
-    }
-}
-
-fn default_chat_output_mapper(
-    input: &ChainEvent,
-    response: ChatResponse,
-    _lineage: obzenflow_core::config::LineagePolicy,
-) -> Result<Vec<ChainEvent>, HandlerError> {
-    let mut out = input.clone();
-
-    match &mut out.content {
-        ChainEventContent::Data { payload, .. } => {
-            payload["llm"] = json!({
-                "response_text": response.text,
-                "tool_calls": response.tool_calls,
-            });
-            Ok(vec![out])
-        }
-        _ => Err(HandlerError::Validation(
-            "chat transform expects data events".to_string(),
-        )),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use obzenflow_core::ai::{
-        AiClientError, AiProvider, ChatMessage, ChatParams, ChatResponseFormat, ChatRole,
-        EstimateSource, ResolvedTokenEstimator, TokenCount, TokenEstimate, TokenEstimator,
-        TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo, Usage, UsageSource,
-    };
-    use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::{StageId, WriterId};
-    use std::collections::VecDeque;
-    use std::sync::Mutex;
-
-    #[derive(Debug)]
-    struct QueueChatClient {
-        target: obzenflow_core::ai::ChatTarget,
-        outcomes: Mutex<VecDeque<Result<ChatResponse, AiClientError>>>,
-    }
-
-    impl Default for QueueChatClient {
-        fn default() -> Self {
-            Self {
-                target: obzenflow_core::ai::ChatTarget::new("ollama", "llama3.1:8b"),
-                outcomes: Mutex::new(VecDeque::new()),
-            }
-        }
-    }
-
-    impl QueueChatClient {
-        fn enqueue_ok(&self, response: ChatResponse) {
-            self.outcomes
-                .lock()
-                .expect("poisoned")
-                .push_back(Ok(response));
-        }
-
-        fn enqueue_err(&self, err: AiClientError) {
-            self.outcomes.lock().expect("poisoned").push_back(Err(err));
-        }
-    }
-
-    #[async_trait]
-    impl ChatClient for QueueChatClient {
-        fn target(&self) -> &obzenflow_core::ai::ChatTarget {
-            &self.target
-        }
-
-        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AiClientError> {
-            self.outcomes
-                .lock()
-                .expect("poisoned")
-                .pop_front()
-                .expect("test should enqueue outcomes")
-        }
-    }
-
-    fn test_event() -> ChainEvent {
-        ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "ticket.created",
-            json!({"id": "T-1", "text": "help"}),
+        let request = spec.bind_target(self.binding.target());
+        let effect = ChatCompletion::new(
+            STANDALONE_CHAT_COMPLETION_LABEL,
+            request,
+            self.binding.target().clone(),
+            self.binding.estimator().clone(),
         )
-    }
-
-    #[derive(Debug)]
-    struct FixedTokenEstimator {
-        tokens: TokenCount,
-        source: EstimateSource,
-    }
-
-    impl TokenEstimator for FixedTokenEstimator {
-        fn estimate_text(&self, _text: &str) -> TokenEstimate {
-            TokenEstimate {
-                tokens: self.tokens,
-                source: self.source,
-            }
-        }
-
-        fn estimate_chat_request(&self, _req: &ChatRequest) -> TokenEstimate {
-            TokenEstimate {
-                tokens: self.tokens,
-                source: self.source,
-            }
-        }
-
-        fn source(&self) -> EstimateSource {
-            self.source
-        }
-    }
-
-    #[tokio::test]
-    async fn chat_transform_attaches_llm_metadata() {
-        let client = Arc::new(QueueChatClient::default());
-        client.enqueue_ok(ChatResponse {
-            text: "summary".to_string(),
-            tool_calls: vec![],
-            usage: Some(Usage {
-                source: UsageSource::Provider,
-                input_tokens: 12,
-                output_tokens: 8,
-                total_tokens: 20,
-            }),
-            raw: None,
-        });
-
-        let transform = ChatTransform::new(client, |_event| {
-            Ok(ChatRequest {
-                provider: AiProvider::new("ollama"),
-                model: "llama3.1:8b".to_string(),
-                messages: vec![ChatMessage {
-                    role: ChatRole::user(),
-                    content: "summarize".to_string(),
-                }],
-                params: ChatParams::default(),
-                tools: vec![],
-                response_format: Some(ChatResponseFormat::JsonObject),
-            })
-        });
-
-        let outputs = transform
-            .process(test_event())
+        .map_err(|error| HandlerError::Validation(error.to_string()))?;
+        let reply = fx
+            .perform(effect)
             .await
-            .expect("chat transform should succeed");
-
-        assert_eq!(outputs.len(), 1);
-        let llm = obzenflow_core::ai::read_llm_observability(&outputs[0])
-            .expect("llm read should parse")
-            .expect("llm metadata should exist");
-        assert_eq!(llm.provider.as_str(), "ollama");
-        assert_eq!(llm.model, "llama3.1:8b");
-        assert_eq!(llm.hashes.version, "sha256:v1");
+            .map_err(effect_error_to_handler_error)?;
+        let output = (self.response_to_output)(input, reply.response)?;
+        fx.emit(output)
+            .await
+            .map_err(effect_error_to_handler_error)?;
+        fx.complete().map_err(effect_error_to_handler_error)
     }
 
-    #[tokio::test]
-    async fn chat_transform_attaches_estimated_input_tokens_when_estimator_is_present() {
-        let client = Arc::new(QueueChatClient::default());
-        client.enqueue_ok(ChatResponse {
-            text: "ok".to_string(),
-            tool_calls: vec![],
-            usage: None,
-            raw: None,
-        });
-
-        let estimator = Arc::new(FixedTokenEstimator {
-            tokens: TokenCount::new(123),
-            source: EstimateSource::Heuristic,
-        });
-
-        let transform = ChatTransform::new(client, |_event| {
-            Ok(ChatRequest {
-                provider: AiProvider::new("ollama"),
-                model: "llama3.1:8b".to_string(),
-                messages: vec![ChatMessage {
-                    role: ChatRole::user(),
-                    content: "hello".to_string(),
-                }],
-                params: ChatParams::default(),
-                tools: vec![],
-                response_format: None,
-            })
-        })
-        .with_estimator(estimator);
-
-        let outputs = transform
-            .process(test_event())
-            .await
-            .expect("chat transform should succeed");
-
-        let llm = obzenflow_core::ai::read_llm_observability(&outputs[0])
-            .expect("llm read should parse")
-            .expect("llm metadata should exist");
-
-        assert_eq!(
-            llm.estimated_input_tokens,
-            Some(TokenEstimate {
-                tokens: TokenCount::new(123),
-                source: EstimateSource::Heuristic
-            })
-        );
-        assert_eq!(llm.estimated_input_resolution, None);
-    }
-
-    #[tokio::test]
-    async fn chat_transform_attaches_estimator_resolution_when_present() {
-        let client = Arc::new(QueueChatClient::default());
-        client.enqueue_ok(ChatResponse {
-            text: "ok".to_string(),
-            tool_calls: vec![],
-            usage: None,
-            raw: None,
-        });
-
-        let resolved = ResolvedTokenEstimator::new(
-            Arc::new(FixedTokenEstimator {
-                tokens: TokenCount::new(77),
-                source: EstimateSource::Heuristic,
-            }),
-            TokenEstimatorResolutionInfo::heuristic(
-                "llama3.1:8b",
-                TokenEstimatorFallbackReason::ModelNotSupportedByTokenizer,
-                Some("no tiktoken encoding for model 'llama3.1:8b'".to_string()),
-            ),
-        );
-
-        let transform = ChatTransform::new(client, |_event| {
-            Ok(ChatRequest {
-                provider: AiProvider::new("ollama"),
-                model: "llama3.1:8b".to_string(),
-                messages: vec![ChatMessage {
-                    role: ChatRole::user(),
-                    content: "hello".to_string(),
-                }],
-                params: ChatParams::default(),
-                tools: vec![],
-                response_format: None,
-            })
-        })
-        .with_resolved_estimator(resolved);
-
-        let outputs = transform
-            .process(test_event())
-            .await
-            .expect("chat transform should succeed");
-
-        let llm = obzenflow_core::ai::read_llm_observability(&outputs[0])
-            .expect("llm read should parse")
-            .expect("llm metadata should exist");
-
-        assert_eq!(
-            llm.estimated_input_resolution,
-            Some(TokenEstimatorResolutionInfo::heuristic(
-                "llama3.1:8b",
-                TokenEstimatorFallbackReason::ModelNotSupportedByTokenizer,
-                Some("no tiktoken encoding for model 'llama3.1:8b'".to_string()),
-            ))
-        );
-    }
-
-    #[tokio::test]
-    async fn chat_transform_maps_auth_to_permanent_failure() {
-        let client = Arc::new(QueueChatClient::default());
-        client.enqueue_err(AiClientError::Auth {
-            message: "bad key".to_string(),
-        });
-
-        let transform = ChatTransform::new(client, |_event| {
-            Ok(ChatRequest {
-                provider: AiProvider::new("openai"),
-                model: "gpt-4.1-mini".to_string(),
-                messages: vec![ChatMessage {
-                    role: ChatRole::user(),
-                    content: "hello".to_string(),
-                }],
-                params: ChatParams::default(),
-                tools: vec![],
-                response_format: None,
-            })
-        });
-
-        let err = transform
-            .process(test_event())
-            .await
-            .expect_err("auth errors should fail");
-
-        match err {
-            HandlerError::PermanentFailure(message) => assert!(message.contains("auth")),
-            other => panic!("expected PermanentFailure error, got {other:?}"),
-        }
+    fn stage_logic_version(&self) -> &str {
+        &self.logic_version
     }
 }

@@ -2230,6 +2230,10 @@ macro_rules! async_transform {
 #[macro_export]
 macro_rules! __obzenflow_effect_declarations_vec {
     (@push $effects:ident,) => {};
+    (@push $effects:ident, at_least_once($effect:ty) $(, $($rest:tt)*)?) => {{
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
+        $crate::__obzenflow_effect_declarations_vec!(@push $effects, $($($rest)*)?);
+    }};
     (@push $effects:ident, transactional($effect:ty, $executor:expr) $(, $($rest:tt)*)?) => {{
         $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
         $crate::__obzenflow_effect_declarations_vec!(@push $effects, $($($rest)*)?);
@@ -2261,6 +2265,24 @@ macro_rules! __obzenflow_effect_entries {
     (@entry $effects:ident, $atts:ident, [],) => {};
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+],) => {
         $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
+    };
+
+    // ── paid non-idempotent acknowledgement entries ──────────────────
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with [$($policy:expr),* $(,)?], $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
+        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, [$($policy),*]);
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with [$($policy:expr),* $(,)?]) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
+        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, [$($policy),*]);
+    };
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty), $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty)) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
     };
 
     // ── transactional entries (recognized at entry start) ─────────────
@@ -2334,6 +2356,19 @@ macro_rules! __obzenflow_effect_manifest_types {
     };
     (@entry [$($types:ty,)*], [$($acc:tt)+],) => {
         ::obzenflow_runtime::effect_set![$($types,)* $($acc)+]
+    };
+
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) with [$($policy:expr),* $(,)?], $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) with [$($policy:expr),* $(,)?]) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $effect]
+    };
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty), $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty)) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $effect]
     };
 
     (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr) with [$($policy:expr),* $(,)?], $($rest:tt)*) => {

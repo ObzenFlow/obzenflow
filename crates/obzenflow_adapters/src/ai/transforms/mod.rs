@@ -6,4 +6,5 @@ mod chat;
 mod embedding;
 
 pub use chat::ChatTransform;
+pub(crate) use chat::ChatTransformSettings;
 pub use embedding::EmbeddingTransform;

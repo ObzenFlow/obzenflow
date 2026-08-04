@@ -3,5 +3,7 @@
 // https://obzenflow.dev
 
 mod chat_completion;
+mod embedding_generation;
 
 pub use chat_completion::{ChatCompletion, ChatCompletionBuildError};
+pub use embedding_generation::{EmbeddingGeneration, EmbeddingGenerationBuildError};

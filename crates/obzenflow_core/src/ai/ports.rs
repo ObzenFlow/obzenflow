@@ -4,6 +4,7 @@
 
 use crate::ai::{
     AiClientError, ChatRequest, ChatResponse, ChatTarget, EmbeddingRequest, EmbeddingResponse,
+    EmbeddingTarget,
 };
 use async_trait::async_trait;
 
@@ -22,5 +23,8 @@ pub trait ChatClient: Send + Sync + 'static {
 
 #[async_trait]
 pub trait EmbeddingClient: Send + Sync + 'static {
+    /// Immutable provider, model, and endpoint identity served by this client.
+    fn target(&self) -> &EmbeddingTarget;
+
     async fn embed(&self, req: EmbeddingRequest) -> Result<EmbeddingResponse, AiClientError>;
 }

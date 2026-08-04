@@ -1,0 +1,14 @@
+error[E0432]: unresolved imports `obzenflow_adapters::ai::ai_client_error_to_handler_error`, `obzenflow_adapters::ai::ai_client_error_to_handler_error_with_context`
+ --> tests/compile_fail/standalone_ai_removed_adapter_helpers.rs:6:5
+  |
+6 |     ai_client_error_to_handler_error, ai_client_error_to_handler_error_with_context,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ai_client_error_to_handler_error_with_context` in `ai`
+  |     |
+  |     no `ai_client_error_to_handler_error` in `ai`
+  |     help: a similar name exists in the module: `effect_error_to_handler_error`
+
+error[E0432]: unresolved import `obzenflow_infra::ai::rig::RigEmbeddingClient`
+ --> tests/compile_fail/standalone_ai_removed_adapter_helpers.rs:8:5
+  |
+8 | use obzenflow_infra::ai::rig::RigEmbeddingClient;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `RigEmbeddingClient` in `ai::rig`
