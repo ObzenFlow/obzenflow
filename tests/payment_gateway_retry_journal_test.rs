@@ -4,10 +4,10 @@
 
 #[path = "test_support/exported_jsonl.rs"]
 mod exported_jsonl;
-#[path = "../examples/payment_gateway_resilience/support.rs"]
-pub mod support;
-
-use support::{fixtures, gateway, proof};
+#[path = "../examples/payment_gateway_resilience/domain.rs"]
+pub mod payment_domain;
+#[path = "test_support/payment_gateway_retry_fixture.rs"]
+mod retry_fixture;
 
 use obzenflow_core::config::{ConfigSubject, ResolvedForDoc};
 use obzenflow_core::event::payloads::effect_payload::EFFECT_RECORD_EVENT_TYPE;
@@ -47,11 +47,11 @@ fn only_run(root: &Path) -> PathBuf {
         })
         .filter(|path| path.is_dir())
         .collect();
-    assert_eq!(runs.len(), 1, "the proof root should contain one run");
+    assert_eq!(runs.len(), 1, "the witness root should contain one run");
     runs.into_iter().next().unwrap()
 }
 
-fn assert_release_manifest(run: &Path, policy: proof::ReleasePolicy) {
+fn assert_release_manifest(run: &Path, policy: retry_fixture::ReleasePolicy) {
     let raw = std::fs::read_to_string(run.join("run_manifest.json"))
         .expect("release witness run manifest should be readable");
     let manifest: RunManifest =
@@ -105,7 +105,7 @@ fn assert_release_manifest(run: &Path, policy: proof::ReleasePolicy) {
     .map(|(key, value)| (key.to_string(), value))
     .collect();
 
-    if policy == proof::ReleasePolicy::BreakerRecovery {
+    if policy == retry_fixture::ReleasePolicy::BreakerRecovery {
         expected.extend(
             [
                 (RESILIENCE_RETRY_KIND_KEY, json!("fixed")),
@@ -126,9 +126,9 @@ fn assert_release_manifest(run: &Path, policy: proof::ReleasePolicy) {
 }
 
 fn run_release_witness(
-    policy: proof::ReleasePolicy,
-    orders: Vec<support::domain::CustomerOrderPlaced>,
-    retry_proof: Arc<gateway::GatewayRetryProof>,
+    policy: retry_fixture::ReleasePolicy,
+    orders: Vec<retry_fixture::ValidatedOrder>,
+    gateway: Arc<retry_fixture::ScriptedGateway>,
     journal_root: &Path,
     replay_from: Option<&Path>,
 ) -> PathBuf {
@@ -145,10 +145,10 @@ fn run_release_witness(
     }
     obzenflow_infra::application::FlowApplication::builder()
         .with_cli_args(args)
-        .run_blocking(proof::build_flow_for_release_policy(
+        .run_blocking(retry_fixture::build_flow(
             policy,
             orders,
-            retry_proof,
+            gateway,
             journal_root.to_path_buf(),
         ))
         .expect("configuration-faithful payment release witness should complete");
@@ -159,8 +159,8 @@ fn run_release_witness(
 
 fn exported_run(run: &Path, output: &Path) -> String {
     obzenflow_infra::journal::disk::inspect::export_jsonl(run, Some(output))
-        .expect("proof journal should export");
-    std::fs::read_to_string(output).expect("exported proof journal should be readable")
+        .expect("witness journal should export");
+    std::fs::read_to_string(output).expect("exported witness journal should be readable")
 }
 
 fn exported_events(jsonl: &str) -> impl Iterator<Item = serde_json::Value> + '_ {
@@ -560,15 +560,15 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
     // The journal proves limiter pacing is real and that fast successes never
     // increment the breaker's slow-call counter.
     let healthy_root = tempfile::tempdir().expect("healthy journal root");
-    let healthy_proof = Arc::new(gateway::GatewayRetryProof::healthy(false));
+    let healthy_gateway = Arc::new(retry_fixture::ScriptedGateway::healthy());
     let healthy_run = run_release_witness(
-        proof::ReleasePolicy::BreakerOnly,
-        fixtures::healthy_proof_orders(),
-        healthy_proof.clone(),
+        retry_fixture::ReleasePolicy::BreakerOnly,
+        retry_fixture::healthy_orders(),
+        healthy_gateway.clone(),
         healthy_root.path(),
         None,
     );
-    assert_eq!(healthy_proof.calls(), 5);
+    assert_eq!(healthy_gateway.calls(), 5);
     let healthy = exported_run(&healthy_run, &healthy_root.path().join("healthy.jsonl"));
     assert_eq!(data_event_count(&healthy, "payment.authorized.v1"), 5);
     assert_eq!(
@@ -614,15 +614,16 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
     }));
 
     let healthy_replay_root = tempfile::tempdir().expect("healthy replay journal root");
-    let healthy_replay_proof = Arc::new(gateway::GatewayRetryProof::healthy(true));
+    let healthy_replay_gateway =
+        Arc::new(retry_fixture::ScriptedGateway::healthy().panic_on_live_call());
     let healthy_replay_run = run_release_witness(
-        proof::ReleasePolicy::BreakerOnly,
-        fixtures::healthy_proof_orders(),
-        healthy_replay_proof.clone(),
+        retry_fixture::ReleasePolicy::BreakerOnly,
+        retry_fixture::healthy_orders(),
+        healthy_replay_gateway.clone(),
         healthy_replay_root.path(),
         Some(&healthy_run),
     );
-    assert_eq!(healthy_replay_proof.calls(), 0);
+    assert_eq!(healthy_replay_gateway.calls(), 0);
     let healthy_replay = exported_run(
         &healthy_replay_run,
         &healthy_replay_root.path().join("healthy-replay.jsonl"),
@@ -642,32 +643,31 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         "strict replay must rematerialise archived recovery completions unchanged"
     );
 
-    // The accelerated control remains a supplementary developer regression;
-    // it is deliberately not passed through `assert_release_manifest`.
-    let control_root = tempfile::tempdir().expect("control journal root");
-    let control_proof = Arc::new(gateway::GatewayRetryProof::new(false));
-    obzenflow_infra::application::FlowApplication::builder()
-        .with_cli_args(["payment_gateway_retry_journal_test"])
-        .run_blocking(proof::build_flow_for_profile(
-            proof::RetryProofProfile::Control,
-            Some(control_proof.clone()),
-            control_root.path().to_path_buf(),
-        ))
-        .expect("control proof flow should complete");
-    assert_eq!(control_proof.calls(), 1);
-    let control = exported_run(
-        &only_run(control_root.path()),
-        &control_root.path().join("control.jsonl"),
+    // Canonical breaker-only control over the same scripted order as the
+    // recovery treatment: one physical failure and no retry continuation.
+    let breaker_only_root = tempfile::tempdir().expect("breaker-only journal root");
+    let breaker_only_gateway = Arc::new(retry_fixture::ScriptedGateway::fail_first(2));
+    let breaker_only_run = run_release_witness(
+        retry_fixture::ReleasePolicy::BreakerOnly,
+        vec![retry_fixture::retry_order()],
+        breaker_only_gateway.clone(),
+        breaker_only_root.path(),
+        None,
+    );
+    assert_eq!(breaker_only_gateway.calls(), 1);
+    let breaker_only = exported_run(
+        &breaker_only_run,
+        &breaker_only_root.path().join("breaker-only.jsonl"),
     );
     assert_eq!(
-        data_event_count(&control, "payment.authorization_unavailable.v1"),
+        data_event_count(&breaker_only, "payment.authorization_unavailable.v1"),
         1
     );
-    assert_eq!(data_event_count(&control, "payment.authorized.v1"), 0);
-    assert_eq!(payment_effect_outcome_group_count(&control), 1);
-    assert_eq!(payment_terminal_group_counters(&control), (1, 0));
+    assert_eq!(data_event_count(&breaker_only, "payment.authorized.v1"), 0);
+    assert_eq!(payment_effect_outcome_group_count(&breaker_only), 1);
+    assert_eq!(payment_terminal_group_counters(&breaker_only), (1, 0));
     assert_eq!(
-        last_payment_breaker_counts(&control),
+        last_payment_breaker_counts(&breaker_only),
         BreakerCounts {
             requests: 1,
             successes: 0,
@@ -678,35 +678,35 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
             state: 0.0,
         }
     );
-    assert_eq!(last_payment_limiter_counts(&control).events, 1);
-    assert_eq!(last_payment_limiter_counts(&control).tokens, 1.0);
-    let control_attempts = attempt_settlements(&control);
-    assert_eq!(control_attempts.len(), 1);
-    assert_eq!(control_attempts[0].attempt, 1);
+    assert_eq!(last_payment_limiter_counts(&breaker_only).events, 1);
+    assert_eq!(last_payment_limiter_counts(&breaker_only).tokens, 1.0);
+    let breaker_only_attempts = attempt_settlements(&breaker_only);
+    assert_eq!(breaker_only_attempts.len(), 1);
+    assert_eq!(breaker_only_attempts[0].attempt, 1);
     assert_eq!(
-        control_attempts[0].health,
+        breaker_only_attempts[0].health,
         CircuitBreakerHealthClassification::TransientFailure
     );
-    assert!(retry_schedules(&control).is_empty());
-    assert!(retry_successes(&control).is_empty());
-    assert_eq!(retry_terminal_failure_count(&control), 0);
-    let control_completions = assert_one_recovery_completion_per_payment_cursor(&control);
-    assert_eq!(control_completions.len(), 1);
-    assert_eq!(control_completions[0].total_attempts, 1);
-    assert_eq!(control_completions[0].backoff_elapsed_ms, 0);
+    assert!(retry_schedules(&breaker_only).is_empty());
+    assert!(retry_successes(&breaker_only).is_empty());
+    assert_eq!(retry_terminal_failure_count(&breaker_only), 0);
+    let breaker_only_completions = assert_one_recovery_completion_per_payment_cursor(&breaker_only);
+    assert_eq!(breaker_only_completions.len(), 1);
+    assert_eq!(breaker_only_completions[0].total_attempts, 1);
+    assert_eq!(breaker_only_completions[0].backoff_elapsed_ms, 0);
 
     // Canonical breaker-recovery release witness: fixed 250 ms retry, three
     // attempts, a 30-second attempt-start window, and one limiter token/second.
     let treatment_root = tempfile::tempdir().expect("treatment journal root");
-    let treatment_proof = Arc::new(gateway::GatewayRetryProof::new(false));
+    let treatment_gateway = Arc::new(retry_fixture::ScriptedGateway::fail_first(2));
     let treatment_run = run_release_witness(
-        proof::ReleasePolicy::BreakerRecovery,
-        vec![fixtures::retry_proof_order()],
-        treatment_proof.clone(),
+        retry_fixture::ReleasePolicy::BreakerRecovery,
+        vec![retry_fixture::retry_order()],
+        treatment_gateway.clone(),
         treatment_root.path(),
         None,
     );
-    assert_eq!(treatment_proof.calls(), 3);
+    assert_eq!(treatment_gateway.calls(), 3);
     let treatment = exported_run(
         &treatment_run,
         &treatment_root.path().join("treatment.jsonl"),
@@ -792,15 +792,16 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
     );
 
     let replay_root = tempfile::tempdir().expect("replay journal root");
-    let replay_proof = Arc::new(gateway::GatewayRetryProof::new(true));
+    let replay_gateway =
+        Arc::new(retry_fixture::ScriptedGateway::fail_first(2).panic_on_live_call());
     let replay_run = run_release_witness(
-        proof::ReleasePolicy::BreakerRecovery,
-        vec![fixtures::retry_proof_order()],
-        replay_proof.clone(),
+        retry_fixture::ReleasePolicy::BreakerRecovery,
+        vec![retry_fixture::retry_order()],
+        replay_gateway.clone(),
         replay_root.path(),
         Some(&treatment_run),
     );
-    assert_eq!(replay_proof.calls(), 0);
+    assert_eq!(replay_gateway.calls(), 0);
     let replay = exported_run(&replay_run, &replay_root.path().join("replay.jsonl"));
     assert_eq!(data_event_count(&replay, "payment.authorized.v1"), 1);
     assert_eq!(
@@ -827,15 +828,15 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
     // count window; the sixth logical effect is rejected without a dependency
     // call or limiter permit.
     let open_root = tempfile::tempdir().expect("open-rejection journal root");
-    let open_proof = Arc::new(gateway::GatewayRetryProof::always_fail(false));
+    let open_gateway = Arc::new(retry_fixture::ScriptedGateway::always_fail());
     let open_run = run_release_witness(
-        proof::ReleasePolicy::BreakerOnly,
-        fixtures::open_rejection_proof_orders(),
-        open_proof.clone(),
+        retry_fixture::ReleasePolicy::BreakerOnly,
+        retry_fixture::open_rejection_orders(),
+        open_gateway.clone(),
         open_root.path(),
         None,
     );
-    assert_eq!(open_proof.calls(), 5);
+    assert_eq!(open_gateway.calls(), 5);
     let open = exported_run(&open_run, &open_root.path().join("open.jsonl"));
     assert_eq!(
         data_event_count(&open, "payment.authorization_unavailable.v1"),
@@ -925,15 +926,16 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
     );
 
     let open_replay_root = tempfile::tempdir().expect("open-rejection replay root");
-    let open_replay_proof = Arc::new(gateway::GatewayRetryProof::always_fail(true));
+    let open_replay_gateway =
+        Arc::new(retry_fixture::ScriptedGateway::always_fail().panic_on_live_call());
     let open_replay_run = run_release_witness(
-        proof::ReleasePolicy::BreakerOnly,
-        fixtures::open_rejection_proof_orders(),
-        open_replay_proof.clone(),
+        retry_fixture::ReleasePolicy::BreakerOnly,
+        retry_fixture::open_rejection_orders(),
+        open_replay_gateway.clone(),
         open_replay_root.path(),
         Some(&open_run),
     );
-    assert_eq!(open_replay_proof.calls(), 0);
+    assert_eq!(open_replay_gateway.calls(), 0);
     let open_replay = exported_run(
         &open_replay_run,
         &open_replay_root.path().join("open-replay.jsonl"),
@@ -969,18 +971,18 @@ fn payment_gateway_half_open_release_witness_uses_the_real_cooldown() {
     // proves open rejection, and the seventh waits outside policy machinery for
     // the real five-second cooldown before becoming the sole half-open probe.
     let live_root = tempfile::tempdir().expect("half-open journal root");
-    let live_proof = Arc::new(
-        gateway::GatewayRetryProof::fail_first(5, false)
+    let live_gateway = Arc::new(
+        retry_fixture::ScriptedGateway::fail_first(5)
             .pause_before_invocation(7, Duration::from_millis(5_250)),
     );
     let live_run = run_release_witness(
-        proof::ReleasePolicy::BreakerOnly,
-        fixtures::half_open_recovery_proof_orders(),
-        live_proof.clone(),
+        retry_fixture::ReleasePolicy::BreakerOnly,
+        retry_fixture::half_open_recovery_orders(),
+        live_gateway.clone(),
         live_root.path(),
         None,
     );
-    assert_eq!(live_proof.calls(), 6);
+    assert_eq!(live_gateway.calls(), 6);
 
     let live = exported_run(&live_run, &live_root.path().join("half-open.jsonl"));
     assert_eq!(data_event_count(&live, "payment.authorized.v1"), 1);
@@ -1052,18 +1054,19 @@ fn payment_gateway_half_open_release_witness_uses_the_real_cooldown() {
     );
 
     let replay_root = tempfile::tempdir().expect("half-open replay journal root");
-    let replay_proof = Arc::new(
-        gateway::GatewayRetryProof::fail_first(5, true)
+    let replay_gateway = Arc::new(
+        retry_fixture::ScriptedGateway::fail_first(5)
+            .panic_on_live_call()
             .pause_before_invocation(7, Duration::from_millis(5_250)),
     );
     let replay_run = run_release_witness(
-        proof::ReleasePolicy::BreakerOnly,
-        fixtures::half_open_recovery_proof_orders(),
-        replay_proof.clone(),
+        retry_fixture::ReleasePolicy::BreakerOnly,
+        retry_fixture::half_open_recovery_orders(),
+        replay_gateway.clone(),
         replay_root.path(),
         Some(&live_run),
     );
-    assert_eq!(replay_proof.calls(), 0);
+    assert_eq!(replay_gateway.calls(), 0);
     let replay = exported_run(
         &replay_run,
         &replay_root.path().join("half-open-replay.jsonl"),

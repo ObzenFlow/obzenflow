@@ -54,7 +54,7 @@ use super::validation;
 use obzenflow::typed::sources as typed_sources;
 use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
 use obzenflow_adapters::middleware::{
-    CircuitBreaker, EffectResilience, MiddlewareFactory, RateLimiter, RateLimiterBuilder,
+    CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder,
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -65,8 +65,7 @@ const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
 const SOURCE_RATE_LIMIT_BURST: f64 = 1.0;
 const GATEWAY_CALLS_PER_SECOND: f64 = 1.0;
 
-/// Where the demo binary journals its runs. The acceptance rig in `proof.rs`
-/// shares it so `--replay-from` paths printed by one entry point work for both.
+/// Where the demo binary journals its runs.
 pub(super) const DEMO_JOURNAL_ROOT: &str = "target/payment-gateway-logs";
 
 /// Optional per-source pacing jitter (FLOWIP-095d demo knob).
@@ -114,7 +113,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
 
 /// Assemble the tutorial flow from its variable ingredients.
 ///
-/// Journal tests reuse this entry point with their own orders, gateway, pacing,
+/// Journal tests reuse this entry point with their own orders, gateway pacing,
 /// and journal root while retaining the tutorial's breaker-plus-limiter policy.
 pub fn assemble_flow(
     scripted_web_orders: Vec<CustomerOrderPlaced>,
@@ -123,35 +122,6 @@ pub fn assemble_flow(
     gateway_calls_per_second: f64,
     journal_root: std::path::PathBuf,
 ) -> obzenflow_dsl::FlowDefinition {
-    assemble_flow_with_resilience(
-        scripted_web_orders,
-        scripted_store_orders,
-        gateway_transform,
-        |gateway_breaker, gateway_limiter| {
-            EffectResilience::with_breaker(gateway_breaker)
-                .rate_limit_each_attempt(gateway_limiter)
-                .build()
-                .expect("gateway resilience configuration must be valid")
-        },
-        gateway_calls_per_second,
-        journal_root,
-    )
-}
-
-/// Injected-policy assembly seam. The tutorial owns the topology and its
-/// default policy; `proof.rs` supplies configured proof variants without
-/// changing that topology.
-pub(super) fn assemble_flow_with_resilience<F>(
-    scripted_web_orders: Vec<CustomerOrderPlaced>,
-    scripted_store_orders: Vec<CustomerOrderPlaced>,
-    gateway_transform: GatewayTransform,
-    build_gateway_resilience: F,
-    gateway_calls_per_second: f64,
-    journal_root: std::path::PathBuf,
-) -> obzenflow_dsl::FlowDefinition
-where
-    F: FnOnce(CircuitBreaker, RateLimiter) -> Box<dyn MiddlewareFactory> + Send + 'static,
-{
     obzenflow_dsl::FlowDefinition::materialize(move |_runtime_config| {
         // One effect-only resilience attachment owns the gateway's health,
         // recovery policy, and per-physical-attempt admission. Its fixed ordering
@@ -169,7 +139,10 @@ where
             .expect("gateway circuit-breaker configuration must be valid");
         let gateway_limiter = RateLimiter::per_second(gateway_calls_per_second)
             .expect("gateway rate-limiter configuration must be valid");
-        let gateway_resilience = build_gateway_resilience(gateway_breaker, gateway_limiter);
+        let gateway_resilience = EffectResilience::with_breaker(gateway_breaker)
+            .rate_limit_each_attempt(gateway_limiter)
+            .build()
+            .expect("gateway resilience configuration must be valid");
 
         let web_orders_feed = typed_sources::finite_from_fn(move |index| {
             let order = scripted_web_orders.get(index).cloned();

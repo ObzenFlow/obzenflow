@@ -8,20 +8,21 @@ pub mod support;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-fn build_validation_journal_proof_flow(journal_root: PathBuf) -> obzenflow_dsl::FlowDefinition {
-    use support::domain::{OrderChannel, PaymentMethodState, TrafficPhase};
+fn build_validation_journal_flow(journal_root: PathBuf) -> obzenflow_dsl::FlowDefinition {
+    use support::domain::{CustomerOrderPlaced, OrderChannel, PaymentMethodState, TrafficPhase};
 
-    let valid = support::fixtures::retry_proof_order();
+    let valid = CustomerOrderPlaced {
+        order_id: "validation-valid-order".to_string(),
+        customer_id: "validation-valid-customer".to_string(),
+        channel: OrderChannel::Web,
+        amount_cents: 10_00,
+        payment_method_state: PaymentMethodState::Valid,
+        phase: TrafficPhase::Warmup,
+    };
     let mut invalid = valid.clone();
     invalid.order_id = "validation-invalid-order".to_string();
     invalid.customer_id = "validation-invalid-customer".to_string();
-    invalid.channel = OrderChannel::Web;
     invalid.payment_method_state = PaymentMethodState::InvalidNumber;
-    invalid.phase = TrafficPhase::Warmup;
-
-    let mut valid = valid;
-    valid.order_id = "validation-valid-order".to_string();
-    valid.customer_id = "validation-valid-customer".to_string();
 
     support::flow::assemble_flow(
         vec![valid, invalid],
@@ -38,13 +39,13 @@ fn only_run(root: &Path) -> PathBuf {
         .map(|entry| entry.expect("run entry should be readable").path())
         .filter(|path| path.is_dir())
         .collect();
-    assert_eq!(runs.len(), 1, "the proof root should contain one run");
+    assert_eq!(runs.len(), 1, "the witness root should contain one run");
     runs.into_iter().next().unwrap()
 }
 
 fn export_run(run: &Path, output: &Path) -> Vec<serde_json::Value> {
     obzenflow_infra::journal::disk::inspect::export_jsonl(run, Some(output))
-        .expect("validation proof journal should export");
+        .expect("validation journal should export");
     std::fs::read_to_string(output)
         .expect("export should be readable")
         .lines()
@@ -67,10 +68,8 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
     let root = tempfile::tempdir().expect("validation journal root");
     obzenflow_infra::application::FlowApplication::builder()
         .with_cli_args(["payment_gateway_validation_journal_test"])
-        .run_blocking(build_validation_journal_proof_flow(
-            root.path().to_path_buf(),
-        ))
-        .expect("validation proof flow should complete");
+        .run_blocking(build_validation_journal_flow(root.path().to_path_buf()))
+        .expect("validation journal flow should complete");
 
     let rows = export_run(
         &only_run(root.path()),
