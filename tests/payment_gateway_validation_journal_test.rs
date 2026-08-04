@@ -27,7 +27,7 @@ fn build_validation_journal_flow(journal_root: PathBuf) -> obzenflow_dsl::FlowDe
     support::flow::assemble_flow(
         vec![valid, invalid],
         Vec::new(),
-        support::gateway::GatewayTransform::default(),
+        support::gateway::GatewayTransform,
         1_000.0,
         journal_root,
     )

@@ -107,7 +107,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
     assemble_flow(
         fixtures::scripted_web_orders(),
         fixtures::scripted_store_orders(),
-        GatewayTransform::default(),
+        GatewayTransform,
         GATEWAY_CALLS_PER_SECOND,
         std::path::PathBuf::from(DEMO_JOURNAL_ROOT),
     )
