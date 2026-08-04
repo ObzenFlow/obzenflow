@@ -62,6 +62,13 @@ and successful authorizations. The two channels are deliberately different
 lengths (13 web, 12 store), so the earlier-ending channel's merged EOF point is
 a real thing for replay to reproduce.
 
+The finite fixture has all 25 inputs ready immediately, unlike a real order
+stream. Before the first live gateway-eligible Recovery order, the example
+therefore leaves a 5.25-second quiet period outside the resilience policy. That
+lets the configured five-second open window expire so the order is admitted as
+the single half-open probe. Replay skips this wall-clock pacing and reconstructs
+the recorded gateway outcomes without executing the effect.
+
 ## Deterministic Fan-In (FLOWIP-095d)
 
 Before FLOWIP-095d, this topology would not build. An effectful stage below a

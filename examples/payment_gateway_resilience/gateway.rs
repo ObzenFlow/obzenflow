@@ -27,6 +27,9 @@ use obzenflow_runtime::effects::{
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use serde_json::json;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// The gateway authorization command, expressed as an effect.
 ///
@@ -151,14 +154,17 @@ impl Effect for AuthorizePayment {
 
 /// Effectful transform that turns a `ValidatedOrder` into named gateway outcome facts.
 ///
-/// The handler body stays small and deterministic. The named payment facts
-/// (`PaymentAuthorized`, `PaymentDeclined`) ARE the recorded effect outcome
-/// group (FLOWIP-120m): `fx.perform` records whichever fact happened and
-/// returns the transient carrier, so the handler never re-emits them. The
-/// handler emits only derived consequences (`OrderCancelled`) and the
-/// non-performance fact (`PaymentAuthorizationUnavailable`).
-#[derive(Debug, Clone, Default)]
-pub struct GatewayTransform;
+/// The named payment facts (`PaymentAuthorized`, `PaymentDeclined`) ARE the
+/// recorded effect outcome group (FLOWIP-120m): `fx.perform` records whichever
+/// fact happened and returns the transient carrier, so the handler never
+/// re-emits them. The handler emits only derived consequences
+/// (`OrderCancelled`) and the non-performance fact
+/// (`PaymentAuthorizationUnavailable`).
+#[derive(Debug, Clone)]
+pub struct GatewayTransform {
+    first_recovery_pause: Option<Duration>,
+    recovery_pause_claimed: Arc<AtomicBool>,
+}
 
 type GatewayOutput = obzenflow_core::stage_fact_set![
     PaymentAuthorized,
@@ -167,6 +173,48 @@ type GatewayOutput = obzenflow_core::stage_fact_set![
     PaymentAuthorizationUnavailable
 ];
 type GatewayAllowedEffects = obzenflow_runtime::effect_set![AuthorizePayment];
+
+impl GatewayTransform {
+    /// Pace the first live recovery authorization after the scripted outage.
+    ///
+    /// A real order stream naturally has time between an outage and later
+    /// recovery traffic. This finite demo has every input ready immediately,
+    /// so its normal assembly adds that quiet period explicitly before breaker
+    /// admission. Replay skips the wall-clock wait and reconstructs the
+    /// recorded effect outcome as usual.
+    pub fn with_first_recovery_pause(pause: Duration) -> Self {
+        assert!(
+            !pause.is_zero(),
+            "the scripted recovery pause must be greater than zero"
+        );
+        Self {
+            first_recovery_pause: Some(pause),
+            recovery_pause_claimed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    async fn pace_first_live_recovery(&self, order: &ValidatedOrder, is_replaying: bool) {
+        if is_replaying || !matches!(order.phase, TrafficPhase::Recovery) {
+            return;
+        }
+
+        let Some(pause) = self.first_recovery_pause else {
+            return;
+        };
+        if !self.recovery_pause_claimed.swap(true, Ordering::SeqCst) {
+            tokio::time::sleep(pause).await;
+        }
+    }
+}
+
+impl Default for GatewayTransform {
+    fn default() -> Self {
+        Self {
+            first_recovery_pause: None,
+            recovery_pause_claimed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
 
 #[async_trait]
 impl EffectfulTransformHandler for GatewayTransform {
@@ -187,6 +235,9 @@ impl EffectfulTransformHandler for GatewayTransform {
                 "invalid_payment_method_reached_gateway".to_string(),
             ));
         }
+
+        self.pace_first_live_recovery(&order, fx.is_replaying())
+            .await;
 
         // The configured resilience unit owns retry and breaker admission. If
         // recovery exhausts or the breaker prevents an attempt, `perform`

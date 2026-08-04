@@ -138,8 +138,8 @@ mod tests {
         let live = banner_for(&RunMode::Live).render_for_stdout().text;
         let replay = banner_for(&replay_mode()).render_for_stdout().text;
 
-        assert!(live.contains("Gateway outages open the circuit breaker"));
-        assert!(!replay.contains("Gateway outages open the circuit breaker"));
+        assert!(live.contains("sustained outages open the circuit breaker"));
+        assert!(!replay.contains("sustained outages open the circuit breaker"));
         assert!(replay.contains("strict replay"));
         assert!(replay.contains("flow_01SOURCE"));
         assert!(replay.contains("Gateway calls are suppressed"));

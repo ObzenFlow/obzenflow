@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// - Warmup: dependency is healthy, all gateway calls succeed.
 /// - Outage: dependency starts failing, circuit breaker opens.
-/// - Recovery: dependency is healthy again, but circuit may still
-///   be open depending on cooldown / probe behaviour.
+/// - Recovery: dependency is healthy again; the finite demo leaves a real
+///   cooldown window before its first gateway-eligible recovery order.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum TrafficPhase {
     Warmup,

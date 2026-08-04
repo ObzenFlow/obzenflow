@@ -66,6 +66,8 @@ use std::time::Duration;
 const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
 const SOURCE_RATE_LIMIT_BURST: f64 = 1.0;
 const GATEWAY_CALLS_PER_SECOND: f64 = 1.0;
+const GATEWAY_BREAKER_OPEN_FOR: Duration = Duration::from_secs(5);
+const FIRST_RECOVERY_PAUSE: Duration = Duration::from_millis(5_250);
 
 /// Where the demo binary journals its runs.
 pub(super) const DEMO_JOURNAL_ROOT: &str = "target/payment-gateway-logs";
@@ -107,7 +109,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
     assemble_flow(
         fixtures::scripted_web_orders(),
         fixtures::scripted_store_orders(),
-        GatewayTransform,
+        GatewayTransform::with_first_recovery_pause(FIRST_RECOVERY_PAUSE),
         GATEWAY_CALLS_PER_SECOND,
         std::path::PathBuf::from(DEMO_JOURNAL_ROOT),
     )
@@ -135,7 +137,7 @@ pub fn assemble_flow(
             .failure_rate_threshold(0.6)
             .slow_call_duration(Duration::from_millis(250))
             .slow_call_rate_threshold(0.5)
-            .open_for(Duration::from_secs(5))
+            .open_for(GATEWAY_BREAKER_OPEN_FOR)
             .probes(1)
             .build()
             .expect("gateway circuit-breaker configuration must be valid");
@@ -233,6 +235,8 @@ pub fn assemble_flow(
                 //   - while open, fails fast: the prevented call surfaces as a
                 //     recorded rejection error, never a synthesized fact, with a
                 //     single half-open probe.
+                // The finite demo pauses before its first live Recovery call so
+                // the real five-second open window expires before that probe.
                 // The breaker attaches inline to the effect it guards
                 // (FLOWIP-120c H7): one policy instance per protected
                 // dependency. A prevented call is recorded under the effect
@@ -252,12 +256,13 @@ pub fn assemble_flow(
                     // Record a per-execution service-level-indicator sample for the
                     // authorization handler. This is end-to-end handler wall time, so it
                     // includes effect-boundary admission, dependency execution, recovery,
-                    // and rejection routing. Breaker attempt rows separately report raw
-                    // dependency and admission-wait time. This sample is observe-only; it
-                    // never changes whether the payment succeeds, retries, or routes. The
-                    // objective (e.g. "under five seconds"), and aggregation into
-                    // percentiles and SLOs, are FLOWIP-115l's job, applied at read time
-                    // over these journalled samples rather than baked into the wide event.
+                    // rejection routing, and the demo's first-Recovery quiet period.
+                    // Breaker attempt rows separately report raw dependency and
+                    // admission-wait time. This sample is observe-only; it never changes
+                    // whether the payment succeeds, retries, or routes. The objective
+                    // (e.g. "under five seconds"), and aggregation into percentiles and
+                    // SLOs, are FLOWIP-115l's job, applied at read time over these
+                    // journalled samples rather than baked into the wide event.
                     middleware: [
                         indicator()
                             .operation("payment.authorization")
