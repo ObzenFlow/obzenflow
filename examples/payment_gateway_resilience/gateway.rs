@@ -6,10 +6,11 @@
 //!
 //! The gateway call is the one place this flow touches the outside world, so it
 //! is expressed as an [`Effect`] (a value the stage returns) rather than inline
-//! I/O. The runtime executes the effect once, journals the named outcome fact
+//! I/O. The runtime owns one logical effect invocation, applies its configured
+//! retry policy to live physical calls, journals the one terminal outcome fact
 //! that happened (`payment.authorized.v1` or `payment.declined.v1`), and on
-//! replay reconstructs that recorded outcome without calling the gateway
-//! again. That is the durable-execution property the tutorial teaches.
+//! replay reconstructs that recorded outcome without calling the gateway again.
+//! That is the durable-execution property the tutorial teaches.
 //!
 //! Each payment-gateway example is self-contained; the high-volume variant keeps
 //! its own copy of this logic and only swaps the source and the flow wiring.
@@ -187,10 +188,10 @@ impl EffectfulTransformHandler for GatewayTransform {
             ));
         }
 
-        // Plain fail-fast breaker path (FLOWIP-115n direction): when the
-        // breaker prevents the call, `perform` returns a recorded
-        // `BoundaryRejected` error; the breaker never synthesizes a fact to
-        // represent non-execution.
+        // The configured resilience unit owns retry and breaker admission. If
+        // recovery exhausts or the breaker prevents an attempt, `perform`
+        // returns the one recorded terminal error; resilience never
+        // synthesizes a business fact to represent non-execution.
         let outcome = fx.perform(AuthorizePayment::for_order(order.clone())).await;
 
         match outcome {

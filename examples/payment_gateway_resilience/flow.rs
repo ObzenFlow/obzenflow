@@ -27,8 +27,9 @@
 //! OrderCancelled }`. Its handler-side `ValidationOutcome` carrier is proven
 //! leaf-equal and never journalled; the `authorize_payment` stage performs the
 //! `AuthorizePayment` effect (see
-//! `gateway.rs`). On a live run the effect executes once and the runtime
-//! journals its result; on a replay the runtime returns that recorded gateway
+//! `gateway.rs`). On a live run the configured resilience policy may make up
+//! to three breaker-governed physical calls before the runtime journals one
+//! terminal result; on replay the runtime returns that recorded gateway
 //! decision without calling the gateway again. The stage then emits the named
 //! payment fact that happened, deriving `OrderCancelled` from declines.
 //!
@@ -36,11 +37,12 @@
 //! dedicated sink: the journal is the record, sinks are external deliveries.
 //! The cancelled-orders sink converges cancellations from both producers.
 //!
-//! The circuit breaker on the authorize_payment stage is the second,
-//! independent layer: it watches the live effect boundary and, once the
-//! dependency looks unhealthy, fails fast with a recorded rejection instead
-//! of hammering it. Unavailability deliberately does not cancel; no decision
-//! was reached, so those orders go to manual review. See `README.md`.
+//! The resilience unit on the authorize_payment stage is the second,
+//! independent layer: bounded retry handles transient failures, the circuit
+//! breaker fails fast once the dependency looks unhealthy, and a per-attempt
+//! limiter governs every physical gateway call. Unavailability deliberately
+//! does not cancel; no decision was reached, so those orders go to manual
+//! review. See `README.md`.
 
 use super::console;
 use super::deliveries::ShippingHandoff;
@@ -54,7 +56,7 @@ use super::validation;
 use obzenflow::typed::sources as typed_sources;
 use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
 use obzenflow_adapters::middleware::{
-    CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder,
+    CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder, Retry,
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -96,7 +98,7 @@ fn demo_jitter(channel: &str, index: usize) {
 }
 
 /// Build the tutorial flow: the scripted three-phase order channels, the real
-/// gateway transform, and its breaker-plus-per-attempt-limiter policy.
+/// gateway transform, and its breaker-retry-limiter policy.
 ///
 /// Gentle source and gateway-effect rate limits keep logs and metrics readable,
 /// so you can watch source-boundary and effect-boundary policy metrics change
@@ -114,7 +116,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
 /// Assemble the tutorial flow from its variable ingredients.
 ///
 /// Journal tests reuse this entry point with their own orders, gateway pacing,
-/// and journal root while retaining the tutorial's breaker-plus-limiter policy.
+/// and journal root while retaining the tutorial's configured resilience policy.
 pub fn assemble_flow(
     scripted_web_orders: Vec<CustomerOrderPlaced>,
     scripted_store_orders: Vec<CustomerOrderPlaced>,
@@ -139,7 +141,11 @@ pub fn assemble_flow(
             .expect("gateway circuit-breaker configuration must be valid");
         let gateway_limiter = RateLimiter::per_second(gateway_calls_per_second)
             .expect("gateway rate-limiter configuration must be valid");
+        let gateway_retry = Retry::fixed(Duration::from_millis(250))
+            .max_attempts(3)
+            .attempt_start_window(Duration::from_secs(30));
         let gateway_resilience = EffectResilience::with_breaker(gateway_breaker)
+            .retry(gateway_retry)
             .rate_limit_each_attempt(gateway_limiter)
             .build()
             .expect("gateway resilience configuration must be valid");

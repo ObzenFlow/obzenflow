@@ -209,7 +209,7 @@ fn retry_contracts_with_live_non_middleware_owners_stay_present() {
 }
 
 #[test]
-fn payment_tutorial_is_proof_free_and_uses_direct_omission_syntax() {
+fn payment_tutorial_is_proof_free_and_uses_configured_retry() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let example_root = root.join("examples/payment_gateway_resilience");
 
@@ -252,15 +252,15 @@ fn payment_tutorial_is_proof_free_and_uses_direct_omission_syntax() {
     let flow =
         fs::read_to_string(example_root.join("flow.rs")).expect("read payment tutorial flow");
     for forbidden in [
-        "Retry",
-        "gateway_retry",
-        ".retry(",
+        "Option<Retry>",
+        ".retry(None)",
+        ".retry(Some(",
         "MiddlewareFactory",
         "FnOnce(",
     ] {
         assert!(
             !flow.contains(forbidden),
-            "payment tutorial flow must represent absent retry by omission; found {forbidden:?}"
+            "payment tutorial flow must use direct configured retry with no proof injection seam; found {forbidden:?}"
         );
     }
     assert_eq!(
@@ -269,11 +269,23 @@ fn payment_tutorial_is_proof_free_and_uses_direct_omission_syntax() {
         1,
         "the tutorial must have one concrete resilience construction path"
     );
-    assert!(
-        flow.contains(
-            "let gateway_resilience = EffectResilience::with_breaker(gateway_breaker)\n            .rate_limit_each_attempt(gateway_limiter)\n            .build()"
-        ),
-        "the tutorial must show the direct breaker-plus-limiter golden path"
+    for required in [
+        "let gateway_retry = Retry::fixed(Duration::from_millis(250))",
+        ".max_attempts(3)",
+        ".attempt_start_window(Duration::from_secs(30))",
+        "let gateway_resilience = EffectResilience::with_breaker(gateway_breaker)",
+        ".retry(gateway_retry)",
+        ".rate_limit_each_attempt(gateway_limiter)",
+    ] {
+        assert!(
+            flow.contains(required),
+            "payment tutorial must show the configured retry golden path; missing {required:?}"
+        );
+    }
+    assert_eq!(
+        flow.matches(".retry(").count(),
+        1,
+        "the tutorial must configure retry exactly once on its direct resilience path"
     );
 
     let main = fs::read_to_string(example_root.join("main.rs"))

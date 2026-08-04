@@ -22,10 +22,11 @@ ideas, in order.
    sits below that fan-in, the runtime orders the merge deterministically
    (FLOWIP-095d). Live runs with different arrival timing and replays all
    consume orders in the same merged order.
-4. **Resilience is a second layer.** A circuit breaker watches the live gateway
-   and, once it looks unhealthy, rejects new calls with a replay-stable
-   framework error instead of hammering it. The handler maps that terminal
-   failure to the domain's authorization-unavailable fact.
+4. **Resilience is a second layer.** Bounded retry handles transient gateway
+   failures, a circuit breaker rejects new calls once the dependency looks
+   unhealthy, and a per-attempt limiter governs every physical call. The
+   handler maps terminal unavailability to the domain's
+   authorization-unavailable fact.
 
 The gateway here is simulated so the behaviour is deterministic, but the shape is
 the real one: a real implementation would issue an HTTP request inside the
@@ -40,7 +41,7 @@ web_orders ----+ canonical merge
 store_orders --+--> validate_order -- ValidatedOrder --> authorize_payment -- PaymentAuthorized --> paid_orders
                       |                                   |              \-- PaymentAuthorizationUnavailable --> manual_review
                       |                                   |
-                      |                                   AuthorizePayment effect + circuit breaker
+                      |                                   AuthorizePayment effect + breaker/retry/limiter
                       |                                   |
                       \-- OrderCancelled -----------------+-- OrderCancelled --> cancelled_orders
 ```
@@ -207,8 +208,9 @@ not correctly process.
 
 ## 4. Deterministic Replay
 
-Run the flow once. The gateway is called for each locally valid payment while the
-breaker permits the call, and every outcome is recorded under
+Run the flow once. Each locally valid payment enters one logical gateway
+invocation. A retryable failure may make up to three physical calls while the
+breaker permits them, and every terminal outcome is recorded under
 `target/payment-gateway-logs`.
 
 ```sh
@@ -250,12 +252,29 @@ skipping it.
 
 ## 5. Resilience as the Second Layer
 
-While the live run is in progress, the gateway stage also carries a circuit
-breaker, attached inline to the effect it guards (`flow.rs`). During the
-scripted outage the breaker observes the failing effect boundary and opens.
-While open it fails fast: the prevented call surfaces as a recorded rejection
-error instead of a gateway call, with a single half-open probe to test
-recovery. The handler maps that rejection to
+While the live run is in progress, the gateway effect carries one resilience
+unit configured directly in `flow.rs`:
+
+```rust
+let gateway_retry = Retry::fixed(Duration::from_millis(250))
+    .max_attempts(3)
+    .attempt_start_window(Duration::from_secs(30));
+
+let gateway_resilience = EffectResilience::with_breaker(gateway_breaker)
+    .retry(gateway_retry)
+    .rate_limit_each_attempt(gateway_limiter)
+    .build()
+    .expect("gateway resilience configuration must be valid");
+```
+
+Retry is ordinary application policy here, not acceptance instrumentation. A
+retryable failure can make at most three total physical calls, separated by a
+fixed 250 ms delay and bounded by a 30-second attempt-start window. Every
+physical call passes through the per-attempt limiter and circuit-breaker
+admission. During the scripted outage the breaker observes those calls and
+opens. While open it fails fast: the prevented call surfaces as a recorded
+rejection error instead of a gateway call, with a single half-open probe to
+test recovery. The handler maps that rejection to
 `PaymentAuthorizationUnavailable` for manual review, and the refusal is
 recorded under the effect cursor like any other failure, so breaker activity
 is auditable from the journal.
@@ -271,10 +290,12 @@ What to watch as it runs:
   opening during the outage. The `manual_review` sink receives
   authorization-unavailable events for failed gateway calls and breaker
   refusals; those orders are not cancelled, because no decision was reached.
+- The authorize-payment journal records retry scheduling and recovery evidence
+  under the same logical effect cursor as the one terminal gateway outcome.
 
 On replay, none of this resilience machinery runs: replay performs no live
-effect, so the breaker and the rate limiter stay quiet and only the recorded
-outcomes drive the result.
+effect, so retry, the breaker, and the rate limiter stay quiet and only the
+recorded outcomes drive the result.
 
 ## What This Example Deliberately Leaves Out
 
@@ -298,5 +319,5 @@ is covered by its own example rather than this one.
 | `fixtures.rs` | The scripted upstream order-event sequence. |
 | `deliveries.rs` | The typed `ShippingHandoff` delivery: destination identity, duplicate-safety, and behaviour on the type (FLOWIP-120s tier 3). |
 | `console.rs`  | Console projection helpers with replay-provenance labels for the demo output. |
-| `flow.rs`     | The flow wiring and the circuit-breaker configuration. |
+| `flow.rs`     | The flow wiring and its breaker, retry, and per-attempt limiter configuration. |
 | `main.rs`     | The entry point and CLI banner. |
