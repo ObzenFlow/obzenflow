@@ -2,10 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-115g drift guards for the destructive handler-shell contraction.
+//! Architecture drift guards for retired handler-shell and replay-cold source bounds.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use syn::visit::Visit;
 
 fn rust_sources_under(path: &Path, output: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(path).expect("read source directory") {
@@ -506,4 +507,618 @@ fn effectful_stateful_keeps_only_its_existing_typed_lowerer() {
             );
         }
     }
+}
+
+#[derive(Default)]
+struct HttpGuardAliases {
+    reqwest_modules: std::collections::HashSet<String>,
+    clients: std::collections::HashSet<String>,
+    builders: std::collections::HashSet<String>,
+    run_mode_names: std::collections::HashSet<String>,
+    imported_run_mode: bool,
+}
+
+#[derive(Debug)]
+struct UseBinding {
+    source: Vec<String>,
+    alias: String,
+}
+
+#[derive(Default)]
+struct HttpGuardAliasCollector {
+    bindings: Vec<UseBinding>,
+    type_aliases: Vec<(String, Vec<String>)>,
+}
+
+fn is_test_only(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attribute| {
+        if attribute
+            .path()
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "test")
+        {
+            return true;
+        }
+        attribute.path().is_ident("cfg")
+            && attribute
+                .parse_args::<syn::Path>()
+                .is_ok_and(|path| path.is_ident("test"))
+    })
+}
+
+fn collect_use_bindings(
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    output: &mut Vec<UseBinding>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_use_bindings(&path.tree, prefix, output);
+            prefix.pop();
+        }
+        syn::UseTree::Name(name) => {
+            let mut source = prefix.clone();
+            source.push(name.ident.to_string());
+            output.push(UseBinding {
+                alias: name.ident.to_string(),
+                source,
+            });
+        }
+        syn::UseTree::Rename(rename) => {
+            let mut source = prefix.clone();
+            source.push(rename.ident.to_string());
+            output.push(UseBinding {
+                alias: rename.rename.to_string(),
+                source,
+            });
+        }
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                collect_use_bindings(tree, prefix, output);
+            }
+        }
+        syn::UseTree::Glob(_) => {
+            let mut source = prefix.clone();
+            source.push("*".to_string());
+            output.push(UseBinding {
+                alias: "*".to_string(),
+                source,
+            });
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for HttpGuardAliasCollector {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if !is_test_only(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if !is_test_only(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if !is_test_only(&item.attrs) {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if !is_test_only(&item.attrs) {
+            collect_use_bindings(&item.tree, &mut Vec::new(), &mut self.bindings);
+        }
+    }
+
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        if !is_test_only(&item.attrs) && item.ident == "reqwest" {
+            self.bindings.push(UseBinding {
+                source: vec!["reqwest".to_string()],
+                alias: item
+                    .rename
+                    .as_ref()
+                    .map_or_else(|| item.ident.to_string(), |(_, alias)| alias.to_string()),
+            });
+        }
+    }
+
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        if is_test_only(&item.attrs) {
+            return;
+        }
+        if let syn::Type::Path(path) = item.ty.as_ref() {
+            self.type_aliases.push((
+                item.ident.to_string(),
+                path.path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect(),
+            ));
+        }
+        syn::visit::visit_item_type(self, item);
+    }
+}
+
+fn aliases_for(file: &syn::File) -> HttpGuardAliases {
+    let mut collector = HttpGuardAliasCollector::default();
+    collector.visit_file(file);
+
+    let mut aliases = HttpGuardAliases::default();
+    aliases.reqwest_modules.insert("reqwest".to_string());
+    aliases.run_mode_names.extend(
+        ["ReplayVerb", "RuntimeMode", "source_phase_for"]
+            .into_iter()
+            .map(str::to_string),
+    );
+
+    let run_mode_symbols = ["ReplayVerb", "RuntimeMode", "source_phase_for"];
+    for binding in &collector.bindings {
+        if binding
+            .source
+            .last()
+            .is_some_and(|name| run_mode_symbols.contains(&name.as_str()))
+        {
+            aliases.imported_run_mode = true;
+            aliases.run_mode_names.insert(binding.alias.clone());
+        }
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for binding in &collector.bindings {
+            let first = binding.source.first().map(String::as_str);
+            let last = binding.source.last().map(String::as_str);
+            if binding.source.len() == 1 {
+                if last.is_some_and(|name| aliases.reqwest_modules.contains(name)) {
+                    changed |= aliases.reqwest_modules.insert(binding.alias.clone());
+                }
+                if last.is_some_and(|name| aliases.clients.contains(name)) {
+                    changed |= aliases.clients.insert(binding.alias.clone());
+                }
+                if last.is_some_and(|name| aliases.builders.contains(name)) {
+                    changed |= aliases.builders.insert(binding.alias.clone());
+                }
+                if last.is_some_and(|name| aliases.run_mode_names.contains(name)) {
+                    changed |= aliases.run_mode_names.insert(binding.alias.clone());
+                    aliases.imported_run_mode = true;
+                }
+            } else if first.is_some_and(|name| aliases.reqwest_modules.contains(name)) {
+                match last {
+                    Some("Client") => changed |= aliases.clients.insert(binding.alias.clone()),
+                    Some("ClientBuilder") => {
+                        changed |= aliases.builders.insert(binding.alias.clone())
+                    }
+                    Some("*") => {
+                        changed |= aliases.clients.insert("Client".to_string());
+                        changed |= aliases.builders.insert("ClientBuilder".to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (alias, source) in &collector.type_aliases {
+            let first = source.first().map(String::as_str);
+            let last = source.last().map(String::as_str);
+            if source.len() == 1 {
+                if first.is_some_and(|name| aliases.clients.contains(name)) {
+                    changed |= aliases.clients.insert(alias.clone());
+                }
+                if first.is_some_and(|name| aliases.builders.contains(name)) {
+                    changed |= aliases.builders.insert(alias.clone());
+                }
+                if first.is_some_and(|name| aliases.run_mode_names.contains(name)) {
+                    changed |= aliases.run_mode_names.insert(alias.clone());
+                    aliases.imported_run_mode = true;
+                }
+            } else if first.is_some_and(|name| aliases.reqwest_modules.contains(name)) {
+                match last {
+                    Some("Client") => changed |= aliases.clients.insert(alias.clone()),
+                    Some("ClientBuilder") => changed |= aliases.builders.insert(alias.clone()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    aliases
+}
+
+struct ReqwestConstructorVisitor<'a> {
+    aliases: &'a HttpGuardAliases,
+    context: Vec<String>,
+    constructors: Vec<(String, String)>,
+}
+
+impl ReqwestConstructorVisitor<'_> {
+    fn constructor_path(&self, path: &syn::Path) -> Option<String> {
+        let parts = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        let operation = parts.last()?.as_str();
+        let owner = parts.get(parts.len().checked_sub(2)?)?.as_str();
+        let constructor = match operation {
+            "new" | "default" => {
+                self.aliases.clients.contains(owner)
+                    || self.aliases.builders.contains(owner)
+                    || ((owner == "Client" || owner == "ClientBuilder")
+                        && parts
+                            .get(parts.len().saturating_sub(3))
+                            .is_some_and(|part| self.aliases.reqwest_modules.contains(part)))
+            }
+            "builder" => {
+                self.aliases.clients.contains(owner)
+                    || (owner == "Client"
+                        && parts
+                            .get(parts.len().saturating_sub(3))
+                            .is_some_and(|part| self.aliases.reqwest_modules.contains(part)))
+            }
+            _ => false,
+        };
+        constructor.then(|| parts.join("::"))
+    }
+}
+
+impl<'ast> Visit<'ast> for ReqwestConstructorVisitor<'_> {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if !is_test_only(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if is_test_only(&item.attrs) {
+            return;
+        }
+        self.context.push(item.sig.ident.to_string());
+        syn::visit::visit_item_fn(self, item);
+        self.context.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if is_test_only(&item.attrs) {
+            return;
+        }
+        self.context.push(item.sig.ident.to_string());
+        syn::visit::visit_impl_item_fn(self, item);
+        self.context.pop();
+    }
+
+    fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+        if let Some(path) = self.constructor_path(&expression.path) {
+            self.constructors.push((
+                path,
+                self.context
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| "<module>".to_string()),
+            ));
+        }
+        syn::visit::visit_expr_path(self, expression);
+    }
+}
+
+struct RunModeVisitor<'a> {
+    aliases: &'a HttpGuardAliases,
+    references: Vec<String>,
+}
+
+#[derive(Default)]
+struct ProductionExpectVisitor {
+    calls: Vec<String>,
+    context: Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for ProductionExpectVisitor {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if !is_test_only(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if is_test_only(&item.attrs) {
+            return;
+        }
+        self.context.push(item.sig.ident.to_string());
+        syn::visit::visit_item_fn(self, item);
+        self.context.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if is_test_only(&item.attrs) {
+            return;
+        }
+        self.context.push(item.sig.ident.to_string());
+        syn::visit::visit_impl_item_fn(self, item);
+        self.context.pop();
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "expect" {
+            self.calls.push(
+                self.context
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| "<module>".to_string()),
+            );
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+fn production_expect_calls(source: &str) -> Vec<String> {
+    let file = syn::parse_file(source).expect("parse guarded reqwest source");
+    let mut visitor = ProductionExpectVisitor::default();
+    visitor.visit_file(&file);
+    visitor.calls
+}
+
+impl<'ast> Visit<'ast> for RunModeVisitor<'_> {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        if !is_test_only(&item.attrs) {
+            syn::visit::visit_item_mod(self, item);
+        }
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if !is_test_only(&item.attrs) {
+            syn::visit::visit_item_fn(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if !is_test_only(&item.attrs) {
+            syn::visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        for segment in &path.segments {
+            let name = segment.ident.to_string();
+            if self.aliases.run_mode_names.contains(&name) {
+                self.references.push(name);
+            }
+        }
+        syn::visit::visit_path(self, path);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        let method = call.method.to_string();
+        if self.aliases.run_mode_names.contains(&method) {
+            self.references.push(method);
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+fn inspect_http_wiring(source: &str) -> Result<(), String> {
+    let file = syn::parse_file(source).map_err(|error| format!("parse Rust source: {error}"))?;
+    let aliases = aliases_for(&file);
+    let mut constructors = ReqwestConstructorVisitor {
+        aliases: &aliases,
+        context: Vec::new(),
+        constructors: Vec::new(),
+    };
+    constructors.visit_file(&file);
+    let mut run_modes = RunModeVisitor {
+        aliases: &aliases,
+        references: Vec::new(),
+    };
+    run_modes.visit_file(&file);
+
+    let mut violations = constructors
+        .constructors
+        .into_iter()
+        .map(|(path, context)| format!("concrete constructor {path} in {context}"))
+        .collect::<Vec<_>>();
+    if aliases.imported_run_mode || !run_modes.references.is_empty() {
+        violations.push(format!(
+            "run-mode reference/import: {}",
+            run_modes.references.join(", ")
+        ));
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations.join("; "))
+    }
+}
+
+fn production_http_constructor_sites(root: &Path) -> Vec<(PathBuf, String, String)> {
+    let mut sources = Vec::new();
+    rust_sources_under(&root.join("src"), &mut sources);
+    rust_sources_under(&root.join("examples"), &mut sources);
+    for crate_entry in fs::read_dir(root.join("crates")).expect("read crates directory") {
+        let source_root = crate_entry.expect("read crate entry").path().join("src");
+        if source_root.is_dir() {
+            rust_sources_under(&source_root, &mut sources);
+        }
+    }
+
+    let mut sites = Vec::new();
+    for path in sources {
+        let relative = path.strip_prefix(root).expect("workspace source");
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if file_name.ends_with("_test.rs") || file_name.ends_with("_tests.rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("read production Rust source");
+        let file = syn::parse_file(&source).unwrap_or_else(|error| {
+            panic!("parse production source {}: {error}", relative.display())
+        });
+        let aliases = aliases_for(&file);
+        let mut visitor = ReqwestConstructorVisitor {
+            aliases: &aliases,
+            context: Vec::new(),
+            constructors: Vec::new(),
+        };
+        visitor.visit_file(&file);
+        for (constructor, context) in visitor.constructors {
+            sites.push((relative.to_path_buf(), constructor, context));
+        }
+    }
+    sites
+}
+
+#[test]
+fn default_http_source_transport_stays_cold_until_execute() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let factory = fs::read_to_string(root.join("crates/obzenflow_infra/src/http_client/mod.rs"))
+        .expect("read default HTTP client factory");
+    let reqwest_source =
+        fs::read_to_string(root.join("crates/obzenflow_infra/src/http_client/reqwest_client.rs"))
+            .expect("read reqwest HTTP client");
+
+    let mut guarded = vec![
+        root.join("src/sources.rs"),
+        root.join("crates/obzenflow_infra/src/http_client/mod.rs"),
+        root.join("crates/obzenflow_adapters/src/sources/http_pull.rs"),
+        root.join("crates/obzenflow_infra/src/web/studio_registration.rs"),
+    ];
+    rust_sources_under(&root.join("examples/hn_ai_digest_demo"), &mut guarded);
+    for path in guarded {
+        let source = fs::read_to_string(&path).expect("read guarded HTTP wiring source");
+        inspect_http_wiring(&source).unwrap_or_else(|violation| {
+            panic!(
+                "{} must stay platform-cold and run-mode-blind: {violation}",
+                path.strip_prefix(&root)
+                    .expect("workspace source")
+                    .display()
+            )
+        });
+    }
+
+    assert!(factory.contains("Arc::new(ReqwestHttpClient::new())"));
+    assert!(reqwest_source.contains("state: Arc<OnceLock<ClientInitFuture>>"));
+    assert!(reqwest_source.contains("shared_platform_step(\"HTTP client initialization\""));
+    assert!(reqwest_source.contains(".spawn_blocking("));
+    assert!(!reqwest_source.contains("block_in_place"));
+    assert_eq!(
+        production_expect_calls(&reqwest_source),
+        Vec::<String>::new(),
+        "the reqwest production path must not hide initialization failure behind expect"
+    );
+
+    let sites = production_http_constructor_sites(&root);
+    let mut source_client_sites = Vec::new();
+    let mut allowed_ai_sites = 0;
+    let native_embedding = Path::new("crates/obzenflow_infra/src/ai/native_embedding_client.rs");
+    let ai_preflight = Path::new("crates/obzenflow_infra/src/ai/rig/preflight.rs");
+    for site @ (path, constructor, context) in &sites {
+        let allowed_ai_site = (path == native_embedding
+            && constructor == "reqwest::Client::builder"
+            && context == "build_http_client")
+            || (path == ai_preflight
+                && constructor == "reqwest::Client::new"
+                && matches!(
+                    context.as_str(),
+                    "preflight_ollama" | "preflight_openai_models"
+                ));
+        if allowed_ai_site {
+            allowed_ai_sites += 1;
+        } else {
+            source_client_sites.push(site);
+        }
+    }
+    assert_eq!(
+        allowed_ai_sites, 3,
+        "the three explicit AI-owned reqwest constructors must remain accounted for: {sites:?}"
+    );
+    assert_eq!(
+        source_client_sites.len(),
+        2,
+        "only the two infra-owned default-source constructors may exist beyond the explicit AI owners; found {sites:?}"
+    );
+    for (path, _constructor, context) in source_client_sites {
+        assert_eq!(
+            path,
+            Path::new("crates/obzenflow_infra/src/http_client/reqwest_client.rs"),
+            "concrete reqwest construction escaped its infra owner: {sites:?}"
+        );
+        assert_eq!(
+            context, "build_default_client",
+            "concrete reqwest construction escaped the one initializer: {sites:?}"
+        );
+    }
+
+    let constructor_start = reqwest_source
+        .find("pub fn new() -> Self")
+        .expect("ReqwestHttpClient::new");
+    let execute_start = reqwest_source
+        .find("async fn execute(&self")
+        .expect("HttpClient::execute implementation");
+    let wrappers = &reqwest_source[constructor_start..execute_start];
+    assert!(wrappers.contains("pub fn with_client(client: reqwest::Client)"));
+
+    let execute = &reqwest_source[execute_start..];
+    let acquire = execute
+        .find("let client = self.client().await?")
+        .expect("lazy async client acquisition");
+    let send = execute.find("builder.send().await").expect("request send");
+    assert!(
+        acquire < send,
+        "execute must acquire the retained single-flight verdict before request send"
+    );
+}
+
+#[test]
+fn cold_http_wiring_guard_rejects_constructor_and_run_mode_aliases() {
+    let aliased_constructor = r#"
+        use reqwest as transport;
+        use transport::Client as ColdLookingClient;
+        type TwiceHiddenClient = ColdLookingClient;
+        fn hidden_helper() -> TwiceHiddenClient { TwiceHiddenClient::new() }
+        fn materialize_source() { let _ = hidden_helper(); }
+    "#;
+    let aliased_run_mode = r#"
+        use obzenflow_runtime::bootstrap::ReplayVerb as RequestedAction;
+        fn materialize_source(action: RequestedAction) {
+            if matches!(action, RequestedAction::Replay) { build_live_transport(); }
+        }
+    "#;
+
+    assert!(inspect_http_wiring(aliased_constructor)
+        .expect_err("aliased concrete constructor must be rejected")
+        .contains("TwiceHiddenClient::new"));
+    assert!(inspect_http_wiring(aliased_run_mode)
+        .expect_err("aliased run-mode branch input must be rejected")
+        .contains("run-mode"));
+}
+
+#[test]
+fn reqwest_guard_rejects_production_expect_but_ignores_test_expect() {
+    let source = r#"
+        fn preseeded() { state.set(client).expect("fresh state"); }
+        #[cfg(test)]
+        mod tests {
+            fn fixture() { value.expect("test assertion"); }
+        }
+    "#;
+    assert_eq!(
+        production_expect_calls(source),
+        vec!["preseeded".to_string()]
+    );
+}
+
+#[test]
+fn cold_http_wiring_guard_allows_explicit_custom_client_injection() {
+    let custom_injection = r#"
+        fn materialize_source(custom_client: std::sync::Arc<dyn HttpClient>) {
+            let _ = HttpPullConfig::builder().client(custom_client);
+        }
+    "#;
+
+    inspect_http_wiring(custom_injection)
+        .expect("an already-constructed custom port is an explicit cold injection");
 }
