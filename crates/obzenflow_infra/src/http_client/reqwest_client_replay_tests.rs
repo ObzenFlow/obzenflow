@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -122,6 +123,81 @@ async fn spawn_http_fixture(
         request_count,
         task,
     )
+}
+
+async fn spawn_http_observer() -> (
+    Url,
+    Arc<AtomicUsize>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind composed HTTP observer");
+    let address = listener.local_addr().expect("observer address");
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let observed = request_count.clone();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (mut stream, _) = accepted.expect("accept observed HTTP request");
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                        )
+                        .await
+                        .expect("write observed HTTP response");
+                }
+                _ = &mut shutdown_rx => break,
+            }
+        }
+    });
+    (
+        Url::parse(&format!("http://{address}/events")).expect("observer URL"),
+        request_count,
+        shutdown_tx,
+        task,
+    )
+}
+
+#[derive(Clone, Default)]
+struct BlockingSetupGate(Arc<(Mutex<bool>, Condvar)>);
+
+impl BlockingSetupGate {
+    fn wait(&self) {
+        let (lock, wake) = &*self.0;
+        let released = lock.lock().expect("lock setup gate");
+        drop(
+            wake.wait_while(released, |released| !*released)
+                .expect("wait for setup release"),
+        );
+    }
+
+    fn release(&self) {
+        let (lock, wake) = &*self.0;
+        *lock.lock().expect("lock setup gate") = true;
+        wake.notify_all();
+    }
+
+    fn release_after(&self, timeout: Duration) -> std::thread::JoinHandle<bool> {
+        let gate = self.clone();
+        std::thread::spawn(move || {
+            let (lock, wake) = &*gate.0;
+            let released = lock.lock().expect("lock setup watchdog gate");
+            let (mut released, _) = wake
+                .wait_timeout_while(released, timeout, |released| !*released)
+                .expect("wait on setup watchdog gate");
+            let forced_release = !*released;
+            if forced_release {
+                *released = true;
+                wake.notify_all();
+            }
+            forced_release
+        })
+    }
 }
 
 fn counted_client(initializations: Arc<AtomicUsize>) -> ReqwestHttpClient {
@@ -399,6 +475,87 @@ async fn source_retry_observes_one_cached_initialization_failure() {
         1,
         "logical source retry must not repeat physical client initialization"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abort_during_initialization_cancels_the_waiter_before_request_send() {
+    const TEST_NAME: &str = concat!(
+        "http_client::reqwest_client::replay_tests::",
+        "abort_during_initialization_cancels_the_waiter_before_request_send"
+    );
+    if !enter_isolated_test(TEST_NAME) {
+        return;
+    }
+
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let initializations = Arc::new(AtomicUsize::new(0));
+    let completed_initializations = Arc::new(AtomicUsize::new(0));
+    let init_count = initializations.clone();
+    let completion_count = completed_initializations.clone();
+    let gate = BlockingSetupGate::default();
+    let setup_watchdog = gate.release_after(Duration::from_secs(10));
+    let initializer_gate = gate.clone();
+    let client = ReqwestHttpClient::with_initializer(move || {
+        init_count.fetch_add(1, Ordering::SeqCst);
+        initializer_gate.wait();
+        let result = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .map_err(|error| HttpClientError::Transport(error.to_string()));
+        completion_count.fetch_add(1, Ordering::SeqCst);
+        result
+    });
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let (url, requests, observer_shutdown, observer) = spawn_http_observer().await;
+    let running = build_flow(poll_flow(journal_base, url, client, delivered.clone())).await;
+    wait_for_running(&running).await;
+    wait_for_count(initializations.as_ref(), 1, "client initialization starts").await;
+
+    let mut stopping = tokio::spawn(stop_flow(running));
+    let stopped_while_setup_was_blocked =
+        match tokio::time::timeout(Duration::from_secs(2), &mut stopping).await {
+            Ok(result) => {
+                result.expect("stop task completes cleanly");
+                true
+            }
+            Err(_) => false,
+        };
+
+    if !stopped_while_setup_was_blocked {
+        gate.release();
+        stopping.await.expect("stop task after emergency release");
+        setup_watchdog.join().expect("setup watchdog");
+        let _ = observer_shutdown.send(());
+        observer.await.expect("HTTP observer task");
+        panic!("Abort must cancel the setup waiter without waiting for physical setup");
+    }
+
+    let completed_while_blocked = completed_initializations.load(Ordering::SeqCst);
+    let requests_while_blocked = requests.load(Ordering::SeqCst);
+    let delivered_while_blocked = delivered.load(Ordering::SeqCst);
+
+    gate.release();
+    assert!(
+        !setup_watchdog.join().expect("setup watchdog"),
+        "the test watchdog must not be what released physical setup"
+    );
+    wait_for_count(
+        completed_initializations.as_ref(),
+        1,
+        "physical client initialization completes",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(completed_while_blocked, 0);
+    assert_eq!(requests_while_blocked, 0);
+    assert_eq!(delivered_while_blocked, 0);
+    assert_eq!(initializations.load(Ordering::SeqCst), 1);
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    assert_eq!(delivered.load(Ordering::SeqCst), 0);
+
+    observer_shutdown.send(()).expect("stop HTTP observer");
+    observer.await.expect("HTTP observer task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -3,11 +3,13 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
+use futures::future::{BoxFuture, FutureExt, Shared};
 use obzenflow_core::http_client::{HttpClient, HttpClientError, HttpResponse, RequestSpec};
 use obzenflow_core::web::HttpMethod;
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 struct NativeRootsStatus {
@@ -33,14 +35,23 @@ impl NativeRootsStatus {
     }
 }
 
-static NATIVE_ROOTS_STATUS: OnceLock<NativeRootsStatus> = OnceLock::new();
+type SharedPlatformFuture<T> = Shared<BoxFuture<'static, Result<T, HttpClientError>>>;
 
-fn ensure_native_roots_for_https(url_scheme: &str) -> Result<(), HttpClientError> {
+static NATIVE_ROOTS_STATUS: OnceLock<SharedPlatformFuture<NativeRootsStatus>> = OnceLock::new();
+
+async fn ensure_native_roots_for_https(url_scheme: &str) -> Result<(), HttpClientError> {
     if url_scheme != "https" {
         return Ok(());
     }
 
-    let status = NATIVE_ROOTS_STATUS.get_or_init(NativeRootsStatus::load);
+    let status = NATIVE_ROOTS_STATUS
+        .get_or_init(|| {
+            shared_platform_step("HTTP native-root discovery", || {
+                Ok(NativeRootsStatus::load())
+            })
+        })
+        .clone()
+        .await?;
     if status.cert_count > 0 {
         return Ok(());
     }
@@ -75,6 +86,7 @@ fn ensure_native_roots_for_https(url_scheme: &str) -> Result<(), HttpClientError
 
 type ClientInitResult = Result<reqwest::Client, HttpClientError>;
 type ClientInitFn = dyn Fn() -> ClientInitResult + Send + Sync + 'static;
+type ClientInitFuture = SharedPlatformFuture<reqwest::Client>;
 
 #[derive(Clone)]
 struct ClientInitializer(Arc<ClientInitFn>);
@@ -125,27 +137,103 @@ fn build_default_client() -> ClientInitResult {
     }
 }
 
-fn run_platform_step<F, R>(step: F) -> R
+fn shared_platform_step<T, F>(operation: &'static str, step: F) -> SharedPlatformFuture<T>
 where
-    F: FnOnce() -> R,
+    T: Clone + Send + Sync + 'static,
+    F: FnOnce() -> Result<T, HttpClientError> + Send + 'static,
 {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle)
-            if matches!(
-                handle.runtime_flavor(),
-                tokio::runtime::RuntimeFlavor::MultiThread
-            ) =>
+    async move {
+        let handle = entered_tokio_runtime(operation)?;
+        let runtime_flavor = match handle.runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::CurrentThread => "current_thread",
+            tokio::runtime::RuntimeFlavor::MultiThread => "multi_thread",
+            _ => "unknown",
+        };
+        tracing::debug!(
+            event = "http_client.platform_setup",
+            operation,
+            runtime_flavor,
+            scheduling = "blocking_pool",
+            phase = "scheduled",
+            "default HTTP platform setup scheduled"
+        );
+
+        match handle
+            .spawn_blocking(move || {
+                let started_at = Instant::now();
+                let result = step();
+                let elapsed_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                let outcome = if result.is_ok() {
+                    "ready"
+                } else {
+                    "transport_error"
+                };
+                tracing::debug!(
+                    event = "http_client.platform_setup",
+                    operation,
+                    runtime_flavor,
+                    scheduling = "blocking_pool",
+                    phase = "completed",
+                    outcome,
+                    elapsed_ms,
+                    "default HTTP platform setup completed"
+                );
+                result
+            })
+            .await
         {
-            tokio::task::block_in_place(step)
+            Ok(result) => result,
+            Err(cause) => {
+                tracing::debug!(
+                    event = "http_client.platform_setup",
+                    operation,
+                    runtime_flavor,
+                    scheduling = "blocking_pool",
+                    phase = "completed",
+                    outcome = "task_failed",
+                    error = %cause,
+                    "default HTTP platform setup task failed"
+                );
+                Err(HttpClientError::Transport(format!(
+                    "{operation} task failed: {cause}"
+                )))
+            }
         }
-        _ => step(),
     }
+    .boxed()
+    .shared()
 }
 
-#[derive(Debug, Clone)]
+fn entered_tokio_runtime(operation: &str) -> Result<tokio::runtime::Handle, HttpClientError> {
+    tokio::runtime::Handle::try_current().map_err(|_| {
+        HttpClientError::Transport(format!("{operation} requires an entered Tokio runtime"))
+    })
+}
+
+fn ready_platform_result<T>(result: Result<T, HttpClientError>) -> SharedPlatformFuture<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    let ready = futures::future::ready(result).boxed().shared();
+    // Populate `Shared`'s cached output so pre-seeded clients report ready without
+    // mutating a fresh one-time cell through a fallible `set` path.
+    let _ = ready.clone().now_or_never();
+    ready
+}
+
+#[derive(Clone)]
 pub struct ReqwestHttpClient {
-    state: Arc<OnceLock<ClientInitResult>>,
+    state: Arc<OnceLock<ClientInitFuture>>,
     initializer: ClientInitializer,
+}
+
+impl fmt::Debug for ReqwestHttpClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReqwestHttpClient")
+            .field("initialized", &self.is_ready())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ReqwestHttpClient {
@@ -161,12 +249,8 @@ impl ReqwestHttpClient {
     }
 
     fn preseeded(client: reqwest::Client, initializer: ClientInitializer) -> Self {
-        let state = OnceLock::new();
-        state
-            .set(Ok(client))
-            .expect("a newly-created HTTP client state is empty");
         Self {
-            state: Arc::new(state),
+            state: Arc::new(OnceLock::from(ready_platform_result(Ok(client)))),
             initializer,
         }
     }
@@ -183,7 +267,7 @@ impl ReqwestHttpClient {
 
     #[cfg(test)]
     fn is_initialized(&self) -> bool {
-        self.state.get().is_some()
+        self.is_ready()
     }
 
     #[cfg(test)]
@@ -194,9 +278,23 @@ impl ReqwestHttpClient {
         Self::preseeded(client, ClientInitializer::injected(initializer))
     }
 
-    fn client(&self) -> Result<&reqwest::Client, HttpClientError> {
-        let state = run_platform_step(|| self.state.get_or_init(|| self.initializer.run()));
-        state.as_ref().map_err(Clone::clone)
+    fn is_ready(&self) -> bool {
+        self.state
+            .get()
+            .is_some_and(|initialization| initialization.peek().is_some())
+    }
+
+    fn initialization(&self) -> ClientInitFuture {
+        self.state
+            .get_or_init(|| {
+                let initializer = self.initializer.clone();
+                shared_platform_step("HTTP client initialization", move || initializer.run())
+            })
+            .clone()
+    }
+
+    async fn client(&self) -> ClientInitResult {
+        self.initialization().await
     }
 }
 
@@ -233,8 +331,9 @@ fn map_reqwest_error(err: reqwest::Error) -> HttpClientError {
 #[async_trait]
 impl HttpClient for ReqwestHttpClient {
     async fn execute(&self, request: RequestSpec) -> Result<HttpResponse, HttpClientError> {
-        let client = self.client()?;
-        run_platform_step(|| ensure_native_roots_for_https(request.url.scheme()))?;
+        entered_tokio_runtime("HTTP request execution")?;
+        let client = self.client().await?;
+        ensure_native_roots_for_https(request.url.scheme()).await?;
 
         let mut builder = client
             .request(map_method(request.method), request.url)
@@ -258,6 +357,7 @@ mod tests {
     use super::*;
     use obzenflow_core::http_client::RequestSpec;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -311,6 +411,100 @@ mod tests {
         assert!(!client.is_initialized());
         assert!(!clone.is_initialized());
         assert!(Arc::ptr_eq(&client.state, &clone.state));
+    }
+
+    #[test]
+    fn execute_without_an_entered_tokio_runtime_returns_a_typed_error() {
+        let client = ReqwestHttpClient::new();
+        let request = RequestSpec::new(
+            HttpMethod::Get,
+            Url::parse("http://127.0.0.1:9/never-sent").expect("test URL"),
+        );
+
+        let error = futures::executor::block_on(client.execute(request))
+            .expect_err("request execution outside Tokio must fail before setup");
+
+        assert_eq!(
+            error.to_string(),
+            "transport error: HTTP request execution requires an entered Tokio runtime"
+        );
+        assert!(!client.is_initialized());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_waiter_does_not_repeat_setup_or_send_a_request() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let watchdog_gate = gate.clone();
+        let watchdog = std::thread::spawn(move || {
+            let (lock, wake) = &*watchdog_gate;
+            let released = lock.lock().expect("lock setup gate");
+            let (mut released, _) = wake
+                .wait_timeout_while(released, Duration::from_secs(2), |released| !*released)
+                .expect("wait on setup gate");
+            if !*released {
+                *released = true;
+                wake.notify_all();
+            }
+        });
+
+        let initializations = Arc::new(AtomicUsize::new(0));
+        let init_count = initializations.clone();
+        let initializer_gate = gate.clone();
+        let client = ReqwestHttpClient::with_initializer(move || {
+            init_count.fetch_add(1, Ordering::SeqCst);
+            let (lock, wake) = &*initializer_gate;
+            let released = lock.lock().expect("lock setup gate");
+            drop(
+                wake.wait_while(released, |released| !*released)
+                    .expect("wait for setup release"),
+            );
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .map_err(|error| HttpClientError::Transport(error.to_string()))
+        });
+        let (url, requests, fixture) = spawn_http_fixture(1).await;
+
+        let first_client = client.clone();
+        let first_url = url.clone();
+        let first = tokio::spawn(async move {
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                first_client.execute(RequestSpec::new(HttpMethod::Get, first_url)),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while initializations.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("blocking-pool initialization starts without blocking current-thread Tokio");
+
+        assert!(
+            first.await.expect("first execute task").is_err(),
+            "the first waiter must time out while physical setup continues"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+
+        {
+            let (lock, wake) = &*gate;
+            *lock.lock().expect("lock setup gate") = true;
+            wake.notify_all();
+        }
+        watchdog.join().expect("setup watchdog");
+
+        let response = client
+            .clone()
+            .execute(RequestSpec::new(HttpMethod::Get, url))
+            .await
+            .expect("a later waiter reuses the retained setup verdict");
+        assert_eq!(response.status, 200);
+        fixture.await.expect("HTTP fixture task");
+        assert_eq!(initializations.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(client.is_initialized());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

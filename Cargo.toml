@@ -148,6 +148,7 @@ fastrand = { workspace = true }
 sysinfo = { workspace = true }
 tempfile = { workspace = true }
 futures = { workspace = true }
+syn = { workspace = true, features = ["full", "visit"] }
 
 [features]
 console = ["obzenflow_infra/console"]

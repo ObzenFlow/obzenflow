@@ -19,6 +19,7 @@ obzenflow_dsl = { workspace = true }
 # Infrastructure dependencies
 tokio = { workspace = true, features = ["full", "tracing"] }
 async-trait = { workspace = true }
+futures = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
