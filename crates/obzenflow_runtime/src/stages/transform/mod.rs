@@ -23,7 +23,7 @@ pub mod supervisor;
 
 // Public API - only expose builder, handle, and essential types
 pub use crate::stages::common::handlers::{
-    AsyncTransformHandler, EffectfulTransformHandler, TransformHandler, TypedTransformHandler,
+    EffectfulTransformHandler, TransformHandler, TypedTransformHandler,
 };
 pub use builder::TransformBuilder;
 pub use config::TransformConfig;
@@ -32,9 +32,8 @@ pub use handle::{TransformHandle, TransformHandleExt};
 
 // Re-export transform strategies for ergonomic imports (FLOWIP-080h)
 pub use strategies::{
-    AsyncMap, AsyncMapTyped, AsyncTryMapWith, AsyncTryMapWithTyped, ChunkByBudgetBuilder,
-    ChunkByBudgetTyped, Filter, FilterMap, FilterMapTyped, FilterTyped, Map, MapTyped, TryMap,
-    TryMapWith, TryMapWithTyped,
+    ChunkByBudgetBuilder, ChunkByBudgetTyped, Filter, FilterMap, FilterMapTyped, FilterTyped, Map,
+    MapTyped, TryMap, TryMapWith, TryMapWithTyped,
 };
 
 // Re-export control strategies for convenience

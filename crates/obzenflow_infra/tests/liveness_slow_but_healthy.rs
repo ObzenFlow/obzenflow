@@ -10,13 +10,14 @@ use obzenflow_core::event::{
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{async_transform, flow, sink, source, FlowDefinition};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
+use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
+    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -83,22 +84,28 @@ impl FiniteSourceHandler for TwoEventSource {
 
 #[derive(Clone, Debug)]
 struct SlowAiTransform {
-    writer_id: WriterId,
     calls: Arc<AtomicUsize>,
 }
 
 impl SlowAiTransform {
     fn new() -> Self {
         Self {
-            writer_id: WriterId::from(StageId::new()),
             calls: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
 
 #[async_trait]
-impl AsyncTransformHandler for SlowAiTransform {
-    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+impl EffectfulTransformHandler for SlowAiTransform {
+    type Input = ProbeEvent;
+    type Output = ProbeOutputEvent;
+    type AllowedEffects = obzenflow_runtime::effect_set![];
+
+    async fn process(
+        &self,
+        input: ProbeEvent,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
         if call_index == 0 {
             tokio::time::sleep(Duration::from_secs(50)).await;
@@ -106,15 +113,10 @@ impl AsyncTransformHandler for SlowAiTransform {
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
 
-        Ok(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            ProbeOutputEvent::versioned_event_type(),
-            event.payload().clone(),
-        )])
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+        fx.emit(ProbeOutputEvent { value: input.value })
+            .await
+            .map_err(|error| HandlerError::Other(error.to_string()))?;
+        Ok(fx.complete()?)
     }
 }
 
@@ -162,7 +164,11 @@ async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
 
             stages: {
                 numbers = source!(ProbeEvent => numbers_handler);
-                slow_ai = async_transform!(ProbeEvent -> ProbeOutputEvent => slow_ai_handler);
+                slow_ai = effectful_transform!(
+                    ProbeEvent -> ProbeOutputEvent => slow_ai_handler,
+                    effects: [],
+                    middleware: [],
+                );
                 sink = sink!(ProbeOutputEvent => sink_handler);
             },
 

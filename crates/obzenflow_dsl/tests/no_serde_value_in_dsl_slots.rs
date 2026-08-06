@@ -50,7 +50,6 @@ const DSL_MACROS: &[&str] = &[
     "infinite_source!",
     "async_infinite_source!",
     "transform!",
-    "async_transform!",
     "stateful!",
     "sink!",
     "join!",

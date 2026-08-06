@@ -36,8 +36,7 @@ use obzenflow_runtime::{
         common::{
             control_strategies::{JonestownSignalStrategy, SignalGate},
             handlers::{
-                AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-                AsyncTransformHandlerAdapter, EffectfulStatefulHandler,
+                AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulStatefulHandler,
                 EffectfulStatefulHandlerAdapter, EffectfulTransformHandler,
                 EffectfulTransformHandlerAdapter, FiniteSourceHandler, InfiniteSourceHandler,
                 JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
@@ -414,9 +413,6 @@ pub enum PolicyGuardSurface {
     /// Sync transforms, sync stateful stages, joins: deterministic handler
     /// shells with no live I/O unit. Policy middleware is build-rejected.
     PureSync,
-    /// Async non-effectful transforms: deprecated surface; policy middleware
-    /// warns naming FLOWIP-128b and FLOWIP-120f until 120f deletes it.
-    AsyncNonEffectful,
     /// Effectful stages: per-effect policy placement (FLOWIP-120c phase 3).
     Effectful,
     /// Effectful stateful stages do not install the stateful effect boundary
@@ -533,9 +529,7 @@ pub trait StageDescriptor: Send + Sync {
 
     /// Handler-surface classification for the FLOWIP-120c H1 policy guards.
     ///
-    /// The default derives from `is_effectful()` and `stage_type()`; the
-    /// async-non-effectful transform descriptor overrides, because
-    /// `StageType` cannot distinguish it from the sync surface. Typed
+    /// The default derives from `is_effectful()` and `stage_type()`. Typed
     /// wrappers must forward to their inner descriptor.
     fn policy_guard_surface(&self) -> PolicyGuardSurface {
         if self.is_effectful() {
@@ -1314,138 +1308,33 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
     }
 }
 
-/// Descriptor for async transform stages.
-pub struct AsyncTransformDescriptor<H: AsyncTransformHandler + 'static> {
-    pub name: String,
-    pub handler: H,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
-    pub backpressure: Option<BackpressureClause>,
-}
-
-#[async_trait]
-impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
-    for AsyncTransformDescriptor<H>
-{
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
-        self.backpressure.as_ref()
-    }
-
-    fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-
-    fn stage_type(&self) -> StageType {
-        StageType::Transform
-    }
-
-    fn policy_guard_surface(&self) -> PolicyGuardSurface {
-        PolicyGuardSurface::AsyncNonEffectful
-    }
-
-    fn stage_middleware_names(&self) -> Vec<String> {
-        self.middleware
-            .iter()
-            .map(|f| f.label().to_string())
-            .collect()
-    }
-
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &self.middleware
-    }
-
-    async fn create_handle_with_flow_middleware(
-        self: Box<Self>,
-        config: StageConfig,
-        resources: StageResources,
-        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
-        control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> StageCreationResult<BoxedStageHandle> {
-        // Validate middleware safety
-        for factory in &self.middleware {
-            let validation_result =
-                validate_middleware_safety(factory.as_ref(), StageType::Transform, &self.name);
-
-            if !validation_result.is_ok() {
-                for error in &validation_result.errors {
-                    tracing::error!("{}", error);
-                }
-            }
-        }
-
-        // Create control strategy before moving middleware
-        // Resolve flow and stage middleware
-        let resolved = crate::middleware_resolution::resolve_middleware(
-            flow_middleware,
-            self.middleware,
-            &config.name,
-        )?;
-
-        // Log the resolution
-        crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-        let control_strategy = create_default_signal_strategy(&resolved.middleware);
-
-        // Create instrumentation configuration
-        let instrumentation_config = InstrumentationConfig::default();
-        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
-            control_middleware.clone();
-
-        let placement =
-            plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
-
-        instrumentation
-            .bind_control_plane(
-                &config.stage_id,
-                &control_provider,
-                placement.expects_circuit_breaker,
-                placement.expects_rate_limiter,
-            )
-            .map_err(|e| e.to_string())?;
-        let instrumentation = Arc::new(instrumentation);
-
-        // Create the stage configuration
-        let transform_config = TransformConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name.clone(),
-            observers: placement.observers.build(),
-            control_strategy: Some(control_strategy),
-            upstream_stages: resources.upstream_stages.clone(),
-            cycle_guard: config.cycle_guard,
-        };
-
-        // Keep the existing temporary async adapter until FLOWIP-120f removes
-        // this handler family. It carries no middleware or policy authority.
-        let handler = AsyncTransformHandlerAdapter(self.handler);
-        let handle = TransformBuilder::new(handler, transform_config, resources)
-            .with_instrumentation(instrumentation)
-            .build()
-            .await
-            .map_err(|e| format!("Failed to build async transform: {e:?}"))?;
-
-        // Create adapter to bridge to StageHandle
-        let adapter = StageHandleAdapter::new(
-            handle,
-            config.stage_id,
-            config.name,
-            StageType::Transform,
-            translate_stage_event_to_transform,
-            check_transform_state,
-        );
-
-        Ok(Box::new(adapter) as BoxedStageHandle)
-    }
-}
-
 /// Per-effect policy attachment: the policies declared inline on one
 /// `effects:` entry (`Effect with [...]`).
 pub struct EffectPolicyAttachment {
     pub effect_type: &'static str,
     pub factories: Vec<Box<dyn MiddlewareFactory>>,
+}
+
+fn validate_effect_policy_attachments(
+    stage_name: &str,
+    effect_declarations: &[EffectDeclaration],
+    attachments: &[EffectPolicyAttachment],
+) -> Result<(), String> {
+    let declared_effect_types = effect_declarations
+        .iter()
+        .map(|declaration| declaration.effect_type)
+        .collect::<std::collections::HashSet<_>>();
+
+    for attachment in attachments {
+        if !declared_effect_types.contains(attachment.effect_type) {
+            return Err(format!(
+                "Effectful stage '{stage_name}' attaches policy middleware to undeclared effect '{}'",
+                attachment.effect_type
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Descriptor for replay-safe effectful async transform stages.
@@ -1643,6 +1532,11 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 .runtime_execution
                 .effect_port_registration_policy(),
         )?;
+        validate_effect_policy_attachments(
+            &self.name,
+            &effect_declarations,
+            &self.effect_policies,
+        )?;
         resources.effect_declarations = effect_declarations.clone();
         resources.direct_fact_plan = self.direct_fact_plan.clone();
 
@@ -1791,6 +1685,15 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             for ((middleware_index, factory), declaration) in
                 attachment.factories.iter().enumerate().zip(declarations)
             {
+                let effect_declaration = effect_declarations
+                    .iter()
+                    .find(|effect| effect.effect_type == attachment.effect_type)
+                    .ok_or_else(|| {
+                        format!(
+                            "Effectful stage '{}' attaches policy middleware to undeclared effect '{}'",
+                            self.name, attachment.effect_type
+                        )
+                    })?;
                 let policy = crate::dsl::binder::bind_effect_policy(
                     crate::dsl::binder::DeclaredMiddlewareFactory::new(
                         factory.as_ref(),
@@ -1799,10 +1702,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                     &config,
                     StageType::Transform,
                     &control_middleware,
-                    effect_declarations
-                        .iter()
-                        .find(|effect| effect.effect_type == attachment.effect_type)
-                        .expect("effect policy attachment names a declared effect"),
+                    effect_declaration,
                     &obzenflow_adapters::middleware::MiddlewareOrigin::Stage,
                     MiddlewareDeclarationIndex::effect_policy(middleware_index),
                 )?;
@@ -2937,6 +2837,22 @@ mod tests {
     }
 
     #[test]
+    fn effect_policy_attachment_validation_rejects_undeclared_effect() {
+        let attachment = EffectPolicyAttachment {
+            effect_type: "test.undeclared",
+            factories: Vec::new(),
+        };
+
+        let error = validate_effect_policy_attachments("effectful", &[], &[attachment])
+            .expect_err("an attachment for an undeclared effect must fail materialisation");
+
+        assert_eq!(
+            error,
+            "Effectful stage 'effectful' attaches policy middleware to undeclared effect 'test.undeclared'"
+        );
+    }
+
+    #[test]
     fn effect_declaration_validation_requires_explicit_at_least_once_acknowledgement() {
         let declaration = EffectDeclaration {
             effect_type: "obzenflow.ai.chat_completion",
@@ -3827,9 +3743,8 @@ mod observer_placement_negative_tests {
 
     #[test]
     fn observer_binds_through_placement_on_every_stage_type_without_legacy_create() {
-        // StageType collapses transform / async transform / effectful transform
-        // to `Transform`, so the six variants cover all seven descriptor paths
-        // the planner serves.
+        // StageType collapses pure and effectful transform descriptors to
+        // `Transform`, so the six variants cover every planner stage kind.
         for stage_type in [
             StageType::FiniteSource,
             StageType::InfiniteSource,

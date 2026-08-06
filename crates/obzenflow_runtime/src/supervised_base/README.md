@@ -223,11 +223,11 @@ sequenceDiagram
 ```
 
 Concrete example (transform stage):
-- Builder: `TransformBuilder` / `AsyncTransformBuilder` in `src/stages/transform/builder.rs`
+- Builder: `TransformBuilder` in `src/stages/transform/builder.rs`
 - Wrapper: `HandlerSupervisedWithExternalEvents` in `src/supervised_base/with_external_events.rs`
 - Supervisor: `TransformSupervisor` in `src/stages/transform/supervisor/mod.rs`
 - Context (owns the handler): `TransformContext` in `src/stages/transform/fsm.rs`
-- User handler traits: `TransformHandler` / `AsyncTransformHandler` in `src/stages/common/handlers/transform/traits.rs`
+- User handler trait: `TransformHandler` in `src/stages/common/handlers/transform/traits.rs`
 - User handler invocation: `handler.process(event).await` in `src/stages/transform/supervisor/running.rs`
 - Drain hook: `TransformAction::DrainHandler` calls `ctx.handler.drain().await` in `src/stages/transform/fsm.rs`
 

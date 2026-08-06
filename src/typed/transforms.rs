@@ -5,11 +5,8 @@
 //! Typed transform helper facades.
 
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::stages::transform::{
-    AsyncMapTyped, AsyncTryMapWithTyped, FilterMapTyped, MapTyped, TryMapWithTyped,
-};
+use obzenflow_runtime::stages::transform::{FilterMapTyped, MapTyped, TryMapWithTyped};
 use serde::{de::DeserializeOwned, Serialize};
-use std::future::Future;
 
 pub fn map<T, O, F>(mapper: F) -> MapTyped<T, O, F>
 where
@@ -36,24 +33,4 @@ where
     F: Fn(T) -> Result<O, String> + Send + Sync + Clone,
 {
     TryMapWithTyped::new(converter)
-}
-
-pub fn async_map<T, O, F, Fut>(mapper: F) -> AsyncMapTyped<T, O, F, Fut>
-where
-    T: DeserializeOwned + Send + Sync,
-    O: Serialize + Send + Sync + TypedPayload,
-    F: Fn(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = O> + Send,
-{
-    AsyncMapTyped::new(mapper)
-}
-
-pub fn async_try_map_with<T, O, F, Fut>(converter: F) -> AsyncTryMapWithTyped<T, O, F, Fut>
-where
-    T: DeserializeOwned + Send + Sync,
-    O: Serialize + Send + Sync + TypedPayload,
-    F: Fn(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = Result<O, String>> + Send,
-{
-    AsyncTryMapWithTyped::new(converter)
 }

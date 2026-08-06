@@ -31,6 +31,22 @@ fn generic_handler_shell_and_standalone_retry_vocabulary_stay_absent() {
     }
 
     let forbidden = [
+        "AsyncTransformHandler",
+        "AsyncTransformHandlerAdapter",
+        "AsyncTransformDescriptor",
+        "AsyncTransformBuilder",
+        "PlaceholderAsyncTransform",
+        "BoundAsyncTransform",
+        "AsyncMap",
+        "AsyncMapTyped",
+        "AsyncTryMapWith",
+        "AsyncTryMapWithTyped",
+        "async_map",
+        "async_try_map_with",
+        "async_transform!",
+        "__obzenflow_async_transform_untyped",
+        "__obzenflow_async_transform_typed",
+        "__obzenflow_async_transform_exact_contract",
         "MiddlewareTransform",
         "UnifiedMiddlewareTransform",
         "AsyncMiddlewareTransform",

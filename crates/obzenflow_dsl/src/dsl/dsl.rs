@@ -1364,10 +1364,8 @@ macro_rules! build_typed_flow {
                 for (scope, factory) in resolved_view {
                     // FLOWIP-120c H1: policy middleware attaches to live I/O
                     // units only. Flow-level broadcast policy rejects above,
-                    // pure sync surfaces hard-reject, effectful-stateful rejects
-                    // until FLOWIP-120l installs its boundary, and the deprecated
-                    // async-non-effectful surface warns until FLOWIP-120f deletes
-                    // it (FLOWIP-128b migrates its AI legs to effects).
+                    // pure sync surfaces hard-reject, and effectful-stateful
+                    // rejects until FLOWIP-120l installs its boundary.
                     if factory.declaration().is_control() {
                         use $crate::dsl::stage_descriptor::PolicyGuardSurface;
                         match descriptor.policy_guard_surface() {
@@ -1386,13 +1384,6 @@ macro_rules! build_typed_flow {
                                     }
                                     .into(),
                                 );
-                            }
-                            PolicyGuardSurface::AsyncNonEffectful => {
-                                return Err(FlowBuildError::PolicyMiddlewareOnPureStage {
-                                    stage_name: name.clone(),
-                                    middleware: factory.label().to_string(),
-                                }
-                                .into());
                             }
                             PolicyGuardSurface::Effectful
                             | PolicyGuardSurface::Source

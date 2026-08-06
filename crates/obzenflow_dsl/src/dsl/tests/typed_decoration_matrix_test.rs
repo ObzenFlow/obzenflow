@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 //! Empirical verification for FLOWIP-114c: every typed decoration combination
-//! across the eight stage families is callable today. If any arm is missing,
+//! across the surviving stage families is callable today. If any arm is missing,
 //! this file fails to compile and the implementing PR must add the missing
 //! arm before deleting the matching untyped arm.
 
@@ -18,9 +18,9 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
-        AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-        EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler,
-        InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
+        AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulStatefulHandler,
+        EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinHandler,
+        SinkHandler, StatefulHandler, TransformHandler,
     };
     use obzenflow_runtime::stages::sink::SinkTyped;
     use obzenflow_runtime::typing::{SinkTyping, SourceTyping, StatefulTyping, TransformTyping};
@@ -112,22 +112,6 @@ mod tests {
     #[async_trait]
     impl TransformHandler for Tr {
         fn process(&self, _e: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-            Ok(vec![])
-        }
-        async fn drain(&mut self) -> Result<(), HandlerError> {
-            Ok(())
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct AsyncTr;
-    impl TransformTyping for AsyncTr {
-        type Input = In;
-        type Output = Out;
-    }
-    #[async_trait]
-    impl AsyncTransformHandler for AsyncTr {
-        async fn process(&self, _e: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
             Ok(vec![])
         }
         async fn drain(&mut self) -> Result<(), HandlerError> {
@@ -291,7 +275,6 @@ mod tests {
         let infinite = InfSrc;
         let async_infinite = AsyncInfSrc;
         let transform = Tr;
-        let async_transform = AsyncTr;
         let effectful_transform = FxTr;
         let stateful = St;
         let effectful_stateful = FxSt;
@@ -325,12 +308,6 @@ mod tests {
         let _ = crate::transform!(
             name: "transform",
             In -> Out => transform,
-            [],
-            backpressure: crate::dsl::backpressure_clause::enforced(1)
-        );
-        let _ = crate::async_transform!(
-            name: "async_transform",
-            In -> Out => async_transform,
             [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
@@ -469,24 +446,6 @@ mod tests {
     #[test]
     fn transform_typed_name_mw() {
         let _ = crate::transform!(name: "t", In -> Out => Tr, []);
-    }
-
-    // ── async_transform! ────────────────────────────────────────────────────
-    #[test]
-    fn async_transform_typed_bare() {
-        let _ = crate::async_transform!(In -> Out => AsyncTr);
-    }
-    #[test]
-    fn async_transform_typed_mw() {
-        let _ = crate::async_transform!(In -> Out => AsyncTr, []);
-    }
-    #[test]
-    fn async_transform_typed_name() {
-        let _ = crate::async_transform!(name: "t", In -> Out => AsyncTr);
-    }
-    #[test]
-    fn async_transform_typed_name_mw() {
-        let _ = crate::async_transform!(name: "t", In -> Out => AsyncTr, []);
     }
 
     // ── effectful_transform! ──────────────────────────────────────────

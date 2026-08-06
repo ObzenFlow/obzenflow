@@ -15,9 +15,15 @@ use obzenflow_adapters::middleware::{
     PolicyAdmission, RateLimiterBuilder, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::TypedPayload;
+use obzenflow_dsl::dsl::stage_descriptor::{
+    EffectPolicyAttachment, EffectfulTransformDescriptor, StageDescriptor,
+};
+use obzenflow_dsl::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::{Effect, EffectContext, EffectError, EffectSafety, Effects};
+use obzenflow_runtime::effects::{
+    Effect, EffectContext, EffectDeclaration, EffectError, EffectSafety, Effects,
+};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::DslConfigDefault;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -461,6 +467,54 @@ macro_rules! two_effect_flow {
     };
 }
 
+fn malformed_effect_policy_attachment_flow(
+    policy_materializations: Arc<AtomicUsize>,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let guarded: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor::new(
+            "guarded",
+            OneEffectHandler,
+            vec![EffectDeclaration::of::<EffectA>()],
+            Vec::new(),
+            vec![EffectPolicyAttachment {
+                effect_type: EffectB::EFFECT_TYPE,
+                // No config defaults: this must reach descriptor materialisation
+                // instead of failing during configuration extraction.
+                factories: vec![Box::new(OrdinaryControlFactory {
+                    materializations: policy_materializations.clone(),
+                })],
+            }],
+            None,
+        ));
+        let guarded = wrap_typed_descriptor(
+            guarded,
+            StageTypingMetadata::transform(
+                TypeHint::exact_payload::<CompositionInput>(),
+                TypeHint::exact_payload::<CompositionFact>(),
+                false,
+                None,
+            ),
+        );
+
+        Ok(flow! {
+            name: "malformed_effect_policy_attachment",
+            journals: memory_journals(),
+            middleware: [],
+
+            stages: {
+                input = source!(CompositionInput => placeholder!());
+                guarded = guarded;
+                output = sink!(CompositionFact => placeholder!());
+            },
+
+            topology: {
+                input |> guarded;
+                guarded |> output;
+            }
+        })
+    })
+}
+
 async fn build(flow: FlowDefinition) -> Result<(), obzenflow_dsl::dsl::FlowBuildFailure> {
     flow.build(FlowBuildContext::for_tests()).await.map(|_| ())
 }
@@ -473,6 +527,25 @@ fn assert_composition_error(error: &obzenflow_dsl::dsl::FlowBuildFailure, messag
             && rendered.contains(message),
         "unexpected composition diagnostic: {rendered}"
     );
+}
+
+#[tokio::test]
+async fn undeclared_policy_effect_fails_build_before_materialization() {
+    let policy_materializations = Arc::new(AtomicUsize::new(0));
+
+    let error = build(malformed_effect_policy_attachment_flow(
+        policy_materializations.clone(),
+    ))
+    .await
+    .expect_err("a policy attachment for an undeclared effect must fail the flow build");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("Effectful stage 'guarded'")
+            && rendered.contains("attaches policy middleware to undeclared effect")
+            && rendered.contains(EffectB::EFFECT_TYPE),
+        "unexpected malformed attachment diagnostic: {rendered}"
+    );
+    assert_eq!(policy_materializations.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

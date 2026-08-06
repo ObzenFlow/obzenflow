@@ -85,7 +85,8 @@
 //! - `infinite_source!(Out => handler)` for an infinite source.
 //! - `async_infinite_source!(Out => handler)` for an async infinite source.
 //! - `transform!(In -> Out => handler)` for a synchronous transform.
-//! - `async_transform!(In -> Out => handler)` for an async transform.
+//! - `effectful_transform!(In -> Out => handler, effects: [...], middleware: [])`
+//!   for a transform that performs declared external work.
 //! - `sink!(In => handler)` for a sink.
 //! - `stateful!(In -> Out => handler)` for stateful aggregation.
 //! - `join!(catalog ref_stage: Ref, Stream -> Out => handler)` for joining with
