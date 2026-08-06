@@ -1539,6 +1539,7 @@ dependencies = [
  "obzenflow_dsl",
  "obzenflow_infra",
  "obzenflow_runtime",
+ "proc-macro2",
  "proptest",
  "reqwest 0.12.28",
  "serde",

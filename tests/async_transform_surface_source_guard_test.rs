@@ -4,6 +4,7 @@
 
 //! Architecture guard for FLOWIP-134a's retired async-transform family.
 
+use proc_macro2::{TokenStream, TokenTree};
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
@@ -19,6 +20,8 @@ const RETIRED_IDENTIFIERS: &[&str] = &[
     "AsyncMapTyped",
     "AsyncTryMapWith",
     "AsyncTryMapWithTyped",
+    "async_map",
+    "async_try_map_with",
     "async_transform",
     "__obzenflow_async_transform_untyped",
     "__obzenflow_async_transform_typed",
@@ -48,12 +51,56 @@ struct RetiredIdentifierVisitor {
     found: Vec<String>,
 }
 
-impl<'ast> Visit<'ast> for RetiredIdentifierVisitor {
-    fn visit_ident(&mut self, ident: &'ast syn::Ident) {
-        let ident = ident.to_string();
+impl RetiredIdentifierVisitor {
+    fn record_ident(&mut self, ident: String) {
         if RETIRED_IDENTIFIERS.contains(&ident.as_str()) {
             self.found.push(ident);
         }
+    }
+
+    fn visit_macro_tokens(&mut self, tokens: TokenStream) {
+        for token in tokens {
+            match token {
+                TokenTree::Group(group) => self.visit_macro_tokens(group.stream()),
+                TokenTree::Ident(ident) => self.record_ident(ident.to_string()),
+                TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for RetiredIdentifierVisitor {
+    fn visit_ident(&mut self, ident: &'ast syn::Ident) {
+        self.record_ident(ident.to_string());
+    }
+
+    fn visit_token_stream(&mut self, tokens: &'ast TokenStream) {
+        self.visit_macro_tokens(tokens.clone());
+    }
+}
+
+#[test]
+fn retirement_guard_descends_into_macro_tokens() {
+    let syntax = syn::parse_file(
+        r#"
+        fn fixture() {
+            outer! {
+                async_transform!(Input -> Output => handler);
+                async_map(handler);
+                async_try_map_with(handler);
+            }
+        }
+        "#,
+    )
+    .expect("parse macro-token regression fixture");
+    let mut visitor = RetiredIdentifierVisitor::default();
+    visitor.visit_file(&syntax);
+
+    for retired in ["async_transform", "async_map", "async_try_map_with"] {
+        assert!(
+            visitor.found.iter().any(|found| found == retired),
+            "retired identifier {retired:?} inside macro tokens was not visited"
+        );
     }
 }
 

@@ -529,9 +529,7 @@ pub trait StageDescriptor: Send + Sync {
 
     /// Handler-surface classification for the FLOWIP-120c H1 policy guards.
     ///
-    /// The default derives from `is_effectful()` and `stage_type()`; the
-    /// async-non-effectful transform descriptor overrides, because
-    /// `StageType` cannot distinguish it from the sync surface. Typed
+    /// The default derives from `is_effectful()` and `stage_type()`. Typed
     /// wrappers must forward to their inner descriptor.
     fn policy_guard_surface(&self) -> PolicyGuardSurface {
         if self.is_effectful() {
@@ -1317,6 +1315,28 @@ pub struct EffectPolicyAttachment {
     pub factories: Vec<Box<dyn MiddlewareFactory>>,
 }
 
+fn validate_effect_policy_attachments(
+    stage_name: &str,
+    effect_declarations: &[EffectDeclaration],
+    attachments: &[EffectPolicyAttachment],
+) -> Result<(), String> {
+    let declared_effect_types = effect_declarations
+        .iter()
+        .map(|declaration| declaration.effect_type)
+        .collect::<std::collections::HashSet<_>>();
+
+    for attachment in attachments {
+        if !declared_effect_types.contains(attachment.effect_type) {
+            return Err(format!(
+                "Effectful stage '{stage_name}' attaches policy middleware to undeclared effect '{}'",
+                attachment.effect_type
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Descriptor for replay-safe effectful async transform stages.
 pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> {
     name: String,
@@ -1512,6 +1532,11 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 .runtime_execution
                 .effect_port_registration_policy(),
         )?;
+        validate_effect_policy_attachments(
+            &self.name,
+            &effect_declarations,
+            &self.effect_policies,
+        )?;
         resources.effect_declarations = effect_declarations.clone();
         resources.direct_fact_plan = self.direct_fact_plan.clone();
 
@@ -1660,6 +1685,15 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             for ((middleware_index, factory), declaration) in
                 attachment.factories.iter().enumerate().zip(declarations)
             {
+                let effect_declaration = effect_declarations
+                    .iter()
+                    .find(|effect| effect.effect_type == attachment.effect_type)
+                    .ok_or_else(|| {
+                        format!(
+                            "Effectful stage '{}' attaches policy middleware to undeclared effect '{}'",
+                            self.name, attachment.effect_type
+                        )
+                    })?;
                 let policy = crate::dsl::binder::bind_effect_policy(
                     crate::dsl::binder::DeclaredMiddlewareFactory::new(
                         factory.as_ref(),
@@ -1668,10 +1702,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                     &config,
                     StageType::Transform,
                     &control_middleware,
-                    effect_declarations
-                        .iter()
-                        .find(|effect| effect.effect_type == attachment.effect_type)
-                        .expect("effect policy attachment names a declared effect"),
+                    effect_declaration,
                     &obzenflow_adapters::middleware::MiddlewareOrigin::Stage,
                     MiddlewareDeclarationIndex::effect_policy(middleware_index),
                 )?;
@@ -2806,6 +2837,22 @@ mod tests {
     }
 
     #[test]
+    fn effect_policy_attachment_validation_rejects_undeclared_effect() {
+        let attachment = EffectPolicyAttachment {
+            effect_type: "test.undeclared",
+            factories: Vec::new(),
+        };
+
+        let error = validate_effect_policy_attachments("effectful", &[], &[attachment])
+            .expect_err("an attachment for an undeclared effect must fail materialisation");
+
+        assert_eq!(
+            error,
+            "Effectful stage 'effectful' attaches policy middleware to undeclared effect 'test.undeclared'"
+        );
+    }
+
+    #[test]
     fn effect_declaration_validation_requires_explicit_at_least_once_acknowledgement() {
         let declaration = EffectDeclaration {
             effect_type: "obzenflow.ai.chat_completion",
@@ -3696,9 +3743,8 @@ mod observer_placement_negative_tests {
 
     #[test]
     fn observer_binds_through_placement_on_every_stage_type_without_legacy_create() {
-        // StageType collapses transform / async transform / effectful transform
-        // to `Transform`, so the six variants cover all seven descriptor paths
-        // the planner serves.
+        // StageType collapses pure and effectful transform descriptors to
+        // `Transform`, so the six variants cover every planner stage kind.
         for stage_type in [
             StageType::FiniteSource,
             StageType::InfiniteSource,
