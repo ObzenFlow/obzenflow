@@ -1,0 +1,14 @@
+error[E0432]: unresolved import `obzenflow_dsl::async_transform`
+ --> tests/compile_fail/async_transform_surface/removed_async_surface.rs:5:5
+  |
+5 | use obzenflow_dsl::async_transform;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `async_transform` in the root
+
+error[E0432]: unresolved import `obzenflow_runtime::stages::common::handlers::AsyncTransformHandler`
+ --> tests/compile_fail/async_transform_surface/removed_async_surface.rs:6:5
+  |
+6 | use obzenflow_runtime::stages::common::handlers::AsyncTransformHandler;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^---------------------
+  |     |                                            |
+  |     |                                            help: a similar name exists in the module: `TransformHandler`
+  |     no `AsyncTransformHandler` in `stages::common::handlers`

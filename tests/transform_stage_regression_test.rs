@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+//! Transform stage integration regression tests.
+
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
@@ -19,11 +21,11 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::WriterId;
-use obzenflow_dsl::{async_transform, flow, sink, source, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
+    FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::observer::{
     ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
@@ -31,16 +33,16 @@ use obzenflow_runtime::stages::observer::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// File-local payload for the async-transform stage test. The JSON shape
+/// File-local payload for the transform stage regression test. The JSON shape
 /// matches what `TestEventSource` emits; the type fingerprints the stage
 /// contract per FLOWIP-114c.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct AsyncTransformEvent {
+struct TransformStageEvent {
     index: u64,
 }
 
-impl TypedPayload for AsyncTransformEvent {
-    const EVENT_TYPE: &'static str = "async_transform.event";
+impl TypedPayload for TransformStageEvent {
+    const EVENT_TYPE: &'static str = "transform.stage.event";
 }
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -82,7 +84,7 @@ impl FiniteSourceHandler for TestEventSource {
             self.emitted += 1;
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id,
-                <AsyncTransformEvent as TypedPayload>::EVENT_TYPE,
+                <TransformStageEvent as TypedPayload>::EVENT_TYPE,
                 json!({ "index": index }),
             )]))
         } else {
@@ -144,24 +146,19 @@ impl SinkHandler for CollectSink {
 }
 
 #[derive(Clone, Debug)]
-struct AsyncErrorTransform {
+struct ErrorTransform {
     drain_calls: Arc<AtomicU64>,
 }
 
-impl AsyncErrorTransform {
+impl ErrorTransform {
     fn new(drain_calls: Arc<AtomicU64>) -> Self {
         Self { drain_calls }
     }
 }
 
 #[async_trait]
-impl AsyncTransformHandler for AsyncErrorTransform {
-    async fn process(
-        &self,
-        event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        tokio::task::yield_now().await;
-
+impl TransformHandler for ErrorTransform {
+    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         let index = event
             .payload()
             .get("index")
@@ -247,15 +244,11 @@ impl MiddlewareFactory for CountDataCommitFactory {
 }
 
 #[derive(Clone, Debug)]
-struct AsyncPassThroughTransform;
+struct PassThroughTransform;
 
 #[async_trait]
-impl AsyncTransformHandler for AsyncPassThroughTransform {
-    async fn process(
-        &self,
-        event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        tokio::task::yield_now().await;
+impl TransformHandler for PassThroughTransform {
+    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![event])
     }
 
@@ -265,23 +258,19 @@ impl AsyncTransformHandler for AsyncPassThroughTransform {
 }
 
 #[derive(Clone, Debug)]
-struct AsyncDrainFailTransform {
+struct DrainFailTransform {
     drain_calls: Arc<AtomicU64>,
 }
 
-impl AsyncDrainFailTransform {
+impl DrainFailTransform {
     fn new(drain_calls: Arc<AtomicU64>) -> Self {
         Self { drain_calls }
     }
 }
 
 #[async_trait]
-impl AsyncTransformHandler for AsyncDrainFailTransform {
-    async fn process(
-        &self,
-        event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        tokio::task::yield_now().await;
+impl TransformHandler for DrainFailTransform {
+    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![event])
     }
 
@@ -292,34 +281,34 @@ impl AsyncTransformHandler for AsyncDrainFailTransform {
 }
 
 #[tokio::test]
-async fn async_transform_routes_error_kinds_to_correct_journal() -> Result<()> {
+async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
     let counter = Arc::new(AtomicU64::new(0));
     let counter_for_flow = counter.clone();
     let drain_calls = Arc::new(AtomicU64::new(0));
     let drain_calls_for_flow = drain_calls.clone();
 
-    let journal_root = unique_journal_dir("async_transform_routing");
+    let journal_root = unique_journal_dir("transform_routing");
     let journal_root_for_flow = journal_root.clone();
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
         let source_handler = TestEventSource::new();
-        let transform_handler = AsyncErrorTransform::new(drain_calls_for_flow);
+        let transform_handler = ErrorTransform::new(drain_calls_for_flow);
         let sink_handler = EventCounterSink::new(counter_for_flow);
 
         Ok(flow! {
-            name: "async_transform_routing_test",
+            name: "transform_routing_test",
             journals: disk_journals(journal_root_for_flow.clone()),
             middleware: [],
 
             stages: {
-                source = source!(AsyncTransformEvent => source_handler);
-                async_errors = async_transform!(AsyncTransformEvent -> AsyncTransformEvent => transform_handler);
-                sink = sink!(AsyncTransformEvent => sink_handler);
+                source = source!(TransformStageEvent => source_handler);
+                errors = transform!(TransformStageEvent -> TransformStageEvent => transform_handler);
+                sink = sink!(TransformStageEvent => sink_handler);
             },
 
             topology: {
-                source |> async_errors;
-                async_errors |> sink;
+                source |> errors;
+                errors |> sink;
             }
         })
     })
@@ -352,9 +341,9 @@ async fn async_transform_routes_error_kinds_to_correct_journal() -> Result<()> {
                 continue;
             };
 
-            if name.starts_with("Transform_async_errors_error_") && name.ends_with(".log") {
+            if name.starts_with("Transform_errors_error_") && name.ends_with(".log") {
                 error_journals.push(file_path);
-            } else if name.starts_with("Transform_async_errors_") && name.ends_with(".log") {
+            } else if name.starts_with("Transform_errors_") && name.ends_with(".log") {
                 data_journals.push(file_path);
             }
         }
@@ -458,30 +447,30 @@ async fn async_transform_routes_error_kinds_to_correct_journal() -> Result<()> {
 }
 
 #[tokio::test]
-async fn async_transform_applies_stage_middleware() -> Result<()> {
+async fn transform_applies_stage_middleware() -> Result<()> {
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_for_flow = events.clone();
     let observer_calls = Arc::new(AtomicU64::new(0));
     let observer_calls_for_flow = observer_calls.clone();
 
-    let journal_root = unique_journal_dir("async_transform_middleware");
+    let journal_root = unique_journal_dir("transform_middleware");
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
         let source_handler = TestEventSource::new();
-        let transform_handler = AsyncPassThroughTransform;
+        let transform_handler = PassThroughTransform;
         let sink_handler = CollectSink::new(events_for_flow);
 
         Ok(flow! {
-            name: "async_transform_middleware_test",
+            name: "transform_middleware_test",
             journals: disk_journals(journal_root.clone()),
             middleware: [],
 
             stages: {
-                source = source!(AsyncTransformEvent => source_handler);
-                mw_transform = async_transform!(AsyncTransformEvent -> AsyncTransformEvent => transform_handler, [
+                source = source!(TransformStageEvent => source_handler);
+                mw_transform = transform!(TransformStageEvent -> TransformStageEvent => transform_handler, [
                     CountDataCommitFactory { calls: observer_calls_for_flow.clone() }
                 ]);
-                sink = sink!(AsyncTransformEvent => sink_handler);
+                sink = sink!(TransformStageEvent => sink_handler);
             },
 
             topology: {
@@ -519,27 +508,27 @@ async fn async_transform_applies_stage_middleware() -> Result<()> {
 }
 
 #[tokio::test]
-async fn async_transform_drain_failure_is_stage_level_failure() -> Result<()> {
+async fn transform_drain_failure_is_stage_level_failure() -> Result<()> {
     let counter = Arc::new(AtomicU64::new(0));
     let drain_calls = Arc::new(AtomicU64::new(0));
     let drain_calls_for_flow = drain_calls.clone();
 
-    let journal_root = unique_journal_dir("async_transform_drain_failure");
+    let journal_root = unique_journal_dir("transform_drain_failure");
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
         let source_handler = TestEventSource::new();
-        let transform_handler = AsyncDrainFailTransform::new(drain_calls_for_flow);
+        let transform_handler = DrainFailTransform::new(drain_calls_for_flow);
         let sink_handler = EventCounterSink::new(counter);
 
         Ok(flow! {
-            name: "async_transform_drain_failure_test",
+            name: "transform_drain_failure_test",
             journals: disk_journals(journal_root.clone()),
             middleware: [],
 
             stages: {
-                source = source!(AsyncTransformEvent => source_handler);
-                drain_fail_transform = async_transform!(AsyncTransformEvent -> AsyncTransformEvent => transform_handler);
-                sink = sink!(AsyncTransformEvent => sink_handler);
+                source = source!(TransformStageEvent => source_handler);
+                drain_fail_transform = transform!(TransformStageEvent -> TransformStageEvent => transform_handler);
+                sink = sink!(TransformStageEvent => sink_handler);
             },
 
             topology: {

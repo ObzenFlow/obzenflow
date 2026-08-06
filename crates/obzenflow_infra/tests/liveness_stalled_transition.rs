@@ -10,13 +10,14 @@ use obzenflow_core::event::{
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{async_transform, flow, sink, source, FlowDefinition};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
+use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
+    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -75,31 +76,30 @@ impl FiniteSourceHandler for OneEventSource {
 }
 
 #[derive(Clone, Debug)]
-struct StallingTransform {
-    writer_id: WriterId,
-}
+struct StallingTransform;
 
 impl StallingTransform {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
 #[async_trait]
-impl AsyncTransformHandler for StallingTransform {
-    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        tokio::time::sleep(Duration::from_secs(130)).await;
-        Ok(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            ProbeOutputEvent::versioned_event_type(),
-            event.payload().clone(),
-        )])
-    }
+impl EffectfulTransformHandler for StallingTransform {
+    type Input = ProbeEvent;
+    type Output = ProbeOutputEvent;
+    type AllowedEffects = obzenflow_runtime::effect_set![];
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    async fn process(
+        &self,
+        input: ProbeEvent,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+        tokio::time::sleep(Duration::from_secs(130)).await;
+        fx.emit(ProbeOutputEvent { value: input.value })
+            .await
+            .map_err(|error| HandlerError::Other(error.to_string()))?;
+        Ok(fx.complete()?)
     }
 }
 
@@ -144,7 +144,11 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
 
             stages: {
                 numbers = source!(ProbeEvent => numbers_handler);
-                slow = async_transform!(ProbeEvent -> ProbeOutputEvent => slow_handler);
+                slow = effectful_transform!(
+                    ProbeEvent -> ProbeOutputEvent => slow_handler,
+                    effects: [],
+                    middleware: [],
+                );
                 sink = sink!(ProbeOutputEvent => sink_handler);
             },
 

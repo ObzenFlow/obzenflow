@@ -21,9 +21,8 @@ use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-    FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
-    TransformHandler,
+    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
+    InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
@@ -703,66 +702,6 @@ where
     }
 }
 
-pub struct PlaceholderAsyncTransform<In, Out> {
-    _phantom: PhantomData<(In, Out)>,
-    message: Option<&'static str>,
-    warned: Arc<AtomicBool>,
-}
-
-impl<In, Out> PlaceholderAsyncTransform<In, Out> {
-    pub fn new(message: Option<&'static str>) -> Self {
-        Self {
-            _phantom: PhantomData,
-            message,
-            warned: Arc::new(AtomicBool::new(false)),
-        }
-    }
-}
-
-impl<In, Out> Clone for PlaceholderAsyncTransform<In, Out> {
-    fn clone(&self) -> Self {
-        Self {
-            _phantom: PhantomData,
-            message: self.message,
-            warned: Arc::clone(&self.warned),
-        }
-    }
-}
-
-impl<In, Out> fmt::Debug for PlaceholderAsyncTransform<In, Out> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PlaceholderAsyncTransform")
-            .field("message", &self.message)
-            .finish()
-    }
-}
-
-impl<In, Out> TransformTyping for PlaceholderAsyncTransform<In, Out> {
-    type Input = In;
-    type Output = Out;
-}
-
-#[async_trait]
-impl<In, Out> AsyncTransformHandler for PlaceholderAsyncTransform<In, Out>
-where
-    In: Send + Sync + 'static,
-    Out: Send + Sync + 'static,
-{
-    async fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        if !self.warned.swap(true, Ordering::Relaxed) {
-            tracing::warn!("{}", placeholder_message("async transform", self.message));
-        }
-        Ok(Vec::new())
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        if !self.warned.swap(true, Ordering::Relaxed) {
-            tracing::warn!("{}", placeholder_message("async transform", self.message));
-        }
-        Ok(())
-    }
-}
-
 // ============================================================================
 // Contract-bound handler wrappers (FLOWIP-086z)
 // ============================================================================
@@ -820,63 +759,6 @@ where
 
     fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         self.inner.process(event)
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        self.inner.drain().await
-    }
-}
-
-/// Wrapper that binds a declared `In -> Out` contract to an arbitrary async transform handler.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct BoundAsyncTransform<In, Out, H> {
-    inner: H,
-    _phantom: PhantomData<(In, Out)>,
-}
-
-impl<In, Out, H> BoundAsyncTransform<In, Out, H>
-where
-    In: 'static,
-    Out: 'static,
-{
-    pub fn new(inner: H) -> Self {
-        Self {
-            inner,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<In, Out, H> fmt::Debug for BoundAsyncTransform<In, Out, H>
-where
-    H: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BoundAsyncTransform")
-            .field("inner", &self.inner)
-            .finish()
-    }
-}
-
-impl<In: 'static, Out: 'static, H> TransformTyping for BoundAsyncTransform<In, Out, H> {
-    type Input = In;
-    type Output = Out;
-}
-
-#[async_trait]
-impl<In, Out, H> AsyncTransformHandler for BoundAsyncTransform<In, Out, H>
-where
-    In: Send + Sync + 'static,
-    Out: Send + Sync + 'static,
-    H: AsyncTransformHandler + Send + Sync,
-{
-    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
-        self.inner.install_lineage_policy(policy)
-    }
-
-    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        self.inner.process(event).await
     }
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
@@ -1503,7 +1385,7 @@ pub fn validate_effect_fact_containment(
 ///
 /// Applicable slots by role:
 /// - Source (any kind): `output_type`
-/// - Transform / AsyncTransform / Stateful: `input_type`, `output_type`
+/// - Transform / Stateful: `input_type`, `output_type`
 /// - Sink: `input_type`
 /// - Join: `reference_type`, `stream_type`, `output_type`
 #[allow(clippy::result_large_err)]

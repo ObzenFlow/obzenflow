@@ -10,14 +10,11 @@ use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{CycleDepth, StageId, WriterId};
-use obzenflow_dsl::{
-    async_source, async_transform, flow, sink, source, test_flow, transform, FlowDefinition,
-};
+use obzenflow_dsl::{async_source, flow, sink, source, test_flow, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
-    TransformHandler,
+    AsyncFiniteSourceHandler, FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::testing::{JournalProbe, TestClock};
 use serde::{Deserialize, Serialize};
@@ -45,6 +42,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tokio::sync::Notify;
 
 fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -142,6 +140,56 @@ impl FiniteSourceHandler for SingleSeedSource {
 }
 
 #[derive(Clone, Debug)]
+struct SeedThenEofSource {
+    state: u8,
+    writer_id: WriterId,
+    correlation_id: CorrelationId,
+    target: u64,
+    iteration_started: Arc<Notify>,
+}
+
+impl SeedThenEofSource {
+    fn new(target: u64, iteration_started: Arc<Notify>) -> Self {
+        Self {
+            state: 0,
+            writer_id: WriterId::from(StageId::new()),
+            correlation_id: CorrelationId::new(),
+            target,
+            iteration_started,
+        }
+    }
+}
+
+#[async_trait]
+impl AsyncFiniteSourceHandler for SeedThenEofSource {
+    async fn next(
+        &mut self,
+    ) -> std::result::Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
+    > {
+        match self.state {
+            0 => {
+                self.state = 1;
+                let mut event = ChainEventFactory::data_event(
+                    self.writer_id,
+                    SeedEvent::versioned_event_type(),
+                    json!({ "kind": KIND_SEED, "depth": 0u64, "target": self.target }),
+                );
+                event.set_single_correlation(self.correlation_id, None);
+                Ok(Some(vec![event]))
+            }
+            1 => {
+                self.iteration_started.notified().await;
+                self.state = 2;
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct EntryConvergeTransform {
     writer_id: WriterId,
     processed_data: Arc<AtomicU64>,
@@ -199,25 +247,22 @@ impl TransformHandler for EntryConvergeTransform {
 struct IterationTransform {
     writer_id: WriterId,
     processed_iterations: Arc<AtomicU64>,
-    delay: Duration,
+    iteration_started: Option<Arc<Notify>>,
 }
 
 impl IterationTransform {
-    fn new(processed_iterations: Arc<AtomicU64>, delay: Duration) -> Self {
+    fn new(processed_iterations: Arc<AtomicU64>, iteration_started: Option<Arc<Notify>>) -> Self {
         Self {
             writer_id: WriterId::from(StageId::new()),
             processed_iterations,
-            delay,
+            iteration_started,
         }
     }
 }
 
 #[async_trait]
-impl AsyncTransformHandler for IterationTransform {
-    async fn process(
-        &self,
-        event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+impl TransformHandler for IterationTransform {
+    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         let ChainEventContent::Data { payload, .. } = &event.content else {
             return Ok(Vec::new());
         };
@@ -227,7 +272,9 @@ impl AsyncTransformHandler for IterationTransform {
         }
 
         self.processed_iterations.fetch_add(1, Ordering::Relaxed);
-        tokio::time::sleep(self.delay).await; // hang-guard: test-only async latency under paused time
+        if let Some(iteration_started) = &self.iteration_started {
+            iteration_started.notify_one();
+        }
 
         let depth = payload.get("depth").and_then(|v| v.as_u64()).unwrap_or(0);
         let target = payload.get("target").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -288,16 +335,15 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     let journal_root = unique_journal_dir("cycle_buffers_external_eof");
 
     let target_iterations = 5u64;
-    let iter_delay = Duration::from_millis(200);
-
     let entry_processed = Arc::new(AtomicU64::new(0));
     let iter_processed = Arc::new(AtomicU64::new(0));
     let entry_processed_for_flow = entry_processed.clone();
     let iter_processed_for_flow = iter_processed.clone();
     let (sink, done_count) = DoneCounterSink::new();
-    let source = SingleSeedSource::new(target_iterations);
+    let iteration_started = Arc::new(Notify::new());
+    let source = SeedThenEofSource::new(target_iterations, iteration_started.clone());
     let entry = EntryConvergeTransform::new(entry_processed_for_flow);
-    let iter = IterationTransform::new(iter_processed_for_flow, iter_delay);
+    let iter = IterationTransform::new(iter_processed_for_flow, Some(iteration_started));
 
     let harness = test_flow! {
         name: "cycle_buffers_external_eof_until_scc_quiescent",
@@ -305,9 +351,9 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!(SeedEvent => source);
+            src = async_source!(SeedEvent => source);
             entry = transform!(SeedEvent -> SeedEvent => entry);
-            iter = async_transform!(SeedEvent -> SeedEvent => iter);
+            iter = transform!(SeedEvent -> SeedEvent => iter);
             snk = sink!(SeedEvent => sink);
         },
 
@@ -387,17 +433,17 @@ struct SeedThenDrainSource {
     writer_id: WriterId,
     correlation_id: CorrelationId,
     target: u64,
-    drain_delay: Duration,
+    iteration_started: Arc<Notify>,
 }
 
 impl SeedThenDrainSource {
-    fn new(target: u64, drain_delay: Duration) -> Self {
+    fn new(target: u64, iteration_started: Arc<Notify>) -> Self {
         Self {
             state: 0,
             writer_id: WriterId::from(StageId::new()),
             correlation_id: CorrelationId::new(),
             target,
-            drain_delay,
+            iteration_started,
         }
     }
 }
@@ -422,7 +468,7 @@ impl AsyncFiniteSourceHandler for SeedThenDrainSource {
                 Ok(Some(vec![event]))
             }
             1 => {
-                tokio::time::sleep(self.drain_delay).await; // hang-guard: test-only virtual-time drain delay
+                self.iteration_started.notified().await;
                 self.state = 2;
                 Ok(Some(vec![ChainEventFactory::drain_event(self.writer_id)]))
             }
@@ -485,17 +531,15 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let journal_root = unique_journal_dir("cycle_buffers_drain");
 
     let target_iterations = 5u64;
-    let iter_delay = Duration::from_millis(200);
-    let drain_delay = Duration::from_millis(50);
-
     let entry_processed = Arc::new(AtomicU64::new(0));
     let iter_processed = Arc::new(AtomicU64::new(0));
     let entry_processed_for_flow = entry_processed.clone();
     let iter_processed_for_flow = iter_processed.clone();
     let (sink, done_count) = DoneCounterSink::new();
-    let source = SeedThenDrainSource::new(target_iterations, drain_delay);
+    let iteration_started = Arc::new(Notify::new());
+    let source = SeedThenDrainSource::new(target_iterations, iteration_started.clone());
     let entry = EntryConvergeTransform::new(entry_processed_for_flow);
-    let iter = IterationTransform::new(iter_processed_for_flow, iter_delay);
+    let iter = IterationTransform::new(iter_processed_for_flow, Some(iteration_started));
 
     let harness = test_flow! {
         name: "cycle_buffers_drain_until_scc_quiescent",
@@ -505,7 +549,7 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
         stages: {
             src = async_source!(SeedEvent => source);
             entry = transform!(SeedEvent -> SeedEvent => entry);
-            iter = async_transform!(SeedEvent -> SeedEvent => iter);
+            iter = transform!(SeedEvent -> SeedEvent => iter);
             snk = sink!(SeedEvent => sink);
         },
 
@@ -598,7 +642,7 @@ async fn cycle_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
     let definition = FlowDefinition::materialize(move |_runtime_config| {
         let source = DualSeedSource::new(converge_target, diverge_target);
         let entry = EntryConvergeTransform::new(entry_processed_for_flow);
-        let iter = IterationTransform::new(iter_processed_for_flow, Duration::ZERO);
+        let iter = IterationTransform::new(iter_processed_for_flow, None);
 
         Ok(flow! {
             name: "cycle_max_iterations_exceeded_routes_to_error_journal",
@@ -608,7 +652,7 @@ async fn cycle_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
             stages: {
                 src = source!(SeedEvent => source);
                 entry = transform!(SeedEvent -> SeedEvent => entry);
-                iter = async_transform!(SeedEvent -> SeedEvent => iter);
+                iter = transform!(SeedEvent -> SeedEvent => iter);
                 snk = sink!(SeedEvent => sink);
             },
 

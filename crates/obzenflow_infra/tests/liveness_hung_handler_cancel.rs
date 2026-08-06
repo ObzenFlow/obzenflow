@@ -8,13 +8,14 @@ use obzenflow_core::event::{ChainEvent, ChainEventFactory, SystemEvent, SystemEv
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{async_transform, flow, sink, source, FlowDefinition};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
+use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
+    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler,
 };
 use obzenflow_runtime::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use obzenflow_runtime::stages::SourceError;
@@ -33,8 +34,10 @@ impl TypedPayload for ProbeEvent {
     const EVENT_TYPE: &'static str = "probe.event";
 }
 use std::future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::Notify;
 
 #[derive(Clone, Debug)]
 struct OneEventSource {
@@ -66,17 +69,52 @@ impl FiniteSourceHandler for OneEventSource {
 }
 
 #[derive(Clone, Debug)]
-struct HungTransform;
+struct HungTransform {
+    entered: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+    drop_observed: Arc<Notify>,
+}
+
+impl HungTransform {
+    fn new(entered: Arc<Notify>, dropped: Arc<AtomicBool>, drop_observed: Arc<Notify>) -> Self {
+        Self {
+            entered,
+            dropped,
+            drop_observed,
+        }
+    }
+}
+
+struct PendingInvocationGuard {
+    dropped: Arc<AtomicBool>,
+    drop_observed: Arc<Notify>,
+}
+
+impl Drop for PendingInvocationGuard {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::SeqCst);
+        self.drop_observed.notify_one();
+    }
+}
 
 #[async_trait]
-impl AsyncTransformHandler for HungTransform {
-    async fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+impl EffectfulTransformHandler for HungTransform {
+    type Input = ProbeEvent;
+    type Output = ProbeEvent;
+    type AllowedEffects = obzenflow_runtime::effect_set![];
+
+    async fn process(
+        &self,
+        _input: ProbeEvent,
+        _fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+        let _pending = PendingInvocationGuard {
+            dropped: self.dropped.clone(),
+            drop_observed: self.drop_observed.clone(),
+        };
+        self.entered.notify_one();
         future::pending::<()>().await;
         unreachable!("pending() never resolves")
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
     }
 }
 
@@ -100,6 +138,12 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
         Arc::new(Mutex::new(None));
     let flow_handle_slot_hook = flow_handle_slot.clone();
     let system_journal_slot_hook = system_journal_slot.clone();
+    let handler_entered = Arc::new(Notify::new());
+    let handler_dropped = Arc::new(AtomicBool::new(false));
+    let handler_drop_observed = Arc::new(Notify::new());
+    let handler_entered_for_flow = handler_entered.clone();
+    let handler_dropped_for_flow = handler_dropped.clone();
+    let handler_drop_observed_for_flow = handler_drop_observed.clone();
 
     let hook = Box::new(move |handle: &Arc<FlowHandle>| {
         *flow_handle_slot_hook.lock().expect("flow_handle_slot lock") = Some(handle.clone());
@@ -112,7 +156,11 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
         let one_event_source = OneEventSource::new();
-        let hung_transform = HungTransform;
+        let hung_transform = HungTransform::new(
+            handler_entered_for_flow.clone(),
+            handler_dropped_for_flow.clone(),
+            handler_drop_observed_for_flow.clone(),
+        );
         let noop_sink = NoopSink;
 
         Ok(flow! {
@@ -122,7 +170,11 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
 
             stages: {
                 numbers = source!(ProbeEvent => one_event_source);
-                hung = async_transform!(ProbeEvent -> ProbeEvent => hung_transform);
+                hung = effectful_transform!(
+                    ProbeEvent -> ProbeEvent => hung_transform,
+                    effects: [],
+                    middleware: [],
+                );
                 snk = sink!(ProbeEvent => noop_sink);
             },
 
@@ -160,8 +212,9 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
         captured_running.expect("flow handle captured and running")
     };
 
-    // Give the pipeline a moment to enter the hung handler call.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(5), handler_entered.notified())
+        .await
+        .expect("hung handler should enter before stop is requested");
 
     flow_handle
         .stop_graceful(Duration::from_millis(100))
@@ -231,4 +284,14 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
             "expected a stop/cancel lifecycle event after stop escalation; saw pipeline events: {pipeline_events:?}"
         );
     }
+
+    if !handler_dropped.load(Ordering::SeqCst) {
+        tokio::time::timeout(Duration::from_secs(5), handler_drop_observed.notified())
+            .await
+            .expect("cancelled handler invocation should be dropped");
+    }
+    assert!(
+        handler_dropped.load(Ordering::SeqCst),
+        "cancelling the stage must drop the directly awaited handler invocation"
+    );
 }

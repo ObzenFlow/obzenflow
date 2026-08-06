@@ -22,7 +22,6 @@ macro_rules! reject_in_every_slot {
         let _ = obzenflow_dsl::infinite_source!(Output => $($bad)+);
         let _ = obzenflow_dsl::async_infinite_source!(Output => $($bad)+);
         let _ = obzenflow_dsl::transform!(Input -> Output => $($bad)+);
-        let _ = obzenflow_dsl::async_transform!(Input -> Output => $($bad)+);
         let _ = obzenflow_dsl::effectful_transform!(
             Input -> Output => $($bad)+,
             effects: [],

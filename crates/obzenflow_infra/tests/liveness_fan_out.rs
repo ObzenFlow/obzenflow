@@ -7,13 +7,14 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, EdgeLivenessState, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{async_source, async_transform, flow, sink, FlowDefinition};
+use obzenflow_dsl::{async_source, effectful_transform, flow, sink, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
+use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, AsyncTransformHandler, SinkHandler,
+    AsyncFiniteSourceHandler, EffectfulTransformHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
@@ -105,35 +106,36 @@ impl AsyncFiniteSourceHandler for DelayedTwoEventSource {
 
 #[derive(Clone, Debug)]
 struct SlowTransform {
-    writer_id: obzenflow_core::WriterId,
     calls: Arc<AtomicUsize>,
 }
 
 impl SlowTransform {
     fn new() -> Self {
         Self {
-            writer_id: obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
             calls: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
 
 #[async_trait]
-impl AsyncTransformHandler for SlowTransform {
-    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+impl EffectfulTransformHandler for SlowTransform {
+    type Input = ProbeEvent;
+    type Output = SlowProbeEvent;
+    type AllowedEffects = obzenflow_runtime::effect_set![];
+
+    async fn process(
+        &self,
+        input: ProbeEvent,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
         if call_index == 0 {
             tokio::time::sleep(Duration::from_secs(50)).await;
         }
-        Ok(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            SlowProbeEvent::versioned_event_type(),
-            event.payload().clone(),
-        )])
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+        fx.emit(SlowProbeEvent { value: input.value })
+            .await
+            .map_err(|error| HandlerError::Other(error.to_string()))?;
+        Ok(fx.complete()?)
     }
 }
 
@@ -151,8 +153,8 @@ impl FastTransform {
 }
 
 #[async_trait]
-impl AsyncTransformHandler for FastTransform {
-    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+impl TransformHandler for FastTransform {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
             FastProbeEvent::versioned_event_type(),
@@ -230,8 +232,12 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
 
             stages: {
                 numbers = async_source!(ProbeEvent => numbers_handler);
-                slow = async_transform!(ProbeEvent -> SlowProbeEvent => slow_handler);
-                fast = async_transform!(ProbeEvent -> FastProbeEvent => fast_handler);
+                slow = effectful_transform!(
+                    ProbeEvent -> SlowProbeEvent => slow_handler,
+                    effects: [],
+                    middleware: [],
+                );
+                fast = transform!(ProbeEvent -> FastProbeEvent => fast_handler);
                 sink_slow = sink!(SlowProbeEvent => slow_sink_handler);
                 sink_fast = sink!(FastProbeEvent => fast_sink_handler);
             },

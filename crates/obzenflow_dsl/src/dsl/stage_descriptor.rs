@@ -36,8 +36,7 @@ use obzenflow_runtime::{
         common::{
             control_strategies::{JonestownSignalStrategy, SignalGate},
             handlers::{
-                AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-                AsyncTransformHandlerAdapter, EffectfulStatefulHandler,
+                AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulStatefulHandler,
                 EffectfulStatefulHandlerAdapter, EffectfulTransformHandler,
                 EffectfulTransformHandlerAdapter, FiniteSourceHandler, InfiniteSourceHandler,
                 JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
@@ -414,9 +413,6 @@ pub enum PolicyGuardSurface {
     /// Sync transforms, sync stateful stages, joins: deterministic handler
     /// shells with no live I/O unit. Policy middleware is build-rejected.
     PureSync,
-    /// Async non-effectful transforms: deprecated surface; policy middleware
-    /// warns naming FLOWIP-128b and FLOWIP-120f until 120f deletes it.
-    AsyncNonEffectful,
     /// Effectful stages: per-effect policy placement (FLOWIP-120c phase 3).
     Effectful,
     /// Effectful stateful stages do not install the stateful effect boundary
@@ -1299,133 +1295,6 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             .build()
             .await
             .map_err(|e| format!("Failed to build transform: {e:?}"))?;
-
-        // Create adapter to bridge to StageHandle
-        let adapter = StageHandleAdapter::new(
-            handle,
-            config.stage_id,
-            config.name,
-            StageType::Transform,
-            translate_stage_event_to_transform,
-            check_transform_state,
-        );
-
-        Ok(Box::new(adapter) as BoxedStageHandle)
-    }
-}
-
-/// Descriptor for async transform stages.
-pub struct AsyncTransformDescriptor<H: AsyncTransformHandler + 'static> {
-    pub name: String,
-    pub handler: H,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
-    pub backpressure: Option<BackpressureClause>,
-}
-
-#[async_trait]
-impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
-    for AsyncTransformDescriptor<H>
-{
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
-        self.backpressure.as_ref()
-    }
-
-    fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-
-    fn stage_type(&self) -> StageType {
-        StageType::Transform
-    }
-
-    fn policy_guard_surface(&self) -> PolicyGuardSurface {
-        PolicyGuardSurface::AsyncNonEffectful
-    }
-
-    fn stage_middleware_names(&self) -> Vec<String> {
-        self.middleware
-            .iter()
-            .map(|f| f.label().to_string())
-            .collect()
-    }
-
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &self.middleware
-    }
-
-    async fn create_handle_with_flow_middleware(
-        self: Box<Self>,
-        config: StageConfig,
-        resources: StageResources,
-        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
-        control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> StageCreationResult<BoxedStageHandle> {
-        // Validate middleware safety
-        for factory in &self.middleware {
-            let validation_result =
-                validate_middleware_safety(factory.as_ref(), StageType::Transform, &self.name);
-
-            if !validation_result.is_ok() {
-                for error in &validation_result.errors {
-                    tracing::error!("{}", error);
-                }
-            }
-        }
-
-        // Create control strategy before moving middleware
-        // Resolve flow and stage middleware
-        let resolved = crate::middleware_resolution::resolve_middleware(
-            flow_middleware,
-            self.middleware,
-            &config.name,
-        )?;
-
-        // Log the resolution
-        crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-        let control_strategy = create_default_signal_strategy(&resolved.middleware);
-
-        // Create instrumentation configuration
-        let instrumentation_config = InstrumentationConfig::default();
-        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
-            control_middleware.clone();
-
-        let placement =
-            plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
-
-        instrumentation
-            .bind_control_plane(
-                &config.stage_id,
-                &control_provider,
-                placement.expects_circuit_breaker,
-                placement.expects_rate_limiter,
-            )
-            .map_err(|e| e.to_string())?;
-        let instrumentation = Arc::new(instrumentation);
-
-        // Create the stage configuration
-        let transform_config = TransformConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name.clone(),
-            observers: placement.observers.build(),
-            control_strategy: Some(control_strategy),
-            upstream_stages: resources.upstream_stages.clone(),
-            cycle_guard: config.cycle_guard,
-        };
-
-        // Keep the existing temporary async adapter until FLOWIP-120f removes
-        // this handler family. It carries no middleware or policy authority.
-        let handler = AsyncTransformHandlerAdapter(self.handler);
-        let handle = TransformBuilder::new(handler, transform_config, resources)
-            .with_instrumentation(instrumentation)
-            .build()
-            .await
-            .map_err(|e| format!("Failed to build async transform: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
         let adapter = StageHandleAdapter::new(

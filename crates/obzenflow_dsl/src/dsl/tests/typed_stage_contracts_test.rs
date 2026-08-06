@@ -15,9 +15,9 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
-        AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-        EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinHandler,
-        SinkHandler, StatefulHandler, TransformHandler, TypedTransformHandler,
+        AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulTransformHandler,
+        FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
+        TransformHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::typing::{
         JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
@@ -261,39 +261,6 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
-    struct ExactAsyncTransform;
-
-    impl TransformTyping for ExactAsyncTransform {
-        type Input = InputEvent;
-        type Output = OutputEvent;
-    }
-
-    #[async_trait]
-    impl AsyncTransformHandler for ExactAsyncTransform {
-        async fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-            Ok(vec![])
-        }
-
-        async fn drain(&mut self) -> Result<(), HandlerError> {
-            Ok(())
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct UntypedAsyncTransform;
-
-    #[async_trait]
-    impl AsyncTransformHandler for UntypedAsyncTransform {
-        async fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-            Ok(vec![])
-        }
-
-        async fn drain(&mut self) -> Result<(), HandlerError> {
-            Ok(())
-        }
-    }
-
-    #[derive(Clone, Debug)]
     struct ExactStateful;
 
     impl StatefulTyping for ExactStateful {
@@ -496,28 +463,6 @@ mod tests {
         assert_eq!(untyped_transform_meta.input_type, exact::<InputEvent>());
         assert_eq!(untyped_transform_meta.output_type, exact::<OutputEvent>());
 
-        let async_transform = crate::async_transform!(
-            name: "async_transform",
-            InputEvent -> OutputEvent => ExactAsyncTransform
-        );
-        let async_transform_meta = async_transform.typing_metadata().unwrap();
-        assert_eq!(async_transform_meta.input_type, exact::<InputEvent>());
-        assert_eq!(async_transform_meta.output_type, exact::<OutputEvent>());
-
-        let untyped_async_transform = crate::async_transform!(
-            name: "untyped_async_transform",
-            InputEvent -> OutputEvent => UntypedAsyncTransform
-        );
-        let untyped_async_transform_meta = untyped_async_transform.typing_metadata().unwrap();
-        assert_eq!(
-            untyped_async_transform_meta.input_type,
-            exact::<InputEvent>()
-        );
-        assert_eq!(
-            untyped_async_transform_meta.output_type,
-            exact::<OutputEvent>()
-        );
-
         let stateful = crate::stateful!(
             name: "stateful",
             InputEvent -> OutputEvent => ExactStateful,
@@ -556,17 +501,6 @@ mod tests {
         assert_eq!(transform_meta.output_type, exact::<OutputEvent>());
         assert_output_contract(
             transform_meta,
-            vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
-        );
-
-        let async_transform = crate::async_transform!(
-            name: "async_transform",
-            InputEvent -> OutputEvent, outputs: [AlternateEvent] => ExactAsyncTransform
-        );
-        let async_transform_meta = async_transform.typing_metadata().unwrap();
-        assert_eq!(async_transform_meta.output_type, exact::<OutputEvent>());
-        assert_output_contract(
-            async_transform_meta,
             vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
         );
 
@@ -661,17 +595,6 @@ mod tests {
         assert_eq!(transform_meta.output_type, exact::<OutputEvent>());
         assert_output_contract(
             transform_meta,
-            vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
-        );
-
-        let async_transform = crate::async_transform!(
-            name: "multi_output_async_transform",
-            InputEvent -> { OutputEvent, AlternateEvent } => ExactAsyncTransform
-        );
-        let async_transform_meta = async_transform.typing_metadata().unwrap();
-        assert_eq!(async_transform_meta.output_type, exact::<OutputEvent>());
-        assert_output_contract(
-            async_transform_meta,
             vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
         );
 
@@ -853,15 +776,6 @@ mod tests {
             source_meta.placeholder_message.as_deref(),
             Some("awaiting source")
         );
-
-        let async_transform = crate::async_transform!(
-            name: "transform",
-            InputEvent -> OutputEvent => placeholder!()
-        );
-        let async_transform_meta = async_transform.typing_metadata().unwrap();
-        assert!(async_transform_meta.is_placeholder);
-        assert_eq!(async_transform_meta.input_type, exact::<InputEvent>());
-        assert_eq!(async_transform_meta.output_type, exact::<OutputEvent>());
     }
 
     /// FLOWIP-114c: validate_edge_typing returns Err with one EdgeError per

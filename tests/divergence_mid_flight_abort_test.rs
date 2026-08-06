@@ -22,12 +22,13 @@ use obzenflow_core::event::types::ViolationCause as EventViolationCause;
 use obzenflow_core::event::SystemEventType;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{CycleDepth, DivergenceContract, StageId, TransportContract, WriterId};
-use obzenflow_dsl::{async_transform, sink, source, test_flow, transform};
+use obzenflow_dsl::{effectful_transform, sink, source, test_flow, transform};
 use obzenflow_infra::journal::memory_journals;
+use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncTransformHandler, FiniteSourceHandler, SinkHandler, TransformHandler,
+    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::testing::{EventShape, JournalOrder, JournalSnapshot, TestClock};
 use serde::{Deserialize, Serialize};
@@ -82,26 +83,43 @@ impl FiniteSourceHandler for SeedSource {
 }
 
 #[derive(Clone, Debug)]
-struct SlowEntryTransform {
+struct DelayedSeedTransform {
     delay: Duration,
 }
 
-impl SlowEntryTransform {
+impl DelayedSeedTransform {
     fn new(delay: Duration) -> Self {
         Self { delay }
     }
 }
 
 #[async_trait]
-impl AsyncTransformHandler for SlowEntryTransform {
+impl EffectfulTransformHandler for DelayedSeedTransform {
+    type Input = SeedEvent;
+    type Output = SeedEvent;
+    type AllowedEffects = obzenflow_runtime::effect_set![];
+
     async fn process(
         &self,
-        event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        input: SeedEvent,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> std::result::Result<StageCompletion<Self::Output>, HandlerError> {
         // Ensure the pipeline stays busy long enough for the supervisor tick to
         // schedule contract checks from the active processing path.
         sleep(self.delay).await;
+        fx.emit(input)
+            .await
+            .map_err(|error| HandlerError::Other(error.to_string()))?;
+        Ok(fx.complete()?)
+    }
+}
 
+#[derive(Clone, Debug)]
+struct CycleEntryTransform;
+
+#[async_trait]
+impl TransformHandler for CycleEntryTransform {
+    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         // Prevent a data feedback loop: we only need a cycle topology for SCC
         // wiring, and a signal storm on the SCC-internal edge.
         if event.is_data() && event.flow_context.stage_name == "iter" {
@@ -187,24 +205,18 @@ impl TransformHandler for FanInEntryTransform {
 
 #[derive(Clone, Debug)]
 struct CycleDepthInjectionEntryTransform {
-    delay: Duration,
     bump_to: u16,
 }
 
 impl CycleDepthInjectionEntryTransform {
-    fn new(delay: Duration, bump_to: u16) -> Self {
-        Self { delay, bump_to }
+    fn new(bump_to: u16) -> Self {
+        Self { bump_to }
     }
 }
 
 #[async_trait]
-impl AsyncTransformHandler for CycleDepthInjectionEntryTransform {
-    async fn process(
-        &self,
-        mut event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        sleep(self.delay).await;
-
+impl TransformHandler for CycleDepthInjectionEntryTransform {
+    fn process(&self, mut event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         // The CycleGuard stamps cycle SCC metadata at the SCC entry point.
         // Bump depth beyond the configured threshold to force an end-to-end
         // DivergenceContract cycle-depth violation on SCC-internal edges.
@@ -258,7 +270,8 @@ impl SinkHandler for CountingSink {
 async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     let clock = TestClock::new().await.expect("paused runtime");
     let source = SeedSource::new(30);
-    let entry = SlowEntryTransform::new(Duration::from_millis(10));
+    let delay = DelayedSeedTransform::new(Duration::from_millis(10));
+    let entry = CycleEntryTransform;
     let iter = SignalStormTransform::new(50);
     let sink = CountingSink;
 
@@ -269,13 +282,19 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
 
         stages: {
             src = source!(SeedEvent => source);
-            entry = async_transform!(SeedEvent -> SeedEvent => entry);
+            delay = effectful_transform!(
+                SeedEvent -> SeedEvent => delay,
+                effects: [],
+                middleware: [],
+            );
+            entry = transform!(SeedEvent -> SeedEvent => entry);
             iter = transform!(SeedEvent -> SeedEvent => iter);
             snk = sink!(SeedEvent => sink);
         },
 
         topology: {
-            src |> entry;
+            src |> delay;
+            delay |> entry;
             entry |> iter;
             entry <| iter;
             entry |> snk;
@@ -386,7 +405,7 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
 async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> {
     let clock = TestClock::new().await.expect("paused runtime");
     let source = SeedSource::new(50);
-    let delay = SlowEntryTransform::new(Duration::from_millis(1));
+    let delay = DelayedSeedTransform::new(Duration::from_millis(1));
     let sink = CountingSink;
 
     let harness = test_flow! {
@@ -396,7 +415,11 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
 
         stages: {
             src = source!(SeedEvent => source);
-            delay = async_transform!(SeedEvent -> SeedEvent => delay);
+            delay = effectful_transform!(
+                SeedEvent -> SeedEvent => delay,
+                effects: [],
+                middleware: [],
+            );
             snk = sink!(SeedEvent => sink);
         },
 
@@ -577,7 +600,8 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
 async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
     let clock = TestClock::new().await.expect("paused runtime");
     let source = SeedSource::new(10);
-    let entry = CycleDepthInjectionEntryTransform::new(Duration::from_millis(5), 100);
+    let delay = DelayedSeedTransform::new(Duration::from_millis(5));
+    let entry = CycleDepthInjectionEntryTransform::new(100);
     let iter = DropAllDataTransform;
     let sink = CountingSink;
 
@@ -588,13 +612,19 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
 
         stages: {
             src = source!(SeedEvent => source);
-            entry = async_transform!(SeedEvent -> SeedEvent => entry);
+            delay = effectful_transform!(
+                SeedEvent -> SeedEvent => delay,
+                effects: [],
+                middleware: [],
+            );
+            entry = transform!(SeedEvent -> SeedEvent => entry);
             iter = transform!(SeedEvent -> SeedEvent => iter);
             snk = sink!(SeedEvent => sink);
         },
 
         topology: {
-            src |> entry;
+            src |> delay;
+            delay |> entry;
             entry |> iter;
             entry <| iter;
             entry |> snk;

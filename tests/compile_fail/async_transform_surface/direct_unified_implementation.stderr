@@ -1,0 +1,31 @@
+error[E0277]: the trait bound `DirectUnifiedTransform: obzenflow_runtime::stages::common::handlers::transform::traits::private::SealedUnifiedTransformHandler` is not satisfied
+  --> tests/compile_fail/async_transform_surface/direct_unified_implementation.rs:14:34
+   |
+14 | impl UnifiedTransformHandler for DirectUnifiedTransform {
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `TransformHandler` is not implemented for `DirectUnifiedTransform`
+  --> tests/compile_fail/async_transform_surface/direct_unified_implementation.rs:11:1
+   |
+11 | struct DirectUnifiedTransform;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: the following other types implement trait `TransformHandler`:
+             ChunkByBudgetTyped<In, Item>
+             FilterMapTyped<T, O, F>
+             FilterTyped<T, F>
+             MapTyped<T, O, F>
+             TryMap<T>
+             TryMapWith<F>
+             TryMapWithTyped<T, O, F>
+             obzenflow_runtime::stages::transform::Filter<F>
+           and $N others
+   = note: required for `DirectUnifiedTransform` to implement `obzenflow_runtime::stages::common::handlers::transform::traits::private::SealedUnifiedTransformHandler`
+note: required by a bound in `UnifiedTransformHandler`
+  --> crates/obzenflow_runtime/src/stages/common/handlers/transform/traits.rs
+   |
+   | pub trait UnifiedTransformHandler: private::SealedUnifiedTransformHandler + Send + Sync {
+   |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `UnifiedTransformHandler`
+   = note: `UnifiedTransformHandler` is a "sealed trait", because to implement it you also need to implement `obzenflow_runtime::stages::common::handlers::transform::traits::private::SealedUnifiedTransformHandler`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+   = help: the following types implement the trait:
+             obzenflow_runtime::stages::common::handlers::EffectfulTransformHandlerAdapter<H>
+             T

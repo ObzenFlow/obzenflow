@@ -86,34 +86,18 @@ pub trait TransformHandler: Send + Sync {
     fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
 }
 
-/// Async handler for stateless transform stages.
-///
-/// This is intended for IO-bound transforms that need to `await` (HTTP, DB, LLM calls).
-#[async_trait]
-pub trait AsyncTransformHandler: Send + Sync {
-    /// Process an event asynchronously, potentially producing multiple outputs.
-    async fn process(
-        &self,
-        event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
-
-    /// Perform any cleanup during shutdown.
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError>;
-
-    /// FLOWIP-010 §7: called once at stage build with the build-resolved
-    /// lineage policy. Handlers that create derived events store it; the
-    /// default ignores it.
-    fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
+mod private {
+    pub trait SealedUnifiedTransformHandler {}
 }
 
 /// Unified async handler surface used by the transform stage supervisor.
 ///
 /// This allows the supervisor to always `await` handler processing while preserving
-/// the existing sync `TransformHandler` API. Both sync and async handlers implement
-/// this trait (sync via blanket impl, async via `AsyncTransformHandlerAdapter` wrapper).
+/// the existing sync `TransformHandler` API. Downstream implementations enter only
+/// through the `TransformHandler` blanket bridge or a runtime-owned adapter.
 #[doc(hidden)]
 #[async_trait]
-pub trait UnifiedTransformHandler: Send + Sync {
+pub trait UnifiedTransformHandler: private::SealedUnifiedTransformHandler + Send + Sync {
     /// Process one event. `scope` is the per-event middleware execution
     /// scope computed by the supervisor at dispatch (FLOWIP-120c H3);
     /// handlers without middleware ignore it.
@@ -134,6 +118,8 @@ pub trait UnifiedTransformHandler: Send + Sync {
     fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
 }
 
+impl<T: TransformHandler + Send + Sync> private::SealedUnifiedTransformHandler for T {}
+
 #[async_trait]
 impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
     async fn process(
@@ -151,33 +137,6 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 
     fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
         TransformHandler::install_lineage_policy(self, policy)
-    }
-}
-
-/// Adapter wrapper that allows `AsyncTransformHandler` to implement `UnifiedTransformHandler`.
-#[doc(hidden)]
-#[derive(Clone, Debug)]
-pub struct AsyncTransformHandlerAdapter<T>(pub T);
-
-#[async_trait]
-impl<T: AsyncTransformHandler + Send + Sync> UnifiedTransformHandler
-    for AsyncTransformHandlerAdapter<T>
-{
-    async fn process(
-        &self,
-        event: ChainEvent,
-        _effect_context: Option<EffectInvocationContext>,
-        _scope: obzenflow_core::MiddlewareExecutionScope,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        AsyncTransformHandler::process(&self.0, event).await
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        AsyncTransformHandler::drain(&mut self.0).await
-    }
-
-    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
-        self.0.install_lineage_policy(policy)
     }
 }
 
@@ -324,6 +283,11 @@ where
 {
     type Input = H::Input;
     type Output = H::Output;
+}
+
+impl<H> private::SealedUnifiedTransformHandler for EffectfulTransformHandlerAdapter<H> where
+    H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static
+{
 }
 
 #[async_trait]

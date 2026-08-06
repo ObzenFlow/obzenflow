@@ -3,17 +3,15 @@
 // https://obzenflow.dev
 
 use crate::dsl::typing::{
-    PlaceholderAsyncSource, PlaceholderAsyncTransform, PlaceholderFiniteSource,
-    PlaceholderInfiniteSource, PlaceholderJoin, PlaceholderSink, PlaceholderStateful,
-    PlaceholderTransform,
+    PlaceholderAsyncSource, PlaceholderFiniteSource, PlaceholderInfiniteSource, PlaceholderJoin,
+    PlaceholderSink, PlaceholderStateful, PlaceholderTransform,
 };
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-    FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
-    TransformHandler,
+    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
+    InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
 };
 use serde_json::json;
 
@@ -64,25 +62,6 @@ async fn placeholder_async_source_is_safe_in_both_modes() {
         .await
         .expect("async infinite next");
     assert!(infinite.is_empty());
-}
-
-#[tokio::test]
-async fn placeholder_async_transform_drops_data_events_and_drains() {
-    let mut handler = PlaceholderAsyncTransform::<u8, u16>::new(None);
-    let event = ChainEventFactory::data_event(
-        WriterId::from(StageId::new()),
-        "test.event",
-        json!({"hello": "world"}),
-    );
-
-    let outputs = AsyncTransformHandler::process(&handler, event)
-        .await
-        .expect("async transform process");
-    assert!(outputs.is_empty());
-
-    AsyncTransformHandler::drain(&mut handler)
-        .await
-        .expect("async transform drain");
 }
 
 #[tokio::test]

@@ -43,12 +43,6 @@ fn main() {
         [middleware],
         backpressure: backpressure
     );
-    let _ = obzenflow_dsl::async_transform!(
-        name: "async_transform",
-        Input -> { Output, Alternate } => Handler::new(),
-        [middleware],
-        backpressure: backpressure
-    );
     let _ = obzenflow_dsl::effectful_transform!(
         name: "effectful_transform",
         Input -> { Output, Alternate } => Handler::new(),
