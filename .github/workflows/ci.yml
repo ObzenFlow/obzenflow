@@ -514,7 +514,9 @@ jobs:
           tool: cargo-machete
 
       - name: cargo-deny
-        run: cargo deny --all-features check
+        run: |
+          rm -rf target/advisory-dbs
+          cargo deny --all-features check
 
       - name: cargo-machete
         run: cargo machete --skip-target-dir
