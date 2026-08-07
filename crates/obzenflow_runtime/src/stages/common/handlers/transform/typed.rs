@@ -51,6 +51,11 @@ impl<O> TypedTransformInvocation<O> {
 
 /// Pure typed transform surface whose returned carrier is the handler's
 /// exhaustive output contract.
+#[diagnostic::on_unimplemented(
+    message = "this transform handler does not witness its arrow contract",
+    label = "this handler does not implement the typed synchronous transform contract",
+    note = "implement TypedTransformHandler with Input and Output matching the transform! arrow (FLOWIP-134b)"
+)]
 pub trait TypedTransformHandler: Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
     type Output: StageOutputFacts;

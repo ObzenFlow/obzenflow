@@ -20,6 +20,10 @@ use std::marker::PhantomData;
 
 mod sealed {
     pub trait Sealed {}
+
+    pub trait Member<T, Index> {}
+
+    pub trait SubsetOf<Super, Proof> {}
 }
 
 /// Type-level empty member list.
@@ -61,9 +65,16 @@ pub struct MemberAfter<Index>(PhantomData<fn() -> Index>);
             handler declaration and the matching DSL clause, or remove this call \
             (FLOWIP-120z)"
 )]
-pub trait Member<T, Index> {}
+pub trait Member<T, Index>: sealed::Member<T, Index> {}
 
+impl<T, Rest> sealed::Member<T, MemberFound> for WithMember<T, Rest> {}
 impl<T, Rest> Member<T, MemberFound> for WithMember<T, Rest> {}
+
+#[diagnostic::do_not_recommend]
+impl<T, Head, Rest, Index> sealed::Member<T, MemberAfter<Index>> for WithMember<Head, Rest> where
+    Rest: Member<T, Index>
+{
+}
 
 #[diagnostic::do_not_recommend]
 impl<T, Head, Rest, Index> Member<T, MemberAfter<Index>> for WithMember<Head, Rest> where
@@ -90,9 +101,19 @@ pub struct SubsetProofStep<AtIndex, RestProof>(PhantomData<fn() -> (AtIndex, Res
             `Output` set, and a stage arrow must equal the handler's declared set in both \
             directions (FLOWIP-120z)"
 )]
-pub trait SubsetOf<Super, Proof> {}
+pub trait SubsetOf<Super, Proof>: sealed::SubsetOf<Super, Proof> {}
 
+impl<Super> sealed::SubsetOf<Super, SubsetProofEnd> for EmptySet {}
 impl<Super> SubsetOf<Super, SubsetProofEnd> for EmptySet {}
+
+#[diagnostic::do_not_recommend]
+impl<Head, Rest, Super, At, RestProof> sealed::SubsetOf<Super, SubsetProofStep<At, RestProof>>
+    for WithMember<Head, Rest>
+where
+    Super: Member<Head, At>,
+    Rest: SubsetOf<Super, RestProof>,
+{
+}
 
 #[diagnostic::do_not_recommend]
 impl<Head, Rest, Super, At, RestProof> SubsetOf<Super, SubsetProofStep<At, RestProof>>

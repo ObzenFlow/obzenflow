@@ -1,14 +1,15 @@
-error[E0277]: the trait bound `support::RawHandler: TypedTransformHandler` is not satisfied
+error[E0277]: this transform handler does not witness its arrow contract
   --> tests/compile_fail/synchronous_transform_witness/raw_single.rs:10:13
    |
 10 |     let _ = obzenflow_dsl::transform!(Input -> First => RawHandler);
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this handler does not implement the typed synchronous transform contract
    |
 help: the trait `TypedTransformHandler` is not implemented for `support::RawHandler`
   --> tests/compile_fail/synchronous_transform_witness/../support/synchronous_transform.rs
    |
    | pub struct RawHandler;
    | ^^^^^^^^^^^^^^^^^^^^^
+   = note: implement TypedTransformHandler with Input and Output matching the transform! arrow (FLOWIP-134b)
    = help: the following other types implement trait `TypedTransformHandler`:
              ChunkByBudgetTyped<In, Item>
              EmitsUndeclaredDynamicMember

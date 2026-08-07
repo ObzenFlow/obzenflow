@@ -41,6 +41,7 @@ use obzenflow_core::ai::{
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, CircuitBreakerHealthClassification, MiddlewareLifecycle,
     ObservabilityPayload,
@@ -769,6 +770,69 @@ fn build_credit_flow(
     })
 }
 
+fn build_chunk_interruption_flow(
+    journal_base: PathBuf,
+    outputs: Arc<Mutex<Vec<DigestOut>>>,
+    effect_ports: EffectPortRegistry,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let chat = ChatBindingContract::from_resolved(target(), estimator())
+            .expect("test chat target and estimator models agree");
+        let interrupt_seed = OneSeed::with_count(5);
+        let map_role = MapRole {
+            fail_prepare: false,
+            fail_interpret: false,
+            prepare_calls: None,
+        };
+        let finalise_role = FinaliseRole;
+        let interrupt_collected = CollectOut { outputs };
+
+        Ok(flow! {
+            name: "hn_ai_digest_chunk_interruption",
+            journals: disk_journals(journal_base),
+            middleware: [],
+            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
+                .stall_timeout_ms(5_000),
+            effect_ports,
+
+            stages: {
+                interrupt_seed = source!(DigestSeed => interrupt_seed);
+                interrupt_digest = ai_map_reduce!(
+                    DigestSeed -> DigestOut => {
+                        map: [DigestItem] ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { ai_resilience() }
+                        } DigestPartial => map_role,
+                        reduce: (DigestSeed, [DigestPartial]) ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { ai_resilience() }
+                        } DigestOut => finalise_role,
+                    },
+                    chunking: by_budget {
+                        items: |seed: &DigestSeed| {
+                            (1..=seed.n)
+                                .map(|value| DigestItem { value })
+                                .collect::<Vec<_>>()
+                        },
+                        render: |item: &DigestItem, _ctx| item.value.to_string(),
+                        budget: TokenCount::new(100),
+                        max_items: Some(1),
+                        oversize: error,
+                    }
+                );
+                interrupt_collected = sink!(DigestOut => interrupt_collected);
+            },
+
+            topology: {
+                interrupt_seed |> interrupt_digest;
+                interrupt_digest |> interrupt_collected;
+            }
+        })
+    })
+}
+
 fn latest_run_dir(base: &Path) -> PathBuf {
     let mut entries = std::fs::read_dir(base.join("flows"))
         .expect("flow archive directory")
@@ -812,6 +876,22 @@ fn is_generated_chunk_output(event: &ChainEvent) -> bool {
         }
         _ => false,
     }
+}
+
+fn final_eof_event_type_counts(
+    events: &[EventEnvelope<ChainEvent>],
+) -> &std::collections::BTreeMap<obzenflow_core::EventType, obzenflow_core::event::types::SeqNo> {
+    events
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event.content {
+            ChainEventContent::FlowControl(FlowControlPayload::Eof {
+                writer_seq_by_event_type,
+                ..
+            }) => Some(writer_seq_by_event_type),
+            _ => None,
+        })
+        .expect("stage journal contains final EOF accounting")
 }
 
 fn assert_generated_chunk_authorship(
@@ -903,6 +983,34 @@ async fn assert_zero_chunk_archive(
         manifest.planning.excluded_items_total,
         expected_excluded_items
     );
+
+    let manifest_key = AiMapReducePlanningManifest::versioned_event_type();
+    let chunk_eof = final_eof_event_type_counts(&chunk);
+    assert_eq!(chunk_eof.len(), 1);
+    assert_eq!(
+        chunk_eof.get(&obzenflow_core::EventType::from(manifest_key.clone())),
+        Some(&obzenflow_core::event::types::SeqNo(1)),
+        "zero-chunk EOF advertises the one canonical manifest feed row"
+    );
+    assert!(!chunk_eof
+        .keys()
+        .any(|key| key.as_str() == AiMapReducePlanningManifest::EVENT_TYPE));
+
+    let map_eof = final_eof_event_type_counts(&map);
+    assert_eq!(map_eof.len(), 1);
+    assert_eq!(
+        map_eof.get(&obzenflow_core::EventType::from(manifest_key)),
+        Some(&obzenflow_core::event::types::SeqNo(1)),
+        "the selected manifest reconciles exactly through the map feed"
+    );
+    assert!(map.iter().all(|envelope| {
+        !matches!(
+            &envelope.event.content,
+            ChainEventContent::Observability(ObservabilityPayload::Metrics(
+                obzenflow_core::event::payloads::observability_payload::MetricsLifecycle::Custom { name, .. }
+            )) if name == "ai_chunking.snapshot"
+        )
+    }), "snapshot observability never enters the selected data feed");
 
     assert_eq!(
         map.iter()
@@ -2169,6 +2277,133 @@ async fn generated_map_waits_for_all_three_real_edge_credits_before_second_role_
             .count(),
         2
     );
+}
+
+#[tokio::test]
+async fn resume_closes_a_generated_plan_interrupted_between_snapshot_and_manifest() {
+    let temp = tempfile::tempdir().expect("temporary chunk-interruption journal root");
+    let journal_base = temp.path().join("journals");
+    let gate = BackpressureAckGate::install("interrupt_digest__chunk", "interrupt_digest__map", 0)
+        .expect("the generated chunk-to-map edge freezes before its first acknowledgement");
+    let live_calls = Arc::new(AtomicUsize::new(0));
+
+    let live_task = tokio::spawn({
+        let journal_base = journal_base.clone();
+        let live_calls = live_calls.clone();
+        async move {
+            FlowApplication::builder()
+                .with_cli_args(["obzenflow"])
+                .run_async(build_chunk_interruption_flow(
+                    journal_base,
+                    Arc::new(Mutex::new(Vec::new())),
+                    eager_chat_port(live_calls, false),
+                ))
+                .await
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_for_withheld(3))
+        .await
+        .expect("the first three map inputs commit while their acknowledgements are withheld");
+    live_task.abort();
+    let _ = live_task.await;
+
+    let interrupted = latest_run_dir(&journal_base);
+    let interrupted_chunk = stage_envelopes(&interrupted, "interrupt_digest__chunk").await;
+    assert_eq!(
+        interrupted_chunk
+            .iter()
+            .filter(|envelope| {
+                matches!(
+                    &envelope.event.content,
+                    ChainEventContent::Observability(ObservabilityPayload::Metrics(
+                        obzenflow_core::event::payloads::observability_payload::MetricsLifecycle::Custom { name, .. }
+                    )) if name == "ai_chunking.snapshot"
+                )
+            })
+            .count(),
+        1,
+        "the interrupted prefix contains its snapshot"
+    );
+    assert_eq!(
+        interrupted_chunk
+            .iter()
+            .filter_map(|envelope| { AiMapReducePlanningManifest::from_event(&envelope.event) })
+            .count(),
+        0,
+        "the withheld first acknowledgement prevents the manifest commit"
+    );
+    assert_eq!(
+        interrupted_chunk
+            .iter()
+            .filter_map(|envelope| {
+                AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::from_event(&envelope.event)
+            })
+            .count(),
+        3,
+        "the fixture interrupts after the first credit window and before the manifest"
+    );
+
+    gate.open();
+
+    let resumed_outputs = Arc::new(Mutex::new(Vec::new()));
+    let resumed_calls = Arc::new(AtomicUsize::new(0));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--resume-from"),
+            interrupted.as_os_str().to_os_string(),
+            OsString::from("--allow-incomplete-archive"),
+        ])
+        .run_async(build_chunk_interruption_flow(
+            journal_base.clone(),
+            resumed_outputs.clone(),
+            eager_chat_port(resumed_calls, false),
+        ))
+        .await
+        .expect("resume completes the interrupted generated protocol");
+
+    assert_eq!(
+        *resumed_outputs.lock().expect("resumed outputs lock"),
+        vec![DigestOut { total: 15 }]
+    );
+    let resumed = latest_run_dir(&journal_base);
+    let resumed_chunk = stage_envelopes(&resumed, "interrupt_digest__chunk").await;
+    assert_eq!(
+        resumed_chunk
+            .iter()
+            .filter(|envelope| {
+                matches!(
+                    &envelope.event.content,
+                    ChainEventContent::Observability(ObservabilityPayload::Metrics(
+                        obzenflow_core::event::payloads::observability_payload::MetricsLifecycle::Custom { name, .. }
+                    )) if name == "ai_chunking.snapshot"
+                )
+            })
+            .count(),
+        1,
+        "resume authors one complete invocation snapshot"
+    );
+    let resumed_map_inputs = resumed_chunk
+        .iter()
+        .filter_map(|envelope| {
+            AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::from_event(&envelope.event)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resumed_map_inputs
+            .iter()
+            .map(|input| input.chunk.chunk_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3, 4],
+        "resume authors every map input in the original plan order"
+    );
+    let manifests = resumed_chunk
+        .iter()
+        .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.event))
+        .collect::<Vec<_>>();
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0].chunk_count, 5);
 }
 
 #[tokio::test]

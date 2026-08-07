@@ -391,20 +391,21 @@ where
         let mut matched_event_types = HashSet::new();
         let mut selected_total = 0u64;
         for selected_event_type in selected {
-            for (actual_event_type, seq) in
+            let Some((actual_event_type, seq)) =
                 writer_seq_by_event_type
                     .iter()
-                    .filter(|(actual_event_type, _)| {
+                    .find(|(actual_event_type, _)| {
                         declared_event_type_matches(
                             selected_event_type.as_str(),
                             actual_event_type.as_str(),
                             None,
                         )
                     })
-            {
-                if matched_event_types.insert(actual_event_type.clone()) {
-                    selected_total = selected_total.saturating_add(seq.0);
-                }
+            else {
+                continue;
+            };
+            if matched_event_types.insert(actual_event_type.clone()) {
+                selected_total = selected_total.saturating_add(seq.0);
             }
         }
         Some(SeqNo(selected_total))

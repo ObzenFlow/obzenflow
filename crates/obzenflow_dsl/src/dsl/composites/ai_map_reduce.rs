@@ -29,7 +29,7 @@ use obzenflow_core::id::CompositeId;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{Effect, EffectDeclaration};
 use obzenflow_runtime::stages::stateful::SeededCollectByInput;
-use obzenflow_runtime::stages::transform::strategies::ai_chunking::GeneratedAiChunkHandler;
+use obzenflow_runtime::stages::transform::strategies::ai_chunking::generated_ai_chunk_handler;
 use obzenflow_runtime::stages::transform::ChunkByBudgetTyped;
 use std::fmt;
 use std::marker::PhantomData;
@@ -170,7 +170,7 @@ where
         let composite_id = CompositeId::new(format!("ai_map_reduce:{}", self.name));
         let direct_bound = NonZeroU64::MIN.saturating_add(2);
 
-        let chunk_handler = GeneratedAiChunkHandler::new(self.chunker, composite_id.clone());
+        let chunk_handler = generated_ai_chunk_handler(self.chunker, composite_id.clone());
         let chunk_descriptor = wrap_typed_descriptor(
             Box::new(TransformDescriptor {
                 name: "chunk".to_string(),

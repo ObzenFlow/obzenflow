@@ -414,10 +414,9 @@ impl SelectedDataSeqByEventType {
     pub(super) fn seq_for_feed(&self, feed: &SelectedFeedMetadata) -> SeqNo {
         self.by_event_type
             .iter()
-            .filter(|(event_type, _)| feed.matches_event_type(event_type.as_str()))
-            .fold(SeqNo(0), |total, (_, seq)| {
-                SeqNo(total.0.saturating_add(seq.0))
-            })
+            .find(|(event_type, _)| feed.matches_event_type(event_type.as_str()))
+            .map(|(_, seq)| *seq)
+            .unwrap_or(SeqNo(0))
     }
 }
 
@@ -439,16 +438,10 @@ impl AdvertisedWriterSeqByEventType {
     }
 
     pub(super) fn seq_for_feed(&self, feed: &SelectedFeedMetadata) -> Option<SeqNo> {
-        let mut matched = false;
-        let total = self
-            .by_event_type
+        self.by_event_type
             .iter()
-            .filter(|(event_type, _)| feed.matches_event_type(event_type.as_str()))
-            .fold(SeqNo(0), |total, (_, seq)| {
-                matched = true;
-                SeqNo(total.0.saturating_add(seq.0))
-            });
-        matched.then_some(total)
+            .find(|(event_type, _)| feed.matches_event_type(event_type.as_str()))
+            .map(|(_, seq)| *seq)
     }
 }
 
@@ -457,24 +450,22 @@ mod selected_feed_sequence_tests {
     use super::*;
 
     #[test]
-    fn compatible_legacy_and_versioned_spellings_share_one_feed_sequence() {
+    fn canonical_versioned_spelling_uses_one_feed_sequence() {
         let feed =
             SelectedFeedMetadata::new(EventType::from("typed.fact.v1"), SelectedFeedRole::Input);
 
         let mut reader = SelectedDataSeqByEventType::default();
-        reader.increment("typed.fact");
         reader.increment("typed.fact.v1");
         reader.increment("typed.fact.v1");
         reader.increment("typed.fact.v2");
-        assert_eq!(reader.seq_for_feed(&feed), SeqNo(3));
+        assert_eq!(reader.seq_for_feed(&feed), SeqNo(2));
 
         let mut advertised = AdvertisedWriterSeqByEventType::default();
         advertised.replace_from_eof(&BTreeMap::from([
-            (EventType::from("typed.fact"), SeqNo(1)),
             (EventType::from("typed.fact.v1"), SeqNo(2)),
             (EventType::from("typed.fact.v2"), SeqNo(99)),
         ]));
-        assert_eq!(advertised.seq_for_feed(&feed), Some(SeqNo(3)));
+        assert_eq!(advertised.seq_for_feed(&feed), Some(SeqNo(2)));
     }
 
     #[test]

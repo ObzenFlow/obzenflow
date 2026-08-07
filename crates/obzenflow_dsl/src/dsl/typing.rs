@@ -38,6 +38,19 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+mod proof_sealed {
+    pub trait Equal<Other> {}
+
+    impl<T> Equal<T> for T {}
+
+    pub trait DeclaredSubsetOf<Super, Proof> {}
+
+    impl<Members, Super, Proof> DeclaredSubsetOf<Super, Proof> for Members where
+        Members: obzenflow_core::SubsetOf<Super, Proof>
+    {
+    }
+}
+
 /// Diagnostic facade for equality between an effectful transform handler's
 /// authoritative input and the stage-arrow input projection.
 ///
@@ -49,7 +62,7 @@ use std::sync::Arc;
     note = "the handler's `type Input` is authoritative: use that fact type before `->`, or \
             attach a handler whose `Input` matches the arrow (FLOWIP-120z B9)"
 )]
-pub trait EffectfulTransformInputMatchesArrow<ArrowInput> {}
+pub trait EffectfulTransformInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput> {}
 
 #[diagnostic::do_not_recommend]
 impl<Input> EffectfulTransformInputMatchesArrow<Input> for Input {}
@@ -62,7 +75,7 @@ impl<Input> EffectfulTransformInputMatchesArrow<Input> for Input {}
     label = "the handler's `Input` does not match the fact type declared before `->`",
     note = "implement TypedTransformHandler with Input and Output matching the transform! arrow (FLOWIP-134b)"
 )]
-pub trait TransformInputMatchesArrow<ArrowInput> {}
+pub trait TransformInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput> {}
 
 #[diagnostic::do_not_recommend]
 impl<Input> TransformInputMatchesArrow<Input> for Input {}
@@ -78,7 +91,7 @@ impl<Input> TransformInputMatchesArrow<Input> for Input {}
     note = "the handler's `type Input` is authoritative: use that fact type before `->`, or \
             attach a handler whose `Input` matches the arrow (FLOWIP-120z B9)"
 )]
-pub trait EffectfulStatefulInputMatchesArrow<ArrowInput> {}
+pub trait EffectfulStatefulInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput> {}
 
 #[diagnostic::do_not_recommend]
 impl<Input> EffectfulStatefulInputMatchesArrow<Input> for Input {}
@@ -99,7 +112,10 @@ impl<Input> EffectfulStatefulInputMatchesArrow<Input> for Input {}
             witness, and a `StageOutputFacts` carrier where values are returned or applied \
             (FLOWIP-120z B9)"
 )]
-pub trait ArrowOutputsAreDeclaredByHandler<HandlerMembers, Proof> {}
+pub trait ArrowOutputsAreDeclaredByHandler<HandlerMembers, Proof>:
+    proof_sealed::DeclaredSubsetOf<HandlerMembers, Proof>
+{
+}
 
 #[diagnostic::do_not_recommend]
 impl<ArrowMembers, HandlerMembers, Proof> ArrowOutputsAreDeclaredByHandler<HandlerMembers, Proof>
@@ -123,7 +139,10 @@ where
             effectful-transform witness, and a `StageOutputFacts` carrier where values are \
             returned or applied (FLOWIP-120z B9)"
 )]
-pub trait HandlerOutputsAreDeclaredByArrow<ArrowMembers, Proof> {}
+pub trait HandlerOutputsAreDeclaredByArrow<ArrowMembers, Proof>:
+    proof_sealed::DeclaredSubsetOf<ArrowMembers, Proof>
+{
+}
 
 #[diagnostic::do_not_recommend]
 impl<HandlerMembers, ArrowMembers, Proof> HandlerOutputsAreDeclaredByArrow<ArrowMembers, Proof>
@@ -146,7 +165,10 @@ where
             AllowedEffects = obzenflow_runtime::effect_set![...]`, or change `effects:` \
             first if the stage capability contract is wrong (FLOWIP-120z B9)"
 )]
-pub trait ManifestEffectsAreAllowedByHandler<HandlerMembers, Proof> {}
+pub trait ManifestEffectsAreAllowedByHandler<HandlerMembers, Proof>:
+    proof_sealed::DeclaredSubsetOf<HandlerMembers, Proof>
+{
+}
 
 #[diagnostic::do_not_recommend]
 impl<ManifestMembers, HandlerMembers, Proof>
@@ -170,7 +192,10 @@ where
             capability and then mirror the clause in `type AllowedEffects = \
             obzenflow_runtime::effect_set![...]` (FLOWIP-120z B9)"
 )]
-pub trait HandlerEffectsAreDeclaredByManifest<ManifestMembers, Proof> {}
+pub trait HandlerEffectsAreDeclaredByManifest<ManifestMembers, Proof>:
+    proof_sealed::DeclaredSubsetOf<ManifestMembers, Proof>
+{
+}
 
 #[diagnostic::do_not_recommend]
 impl<HandlerMembers, ManifestMembers, Proof>
@@ -481,15 +506,24 @@ pub struct TypedStageDescriptor {
 impl crate::dsl::stage_descriptor::sealed::Sealed for TypedStageDescriptor {}
 
 impl TypedStageDescriptor {
-    pub fn new(inner: Box<dyn StageDescriptor>, metadata: StageTypingMetadata) -> Self {
+    pub(crate) fn new(inner: Box<dyn StageDescriptor>, metadata: StageTypingMetadata) -> Self {
         Self { inner, metadata }
     }
 }
 
+/// Attach typing metadata to an untyped framework descriptor.
+///
+/// Exported macros need this mechanically public entry point. Once a
+/// descriptor already carries canonical metadata, that existing contract is
+/// authoritative and cannot be replaced by wrapping it again.
+#[doc(hidden)]
 pub fn wrap_typed_descriptor(
     inner: Box<dyn StageDescriptor>,
     metadata: StageTypingMetadata,
 ) -> Box<dyn StageDescriptor> {
+    if inner.typing_metadata().is_some() {
+        return inner;
+    }
     Box::new(TypedStageDescriptor::new(inner, metadata))
 }
 

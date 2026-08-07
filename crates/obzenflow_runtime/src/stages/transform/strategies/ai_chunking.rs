@@ -308,7 +308,7 @@ where
 /// protocol from one invocation-local plan.
 #[doc(hidden)]
 #[derive(Clone)]
-pub struct GeneratedAiChunkHandler<In, Item> {
+pub(crate) struct GeneratedAiChunkHandler<In, Item> {
     inner: ChunkByBudgetTyped<In, Item>,
     composite_id: CompositeId,
     lineage: obzenflow_core::config::LineagePolicy,
@@ -316,8 +316,7 @@ pub struct GeneratedAiChunkHandler<In, Item> {
 }
 
 impl<In, Item> GeneratedAiChunkHandler<In, Item> {
-    #[doc(hidden)]
-    pub fn new(inner: ChunkByBudgetTyped<In, Item>, composite_id: CompositeId) -> Self {
+    pub(crate) fn new(inner: ChunkByBudgetTyped<In, Item>, composite_id: CompositeId) -> Self {
         Self {
             inner,
             composite_id,
@@ -325,6 +324,23 @@ impl<In, Item> GeneratedAiChunkHandler<In, Item> {
             writer_id: None,
         }
     }
+}
+
+/// Framework-only constructor for the generated map-reduce chunk stage.
+///
+/// The concrete raw adapter stays runtime-private. The opaque return exists
+/// solely so the DSL crate can assemble the fixed generated protocol without
+/// publishing a raw handler type that authored stages can name.
+#[doc(hidden)]
+pub fn generated_ai_chunk_handler<In, Item>(
+    inner: ChunkByBudgetTyped<In, Item>,
+    composite_id: CompositeId,
+) -> impl TransformHandler + Clone + fmt::Debug
+where
+    In: TypedPayload + Clone + Send + Sync + 'static,
+    Item: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+{
+    GeneratedAiChunkHandler::new(inner, composite_id)
 }
 
 impl<In, Item> fmt::Debug for GeneratedAiChunkHandler<In, Item> {
