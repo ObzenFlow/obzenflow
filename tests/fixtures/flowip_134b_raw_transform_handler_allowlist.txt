@@ -1,0 +1,20 @@
+# category|workspace-relative Rust source|implementing type
+#
+# The source guard accepts exactly these categories. Entries are deliberately
+# implementation-specific: a new raw handler or a moved/removed entry fails
+# closed until this file is reviewed.
+framework_erasure|crates/obzenflow_runtime/src/stages/common/handlers/transform/typed.rs|TypedTransformHandlerAdapter
+structural_adapter|crates/obzenflow_runtime/src/stages/transform/strategies/ai_chunking.rs|GeneratedAiChunkHandler
+structural_adapter|crates/obzenflow_dsl/src/dsl/typing.rs|PlaceholderTransform
+test_harness|crates/obzenflow_runtime/src/stages/transform/supervisor/tests.rs|ExpandHandler
+test_harness|crates/obzenflow_runtime/src/stages/transform/supervisor/tests.rs|FilterHandler
+test_harness|crates/obzenflow_runtime/src/stages/transform/supervisor/tests.rs|CountingFilterHandler
+test_harness|crates/obzenflow_dsl/src/dsl/composition.rs|Noop
+test_harness|crates/obzenflow_dsl/src/dsl/tests/typed_decoration_matrix_test.rs|Tr
+test_harness|crates/obzenflow_dsl/src/dsl/tests/typed_stage_contracts_test.rs|ExactTransform
+test_harness|crates/obzenflow_dsl/src/dsl/tests/composite_substrate_test.rs|Noop
+test_harness|crates/obzenflow_dsl/src/dsl/tests/ai_map_reduce_lowering_test.rs|NoopTransform
+test_harness|tests/middleware_factory_context_injection_test.rs|TestTransform
+test_harness|tests/volume_tests.rs|CpuIntensiveStage
+test_harness|tests/volume_tests.rs|MemoryIntensiveStage
+test_harness|tests/volume_tests.rs|PassthroughStage

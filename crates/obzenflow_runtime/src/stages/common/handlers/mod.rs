@@ -31,5 +31,6 @@ pub use stateful::{
 };
 pub use transform::{
     EffectfulTransformHandler, EffectfulTransformHandlerAdapter, TransformHandler,
-    TypedTransformHandler, TypedTransformHandlerAdapter, UnifiedTransformHandler,
+    TypedTransformHandler, TypedTransformHandlerAdapter, TypedTransformInvocation,
+    UnifiedTransformHandler,
 };

@@ -14,7 +14,7 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, EffectfulTransformHandler, SinkHandler, TransformHandler,
+    AsyncFiniteSourceHandler, EffectfulTransformHandler, SinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
@@ -140,30 +140,20 @@ impl EffectfulTransformHandler for SlowTransform {
 }
 
 #[derive(Clone, Debug)]
-struct FastTransform {
-    writer_id: obzenflow_core::WriterId,
-}
+struct FastTransform;
 
 impl FastTransform {
     fn new() -> Self {
-        Self {
-            writer_id: obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl TransformHandler for FastTransform {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            FastProbeEvent::versioned_event_type(),
-            event.payload().clone(),
-        )])
-    }
+impl TypedTransformHandler for FastTransform {
+    type Input = ProbeEvent;
+    type Output = FastProbeEvent;
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, event: ProbeEvent) -> Result<FastProbeEvent, HandlerError> {
+        Ok(FastProbeEvent { value: event.value })
     }
 }
 

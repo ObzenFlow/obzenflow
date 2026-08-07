@@ -12,12 +12,12 @@ use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::{StageId, StageOutputs, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -93,23 +93,18 @@ impl DroppingTransform {
     }
 }
 
-#[async_trait]
-impl TransformHandler for DroppingTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        // Extract index from payload
-        if let Some(index) = event.payload().get("index").and_then(|v| v.as_u64()) {
-            if self.drop_indices.contains(&(index as usize)) {
-                // Drop this event (return empty vec)
-                return Ok(vec![]);
-            }
+impl TypedTransformHandler for DroppingTransform {
+    type Input = CorrelatedTestEvent;
+    type Output = StageOutputs<CorrelatedTestEvent>;
+
+    fn process(
+        &self,
+        event: CorrelatedTestEvent,
+    ) -> std::result::Result<StageOutputs<CorrelatedTestEvent>, HandlerError> {
+        if self.drop_indices.contains(&(event.index as usize)) {
+            return Ok(StageOutputs::none());
         }
-
-        // Pass through
-        Ok(vec![event])
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+        Ok(StageOutputs::one(event))
     }
 }
 

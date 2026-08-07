@@ -13,6 +13,12 @@ fn typed_transform_brace_arrows_require_an_exact_leaf_contract() {
 }
 
 #[test]
+fn synchronous_transform_witness_boundary_fails_closed() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/compile_fail/synchronous_transform_witness/*.rs");
+}
+
+#[test]
 fn effectful_handlers_require_complete_exact_contract_witnesses() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile_fail/effectful_transform_missing_contract_types.rs");

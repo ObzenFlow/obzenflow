@@ -39,7 +39,7 @@ use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::SinkHandler;
 use obzenflow_runtime::stages::sink::SinkTyped;
-use obzenflow_runtime::stages::transform::TryMapWithTyped;
+use obzenflow_runtime::stages::transform::TryMapTyped;
 use obzenflow_runtime::typing::SinkTyping;
 use serde::{Deserialize, Serialize};
 const CONFIG_FILE: &str = concat!(
@@ -88,16 +88,17 @@ impl TypedPayload for ProcessedEvent {
 
 /// Transform that can fail on certain events.
 ///
-/// Returns `TryMapWithTyped<DataRequest, ProcessedEvent, _>`, which both
+/// Returns `TryMapTyped<DataRequest, ProcessedEvent, String, _>`, which both
 /// satisfies `TransformTyping<Input = DataRequest, Output = ProcessedEvent>`
-/// for the typed `transform!` macro and routes failures to the error journal
-/// via the default `ErrorStrategy::ToErrorJournal`.
-fn error_prone_transform() -> TryMapWithTyped<
+/// for the typed `transform!` macro. The transform supervisor owns terminal
+/// error marking and error-journal routing.
+fn error_prone_transform() -> TryMapTyped<
     DataRequest,
     ProcessedEvent,
+    String,
     impl Fn(DataRequest) -> Result<ProcessedEvent, String> + Send + Sync + Clone,
 > {
-    typed_transforms::try_map_with(|req: DataRequest| {
+    typed_transforms::try_map(|req: DataRequest| {
         if req.should_fail {
             Err("Simulated processing error".to_string())
         } else {

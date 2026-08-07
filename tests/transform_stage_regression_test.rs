@@ -25,11 +25,12 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::observer::{
     ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
 };
+use obzenflow_runtime::stages::transform::TryMapTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -146,35 +147,27 @@ impl SinkHandler for CollectSink {
 }
 
 #[derive(Clone, Debug)]
-struct ErrorTransform {
-    drain_calls: Arc<AtomicU64>,
-}
+struct ErrorTransform;
 
 impl ErrorTransform {
-    fn new(drain_calls: Arc<AtomicU64>) -> Self {
-        Self { drain_calls }
+    fn new() -> Self {
+        Self
     }
 }
 
-#[async_trait]
-impl TransformHandler for ErrorTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let index = event
-            .payload()
-            .get("index")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+impl TypedTransformHandler for ErrorTransform {
+    type Input = TransformStageEvent;
+    type Output = TransformStageEvent;
 
-        match index {
+    fn process(
+        &self,
+        event: TransformStageEvent,
+    ) -> std::result::Result<TransformStageEvent, HandlerError> {
+        match event.index {
             0 => Err(HandlerError::Timeout("simulated timeout".to_string())),
             1 => Err(HandlerError::Domain("simulated domain error".to_string())),
-            _ => Ok(vec![event]),
+            _ => Ok(event),
         }
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        self.drain_calls.fetch_add(1, Ordering::Relaxed);
-        Ok(())
     }
 }
 
@@ -246,37 +239,15 @@ impl MiddlewareFactory for CountDataCommitFactory {
 #[derive(Clone, Debug)]
 struct PassThroughTransform;
 
-#[async_trait]
-impl TransformHandler for PassThroughTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![event])
-    }
+impl TypedTransformHandler for PassThroughTransform {
+    type Input = TransformStageEvent;
+    type Output = TransformStageEvent;
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct DrainFailTransform {
-    drain_calls: Arc<AtomicU64>,
-}
-
-impl DrainFailTransform {
-    fn new(drain_calls: Arc<AtomicU64>) -> Self {
-        Self { drain_calls }
-    }
-}
-
-#[async_trait]
-impl TransformHandler for DrainFailTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![event])
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        self.drain_calls.fetch_add(1, Ordering::Relaxed);
-        Err(HandlerError::Other("simulated drain failure".to_string()))
+    fn process(
+        &self,
+        event: TransformStageEvent,
+    ) -> std::result::Result<TransformStageEvent, HandlerError> {
+        Ok(event)
     }
 }
 
@@ -284,15 +255,13 @@ impl TransformHandler for DrainFailTransform {
 async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
     let counter = Arc::new(AtomicU64::new(0));
     let counter_for_flow = counter.clone();
-    let drain_calls = Arc::new(AtomicU64::new(0));
-    let drain_calls_for_flow = drain_calls.clone();
 
     let journal_root = unique_journal_dir("transform_routing");
     let journal_root_for_flow = journal_root.clone();
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
         let source_handler = TestEventSource::new();
-        let transform_handler = ErrorTransform::new(drain_calls_for_flow);
+        let transform_handler = ErrorTransform::new();
         let sink_handler = EventCounterSink::new(counter_for_flow);
 
         Ok(flow! {
@@ -320,9 +289,6 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
 
     // Only the Domain error should be written to the transform data journal (and reach the sink).
     assert_eq!(counter.load(Ordering::Relaxed), 1);
-
-    // The handler should be drained exactly once after the subscription queue is empty.
-    assert_eq!(drain_calls.load(Ordering::Relaxed), 1);
 
     // Find the transform stage data/error journals on disk and validate routing.
     let flows_dir = journal_root.join("flows");
@@ -447,6 +413,121 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
 }
 
 #[tokio::test]
+async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract() -> Result<()> {
+    let delivered = Arc::new(AtomicU64::new(0));
+    let delivered_for_flow = delivered.clone();
+    let journal_root = unique_journal_dir("typed_try_map_journal");
+    let journal_root_for_flow = journal_root.clone();
+
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source_handler = TestEventSource::new();
+        let transform_handler = TryMapTyped::new(|event: TransformStageEvent| {
+            if event.index == 0 {
+                Err("index zero is invalid")
+            } else {
+                Ok(event)
+            }
+        });
+        let sink_handler = EventCounterSink::new(delivered_for_flow);
+
+        Ok(flow! {
+            name: "typed_try_map_journal_test",
+            journals: disk_journals(journal_root_for_flow.clone()),
+            middleware: [],
+
+            stages: {
+                source = source!(TransformStageEvent => source_handler);
+                try_map = transform!(TransformStageEvent -> TransformStageEvent => transform_handler);
+                sink = sink!(TransformStageEvent => sink_handler);
+            },
+
+            topology: {
+                source |> try_map;
+                try_map |> sink;
+            }
+        })
+    })
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|error| anyhow::anyhow!("Failed to create typed try-map flow: {error:?}"))?;
+
+    handle.run().await?;
+    assert_eq!(
+        delivered.load(Ordering::Relaxed),
+        1,
+        "the successful conversion reaches the ordinary data lane"
+    );
+
+    let mut data_journal = None;
+    let mut error_journal = None;
+    for flow_dir in std::fs::read_dir(journal_root.join("flows"))? {
+        let flow_dir = flow_dir?.path();
+        if !flow_dir.is_dir() {
+            continue;
+        }
+        for file in std::fs::read_dir(flow_dir)? {
+            let path = file?.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with("Transform_try_map_error_") && name.ends_with(".log") {
+                error_journal = Some(path);
+            } else if name.starts_with("Transform_try_map_") && name.ends_with(".log") {
+                data_journal = Some(path);
+            }
+        }
+    }
+
+    async fn read_journal(
+        path: std::path::PathBuf,
+    ) -> Result<Vec<obzenflow_core::EventEnvelope<ChainEvent>>> {
+        let journal = obzenflow_infra::journal::DiskJournal::<ChainEvent>::with_owner(
+            path,
+            JournalOwner::stage(StageId::new()),
+        )?;
+        journal
+            .read_causally_ordered()
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))
+    }
+
+    let error_events = read_journal(error_journal.expect("try-map error journal exists"))
+        .await?
+        .into_iter()
+        .map(|envelope| envelope.event)
+        .filter(|event| event.is_data())
+        .collect::<Vec<_>>();
+    assert_eq!(error_events.len(), 1);
+    assert_eq!(error_events[0].payload()["index"], serde_json::json!(0));
+    assert!(matches!(
+        &error_events[0].processing_info.status,
+        ProcessingStatus::Error {
+            kind: Some(ErrorKind::Unknown),
+            message,
+            ..
+        } if message.contains("typed try-map failed: index zero is invalid")
+    ));
+
+    let successful_events = read_journal(data_journal.expect("try-map data journal exists"))
+        .await?
+        .into_iter()
+        .map(|envelope| envelope.event)
+        .filter(|event| TransformStageEvent::event_type_matches(&event.event_type()))
+        .collect::<Vec<_>>();
+    assert_eq!(successful_events.len(), 1);
+    assert_eq!(
+        successful_events[0].payload()["index"],
+        serde_json::json!(1)
+    );
+    assert!(matches!(
+        successful_events[0].processing_info.status,
+        ProcessingStatus::Success
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn transform_applies_stage_middleware() -> Result<()> {
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_for_flow = events.clone();
@@ -502,56 +583,6 @@ async fn transform_applies_stage_middleware() -> Result<()> {
         observer_calls.load(Ordering::Relaxed),
         data_events.len() as u64,
         "the typed output-commit observer sees every data event without mutating it"
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn transform_drain_failure_is_stage_level_failure() -> Result<()> {
-    let counter = Arc::new(AtomicU64::new(0));
-    let drain_calls = Arc::new(AtomicU64::new(0));
-    let drain_calls_for_flow = drain_calls.clone();
-
-    let journal_root = unique_journal_dir("transform_drain_failure");
-
-    let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source_handler = TestEventSource::new();
-        let transform_handler = DrainFailTransform::new(drain_calls_for_flow);
-        let sink_handler = EventCounterSink::new(counter);
-
-        Ok(flow! {
-            name: "transform_drain_failure_test",
-            journals: disk_journals(journal_root.clone()),
-            middleware: [],
-
-            stages: {
-                source = source!(TransformStageEvent => source_handler);
-                drain_fail_transform = transform!(TransformStageEvent -> TransformStageEvent => transform_handler);
-                sink = sink!(TransformStageEvent => sink_handler);
-            },
-
-            topology: {
-                source |> drain_fail_transform;
-                drain_fail_transform |> sink;
-            }
-        })
-    })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
-
-    let run_result = tokio::time::timeout(Duration::from_secs(10), handle.run()).await;
-    let err = match run_result {
-        Ok(Ok(())) => anyhow::bail!("expected flow to fail due to transform drain failure"),
-        Ok(Err(e)) => e,
-        Err(_) => anyhow::bail!("flow did not complete within timeout"),
-    };
-
-    assert_eq!(drain_calls.load(Ordering::Relaxed), 1);
-    assert!(
-        format!("{err:?}").contains("Failed to drain transform handler"),
-        "expected stage-level drain failure to surface; got: {err:?}"
     );
 
     Ok(())

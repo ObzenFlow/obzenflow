@@ -22,7 +22,7 @@ pub use obzenflow_topology::{StageInfo, Topology, TopologyBuilder};
 
 // Handler traits
 pub use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, InfiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, InfiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 
 // Supervisor config

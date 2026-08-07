@@ -20,14 +20,14 @@ use obzenflow_core::event::SystemEventType;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{DeliveryContract, EventId, StageId, SystemId, WriterId};
+use obzenflow_core::{DeliveryContract, EventId, StageId, StageOutputs, SystemId, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     CommitReceipt, FiniteSourceHandler, SinkConsumeReport, SinkHandler, SinkLifecycleReport,
-    TransformHandler,
+    TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -143,29 +143,21 @@ impl FanOutTransform {
     }
 }
 
-#[async_trait]
-impl TransformHandler for FanOutTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        if !event.is_data() {
-            return Ok(vec![event]);
-        }
+impl TypedTransformHandler for FanOutTransform {
+    type Input = DeliveryTestEvent;
+    type Output = StageOutputs<FanOutTestEvent>;
 
+    fn process(
+        &self,
+        _event: DeliveryTestEvent,
+    ) -> std::result::Result<StageOutputs<FanOutTestEvent>, HandlerError> {
         let mut out = Vec::with_capacity(self.fan_out);
         for index in 0..self.fan_out {
-            out.push(ChainEventFactory::derived_data_event(
-                event.writer_id,
-                &event,
-                FanOutTestEvent::versioned_event_type(),
-                json!({ "fan_out_index": index }),
-                obzenflow_core::config::LineagePolicy::default(),
-            ));
+            out.push(FanOutTestEvent {
+                fan_out_index: index as u64,
+            });
         }
-
-        Ok(out)
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+        Ok(StageOutputs::many(out))
     }
 }
 

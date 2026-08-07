@@ -2,10 +2,8 @@ error[E0432]: unresolved imports `obzenflow::typed::transforms::async_map`, `obz
  --> tests/compile_fail/async_transform_surface/removed_async_surface.rs:5:36
   |
 5 | use obzenflow::typed::transforms::{async_map, async_try_map_with};
-  |                                    ^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
-  |                                    |          |
-  |                                    |          no `async_try_map_with` in `typed::transforms`
-  |                                    |          help: a similar name exists in the module: `try_map_with`
+  |                                    ^^^^^^^^^  ^^^^^^^^^^^^^^^^^^ no `async_try_map_with` in `typed::transforms`
+  |                                    |
   |                                    no `async_map` in `typed::transforms`
 
 error[E0432]: unresolved import `obzenflow_dsl::async_transform`
@@ -31,15 +29,5 @@ error[E0432]: unresolved imports `obzenflow_runtime::stages::transform::AsyncMap
   |     |         |              |
   |     |         |              no `AsyncTryMapWith` in `stages::transform`
   |     |         no `AsyncMapTyped` in `stages::transform`
+  |     |         help: a similar name exists in the module: `TryMapTyped`
   |     no `AsyncMap` in `stages::transform`
-  |
-help: a similar name exists in the module
-  |
-9 -     AsyncMap, AsyncMapTyped, AsyncTryMapWith, AsyncTryMapWithTyped,
-9 +     AsyncMap, AsyncMapTyped, TryMapWith, AsyncTryMapWithTyped,
-  |
-help: a similar name exists in the module
-  |
-9 -     AsyncMap, AsyncMapTyped, AsyncTryMapWith, AsyncTryMapWithTyped,
-9 +     AsyncMap, AsyncMapTyped, AsyncTryMapWith, TryMapWithTyped,
-  |

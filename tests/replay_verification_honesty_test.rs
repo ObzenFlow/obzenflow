@@ -12,7 +12,6 @@
 //! stage is named `not_order_certified`, per-type row counts are an advisory,
 //! and the run exits 2.
 
-use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::{id::StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
@@ -20,7 +19,7 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome, MATCHED_LINE};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, TransformHandler};
+use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, TypedTransformHandler};
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -78,14 +77,12 @@ impl FiniteSourceHandler for Channel {
 #[derive(Clone, Debug)]
 struct PassthroughMerge;
 
-#[async_trait]
-impl TransformHandler for PassthroughMerge {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![event])
-    }
+impl TypedTransformHandler for PassthroughMerge {
+    type Input = Reading;
+    type Output = Reading;
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, reading: Reading) -> Result<Reading, HandlerError> {
+        Ok(reading)
     }
 }
 

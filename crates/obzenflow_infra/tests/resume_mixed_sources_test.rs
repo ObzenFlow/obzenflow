@@ -17,7 +17,7 @@ mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainEventContent, EventEnvelope};
@@ -34,7 +34,7 @@ use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, SinkHandler,
-    TransformHandler,
+    TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -161,38 +161,23 @@ impl InfiniteSourceHandler for InfiniteChannelSource {
 }
 
 #[derive(Clone, Debug)]
-struct MergeTransform {
-    writer_id: WriterId,
-}
+struct MergeTransform;
 
 impl MergeTransform {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl TransformHandler for MergeTransform {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let Some(tick) = ChannelTick::from_event(&event) else {
-            return Ok(Vec::new());
-        };
-        Ok(vec![ChainEventFactory::derived_data_event(
-            self.writer_id,
-            &event,
-            Merged::EVENT_TYPE,
-            json!(Merged {
-                channel: tick.channel,
-                value: tick.value,
-            }),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
+impl TypedTransformHandler for MergeTransform {
+    type Input = ChannelTick;
+    type Output = Merged;
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, tick: ChannelTick) -> Result<Merged, HandlerError> {
+        Ok(Merged {
+            channel: tick.channel,
+            value: tick.value,
+        })
     }
 }
 

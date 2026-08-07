@@ -20,7 +20,7 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulStatefulHandler,
         EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinHandler,
-        SinkHandler, StatefulHandler, TransformHandler,
+        SinkHandler, StatefulHandler, TransformHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::stages::sink::SinkTyped;
     use obzenflow_runtime::typing::{SinkTyping, SourceTyping, StatefulTyping, TransformTyping};
@@ -108,6 +108,14 @@ mod tests {
     impl TransformTyping for Tr {
         type Input = In;
         type Output = Out;
+    }
+    impl TypedTransformHandler for Tr {
+        type Input = In;
+        type Output = Out;
+
+        fn process(&self, _input: In) -> Result<Out, HandlerError> {
+            Ok(Out)
+        }
     }
     #[async_trait]
     impl TransformHandler for Tr {

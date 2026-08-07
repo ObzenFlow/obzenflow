@@ -18,7 +18,7 @@ mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::JournalEvent;
@@ -36,7 +36,7 @@ use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InfiniteSourceHandler, SinkHandler, TransformHandler,
+    InfiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -102,38 +102,23 @@ impl InfiniteSourceHandler for BoundedTicker {
 /// Pure 1:1 transform: one `Doubled` per consumed tick, so the delivered
 /// order is fully witnessed by the transform's output journal.
 #[derive(Clone, Debug)]
-struct DoubleTransform {
-    writer_id: WriterId,
-}
+struct DoubleTransform;
 
 impl DoubleTransform {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl TransformHandler for DoubleTransform {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let Some(tick) = Tick::from_event(&event) else {
-            return Ok(Vec::new());
-        };
-        Ok(vec![ChainEventFactory::derived_data_event(
-            self.writer_id,
-            &event,
-            Doubled::EVENT_TYPE,
-            json!(Doubled {
-                n: tick.n,
-                doubled: tick.n * 2,
-            }),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
+impl TypedTransformHandler for DoubleTransform {
+    type Input = Tick;
+    type Output = Doubled;
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, tick: Tick) -> Result<Doubled, HandlerError> {
+        Ok(Doubled {
+            n: tick.n,
+            doubled: tick.n * 2,
+        })
     }
 }
 

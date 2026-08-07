@@ -33,7 +33,7 @@ use obzenflow_core::{
     event::ChainEventContent,
     id::StageId,
     journal::{journal_owner::JournalOwner, Journal},
-    TypedPayload, WriterId,
+    StageOutputs, TypedPayload, WriterId,
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -44,7 +44,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, TransformHandler,
+    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -121,48 +121,27 @@ impl FiniteSourceHandler for CompSource {
 /// One input fans out to two derived inputs, so each source event produces two
 /// downstream effect attempts and two sink deliveries.
 #[derive(Clone, Debug)]
-struct FanOutTransform {
-    writer_id: WriterId,
-}
+struct FanOutTransform;
 
 impl FanOutTransform {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl TransformHandler for FanOutTransform {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let Some(input) = CompInput::from_event(&event) else {
-            return Ok(Vec::new());
-        };
-        Ok(vec![
-            ChainEventFactory::derived_data_event(
-                self.writer_id,
-                &event,
-                CompInput::EVENT_TYPE,
-                json!(CompInput {
-                    value: input.value * 10 + 1
-                }),
-                obzenflow_core::config::LineagePolicy::default(),
-            ),
-            ChainEventFactory::derived_data_event(
-                self.writer_id,
-                &event,
-                CompInput::EVENT_TYPE,
-                json!(CompInput {
-                    value: input.value * 10 + 2
-                }),
-                obzenflow_core::config::LineagePolicy::default(),
-            ),
-        ])
-    }
+impl TypedTransformHandler for FanOutTransform {
+    type Input = CompInput;
+    type Output = StageOutputs<CompInput>;
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, input: CompInput) -> Result<StageOutputs<CompInput>, HandlerError> {
+        Ok(StageOutputs::many([
+            CompInput {
+                value: input.value * 10 + 1,
+            },
+            CompInput {
+                value: input.value * 10 + 2,
+            },
+        ]))
     }
 }
 
@@ -600,7 +579,7 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
     assert_eq!(
         data_event_count(
             &read_stage_events(&live_run, "fan_out").await,
-            CompInput::EVENT_TYPE,
+            &CompInput::versioned_event_type(),
         ),
         6,
         "fan-out should journal exactly two derived siblings per source input"

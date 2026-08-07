@@ -4,14 +4,14 @@
 
 //! Types-first metadata and descriptor wrappers for the DSL layer.
 
-use crate::dsl::stage_descriptor::StageDescriptor;
+use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
 use crate::dsl::StageCreationResult;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, MiddlewareFactory};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::TypedPayload;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_core::{Member, StageFactSet, TypedFactType, TypedPayload};
 use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, PayloadTypeDescriptor,
     StageOutputContract,
@@ -23,6 +23,7 @@ use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
     InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
+    TypedTransformHandler, TypedTransformHandlerAdapter,
 };
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
@@ -52,6 +53,19 @@ pub trait EffectfulTransformInputMatchesArrow<ArrowInput> {}
 
 #[diagnostic::do_not_recommend]
 impl<Input> EffectfulTransformInputMatchesArrow<Input> for Input {}
+
+/// Diagnostic facade for equality between a pure typed transform handler's
+/// authoritative input and the stage-arrow input projection.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "this transform handler does not witness its arrow contract",
+    label = "the handler's `Input` does not match the fact type declared before `->`",
+    note = "implement TypedTransformHandler with Input and Output matching the transform! arrow (FLOWIP-134b)"
+)]
+pub trait TransformInputMatchesArrow<ArrowInput> {}
+
+#[diagnostic::do_not_recommend]
+impl<Input> TransformInputMatchesArrow<Input> for Input {}
 
 /// Diagnostic facade for equality between an effectful stateful handler's
 /// authoritative input and the stage-arrow input projection.
@@ -206,6 +220,15 @@ impl TypeHint {
             display_name: type_name::<T>().to_string(),
             event_type: Some(T::versioned_event_type()),
             schema_version: Some(T::SCHEMA_VERSION),
+        }
+    }
+
+    fn exact_fact_type(fact: TypedFactType) -> Self {
+        Self::Exact {
+            type_id: fact.type_id,
+            display_name: fact.display_name,
+            event_type: Some(fact.event_type.to_string()),
+            schema_version: Some(fact.schema_version),
         }
     }
 }
@@ -455,6 +478,8 @@ pub struct TypedStageDescriptor {
     metadata: StageTypingMetadata,
 }
 
+impl crate::dsl::stage_descriptor::sealed::Sealed for TypedStageDescriptor {}
+
 impl TypedStageDescriptor {
     pub fn new(inner: Box<dyn StageDescriptor>, metadata: StageTypingMetadata) -> Self {
         Self { inner, metadata }
@@ -466,6 +491,102 @@ pub fn wrap_typed_descriptor(
     metadata: StageTypingMetadata,
 ) -> Box<dyn StageDescriptor> {
     Box::new(TypedStageDescriptor::new(inner, metadata))
+}
+
+fn transform_metadata_from_contract<ArrowInput, PrimaryOutput, ArrowOutputSet>(
+    is_placeholder: bool,
+    placeholder_message: Option<String>,
+) -> StageTypingMetadata
+where
+    ArrowInput: TypedPayload + 'static,
+    PrimaryOutput: TypedPayload + 'static,
+    ArrowOutputSet: StageFactSet,
+{
+    let output_contract = ArrowOutputSet::member_fact_types()
+        .into_iter()
+        .map(TypeHint::exact_fact_type)
+        .collect();
+    StageTypingMetadata::transform(
+        TypeHint::exact_payload::<ArrowInput>(),
+        TypeHint::exact_payload::<PrimaryOutput>(),
+        is_placeholder,
+        placeholder_message,
+    )
+    .with_output_contract(output_contract)
+}
+
+/// Canonical admission factory for a real synchronous transform.
+///
+/// Public only for exported macro expansion. The handler owns its associated
+/// types, the arrow supplies an exact fact set, and this function proves both
+/// directions before adapting and erasing the handler.
+#[doc(hidden)]
+pub fn typed_transform_descriptor<
+    H,
+    ArrowInput,
+    PrimaryOutput,
+    ArrowOutputSet,
+    PrimaryOutputIndex,
+    ArrowToHandlerProof,
+    HandlerToArrowProof,
+>(
+    name: impl Into<String>,
+    handler: H,
+    middleware: Vec<Box<dyn MiddlewareFactory>>,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    H: TypedTransformHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    H::Input: TransformInputMatchesArrow<ArrowInput>,
+    ArrowInput: TypedPayload + Send + Sync + 'static,
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
+    <H::Output as StageFactSet>::Members:
+        HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
+{
+    let metadata =
+        transform_metadata_from_contract::<ArrowInput, PrimaryOutput, ArrowOutputSet>(false, None);
+    let descriptor: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
+        name: name.into(),
+        handler: TypedTransformHandlerAdapter::new(handler),
+        middleware,
+        backpressure,
+    });
+    wrap_typed_descriptor(descriptor, metadata)
+}
+
+/// Canonical admission factory for a synchronous transform placeholder.
+#[doc(hidden)]
+pub fn placeholder_transform_descriptor<
+    ArrowInput,
+    PrimaryOutput,
+    ArrowOutputSet,
+    PrimaryOutputIndex,
+>(
+    name: impl Into<String>,
+    message: Option<&'static str>,
+    middleware: Vec<Box<dyn MiddlewareFactory>>,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    ArrowInput: TypedPayload + Send + Sync + 'static,
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>,
+{
+    let metadata = transform_metadata_from_contract::<ArrowInput, PrimaryOutput, ArrowOutputSet>(
+        true,
+        message.map(str::to_string),
+    );
+    let descriptor: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
+        name: name.into(),
+        handler: PlaceholderTransform::<ArrowInput, PrimaryOutput>::new(message),
+        middleware,
+        backpressure,
+    });
+    wrap_typed_descriptor(descriptor, metadata)
 }
 
 fn placeholder_message(stage_kind: &str, message: Option<&str>) -> String {
@@ -699,70 +820,6 @@ where
             tracing::warn!("{}", placeholder_message("transform", self.message));
         }
         Ok(())
-    }
-}
-
-// ============================================================================
-// Contract-bound handler wrappers (FLOWIP-086z)
-// ============================================================================
-
-/// Wrapper that binds a declared `In -> Out` contract to an arbitrary transform handler.
-///
-/// The handler only needs to implement [`TransformHandler`]. The typed stage macros use this
-/// wrapper internally so application handlers do not have to implement `TransformTyping`.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct BoundTransform<In, Out, H> {
-    inner: H,
-    _phantom: PhantomData<(In, Out)>,
-}
-
-impl<In, Out, H> BoundTransform<In, Out, H>
-where
-    In: 'static,
-    Out: 'static,
-{
-    pub fn new(inner: H) -> Self {
-        Self {
-            inner,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<In, Out, H> fmt::Debug for BoundTransform<In, Out, H>
-where
-    H: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BoundTransform")
-            .field("inner", &self.inner)
-            .finish()
-    }
-}
-
-impl<In: 'static, Out: 'static, H> TransformTyping for BoundTransform<In, Out, H> {
-    type Input = In;
-    type Output = Out;
-}
-
-#[async_trait]
-impl<In, Out, H> TransformHandler for BoundTransform<In, Out, H>
-where
-    In: Send + Sync + 'static,
-    Out: Send + Sync + 'static,
-    H: TransformHandler + Send + Sync,
-{
-    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
-        self.inner.install_lineage_policy(policy)
-    }
-
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        self.inner.process(event)
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        self.inner.drain().await
     }
 }
 
@@ -2081,6 +2138,8 @@ pub fn derive_manifest_delivery_metadata(
 pub struct DeterministicOrdererOverride {
     inner: Box<dyn StageDescriptor>,
 }
+
+impl crate::dsl::stage_descriptor::sealed::Sealed for DeterministicOrdererOverride {}
 
 #[async_trait]
 impl StageDescriptor for DeterministicOrdererOverride {

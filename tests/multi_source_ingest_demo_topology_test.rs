@@ -35,10 +35,9 @@ use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, StatefulHandler,
 };
-use obzenflow_runtime::stages::transform::Map;
+use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct KafkaRawEvent {
@@ -103,13 +102,13 @@ impl FiniteSourceHandler for OneShotSource<FileLine> {
     }
 }
 
-fn align_to_ingested() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone> {
-    Map::new(|_event: ChainEvent| {
-        ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            IngestedEvent::EVENT_TYPE,
-            json!({"origin": "test"}),
-        )
+fn align_to_ingested<P>(
+) -> MapTyped<P, IngestedEvent, impl Fn(P) -> IngestedEvent + Send + Sync + Clone>
+where
+    P: TypedPayload + Send + Sync + 'static,
+{
+    MapTyped::new(|_event: P| IngestedEvent {
+        origin: "test".to_string(),
     })
 }
 
@@ -159,9 +158,9 @@ fn multi_source_ingest_demo_satisfies_typed_fan_in_invariants() {
     let kafka_source_handler = OneShotSource::<KafkaRawEvent>::new();
     let webhook_source_handler = OneShotSource::<WebhookEnvelope>::new();
     let file_source_handler = OneShotSource::<FileLine>::new();
-    let align_kafka_handler = align_to_ingested();
-    let align_webhook_handler = align_to_ingested();
-    let align_file_handler = align_to_ingested();
+    let align_kafka_handler = align_to_ingested::<KafkaRawEvent>();
+    let align_webhook_handler = align_to_ingested::<WebhookEnvelope>();
+    let align_file_handler = align_to_ingested::<FileLine>();
     let aggregator_handler = IngestAggregator;
     let summary_sink_handler = NullSink;
 

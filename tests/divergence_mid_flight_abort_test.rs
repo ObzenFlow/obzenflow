@@ -15,24 +15,35 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow_adapters::middleware::{
+    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
+    MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent};
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
 use obzenflow_core::event::SystemEventType;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{CycleDepth, DivergenceContract, StageId, TransportContract, WriterId};
+use obzenflow_core::{
+    CycleDepth, DivergenceContract, StageId, StageOutputs, TransportContract, WriterId,
+};
 use obzenflow_dsl::{effectful_transform, sink, source, test_flow, transform};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, TransformHandler,
+    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+};
+use obzenflow_runtime::stages::observer::{
+    HandlerObserver, HandlerObserverContext, ObserverReport,
 };
 use obzenflow_runtime::testing::{EventShape, JournalOrder, JournalSnapshot, TestClock};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::Arc;
 
 /// File-local payload for the mid-flight-divergence abort test. The JSON
 /// shape matches what `SeedSource` emits; the type fingerprints the
@@ -40,6 +51,8 @@ use serde_json::json;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SeedEvent {
     n: u64,
+    #[serde(default)]
+    looped: bool,
 }
 
 impl TypedPayload for SeedEvent {
@@ -52,6 +65,8 @@ use tokio::time::sleep;
 struct SeedSource {
     remaining: usize,
     writer_id: WriterId,
+    signals_per_event: usize,
+    signal_seq: u64,
 }
 
 impl SeedSource {
@@ -59,6 +74,15 @@ impl SeedSource {
         Self {
             remaining: count,
             writer_id: WriterId::from(StageId::new()),
+            signals_per_event: 0,
+            signal_seq: 0,
+        }
+    }
+
+    fn with_signals(count: usize, signals_per_event: usize) -> Self {
+        Self {
+            signals_per_event,
+            ..Self::new(count)
         }
     }
 }
@@ -74,11 +98,20 @@ impl FiniteSourceHandler for SeedSource {
         }
 
         self.remaining -= 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
+        let mut events = vec![ChainEventFactory::data_event(
             self.writer_id,
             "divergence.seed",
             json!({ "n": self.remaining }),
-        )]))
+        )];
+        for _ in 0..self.signals_per_event {
+            events.push(ChainEventFactory::watermark_event(
+                self.writer_id,
+                self.signal_seq,
+                None,
+            ));
+            self.signal_seq += 1;
+        }
+        Ok(Some(events))
     }
 }
 
@@ -117,136 +150,137 @@ impl EffectfulTransformHandler for DelayedSeedTransform {
 #[derive(Clone, Debug)]
 struct CycleEntryTransform;
 
-#[async_trait]
-impl TransformHandler for CycleEntryTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        // Prevent a data feedback loop: we only need a cycle topology for SCC
-        // wiring, and a signal storm on the SCC-internal edge.
-        if event.is_data() && event.flow_context.stage_name == "iter" {
-            return Ok(Vec::new());
-        }
+impl TypedTransformHandler for CycleEntryTransform {
+    type Input = SeedEvent;
+    type Output = StageOutputs<SeedEvent>;
 
-        Ok(vec![event])
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SignalStormTransform {
-    signals_per_event: usize,
-    signal_writer_id: WriterId,
-}
-
-impl SignalStormTransform {
-    fn new(signals_per_event: usize) -> Self {
-        Self {
-            signals_per_event,
-            signal_writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl TransformHandler for SignalStormTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let mut out = Vec::with_capacity(self.signals_per_event.saturating_add(1));
-        out.push(event);
-        for i in 0..self.signals_per_event {
-            out.push(ChainEventFactory::watermark_event(
-                self.signal_writer_id,
-                i as u64,
-                None,
-            ));
-        }
-        Ok(out)
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+    fn process(
+        &self,
+        event: SeedEvent,
+    ) -> std::result::Result<StageOutputs<SeedEvent>, HandlerError> {
+        Ok(if event.looped {
+            StageOutputs::none()
+        } else {
+            StageOutputs::one(event)
+        })
     }
 }
 
 #[derive(Clone, Debug)]
 struct PassThroughTransform;
 
-#[async_trait]
-impl TransformHandler for PassThroughTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![event])
-    }
+impl TypedTransformHandler for PassThroughTransform {
+    type Input = SeedEvent;
+    type Output = SeedEvent;
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, event: SeedEvent) -> std::result::Result<SeedEvent, HandlerError> {
+        Ok(event)
     }
 }
 
 #[derive(Clone, Debug)]
 struct FanInEntryTransform;
 
-#[async_trait]
-impl TransformHandler for FanInEntryTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        // Prevent a data feedback loop: SCC wiring is structural, but this test
-        // wants a finite run that exercises SCC-internal fan-in without cycling
-        // data indefinitely.
-        if event.is_data() && event.flow_context.stage_name == "merge" {
-            return Ok(Vec::new());
-        }
-        Ok(vec![event])
-    }
+impl TypedTransformHandler for FanInEntryTransform {
+    type Input = SeedEvent;
+    type Output = StageOutputs<SeedEvent>;
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+    fn process(
+        &self,
+        event: SeedEvent,
+    ) -> std::result::Result<StageOutputs<SeedEvent>, HandlerError> {
+        Ok(if event.looped {
+            StageOutputs::none()
+        } else {
+            StageOutputs::one(event)
+        })
     }
 }
 
 #[derive(Clone, Debug)]
-struct CycleDepthInjectionEntryTransform {
+struct LoopBackTransform;
+
+impl TypedTransformHandler for LoopBackTransform {
+    type Input = SeedEvent;
+    type Output = SeedEvent;
+
+    fn process(&self, mut event: SeedEvent) -> std::result::Result<SeedEvent, HandlerError> {
+        event.looped = true;
+        Ok(event)
+    }
+}
+
+/// Test-only observer that corrupts the runtime-owned cycle metadata after a
+/// typed handler has produced its facts. This preserves the original
+/// integration proof: the divergence contract must reject an over-depth event
+/// arriving on an SCC-internal edge, independently of the entry guard that
+/// normally prevents an honest flow from constructing one.
+#[derive(Clone, Debug)]
+struct CycleDepthInjectionMiddleware {
     bump_to: u16,
 }
 
-impl CycleDepthInjectionEntryTransform {
+impl CycleDepthInjectionMiddleware {
     fn new(bump_to: u16) -> Self {
         Self { bump_to }
     }
 }
 
-#[async_trait]
-impl TransformHandler for CycleDepthInjectionEntryTransform {
-    fn process(&self, mut event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        // The CycleGuard stamps cycle SCC metadata at the SCC entry point.
-        // Bump depth beyond the configured threshold to force an end-to-end
-        // DivergenceContract cycle-depth violation on SCC-internal edges.
-        if event.is_data() && event.cycle_scc_id.is_some() {
-            event.cycle_depth = Some(CycleDepth::new(self.bump_to));
-        }
+struct CycleDepthInjectionFamily;
 
-        Ok(vec![event])
+const CYCLE_DEPTH_INJECTION_LABEL: &str = "test_cycle_depth_injection";
+
+impl MiddlewareFactory for CycleDepthInjectionMiddleware {
+    fn label(&self) -> &'static str {
+        CYCLE_DEPTH_INJECTION_LABEL
     }
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<CycleDepthInjectionFamily>(CYCLE_DEPTH_INJECTION_LABEL)
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::observer_with_family(
+            CYCLE_DEPTH_INJECTION_LABEL,
+            self.override_key().family_label(),
+            vec![MiddlewareSurfaceKind::Handler],
+        )
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> Result<MiddlewareSurfaceAttachment, MiddlewareFactoryError> {
+        validate_attachment_request(&self.declaration(), &request).map_err(|error| {
+            MiddlewareFactoryError::materialization_failed(
+                CYCLE_DEPTH_INJECTION_LABEL,
+                &context.config.name,
+                error,
+            )
+        })?;
+        Ok(MiddlewareSurfaceAttachment::handler_observer(Arc::new(
+            self.clone(),
+        )))
     }
 }
 
-#[derive(Clone, Debug)]
-struct DropAllDataTransform;
-
-#[async_trait]
-impl TransformHandler for DropAllDataTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        if event.is_data() {
-            Ok(Vec::new())
-        } else {
-            Ok(vec![event])
-        }
+impl HandlerObserver for CycleDepthInjectionMiddleware {
+    fn label(&self) -> &'static str {
+        CYCLE_DEPTH_INJECTION_LABEL
     }
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+    fn after_handle(
+        &self,
+        _ctx: &HandlerObserverContext<'_>,
+        outputs: &mut [ChainEvent],
+    ) -> ObserverReport {
+        for event in outputs {
+            if event.is_data() && event.cycle_scc_id.is_some() {
+                event.cycle_depth = Some(CycleDepth::new(self.bump_to));
+            }
+        }
+        ObserverReport::empty()
     }
 }
 
@@ -269,10 +303,10 @@ impl SinkHandler for CountingSink {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     let clock = TestClock::new().await.expect("paused runtime");
-    let source = SeedSource::new(30);
+    let source = SeedSource::with_signals(30, 50);
     let delay = DelayedSeedTransform::new(Duration::from_millis(10));
     let entry = CycleEntryTransform;
-    let iter = SignalStormTransform::new(50);
+    let iter = LoopBackTransform;
     let sink = CountingSink;
 
     let harness = test_flow! {
@@ -496,7 +530,7 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
     let entry = FanInEntryTransform;
     let branch_a = PassThroughTransform;
     let branch_b = PassThroughTransform;
-    let merge = PassThroughTransform;
+    let merge = LoopBackTransform;
     let sink = CountingSink;
 
     let harness = test_flow! {
@@ -601,8 +635,9 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
     let clock = TestClock::new().await.expect("paused runtime");
     let source = SeedSource::new(10);
     let delay = DelayedSeedTransform::new(Duration::from_millis(5));
-    let entry = CycleDepthInjectionEntryTransform::new(100);
-    let iter = DropAllDataTransform;
+    let entry = PassThroughTransform;
+    let iter = PassThroughTransform;
+    let inject_cycle_depth = CycleDepthInjectionMiddleware::new(100);
     let sink = CountingSink;
 
     let harness = test_flow! {
@@ -617,7 +652,7 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
                 effects: [],
                 middleware: [],
             );
-            entry = transform!(SeedEvent -> SeedEvent => entry);
+            entry = transform!(SeedEvent -> SeedEvent => entry, [inject_cycle_depth]);
             iter = transform!(SeedEvent -> SeedEvent => iter);
             snk = sink!(SeedEvent => sink);
         },

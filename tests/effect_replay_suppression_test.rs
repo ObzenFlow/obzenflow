@@ -17,7 +17,7 @@ use obzenflow_core::{
     event::{ChainEventContent, StageLifecycleEvent, SystemEvent, SystemEventType},
     id::{StageId, SystemId},
     journal::{journal_owner::JournalOwner, Journal},
-    TypedPayload, WriterId,
+    StageOutputs, TypedPayload, WriterId,
 };
 use obzenflow_dsl::{
     effectful_stateful, effectful_transform, flow, sink, source, transform, FlowDefinition,
@@ -32,7 +32,7 @@ use obzenflow_runtime::effects::{
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler, SinkHandler,
-    TransformHandler,
+    TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -141,49 +141,27 @@ impl FiniteSourceHandler for SingleReplaySource {
 }
 
 #[derive(Clone, Debug)]
-struct FanOutTransform {
-    writer_id: WriterId,
-}
+struct FanOutTransform;
 
 impl FanOutTransform {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl TransformHandler for FanOutTransform {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let Some(input) = ReplayInput::from_event(&event) else {
-            return Ok(Vec::new());
-        };
+impl TypedTransformHandler for FanOutTransform {
+    type Input = ReplayInput;
+    type Output = StageOutputs<ReplayInput>;
 
-        Ok(vec![
-            ChainEventFactory::derived_data_event(
-                self.writer_id,
-                &event,
-                ReplayInput::EVENT_TYPE,
-                json!(ReplayInput {
-                    value: input.value * 10 + 1
-                }),
-                obzenflow_core::config::LineagePolicy::default(),
-            ),
-            ChainEventFactory::derived_data_event(
-                self.writer_id,
-                &event,
-                ReplayInput::EVENT_TYPE,
-                json!(ReplayInput {
-                    value: input.value * 10 + 2
-                }),
-                obzenflow_core::config::LineagePolicy::default(),
-            ),
-        ])
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, input: ReplayInput) -> Result<StageOutputs<ReplayInput>, HandlerError> {
+        Ok(StageOutputs::many([
+            ReplayInput {
+                value: input.value * 10 + 1,
+            },
+            ReplayInput {
+                value: input.value * 10 + 2,
+            },
+        ]))
     }
 }
 

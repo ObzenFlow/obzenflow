@@ -6,28 +6,22 @@
 //!
 //! This mirrors the high-volume source + error_prone_transform pipeline from
 //! `examples/prometheus_demo/main.rs`, but runs entirely under `cargo test`.
-//! It asserts that:
-//! - `error_processor` reports exactly 100 Domain errors, and
-//! - there are no Unknown errors for that stage.
+//! It asserts that the typed `try_map` uses its fixed terminal-error path:
+//! `error_processor` reports exactly 100 Unknown errors and no Domain errors.
 
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    event::status::processing_status::ErrorKind,
     id::StageId,
     TypedPayload, WriterId,
 };
-use obzenflow_dsl::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
-use obzenflow_dsl::dsl::typing::{
-    wrap_typed_descriptor, BoundTransform, StageTypingMetadata, TypeHint,
-};
-use obzenflow_dsl::{flow, sink, source, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
-use obzenflow_runtime::stages::transform::Map;
+use obzenflow_runtime::stages::transform::TryMapTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -109,48 +103,25 @@ impl TypedPayload for ProcessedEvent {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Error event emitted on simulated failures.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ErrorEvent {
-    id: usize,
-    should_fail: bool,
-    batch: usize,
-    error: String,
-    error_code: u32,
-}
-
-impl TypedPayload for ErrorEvent {
-    const EVENT_TYPE: &'static str = "error.event";
-    const SCHEMA_VERSION: u32 = 1;
-}
-
-/// Transform that routes every 100th event to an error event with ErrorKind::Domain.
-fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone> {
-    Map::new(|event| {
-        let mut payload = event.payload();
-
-        if payload["should_fail"].as_bool().unwrap_or(false) {
-            payload["error"] = json!("Simulated processing error");
-            payload["error_code"] = json!(500);
-
-            event.derive_error_event(
-                ErrorEvent::versioned_event_type(),
-                payload,
-                "Simulated processing error",
-                ErrorKind::Domain,
-                obzenflow_core::config::LineagePolicy::default(),
-            )
+/// Typed conversion that fails every 100th input. The supervisor owns the
+/// error-marked parent and error-journal routing.
+fn error_prone_transform() -> TryMapTyped<
+    DataRequest,
+    ProcessedEvent,
+    String,
+    impl Fn(DataRequest) -> Result<ProcessedEvent, String> + Send + Sync + Clone,
+> {
+    TryMapTyped::new(|request: DataRequest| {
+        if request.should_fail {
+            Err("Simulated processing error".to_string())
         } else {
-            payload["processed"] = json!(true);
-            payload["processing_stage"] = json!("error_prone_transform");
-
-            ChainEventFactory::derived_data_event(
-                event.writer_id,
-                &event,
-                ProcessedEvent::versioned_event_type(),
-                payload,
-                obzenflow_core::config::LineagePolicy::default(),
-            )
+            Ok(ProcessedEvent {
+                id: request.id,
+                should_fail: request.should_fail,
+                batch: request.batch,
+                processed: true,
+                processing_stage: "error_prone_transform".to_string(),
+            })
         }
     })
 }
@@ -179,7 +150,7 @@ impl SinkHandler for CompletionSink {
 }
 
 #[tokio::test]
-async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result<()> {
+async fn prometheus_100k_typed_try_map_errors_are_unknown_only() -> Result<()> {
     // Use a dedicated journal directory for this test run.
     let journal_root = std::path::PathBuf::from("target/prometheus_100k_error_kinds_test_journal");
 
@@ -188,31 +159,6 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
         // high_volume_source -> error_processor -> completion_sink.
         let source = HighVolumeSource::new(TOTAL_EVENTS);
         let transform = error_prone_transform();
-        // This raw transform deliberately authors a processing-error event, not
-        // merely a typed fact payload. Keep it on the ordinary TransformHandler
-        // path and attach its multi-output metadata explicitly; the typed carrier
-        // adapter is for deterministic fact classification and cannot encode an
-        // ErrorKind-bearing ChainEvent.
-        let transform = BoundTransform::<DataRequest, ProcessedEvent, _>::new(transform);
-        let transform: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
-            name: "error_processor".to_string(),
-            handler: transform,
-            middleware: Vec::new(),
-            backpressure: None,
-        });
-        let transform = wrap_typed_descriptor(
-            transform,
-            StageTypingMetadata::transform(
-                TypeHint::exact_payload::<DataRequest>(),
-                TypeHint::exact_payload::<ProcessedEvent>(),
-                false,
-                None,
-            )
-            .with_output_contract(vec![
-                TypeHint::exact_payload::<ProcessedEvent>(),
-                TypeHint::exact_payload::<ErrorEvent>(),
-            ]),
-        );
         let sink = CompletionSink::new();
 
         Ok(flow! {
@@ -222,7 +168,7 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
 
             stages: {
                 high_volume_source = source!(DataRequest => source);
-                error_processor = transform;
+                error_processor = transform!(DataRequest -> ProcessedEvent => transform);
                 completion_sink = sink!(ProcessedEvent => sink);
             },
 
@@ -276,17 +222,16 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
         }
     }
 
-    // We generated a high-volume stream and marked every 100th event as a Domain error.
+    // The fixed typed try-map path classifies converter failures as Unknown.
     assert_eq!(
-        domain_errors,
+        unknown_errors,
         Some(EXPECTED_DOMAIN_ERRORS),
-        "error_processor should report exactly {EXPECTED_DOMAIN_ERRORS} domain errors"
+        "error_processor should report exactly {EXPECTED_DOMAIN_ERRORS} unknown errors"
     );
 
-    // Unknown errors should not be present (regression check for the old 'unknown' bucket bug).
     assert!(
-        unknown_errors.unwrap_or(0) == 0,
-        "error_processor should not report any unknown errors, found {unknown_errors:?}"
+        domain_errors.unwrap_or(0) == 0,
+        "error_processor should not report domain errors, found {domain_errors:?}"
     );
 
     Ok(())

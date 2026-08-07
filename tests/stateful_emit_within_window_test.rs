@@ -15,7 +15,7 @@ use obzenflow_dsl::{sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -257,14 +257,12 @@ impl SinkHandler for AckSink {
 #[derive(Clone, Debug)]
 struct IdentityTransform;
 
-#[async_trait]
-impl TransformHandler for IdentityTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![event])
-    }
+impl TypedTransformHandler for IdentityTransform {
+    type Input = WindowAgg;
+    type Output = WindowAgg;
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, event: WindowAgg) -> std::result::Result<WindowAgg, HandlerError> {
+        Ok(event)
     }
 }
 

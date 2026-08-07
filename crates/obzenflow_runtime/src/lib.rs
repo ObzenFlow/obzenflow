@@ -68,7 +68,7 @@ pub mod testing;
 /// **Handlers** — the user-facing handler traits:
 /// [`FiniteSourceHandler`](crate::stages::FiniteSourceHandler),
 /// [`InfiniteSourceHandler`](crate::stages::InfiniteSourceHandler),
-/// [`TransformHandler`](crate::stages::TransformHandler),
+/// [`TypedTransformHandler`](crate::stages::TypedTransformHandler),
 /// [`SinkHandler`](crate::stages::SinkHandler),
 /// [`StatefulHandler`](crate::stages::StatefulHandler),
 /// [`ObserverHandler`](crate::stages::ObserverHandler), and the
@@ -101,7 +101,7 @@ pub mod prelude {
     pub use crate::stages::{
         EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler,
         InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler, SourceError,
-        StatefulHandler, TransformHandler,
+        StatefulHandler, TypedTransformHandler,
     };
     pub use crate::typing::{
         JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,

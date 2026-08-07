@@ -17,7 +17,7 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -87,16 +87,14 @@ impl FiniteSourceHandler for TestSource {
 #[derive(Clone, Debug)]
 struct UppercaseTransform;
 
-#[async_trait]
-impl TransformHandler for UppercaseTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+impl TypedTransformHandler for UppercaseTransform {
+    type Input = MetricEvent;
+    type Output = MetricEvent;
+
+    fn process(&self, event: MetricEvent) -> std::result::Result<MetricEvent, HandlerError> {
         // For metrics purposes we don't need to mutate payloads –
         // just ensure the transform runs and emits an event.
-        Ok(vec![event])
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+        Ok(event)
     }
 }
 

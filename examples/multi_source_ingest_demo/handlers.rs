@@ -4,7 +4,7 @@
 
 //! Handler implementations for the multi_source_ingest_demo example.
 //!
-//! Three finite sources emit source-specific types; three `Map`-based
+//! Three finite sources emit source-specific types; three typed map
 //! alignment transforms normalise to `IngestedEvent`; one stateful
 //! aggregator emits `IngestSummary`; one sink prints the summary.
 //!
@@ -22,7 +22,7 @@ use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, StatefulHandler,
 };
-use obzenflow_runtime::stages::transform::Map;
+use obzenflow_runtime::stages::transform::MapTyped;
 use serde_json::json;
 
 use crate::domain::{FileLine, IngestSummary, IngestedEvent, KafkaRawEvent, WebhookEnvelope};
@@ -95,41 +95,30 @@ impl FiniteSourceHandler for FileSource {
 // emits the common IngestedEvent type. After this, the fan-in into the
 // aggregator is type-homogeneous on IngestedEvent.
 
-pub fn align_kafka_fn() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone> {
-    Map::new(|event: ChainEvent| {
-        let topic = event.payload()["topic"].as_str().unwrap_or("?").to_string();
-        let writer = WriterId::from(StageId::new());
-        ChainEventFactory::data_event(
-            writer,
-            IngestedEvent::EVENT_TYPE,
-            json!({"origin": format!("kafka:{topic}")}),
-        )
+pub fn align_kafka_fn() -> MapTyped<
+    KafkaRawEvent,
+    IngestedEvent,
+    impl Fn(KafkaRawEvent) -> IngestedEvent + Send + Sync + Clone,
+> {
+    MapTyped::new(|event: KafkaRawEvent| IngestedEvent {
+        origin: format!("kafka:{}", event.topic),
     })
 }
 
-pub fn align_webhook_fn() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone> {
-    Map::new(|event: ChainEvent| {
-        let source = event.payload()["source"]
-            .as_str()
-            .unwrap_or("?")
-            .to_string();
-        let writer = WriterId::from(StageId::new());
-        ChainEventFactory::data_event(
-            writer,
-            IngestedEvent::EVENT_TYPE,
-            json!({"origin": format!("webhook:{source}")}),
-        )
+pub fn align_webhook_fn() -> MapTyped<
+    WebhookEnvelope,
+    IngestedEvent,
+    impl Fn(WebhookEnvelope) -> IngestedEvent + Send + Sync + Clone,
+> {
+    MapTyped::new(|event: WebhookEnvelope| IngestedEvent {
+        origin: format!("webhook:{}", event.source),
     })
 }
 
-pub fn align_file_fn() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone> {
-    Map::new(|_event: ChainEvent| {
-        let writer = WriterId::from(StageId::new());
-        ChainEventFactory::data_event(
-            writer,
-            IngestedEvent::EVENT_TYPE,
-            json!({"origin": "file:/var/log/app.log"}),
-        )
+pub fn align_file_fn(
+) -> MapTyped<FileLine, IngestedEvent, impl Fn(FileLine) -> IngestedEvent + Send + Sync + Clone> {
+    MapTyped::new(|_event: FileLine| IngestedEvent {
+        origin: "file:/var/log/app.log".to_string(),
     })
 }
 

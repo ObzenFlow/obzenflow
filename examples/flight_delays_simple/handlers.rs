@@ -7,8 +7,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::{id::StageId, TypedPayload, WriterId};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{StatefulHandler, TransformHandler};
-use serde_json::json;
+use obzenflow_runtime::stages::common::handlers::{StatefulHandler, TypedTransformHandler};
 use std::collections::HashMap;
 
 // ============================================================================
@@ -24,28 +23,13 @@ impl FlightValidator {
     }
 }
 
-#[async_trait]
-impl TransformHandler for FlightValidator {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        if FlightRecord::event_type_matches(&event.event_type()) {
-            let has_carrier = event.payload().get("carrier").is_some();
-            let has_delay = event.payload().get("delay_minutes").is_some();
-            let has_duration = event.payload().get("scheduled_duration").is_some();
+impl TypedTransformHandler for FlightValidator {
+    type Input = FlightRecord;
+    type Output = FlightRecord;
 
-            if !(has_carrier && has_delay && has_duration) {
-                return Ok(vec![event.mark_as_validation_error(
-                    "flight_validation_failed: missing carrier, delay_minutes, or scheduled_duration",
-                )]);
-            }
-
-            Ok(vec![event])
-        } else {
-            Ok(vec![])
-        }
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, flight: FlightRecord) -> Result<FlightRecord, HandlerError> {
+        // Typed admission/deserialization proves the required fields exist.
+        Ok(flight)
     }
 }
 
@@ -62,42 +46,21 @@ impl DelayCalculator {
     }
 }
 
-#[async_trait]
-impl TransformHandler for DelayCalculator {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        if FlightRecord::event_type_matches(&event.event_type()) {
-            if let Some(delay) = event
-                .payload()
-                .get("delay_minutes")
-                .and_then(|v| v.as_u64())
-            {
-                let delay_category = if delay == 0 {
-                    "on_time"
-                } else if delay < 15 {
-                    "minor_delay"
-                } else if delay < 60 {
-                    "moderate_delay"
-                } else {
-                    "severe_delay"
-                };
+impl TypedTransformHandler for DelayCalculator {
+    type Input = FlightRecord;
+    type Output = FlightRecord;
 
-                let mut payload = event.payload().clone();
-                payload["delay_category"] = json!(delay_category);
-
-                return Ok(vec![ChainEventFactory::derived_data_event(
-                    event.writer_id,
-                    &event,
-                    FlightRecord::versioned_event_type(),
-                    payload,
-                    obzenflow_core::config::LineagePolicy::default(),
-                )]);
+    fn process(&self, mut flight: FlightRecord) -> Result<FlightRecord, HandlerError> {
+        flight.delay_category = Some(
+            match flight.delay_minutes {
+                0 => "on_time",
+                1..=14 => "minor_delay",
+                15..=59 => "moderate_delay",
+                _ => "severe_delay",
             }
-        }
-        Ok(vec![event])
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+            .to_string(),
+        );
+        Ok(flight)
     }
 }
 

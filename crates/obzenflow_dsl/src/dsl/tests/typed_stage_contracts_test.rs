@@ -168,6 +168,15 @@ mod tests {
         type Output = OutputEvent;
     }
 
+    impl TypedTransformHandler for ExactTransform {
+        type Input = InputEvent;
+        type Output = OutputEvent;
+
+        fn process(&self, input: InputEvent) -> Result<OutputEvent, HandlerError> {
+            Ok(OutputEvent { value: input.value })
+        }
+    }
+
     #[async_trait]
     impl TransformHandler for ExactTransform {
         fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
@@ -243,20 +252,6 @@ mod tests {
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
             Ok(fx.complete()?)
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct UntypedTransform;
-
-    #[async_trait]
-    impl TransformHandler for UntypedTransform {
-        fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-            Ok(vec![])
-        }
-
-        async fn drain(&mut self) -> Result<(), HandlerError> {
-            Ok(())
         }
     }
 
@@ -454,14 +449,6 @@ mod tests {
         assert_eq!(transform_meta.input_type, exact::<InputEvent>());
         assert_eq!(transform_meta.output_type, exact::<OutputEvent>());
         assert_one_member_output_contract::<OutputEvent>(transform_meta);
-
-        let untyped_transform = crate::transform!(
-            name: "untyped_transform",
-            InputEvent -> OutputEvent => UntypedTransform
-        );
-        let untyped_transform_meta = untyped_transform.typing_metadata().unwrap();
-        assert_eq!(untyped_transform_meta.input_type, exact::<InputEvent>());
-        assert_eq!(untyped_transform_meta.output_type, exact::<OutputEvent>());
 
         let stateful = crate::stateful!(
             name: "stateful",

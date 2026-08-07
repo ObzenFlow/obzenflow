@@ -5,13 +5,13 @@
 // tests/basic_streaming.rs
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::{StageId, StageOutputs, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use anyhow::Result;
@@ -163,14 +163,15 @@ impl Doubler {
     }
 }
 
-#[async_trait]
-impl TransformHandler for Doubler {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![event.clone(), event])
-    }
+impl TypedTransformHandler for Doubler {
+    type Input = StreamItem;
+    type Output = StageOutputs<StreamItem>;
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+    fn process(
+        &self,
+        event: StreamItem,
+    ) -> std::result::Result<StageOutputs<StreamItem>, HandlerError> {
+        Ok(StageOutputs::many([event.clone(), event]))
     }
 }
 
@@ -268,22 +269,14 @@ impl NumberDoubler {
     }
 }
 
-#[async_trait]
-impl TransformHandler for NumberDoubler {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        if let Some(value) = event.payload().get("value").and_then(|v| v.as_u64()) {
-            Ok(vec![ChainEventFactory::data_event(
-                event.writer_id,
-                <NumberItem as TypedPayload>::EVENT_TYPE,
-                json!({ "value": value * 2 }),
-            )])
-        } else {
-            Ok(vec![])
-        }
-    }
+impl TypedTransformHandler for NumberDoubler {
+    type Input = NumberItem;
+    type Output = NumberItem;
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, event: NumberItem) -> std::result::Result<NumberItem, HandlerError> {
+        Ok(NumberItem {
+            value: event.value * 2,
+        })
     }
 }
 

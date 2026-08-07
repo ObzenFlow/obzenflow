@@ -16,7 +16,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, StatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -78,37 +78,23 @@ impl FiniteSourceHandler for ThreeRows {
 }
 
 #[derive(Clone, Debug)]
-struct RejectTwo {
-    writer_id: WriterId,
-}
+struct RejectTwo;
 
 impl RejectTwo {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl TransformHandler for RejectTwo {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let input = Input::from_event(&event)
-            .ok_or_else(|| HandlerError::Deserialization("missing Input payload".to_string()))?;
+impl TypedTransformHandler for RejectTwo {
+    type Input = Input;
+    type Output = Input;
+
+    fn process(&self, input: Input) -> Result<Input, HandlerError> {
         if input.value == 2 {
             return Err(HandlerError::Domain("rejected value 2".to_string()));
         }
-        Ok(vec![ChainEventFactory::derived_data_event(
-            self.writer_id,
-            &event,
-            Input::EVENT_TYPE,
-            json!(input),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+        Ok(input)
     }
 }
 
