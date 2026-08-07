@@ -110,10 +110,7 @@ fn first_party_declarations_do_not_call_exported_lowering_helpers_directly() {
     let allowed: Vec<&str> = LOWERING_IMPLEMENTATIONS
         .iter()
         .copied()
-        .chain([
-            LOWERING_CONTRACT_TESTS,
-            RETIRED_HELPER_COMPILE_FAIL_FIXTURE,
-        ])
+        .chain([LOWERING_CONTRACT_TESTS, RETIRED_HELPER_COMPILE_FAIL_FIXTURE])
         .collect();
     let mut violations = Vec::new();
 

@@ -545,7 +545,8 @@ mod tests {
         ] {
             let expected_chunks = items.len();
             let estimator = Arc::new(CountingEstimator::default());
-            let adapter = TypedTransformHandlerAdapter::new(planner(estimator.clone()));
+            let mut adapter = TypedTransformHandlerAdapter::new(planner(estimator.clone()));
+            TransformHandler::install_writer_id(&mut adapter, WriterId::from(StageId::new()));
             let outputs = TransformHandler::process(&adapter, seed_event(items))
                 .expect("direct planning succeeds");
 
@@ -604,7 +605,8 @@ mod tests {
             })
             .snapshot_excluded_items_limit(8)
             .build();
-        let adapter = TypedTransformHandlerAdapter::new(planner);
+        let mut adapter = TypedTransformHandlerAdapter::new(planner);
+        TransformHandler::install_writer_id(&mut adapter, WriterId::from(StageId::new()));
         let outputs =
             TransformHandler::process(&adapter, seed_event(vec!["a".to_string(), "b".to_string()]))
                 .expect("exclusions complete the plan");
