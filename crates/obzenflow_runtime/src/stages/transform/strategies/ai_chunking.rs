@@ -22,7 +22,7 @@ use obzenflow_core::event::{
     ChainEventContent, ChainEventFactory, StageFatalCode, StageFatalReason,
 };
 use obzenflow_core::id::CompositeId;
-use obzenflow_core::{ChainEvent, StageOutputs, TypedPayload};
+use obzenflow_core::{ChainEvent, StageOutputs, TypedPayload, WriterId};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -312,6 +312,7 @@ pub struct GeneratedAiChunkHandler<In, Item> {
     inner: ChunkByBudgetTyped<In, Item>,
     composite_id: CompositeId,
     lineage: obzenflow_core::config::LineagePolicy,
+    writer_id: Option<WriterId>,
 }
 
 impl<In, Item> GeneratedAiChunkHandler<In, Item> {
@@ -321,6 +322,7 @@ impl<In, Item> GeneratedAiChunkHandler<In, Item> {
             inner,
             composite_id,
             lineage: obzenflow_core::config::LineagePolicy::default(),
+            writer_id: None,
         }
     }
 }
@@ -331,8 +333,17 @@ impl<In, Item> fmt::Debug for GeneratedAiChunkHandler<In, Item> {
             .debug_struct("GeneratedAiChunkHandler")
             .field("inner", &self.inner)
             .field("composite_id", &self.composite_id)
+            .field("writer_id", &self.writer_id)
             .finish()
     }
+}
+
+fn configuration_fatal(detail: impl Into<String>) -> HandlerError {
+    HandlerError::Fatal(StageFatal::new(
+        StageFatalCode::Configuration,
+        StageFatalReason::ConfigurationInvariant,
+        detail,
+    ))
 }
 
 fn protocol_fatal(detail: impl Into<String>) -> HandlerError {
@@ -350,6 +361,11 @@ where
     Item: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        let writer_id = self.writer_id.ok_or_else(|| {
+            configuration_fatal(
+                "generated AI chunk adapter invoked before runtime writer identity installation",
+            )
+        })?;
         let matching = event
             .composite_activations()
             .iter()
@@ -375,7 +391,7 @@ where
                         protocol_fatal(format!("planning failure serialization failed: {error}"))
                     })?;
                 return Ok(vec![ChainEventFactory::derived_data_event(
-                    event.writer_id,
+                    writer_id,
                     &event,
                     AiMapReducePlanningFailed::versioned_event_type(),
                     payload,
@@ -396,7 +412,7 @@ where
         let chunk_count = planned.chunks.len();
         let mut outputs = Vec::with_capacity(chunk_count + 2);
         outputs.push(ChainEventFactory::derived_event(
-            event.writer_id,
+            writer_id,
             &event,
             ChainEventContent::Observability(observability),
             self.lineage,
@@ -408,7 +424,7 @@ where
                     protocol_fatal(format!("generated map input serialization failed: {error}"))
                 })?;
             outputs.push(ChainEventFactory::derived_data_event(
-                event.writer_id,
+                writer_id,
                 &event,
                 AiMapReduceMapInput::<ChunkEnvelope<Item>>::versioned_event_type(),
                 payload,
@@ -427,7 +443,7 @@ where
             protocol_fatal(format!("planning manifest serialization failed: {error}"))
         })?;
         outputs.push(ChainEventFactory::derived_data_event(
-            event.writer_id,
+            writer_id,
             &event,
             AiMapReducePlanningManifest::versioned_event_type(),
             payload,
@@ -442,6 +458,10 @@ where
 
     fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
         self.lineage = policy;
+    }
+
+    fn install_writer_id(&mut self, writer_id: WriterId) {
+        self.writer_id = Some(writer_id);
     }
 }
 
@@ -636,11 +656,22 @@ mod tests {
             let composite_id = CompositeId::new(format!("test:generated:{expected_chunks}"));
             let parent = activated_seed_event(&composite_id, items);
             let job_key: EventId = parent.id;
-            let handler = GeneratedAiChunkHandler::new(planner(estimator.clone()), composite_id);
+            let upstream_writer_id = parent.writer_id;
+            let generated_writer_id = WriterId::from(StageId::new());
+            let mut handler =
+                GeneratedAiChunkHandler::new(planner(estimator.clone()), composite_id);
+            TransformHandler::install_writer_id(&mut handler, generated_writer_id);
 
-            let outputs =
-                TransformHandler::process(&handler, parent).expect("generated planning succeeds");
+            let outputs = TransformHandler::process(&handler, parent.clone())
+                .expect("generated planning succeeds");
             assert_eq!(outputs.len(), expected_chunks + 2);
+            assert_ne!(upstream_writer_id, generated_writer_id);
+            assert!(outputs
+                .iter()
+                .all(|event| event.writer_id == generated_writer_id));
+            assert!(outputs
+                .iter()
+                .all(|event| event.causality.parent_ids.first() == Some(&parent.id)));
             let observed = snapshot(&outputs[0]);
             assert_eq!(observed.chunk_count, expected_chunks);
 
@@ -675,5 +706,92 @@ mod tests {
                 "snapshot, map inputs, and manifest must share one plan"
             );
         }
+    }
+
+    #[test]
+    fn generated_chunking_fails_closed_before_planning_without_runtime_writer_identity() {
+        let estimator = Arc::new(CountingEstimator::default());
+        let composite_id = CompositeId::new("test:generated:unbound");
+        let parent = activated_seed_event(&composite_id, vec!["one".to_string()]);
+        let handler = GeneratedAiChunkHandler::new(planner(estimator.clone()), composite_id);
+
+        let error = TransformHandler::process(&handler, parent)
+            .expect_err("unbound generated adapter must not inherit the upstream author");
+
+        let HandlerError::Fatal(fatal) = error else {
+            panic!("missing runtime identity must be a stage fatal")
+        };
+        assert_eq!(fatal.code, StageFatalCode::Configuration);
+        assert_eq!(fatal.reason, StageFatalReason::ConfigurationInvariant);
+        assert!(fatal
+            .detail
+            .contains("before runtime writer identity installation"));
+        assert_eq!(
+            estimator.calls(),
+            0,
+            "runtime binding must be checked before planner or estimator work"
+        );
+    }
+
+    #[test]
+    fn generated_planning_failure_is_authored_by_the_chunk_stage() {
+        let estimator = Arc::new(CountingEstimator::default());
+        let planner = ChunkByBudgetBuilder::new()
+            .estimator(estimator)
+            .items(|seed: &Seed| seed.items.clone())
+            .render(|item: &String, _context| item.clone())
+            .budget(TokenCount::new(1))
+            .build();
+        let composite_id = CompositeId::new("test:generated:planning-failure");
+        let parent = activated_seed_event(&composite_id, vec!["oversize".to_string()]);
+        let generated_writer_id = WriterId::from(StageId::new());
+        let mut handler = GeneratedAiChunkHandler::new(planner, composite_id);
+        TransformHandler::install_writer_id(&mut handler, generated_writer_id);
+
+        let outputs = TransformHandler::process(&handler, parent.clone())
+            .expect("planning failure is lowered to a protocol fact");
+
+        let [failure] = outputs.as_slice() else {
+            panic!("planning failure must emit exactly one fact")
+        };
+        assert!(AiMapReducePlanningFailed::from_event(failure).is_some());
+        assert_eq!(failure.writer_id, generated_writer_id);
+        assert_eq!(failure.causality.parent_ids.first(), Some(&parent.id));
+    }
+
+    #[test]
+    fn generated_all_excluded_job_authors_snapshot_and_manifest_with_stage_writer() {
+        let estimator = Arc::new(CountingEstimator::default());
+        let planner = ChunkByBudgetBuilder::new()
+            .estimator(estimator)
+            .items(|seed: &Seed| seed.items.clone())
+            .render(|item: &String, _context| item.clone())
+            .budget(TokenCount::new(1))
+            .oversize(OversizePolicy::Rerender {
+                max_depth: 1,
+                min_progress_tokens: TokenCount::new(1),
+                exhaustion: OversizeExhaustion::Exclude,
+            })
+            .build();
+        let composite_id = CompositeId::new("test:generated:all-excluded");
+        let parent = activated_seed_event(&composite_id, vec!["oversize".to_string()]);
+        let generated_writer_id = WriterId::from(StageId::new());
+        let mut handler = GeneratedAiChunkHandler::new(planner, composite_id);
+        TransformHandler::install_writer_id(&mut handler, generated_writer_id);
+
+        let outputs = TransformHandler::process(&handler, parent)
+            .expect("all-excluded planning still completes the generated protocol");
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(snapshot(&outputs[0]).chunk_count, 0);
+        let manifest = AiMapReducePlanningManifest::try_from_event(&outputs[1])
+            .expect("all-excluded job emits a manifest");
+        assert_eq!(manifest.chunk_count, 0);
+        assert_eq!(manifest.planning.input_items_total, 1);
+        assert_eq!(manifest.planning.planned_items_total, 0);
+        assert_eq!(manifest.planning.excluded_items_total, 1);
+        assert!(outputs
+            .iter()
+            .all(|event| event.writer_id == generated_writer_id));
     }
 }

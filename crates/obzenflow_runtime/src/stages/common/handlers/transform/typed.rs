@@ -5,13 +5,14 @@
 //! Typed pure transform handlers (FLOWIP-120z).
 
 use super::traits::TransformHandler;
-use crate::stages::common::handler_error::HandlerError;
+use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::observability_payload::ObservabilityPayload;
 use obzenflow_core::event::schema::{StageOutputFacts, TypedFactSet, TypedPayload};
-use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::event::{
+    ChainEventContent, ChainEventFactory, StageFatalCode, StageFatalReason,
+};
 use obzenflow_core::{ChainEvent, WriterId};
 
 /// One typed transform invocation before runtime-owned envelope lowering.
@@ -105,10 +106,11 @@ where
 {
     fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         let writer_id = self.writer_id.ok_or_else(|| {
-            HandlerError::Other(
-                "typed transform adapter invoked before runtime writer identity installation"
-                    .to_string(),
-            )
+            HandlerError::Fatal(StageFatal::new(
+                StageFatalCode::Configuration,
+                StageFatalReason::ConfigurationInvariant,
+                "typed transform adapter invoked before runtime writer identity installation",
+            ))
         })?;
         let input = H::Input::try_from_event(&event)
             .map_err(|error| HandlerError::Deserialization(error.to_string()))?;
@@ -249,8 +251,13 @@ mod tests {
         let error = TransformHandler::process(&adapter, parent)
             .expect_err("unbound adapter must not inherit the upstream author");
 
-        assert!(error
-            .to_string()
+        let HandlerError::Fatal(fatal) = error else {
+            panic!("missing runtime identity must be a stage fatal")
+        };
+        assert_eq!(fatal.code, StageFatalCode::Configuration);
+        assert_eq!(fatal.reason, StageFatalReason::ConfigurationInvariant);
+        assert!(fatal
+            .detail
             .contains("before runtime writer identity installation"));
     }
 }
