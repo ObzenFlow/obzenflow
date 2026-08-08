@@ -414,9 +414,10 @@ impl SelectedDataSeqByEventType {
     pub(super) fn seq_for_feed(&self, feed: &SelectedFeedMetadata) -> SeqNo {
         self.by_event_type
             .iter()
-            .find(|(event_type, _)| feed.matches_event_type(event_type.as_str()))
-            .map(|(_, seq)| *seq)
-            .unwrap_or(SeqNo(0))
+            .filter(|(event_type, _)| feed.matches_event_type(event_type.as_str()))
+            .fold(SeqNo(0), |total, (_, seq)| {
+                SeqNo(total.0.saturating_add(seq.0))
+            })
     }
 }
 
@@ -438,10 +439,15 @@ impl AdvertisedWriterSeqByEventType {
     }
 
     pub(super) fn seq_for_feed(&self, feed: &SelectedFeedMetadata) -> Option<SeqNo> {
-        self.by_event_type
+        let mut matches = self
+            .by_event_type
             .iter()
-            .find(|(event_type, _)| feed.matches_event_type(event_type.as_str()))
-            .map(|(_, seq)| *seq)
+            .filter(|(event_type, _)| feed.matches_event_type(event_type.as_str()))
+            .peekable();
+        matches.peek()?;
+        Some(matches.fold(SeqNo(0), |total, (_, seq)| {
+            SeqNo(total.0.saturating_add(seq.0))
+        }))
     }
 }
 
@@ -479,6 +485,27 @@ mod selected_feed_sequence_tests {
         )]));
 
         assert_eq!(advertised.seq_for_feed(&feed), None);
+    }
+
+    #[test]
+    fn compatible_legacy_and_versioned_spellings_are_summed() {
+        let feed =
+            SelectedFeedMetadata::new(EventType::from("typed.fact.v1"), SelectedFeedRole::Input);
+
+        let mut reader = SelectedDataSeqByEventType::default();
+        reader.increment("typed.fact");
+        reader.increment("typed.fact.v1");
+        reader.increment("typed.fact.v1");
+        reader.increment("typed.fact.v2");
+        assert_eq!(reader.seq_for_feed(&feed), SeqNo(3));
+
+        let mut advertised = AdvertisedWriterSeqByEventType::default();
+        advertised.replace_from_eof(&BTreeMap::from([
+            (EventType::from("typed.fact"), SeqNo(1)),
+            (EventType::from("typed.fact.v1"), SeqNo(2)),
+            (EventType::from("typed.fact.v2"), SeqNo(99)),
+        ]));
+        assert_eq!(advertised.seq_for_feed(&feed), Some(SeqNo(3)));
     }
 }
 
