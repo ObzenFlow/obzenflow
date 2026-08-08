@@ -1100,20 +1100,14 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.set_reference_stage_id(id);
     }
 
-    async fn create_handle_with_flow_middleware(
+    async fn create_handle(
         self: Box<Self>,
         config: StageConfig,
         resources: StageResources,
-        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
         self.inner
-            .create_handle_with_flow_middleware(
-                config,
-                resources,
-                flow_middleware,
-                control_middleware,
-            )
+            .create_handle(config, resources, control_middleware)
             .await
     }
 
@@ -1832,7 +1826,7 @@ pub fn validate_edge_typing(
     // declaration means the lane can never deliver), then HeterogeneousFanIn
     // (the architecturally-meaningful diagnosis), then SingleEdge errors that
     // are NOT subsumed by a hetero group on the same (downstream, role) slot.
-    // `build_typed_flow!` surfaces the first error from the returned vector
+    // The ordinary flow builder surfaces the first error from the returned vector
     // as the structured `FlowBuildError::EdgeTypingMismatch`, so the ordering
     // chosen here determines which kind reaches the user.
     feed_errors.sort_by(|a, b| {
@@ -2209,20 +2203,14 @@ impl StageDescriptor for DeterministicOrdererOverride {
         self.inner.set_reference_stage_id(id);
     }
 
-    async fn create_handle_with_flow_middleware(
+    async fn create_handle(
         self: Box<Self>,
         config: StageConfig,
         resources: StageResources,
-        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
         self.inner
-            .create_handle_with_flow_middleware(
-                config,
-                resources,
-                flow_middleware,
-                control_middleware,
-            )
+            .create_handle(config, resources, control_middleware)
             .await
     }
 

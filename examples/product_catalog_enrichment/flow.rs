@@ -172,7 +172,6 @@ fn build_flow() -> FlowDefinition {
         Ok(flow! {
         name: "product_catalog_enrichment",
         journals: disk_journals(std::path::PathBuf::from("target/catalog-logs")),
-        middleware: [],
 
         stages: {
             categories = source!(Category => categories_handler);

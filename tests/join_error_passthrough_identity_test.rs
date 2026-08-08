@@ -295,7 +295,6 @@ fn build_flow(journal_base: PathBuf, unexpected_error_calls: Arc<AtomicUsize>) -
         Ok(flow! {
             name: "join_error_passthrough_identity",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 ref_src = source!(RefItem => reference_source);

@@ -342,7 +342,6 @@ async fn sink_edge_emits_passed_delivery_contract_result() -> Result<()> {
         Ok(flow! {
             name: "delivery_contract_wiring",
             journals: disk_journals(journals_base),
-            middleware: [],
 
             stages: {
                 source = source!(DeliveryTestEvent => source_handler);
@@ -386,7 +385,6 @@ async fn buffered_sink_edge_emits_passed_delivery_contract_result_after_flush() 
         Ok(flow! {
             name: "delivery_contract_wiring_buffered",
             journals: disk_journals(journals_base),
-            middleware: [],
 
             stages: {
                 source = source!(DeliveryTestEvent => source_handler);
@@ -436,7 +434,6 @@ async fn fan_out_before_buffered_sink_emits_passed_delivery_contract_result() ->
         Ok(flow! {
             name: "delivery_contract_wiring_fanout_buffered",
             journals: disk_journals(journals_base),
-            middleware: [],
 
             stages: {
                 source = source!(DeliveryTestEvent => source_handler);

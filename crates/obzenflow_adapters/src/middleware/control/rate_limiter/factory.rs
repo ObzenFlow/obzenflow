@@ -744,8 +744,8 @@ mod tests {
     fn rate_limiter_ingress_admits_then_rejects_fail_fast() {
         use crate::middleware::{
             HostedIngressTargetKey, IngressRouteScope, IngressSurface, IngressUnitId,
-            MiddlewareAttachmentRequest, MiddlewareDeclarationIndex, MiddlewareOrigin,
-            ProtectedUnit, ProtectedUnitId, SourceStageIngressOwner,
+            MiddlewareAttachmentRequest, MiddlewareDeclarationIndex, ProtectedUnit,
+            ProtectedUnitId, SourceStageIngressOwner,
         };
         use obzenflow_core::ingress::{
             IngressAdmissionDecision, IngressAttemptContext, IngressAttemptSeq, IngressKey,
@@ -774,12 +774,10 @@ mod tests {
                 target,
             }),
         };
-        let origin = MiddlewareOrigin::Stage;
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &unit,
-            origin: &origin,
-            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
         };
         // Burst capacity 1 (events_per_second defaults the burst), 1 event/sec.
         let boundary = materialize_factory_checked(

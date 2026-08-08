@@ -302,7 +302,6 @@ fn build_flow(
         Ok(flow! {
             name: "resume_mixed",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 fin = source!(ChannelTick => finite_handler);

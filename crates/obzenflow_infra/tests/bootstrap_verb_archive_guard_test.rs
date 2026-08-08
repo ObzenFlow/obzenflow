@@ -50,7 +50,6 @@ async fn installed_replay_verb_without_opened_archive_fails_the_build() {
         Ok(flow! {
             name: "verb_without_archive",
             journals: journals,
-            middleware: [],
 
             stages: {
                 src = source!(GuardEvent => placeholder!());

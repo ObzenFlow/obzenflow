@@ -314,7 +314,6 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     let harness = test_flow! {
         name: "cycle_buffers_external_eof_until_scc_quiescent",
         journals: disk_journals(journal_root),
-        middleware: [],
 
         stages: {
             src = async_source!(SeedEvent => source);
@@ -510,7 +509,6 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let harness = test_flow! {
         name: "cycle_buffers_drain_until_scc_quiescent",
         journals: disk_journals(journal_root),
-        middleware: [],
 
         stages: {
             src = async_source!(SeedEvent => source);
@@ -613,7 +611,6 @@ async fn cycle_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
         Ok(flow! {
             name: "cycle_max_iterations_exceeded_routes_to_error_journal",
             journals: disk_journals(journal_root_for_flow),
-            middleware: [],
 
             stages: {
                 src = source!(SeedEvent => source);
@@ -677,7 +674,6 @@ async fn cycle_rejects_sccs_with_multiple_entry_points() {
         Ok(flow! {
             name: "cycle_reject_multi_entry_scc",
             journals: disk_journals(unique_journal_dir("cycle_reject_multi_entry_scc")),
-            middleware: [],
 
             stages: {
                 src1 = source!(SeedEvent => source_a);

@@ -159,7 +159,6 @@ fn build_flow(
         Ok(flow! {
             name: "resume_linear",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 src = infinite_source!(Tick => source_handler);
@@ -244,7 +243,6 @@ fn build_flow_memory(first_n: u64, count: u64, delivered: Arc<AtomicU64>) -> Flo
         Ok(flow! {
             name: "resume_linear",
             journals: memory_journals(),
-            middleware: [],
 
             stages: {
                 src = infinite_source!(Tick => source_handler);

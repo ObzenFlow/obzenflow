@@ -170,7 +170,6 @@ fn build_flow(journal_base: PathBuf, nondeterministic: bool) -> FlowDefinition {
         Ok(flow! {
             name: "replay_verification_divergence",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 numbers = source!(Input => numbers_handler);
@@ -199,7 +198,6 @@ fn build_flow_v2(journal_base: PathBuf) -> FlowDefinition {
         Ok(flow! {
             name: "replay_verification_divergence",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 numbers = source!(Input => numbers_handler);

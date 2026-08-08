@@ -47,7 +47,6 @@ pub async fn run() -> Result<()> {
         Ok(flow! {
             name: "multi_source_ingest_demo",
             journals: disk_journals(std::path::PathBuf::from("target/multi_source_ingest_demo")),
-            middleware: [],
 
             stages: {
                 // Three sources, three different concrete types.

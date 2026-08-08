@@ -20,7 +20,7 @@ error[E0432]: unresolved imports `obzenflow_adapters::middleware::AsyncMiddlewar
 help: a similar name exists in the module
   |
 7 -     MiddlewareFiniteSource, MiddlewareInfiniteSource, MiddlewareJoin, MiddlewareSink,
-7 +     MiddlewareFiniteSource, MiddlewareInfiniteSource, MiddlewareOrigin, MiddlewareSink,
+7 +     MiddlewareFiniteSource, MiddlewareInfiniteSource, MiddlewareHints, MiddlewareSink,
   |
 help: a similar name exists in the module
   |

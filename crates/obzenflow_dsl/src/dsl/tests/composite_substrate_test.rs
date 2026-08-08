@@ -110,11 +110,10 @@ mod tests {
             }]
         }
 
-        async fn create_handle_with_flow_middleware(
+        async fn create_handle(
             self: Box<Self>,
             config: obzenflow_runtime::pipeline::config::StageConfig,
             resources: obzenflow_runtime::stages::StageResources,
-            flow_middleware: Vec<Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>>,
             control_middleware: std::sync::Arc<
                 obzenflow_adapters::middleware::control::ControlMiddlewareAggregator,
             >,
@@ -122,12 +121,7 @@ mod tests {
             obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle,
         > {
             Box::new(self.inner)
-                .create_handle_with_flow_middleware(
-                    config,
-                    resources,
-                    flow_middleware,
-                    control_middleware,
-                )
+                .create_handle(config, resources, control_middleware)
                 .await
         }
     }

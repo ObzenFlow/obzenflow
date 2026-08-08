@@ -207,7 +207,6 @@ fn build_flow(
         Ok(flow! {
             name: "resume_effects",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 src = infinite_source!(Reading => reader);

@@ -166,7 +166,6 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
         Ok(flow! {
             name: "liveness_hung_handler_cancel",
             journals: memory_journals(),
-            middleware: [],
 
             stages: {
                 numbers = source!(ProbeEvent => one_event_source);

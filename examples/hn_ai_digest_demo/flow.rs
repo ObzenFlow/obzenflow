@@ -433,7 +433,6 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
         Ok(flow! {
             name: "hn_ai_digest_demo",
             journals: disk_journals(journal_base),
-            middleware: [],
             effect_ports,
 
             stages: {

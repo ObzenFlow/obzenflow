@@ -261,7 +261,6 @@ fn finite_flow(
         Ok(flow! {
             name: "standalone_ai_gap_proof",
             journals: disk_journals(journal_base.clone()),
-            middleware: [],
             effect_ports: effect_ports.clone(),
 
             stages: {
@@ -347,7 +346,6 @@ fn resumable_flow(
         Ok(flow! {
             name: "standalone_ai_resume_tail",
             journals: disk_journals(journal_base.clone()),
-            middleware: [],
             effect_ports: effect_ports.clone(),
 
             stages: {
@@ -449,7 +447,6 @@ fn control_interleaving_flow(
         Ok(flow! {
             name: "standalone_ai_control_interleaving",
             journals: disk_journals(journal_base.clone()),
-            middleware: [],
             effect_ports: effect_ports.clone(),
 
             stages: {

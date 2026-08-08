@@ -369,7 +369,6 @@ fn build_two_channel_flow_with_jitter(
         Ok(flow! {
             name: "deterministic_fan_in",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 source_a = source!(FanInInput => source_a);
@@ -415,7 +414,6 @@ fn build_skip_level_flow_with_delay(
         Ok(flow! {
             name: "deterministic_fan_in_skip_level",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 source_a = source!(FanInInput => source_a);
@@ -455,7 +453,6 @@ fn build_two_channel_stateful_flow(journal_base: PathBuf) -> FlowDefinition {
         Ok(flow! {
             name: "stateful_fan_in",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 source_a = source!(FanInInput => source_a);

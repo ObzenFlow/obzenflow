@@ -229,7 +229,6 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
         Ok(flow! {
             name: "liveness_join_fan_in",
             journals: memory_journals(),
-            middleware: [],
 
             stages: {
                 ref_src = source!(CatalogRecord => reference_source);

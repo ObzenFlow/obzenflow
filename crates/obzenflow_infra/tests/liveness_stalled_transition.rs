@@ -140,7 +140,6 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
         Ok(flow! {
             name: "liveness_stalled_transition",
             journals: memory_journals(),
-            middleware: [],
 
             stages: {
                 numbers = source!(ProbeEvent => numbers_handler);

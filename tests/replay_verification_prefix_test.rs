@@ -98,7 +98,6 @@ macro_rules! prefix_flow {
             Ok(flow! {
                 name: "replay_verification_prefix",
                 journals: disk_journals($journal_base),
-                middleware: [],
 
                 stages: {
                     ticks = source!(Tick => stalling_ticks);

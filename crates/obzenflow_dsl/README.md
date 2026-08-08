@@ -4,12 +4,12 @@ This crate is an internal implementation detail of the ObzenFlow project. Most u
 
 **Layer:** DSL/orchestration (outer). Depends on `obzenflow_adapters`, `obzenflow_runtime`, `obzenflow_core`, and `obzenflow-topology`.
 
-The composition root for flow construction. The `flow!` macro turns a declarative block into a runnable `FlowHandle` by coordinating topology validation, journal allocation, middleware resolution, and stage wiring.
+The composition root for flow construction. The `flow!` macro turns a declarative block into a `FlowDefinition`; ordinary crate-owned Rust coordinates topology validation, journal allocation, stage-authored middleware binding, and stage wiring when the host builds it.
 
 - `flow!` macro and topology parsing helpers
 - Stage descriptor macros (`source!`, `transform!`, `sink!`, `stateful!`, `join!`, `effectful_transform!`, `effectful_stateful!`, `inference!`, `ai_map_reduce!`, and async variants)
-- Middleware inheritance and override resolution with audit trail
-- `FlowDefinition` future wrapper (what `flow!` returns)
+- Stage-authored middleware binding to typed runtime surfaces
+- `FlowDefinition` deferred build wrapper (what `flow!` returns)
 - Structured build errors
 
 ## Usage
@@ -29,7 +29,6 @@ fn build_flow() -> FlowDefinition {
         Ok(flow! {
             name: "my_flow",
             journals: disk_journals("target/my-flow-logs".into()),
-            middleware: [],
 
             stages: {
                 // Every stage declares its types. After FLOWIP-114c, untyped macro
@@ -55,7 +54,7 @@ materialiser immediately above `flow!`; calls, closures, builder chains, and str
 literals are rejected in the slots. Async-source poll timeout is handler
 configuration exposed through `poll_timeout()`, not stage syntax.
 
-The DSL has five sections: `name` (flow identifier), `journals` (persistence backend), `middleware` (flow-level defaults), `stages` (let-bindings producing stage descriptors), and `topology` (edges connecting stages with `|>` and `<|` operators).
+The DSL has four core sections: optional `name` (flow identifier), `journals` (persistence backend), `stages` (bindings producing stage descriptors), and `topology` (edges connecting stages with `|>` and `<|` operators). Optional flow backpressure and effect-port sections sit between `journals` and `stages`. Middleware is declared only on the stage where it applies.
 
 ## AI stage shapes
 

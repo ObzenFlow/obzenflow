@@ -4,23 +4,20 @@
 
 //! FLOWIP-115b: middleware hook binder.
 //!
-//! The binder is the only layer that sees both the adapter-owned carrier
-//! (`CheckedMiddlewareSurfaceAttachment`, `MiddlewareOrigin`, ...) and the
-//! runtime/infra neutral boundary seams. It maps DSL resolution provenance into
-//! the adapter-owned origin, calls the adapter-owned checked materialisation
-//! gateway, and hands only neutral seams inward (a composed source boundary, a
-//! completion gate).
+//! The binder is the only layer that sees both the adapter-owned checked
+//! attachment carrier and the runtime/infra neutral boundary seams. It calls
+//! the adapter-owned checked materialisation gateway and hands only neutral
+//! seams inward (a composed source boundary, a completion gate).
 
-use crate::middleware_resolution::MiddlewareSource;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     materialize_factory_checked, materialize_factory_checked_with_declaration,
     CheckedMiddlewareSurfaceAttachment, EffectPolicyAttachment, EffectSurface, EffectTypeKey,
     EffectUnitId, HostedIngressTargetKey, IngressRouteScope, IngressSurface, IngressUnitId,
     MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareDeclarationIndex,
-    MiddlewareFactory, MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceKind, ProtectedUnit,
-    ProtectedUnitId, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy,
-    SourcePolicy, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
+    MiddlewareFactory, MiddlewareSurface, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
+    SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SourcePolicy,
+    SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
@@ -30,26 +27,6 @@ use obzenflow_runtime::effects::EffectDeclaration;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use std::sync::Arc;
-
-/// Map the DSL's middleware resolution provenance into the adapter-owned
-/// `MiddlewareOrigin`, dropping the DSL-only `overrode_config` detail so adapter
-/// APIs never depend on DSL resolution types.
-pub(crate) fn middleware_origin_from_source(source: &MiddlewareSource) -> MiddlewareOrigin {
-    match source {
-        MiddlewareSource::Flow => MiddlewareOrigin::Flow,
-        MiddlewareSource::Stage => MiddlewareOrigin::Stage,
-        MiddlewareSource::StageOverride {
-            family_label,
-            flow_label,
-            stage_label,
-            ..
-        } => MiddlewareOrigin::StageOverride {
-            family_label: family_label.clone(),
-            flow_label: flow_label.clone(),
-            stage_label: stage_label.clone(),
-        },
-    }
-}
 
 /// The pieces destructured from one control middleware's `SourcePoll`
 /// attachment: the composable source policy and the optional completion-gate
@@ -86,7 +63,6 @@ pub(crate) fn materialize_source_poll(
     config: &StageConfig,
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
-    origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<SourcePollBinding, String> {
     let surface = MiddlewareSurface::SourcePoll(SourcePollSurface {
@@ -99,7 +75,6 @@ pub(crate) fn materialize_source_poll(
     let request = MiddlewareAttachmentRequest {
         surface: &surface,
         protected_unit: &protected_unit,
-        origin,
         declaration_index,
     };
     match materialize_factory_checked(factory, request, config, stage_type, control_middleware)
@@ -127,7 +102,6 @@ pub(crate) fn bind_effect_policy(
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     effect: &EffectDeclaration,
-    origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<EffectPolicyAttachment, String> {
     let factory = declared_factory.factory;
@@ -154,7 +128,6 @@ pub(crate) fn bind_effect_policy(
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &protected_unit,
-            origin,
             declaration_index,
         };
         match materialize_factory_checked_with_declaration(
@@ -191,7 +164,6 @@ pub(crate) fn materialize_effect_observer(
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     effect: &EffectDeclaration,
-    origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<CheckedMiddlewareSurfaceAttachment, String> {
     let effect_type = effect.effect_type;
@@ -209,7 +181,6 @@ pub(crate) fn materialize_effect_observer(
     let request = MiddlewareAttachmentRequest {
         surface: &surface,
         protected_unit: &protected_unit,
-        origin,
         declaration_index,
     };
     materialize_factory_checked(factory, request, config, stage_type, control_middleware)
@@ -222,7 +193,6 @@ pub(crate) fn materialize_observer(
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     surface_kind: MiddlewareSurfaceKind,
-    origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<CheckedMiddlewareSurfaceAttachment, String> {
     let surface = match surface_kind {
@@ -278,7 +248,6 @@ pub(crate) fn materialize_observer(
     let request = MiddlewareAttachmentRequest {
         surface: &surface,
         protected_unit: &protected_unit,
-        origin,
         declaration_index,
     };
     materialize_factory_checked(factory, request, config, stage_type, control_middleware)
@@ -292,7 +261,6 @@ pub(crate) fn materialize_sink_delivery(
     config: &StageConfig,
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
-    origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<Arc<dyn SinkPolicy>, String> {
     let surface = MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
@@ -308,7 +276,6 @@ pub(crate) fn materialize_sink_delivery(
     let request = MiddlewareAttachmentRequest {
         surface: &surface,
         protected_unit: &protected_unit,
-        origin,
         declaration_index,
     };
     match materialize_factory_checked(factory, request, config, stage_type, control_middleware)
@@ -335,7 +302,6 @@ pub(crate) fn materialize_ingress(
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     ingress_key: &IngressKey,
-    origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<Arc<dyn IngressBoundaryMiddleware>, String> {
     let stage_key = StageKey(config.name.clone());
@@ -360,7 +326,6 @@ pub(crate) fn materialize_ingress(
     let request = MiddlewareAttachmentRequest {
         surface: &surface,
         protected_unit: &protected_unit,
-        origin,
         declaration_index,
     };
     match materialize_factory_checked(factory, request, config, stage_type, control_middleware)

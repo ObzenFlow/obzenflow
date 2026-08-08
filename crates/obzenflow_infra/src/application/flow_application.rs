@@ -211,7 +211,6 @@ enabled = false
                     Ok(flow! {
                         name: "server_auto_double_run_regression",
                         journals: disk_journals(journal_dir),
-                        middleware: [],
 
                         stages: {
                             src = infinite_source!(IdlePayload => source);
@@ -282,7 +281,6 @@ enabled = false
                     Ok(flow! {
                         name: "server_terminal_journal_regression",
                         journals: disk_journals(flow_journal_dir),
-                        middleware: [],
 
                         stages: {
                             src = source!(IdlePayload => source);
@@ -470,7 +468,6 @@ enabled = false
                     Ok(flow! {
                         name: "gap24_deregister_regression",
                         journals: disk_journals(journal_dir),
-                        middleware: [],
 
                         stages: {
                             src = infinite_source!(IdlePayload => source);

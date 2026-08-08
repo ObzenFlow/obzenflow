@@ -1,0 +1,357 @@
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+  --> tests/compile_fail/flow_middleware_removed_matrix.rs:10:13
+   |
+10 |       let _ = flow! {
+   |  _____________^
+11 | |         name: "named_without_backpressure_omitted_empty",
+12 | |         journals: (),
+13 | |         middleware: [],
+14 | |         stages: {},
+15 | |         topology: {}
+16 | |     };
+   | |_____^
+   |
+   = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+  --> tests/compile_fail/flow_middleware_removed_matrix.rs:19:13
+   |
+19 |       let _ = flow! {
+   |  _____________^
+20 | |         name: "named_without_backpressure_omitted_nonempty",
+21 | |         journals: (),
+22 | |         middleware: [()],
+23 | |         stages: {},
+24 | |         topology: {}
+25 | |     };
+   | |_____^
+   |
+   = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+  --> tests/compile_fail/flow_middleware_removed_matrix.rs:28:13
+   |
+28 |       let _ = flow! {
+   |  _____________^
+29 | |         name: "named_without_backpressure_shorthand_empty",
+30 | |         journals: (),
+31 | |         middleware: [],
+...  |
+34 | |         topology: {}
+35 | |     };
+   | |_____^
+   |
+   = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+  --> tests/compile_fail/flow_middleware_removed_matrix.rs:38:13
+   |
+38 |       let _ = flow! {
+   |  _____________^
+39 | |         name: "named_without_backpressure_shorthand_nonempty",
+40 | |         journals: (),
+41 | |         middleware: [()],
+...  |
+44 | |         topology: {}
+45 | |     };
+   | |_____^
+   |
+   = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+  --> tests/compile_fail/flow_middleware_removed_matrix.rs:48:13
+   |
+48 |       let _ = flow! {
+   |  _____________^
+49 | |         name: "named_without_backpressure_expression_empty",
+50 | |         journals: (),
+51 | |         middleware: [],
+...  |
+54 | |         topology: {}
+55 | |     };
+   | |_____^
+   |
+   = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+  --> tests/compile_fail/flow_middleware_removed_matrix.rs:58:13
+   |
+58 |       let _ = flow! {
+   |  _____________^
+59 | |         name: "named_without_backpressure_expression_nonempty",
+60 | |         journals: (),
+61 | |         middleware: [()],
+...  |
+64 | |         topology: {}
+65 | |     };
+   | |_____^
+   |
+   = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+  --> tests/compile_fail/flow_middleware_removed_matrix.rs:68:13
+   |
+68 |       let _ = flow! {
+   |  _____________^
+69 | |         name: "named_with_backpressure_omitted_empty",
+70 | |         journals: (),
+71 | |         middleware: [],
+...  |
+74 | |         topology: {}
+75 | |     };
+   | |_____^
+   |
+   = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+  --> tests/compile_fail/flow_middleware_removed_matrix.rs:78:13
+   |
+78 |       let _ = flow! {
+   |  _____________^
+79 | |         name: "named_with_backpressure_omitted_nonempty",
+80 | |         journals: (),
+81 | |         middleware: [()],
+...  |
+84 | |         topology: {}
+85 | |     };
+   | |_____^
+   |
+   = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+  --> tests/compile_fail/flow_middleware_removed_matrix.rs:88:13
+   |
+88 |       let _ = flow! {
+   |  _____________^
+89 | |         name: "named_with_backpressure_shorthand_empty",
+90 | |         journals: (),
+91 | |         middleware: [],
+...  |
+95 | |         topology: {}
+96 | |     };
+   | |_____^
+   |
+   = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:99:13
+    |
+ 99 |       let _ = flow! {
+    |  _____________^
+100 | |         name: "named_with_backpressure_shorthand_nonempty",
+101 | |         journals: (),
+102 | |         middleware: [()],
+...   |
+106 | |         topology: {}
+107 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:110:13
+    |
+110 |       let _ = flow! {
+    |  _____________^
+111 | |         name: "named_with_backpressure_expression_empty",
+112 | |         journals: (),
+113 | |         middleware: [],
+...   |
+117 | |         topology: {}
+118 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:121:13
+    |
+121 |       let _ = flow! {
+    |  _____________^
+122 | |         name: "named_with_backpressure_expression_nonempty",
+123 | |         journals: (),
+124 | |         middleware: [()],
+...   |
+128 | |         topology: {}
+129 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:132:13
+    |
+132 |       let _ = flow! {
+    |  _____________^
+133 | |         journals: (),
+134 | |         middleware: [],
+135 | |         stages: {},
+136 | |         topology: {}
+137 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:140:13
+    |
+140 |       let _ = flow! {
+    |  _____________^
+141 | |         journals: (),
+142 | |         middleware: [()],
+143 | |         stages: {},
+144 | |         topology: {}
+145 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:148:13
+    |
+148 |       let _ = flow! {
+    |  _____________^
+149 | |         journals: (),
+150 | |         middleware: [],
+151 | |         effect_ports,
+152 | |         stages: {},
+153 | |         topology: {}
+154 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:157:13
+    |
+157 |       let _ = flow! {
+    |  _____________^
+158 | |         journals: (),
+159 | |         middleware: [()],
+160 | |         effect_ports,
+161 | |         stages: {},
+162 | |         topology: {}
+163 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:166:13
+    |
+166 |       let _ = flow! {
+    |  _____________^
+167 | |         journals: (),
+168 | |         middleware: [],
+169 | |         effect_ports: (),
+170 | |         stages: {},
+171 | |         topology: {}
+172 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:175:13
+    |
+175 |       let _ = flow! {
+    |  _____________^
+176 | |         journals: (),
+177 | |         middleware: [()],
+178 | |         effect_ports: (),
+179 | |         stages: {},
+180 | |         topology: {}
+181 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:184:13
+    |
+184 |       let _ = flow! {
+    |  _____________^
+185 | |         journals: (),
+186 | |         middleware: [],
+187 | |         backpressure: (),
+188 | |         stages: {},
+189 | |         topology: {}
+190 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:193:13
+    |
+193 |       let _ = flow! {
+    |  _____________^
+194 | |         journals: (),
+195 | |         middleware: [()],
+196 | |         backpressure: (),
+197 | |         stages: {},
+198 | |         topology: {}
+199 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:202:13
+    |
+202 |       let _ = flow! {
+    |  _____________^
+203 | |         journals: (),
+204 | |         middleware: [],
+205 | |         backpressure: (),
+...   |
+208 | |         topology: {}
+209 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:212:13
+    |
+212 |       let _ = flow! {
+    |  _____________^
+213 | |         journals: (),
+214 | |         middleware: [()],
+215 | |         backpressure: (),
+...   |
+218 | |         topology: {}
+219 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:222:13
+    |
+222 |       let _ = flow! {
+    |  _____________^
+223 | |         journals: (),
+224 | |         middleware: [],
+225 | |         backpressure: (),
+...   |
+228 | |         topology: {}
+229 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)
+   --> tests/compile_fail/flow_middleware_removed_matrix.rs:232:13
+    |
+232 |       let _ = flow! {
+    |  _____________^
+233 | |         journals: (),
+234 | |         middleware: [()],
+235 | |         backpressure: (),
+...   |
+238 | |         topology: {}
+239 | |     };
+    | |_____^
+    |
+    = note: this error originates in the macro `flow` (in Nightly builds, run with -Z macro-backtrace for more info)

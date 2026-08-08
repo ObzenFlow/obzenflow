@@ -266,7 +266,6 @@ fn build_flow(
         Ok(flow! {
             name: "resume_fan_in",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 src_a = infinite_source!(ChannelTick => source_a_handler);

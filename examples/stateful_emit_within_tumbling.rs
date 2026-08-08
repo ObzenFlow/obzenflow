@@ -96,7 +96,6 @@ fn main() -> Result<()> {
             Ok(flow! {
                 name: "stateful_emit_within_tumbling",
                 journals: disk_journals(std::path::PathBuf::from("target/stateful_emit_within_tumbling")),
-                middleware: [],
 
                 stages: {
                     clicks = source!(ClickEvent => clicks_handler);

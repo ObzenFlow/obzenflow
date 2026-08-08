@@ -97,7 +97,6 @@ async fn memory_journals_flow_runs_to_completion() {
 
             Ok(flow! {
                 journals: memory_journals(),
-                middleware: [],
 
                 stages: {
                     src = source!(SmokeEvent => source);

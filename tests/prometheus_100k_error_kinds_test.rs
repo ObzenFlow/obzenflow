@@ -164,7 +164,6 @@ async fn prometheus_100k_typed_try_map_errors_are_unknown_only() -> Result<()> {
         Ok(flow! {
             name: "prometheus_100k_demo",
             journals: disk_journals(journal_root),
-            middleware: [],
 
             stages: {
                 high_volume_source = source!(DataRequest => source);

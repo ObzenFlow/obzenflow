@@ -280,7 +280,6 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let test_handle = test_flow! {
         name: "stateful_metrics",
         journals: disk_journals(journal_dir_for_flow.clone()),
-        middleware: [],
 
         stages: {
             src = source!(MetricEvent => source);
@@ -519,7 +518,6 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
     let test_handle = test_flow! {
         name: "stateful_join_metrics",
         journals: disk_journals(unique_journal_dir("stateful_join_metrics")),
-        middleware: [],
 
         stages: {
             ref_src = source!(RefMetricEvent => reference_source);

@@ -170,7 +170,6 @@ async fn test_basic_throughput() -> Result<()> {
     let handle = flow! {
         name: "high_throughput_test",
         journal: journal,
-        middleware: [],
 
         stages: {
             source = source!(BenchEvent => EventGenerator::new(1000, 1000, "TestEvent".to_string()));
@@ -220,7 +219,6 @@ async fn test_backpressure() -> Result<()> {
     let handle = flow! {
         name: "backpressure_test",
         journal: journal,
-        middleware: [],
 
         stages: {
             source = source!(BenchEvent => EventGenerator::new(1000, 100, "TestEvent".to_string()));
@@ -266,7 +264,6 @@ async fn test_memory_pressure() -> Result<()> {
     let handle = flow! {
         name: "disk_journal_memory_usage_test",
         journal: journal,
-        middleware: [],
 
         stages: {
             source = source!(BenchEvent => EventGenerator::new(100, 50, "TestEvent".to_string()));

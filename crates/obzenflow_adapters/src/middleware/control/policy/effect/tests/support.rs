@@ -30,8 +30,8 @@ pub(super) use std::time::Duration;
 
 use crate::middleware::{
     materialize_factory_checked, EffectSurface, EffectTypeKey, EffectUnitId,
-    MiddlewareAttachmentRequest, MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareOrigin,
-    MiddlewareSurface, ProtectedUnit, ProtectedUnitId,
+    MiddlewareAttachmentRequest, MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareSurface,
+    ProtectedUnit, ProtectedUnitId,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::EffectType;
@@ -139,11 +139,9 @@ pub(super) fn materialize_effect_attachment(
             effect_type: EffectTypeKey::from("effect.retry"),
         }),
     };
-    let origin = MiddlewareOrigin::Stage;
     let request = MiddlewareAttachmentRequest {
         surface: &surface,
         protected_unit: &protected_unit,
-        origin: &origin,
         declaration_index: MiddlewareDeclarationIndex::effect_policy(declaration_index),
     };
     materialize_factory_checked(factory, request, config, StageType::Transform, control)

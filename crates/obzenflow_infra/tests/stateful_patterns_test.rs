@@ -334,7 +334,6 @@ async fn counter_emits_single_event_on_drain() {
             Ok(flow! {
                 name: "pattern_counter_test",
                 journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_counter")),
-                middleware: [],
 
                 stages: {
                     src = source!(NumberEvent => source_handler);
@@ -375,7 +374,6 @@ async fn accumulator_emits_one_event_per_input_on_drain() {
             Ok(flow! {
                 name: "pattern_accumulator_test",
                 journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_accumulator")),
-                middleware: [],
 
                 stages: {
                     src = source!(NumberEvent => source_handler);
@@ -414,7 +412,6 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
             Ok(flow! {
                 name: "pattern_sum_test",
                 journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_sum")),
-                middleware: [],
 
                 stages: {
                     src = source!(NumberEvent => source_handler);
@@ -455,7 +452,6 @@ async fn immediate_emitter_emits_during_accumulating() {
             Ok(flow! {
                 name: "pattern_immediate_test",
                 journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_immediate")),
-                middleware: [],
 
                 stages: {
                     src = source!(NumberEvent => source_handler);
@@ -494,7 +490,6 @@ async fn empty_source_still_triggers_drain_for_stateful_handler() {
             Ok(flow! {
                 name: "pattern_empty_test",
                 journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_empty")),
-                middleware: [],
 
                 stages: {
                     src = source!(NumberEvent => source_handler);

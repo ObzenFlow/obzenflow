@@ -119,7 +119,6 @@ async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
         Ok(flow! {
             name: "circuit_breaker_sink_delivery_test",
             journals: disk_journals(std::path::PathBuf::from("target/cb_sink_delivery")),
-            middleware: [],
 
             stages: {
                 cb_source = source!(SinkBreakerEvent => source);

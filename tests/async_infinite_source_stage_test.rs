@@ -261,7 +261,6 @@ async fn async_infinite_source_stop_interrupts_blocked_next_and_calls_drain() ->
         Ok(flow! {
             name: "async_infinite_source_stop_test",
             journals: disk_journals(journal_root),
-            middleware: [],
 
             stages: {
                 source = async_infinite_source!(AsyncInfiniteEvent => source);
@@ -327,7 +326,6 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
         Ok(flow! {
             name: "async_infinite_source_middleware_test",
             journals: disk_journals(journal_root),
-            middleware: [],
 
             stages: {
                 source = async_infinite_source!(AsyncInfiniteEvent => source, [

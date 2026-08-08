@@ -135,7 +135,6 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
         Ok(flow! {
             name: "stateful_primitives_groupby_test",
             journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_groupby")),
-            middleware: [],
 
             stages: {
                 src = source!(TransactionEvent => transaction_source);
@@ -202,7 +201,6 @@ async fn reduce_with_on_eof_emits_single_total() {
         Ok(flow! {
             name: "stateful_primitives_reduce_test",
             journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_reduce")),
-            middleware: [],
 
             stages: {
                 src = source!(TransactionEvent => transaction_source);
@@ -245,7 +243,6 @@ async fn conflate_emits_latest_value_per_key() {
         Ok(flow! {
             name: "stateful_primitives_conflate_test",
             journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_conflate")),
-            middleware: [],
 
             stages: {
                 src = source!(TransactionEvent => transaction_source);

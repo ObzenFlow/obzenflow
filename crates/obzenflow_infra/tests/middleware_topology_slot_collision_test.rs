@@ -98,21 +98,20 @@ async fn topology_config_slot_collisions_are_configuration_errors() {
         Ok(flow! {
             name: "topology_slot_collision",
             journals: obzenflow_infra::journal::memory_journals(),
-            middleware: [
-                SlotFactory {
-                    label: "slot.a",
-                    key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
-                    slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
-                },
-                SlotFactory {
-                    label: "slot.b",
-                    key: MiddlewareOverrideKey::of::<FamilyB>("family.b"),
-                    slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
-                }
-            ],
 
             stages: {
-                src = source!(TestEvent => placeholder!());
+                src = source!(TestEvent => placeholder!(), [
+                    SlotFactory {
+                        label: "slot.a",
+                        key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
+                        slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
+                    },
+                    SlotFactory {
+                        label: "slot.b",
+                        key: MiddlewareOverrideKey::of::<FamilyB>("family.b"),
+                        slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
+                    }
+                ]);
                 snk = sink!(TestEvent => placeholder!());
             },
 
@@ -132,4 +131,51 @@ async fn topology_config_slot_collisions_are_configuration_errors() {
         }
         other => panic!("expected StageResourcesFailed, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn duplicate_stage_middleware_families_are_rejected_before_materialisation() {
+    let built = FlowDefinition::materialize(move |_runtime_config| {
+        Ok(flow! {
+            name: "duplicate_stage_middleware_family",
+            journals: obzenflow_infra::journal::memory_journals(),
+
+            stages: {
+                src = source!(TestEvent => placeholder!(), [
+                    SlotFactory {
+                        label: "family.first",
+                        key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
+                        slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
+                    },
+                    SlotFactory {
+                        label: "family.second",
+                        key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
+                        slot: TopologyMiddlewareConfigSlot::RateLimiter,
+                    }
+                ]);
+                snk = sink!(TestEvent => placeholder!());
+            },
+
+            topology: {
+                src |> snk;
+            }
+        })
+    })
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await;
+
+    let error = built.err().expect("duplicate stage family must fail");
+    assert!(
+        error.run.is_none(),
+        "validation must precede substrate selection"
+    );
+    assert!(matches!(
+        error.error,
+        obzenflow_dsl::dsl::FlowBuildError::DuplicateStageMiddlewareFamily {
+            stage_name,
+            family_label: "family.a",
+            first_label: "family.first",
+            second_label: "family.second",
+        } if stage_name == "src"
+    ));
 }

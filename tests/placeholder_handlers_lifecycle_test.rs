@@ -45,7 +45,6 @@ async fn placeholder_handlers_survive_full_lifecycle() -> Result<()> {
         Ok(flow! {
             name: "placeholder_handlers_lifecycle_test",
             journals: disk_journals(PathBuf::from("target/placeholder_handlers_lifecycle")),
-            middleware: [],
 
             stages: {
                 input = source!(InputEvent => placeholder!());

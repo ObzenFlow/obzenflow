@@ -350,7 +350,6 @@ fn main() -> Result<()> {
             Ok(flow! {
             name: "web_analytics",
             journals: disk_journals(std::path::PathBuf::from("target/web_analytics")),
-            middleware: [],
 
             stages: {
                 user_events = source!(UserEvent => user_events_handler);

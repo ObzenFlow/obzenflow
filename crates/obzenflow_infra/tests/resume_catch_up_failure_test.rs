@@ -261,7 +261,6 @@ fn build_flow(
         Ok(flow! {
             name: "resume_abort",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 src_a = infinite_source!(ChannelTick => channel_a);

@@ -192,7 +192,6 @@ async fn async_finite_source_emits_events_and_calls_drain() -> Result<()> {
         Ok(flow! {
             name: "async_finite_source_basic_test",
             journals: disk_journals(journal_root),
-            middleware: [],
 
             stages: {
                 source = async_source!(AsyncTestEvent => source);
@@ -248,7 +247,6 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
         Ok(flow! {
             name: "async_finite_source_middleware_test",
             journals: disk_journals(journal_root),
-            middleware: [],
 
             stages: {
                 source = async_source!(AsyncTestEvent => source, [

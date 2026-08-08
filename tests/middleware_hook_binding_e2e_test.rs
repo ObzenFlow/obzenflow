@@ -17,7 +17,7 @@ use obzenflow_adapters::middleware::{
     validate_attachment_request, EffectSurface, EffectTypeKey, EffectUnitId,
     EventAwareEffectPolicy, MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration,
     MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareOverrideKey, MiddlewareSurface,
+    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurface,
     MiddlewareSurfaceAttachment, MiddlewareSurfaceKind::Effect,
     MiddlewareSurfaceKind::SinkDelivery, MiddlewareSurfaceKind::SourcePoll, PolicyAdmission,
     ProtectedUnit, ProtectedUnitId, SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface,
@@ -480,7 +480,6 @@ fn build_flow(
         Ok(flow! {
             name: "middleware_hook_binding_e2e",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 input = source!(HookInput => hook_source, [
@@ -520,7 +519,6 @@ fn build_failure_cause_flow(
         Ok(flow! {
             name: "middleware_failure_cause_api",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 input = source!(HookInput => hook_source);
@@ -836,12 +834,10 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
             effect_type: EffectTypeKey::from("actual"),
         }),
     };
-    let origin = MiddlewareOrigin::Stage;
     let request = MiddlewareAttachmentRequest {
         surface: &surface,
         protected_unit: &mismatched_unit,
-        origin: &origin,
-        declaration_index: MiddlewareDeclarationIndex::resolved(0),
+        declaration_index: MiddlewareDeclarationIndex::stage(0),
     };
 
     assert!(validate_attachment_request(&factory.declaration(), &request).is_err());
@@ -859,8 +855,7 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
     let sink_request = MiddlewareAttachmentRequest {
         surface: &sink_surface,
         protected_unit: &sink_unit,
-        origin: &origin,
-        declaration_index: MiddlewareDeclarationIndex::resolved(0),
+        declaration_index: MiddlewareDeclarationIndex::stage(0),
     };
     assert!(validate_attachment_request(&factory.declaration(), &sink_request).is_ok());
 
@@ -874,8 +869,7 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
     let source_request = MiddlewareAttachmentRequest {
         surface: &source_surface,
         protected_unit: &source_unit,
-        origin: &origin,
-        declaration_index: MiddlewareDeclarationIndex::resolved(0),
+        declaration_index: MiddlewareDeclarationIndex::stage(0),
     };
     assert!(validate_attachment_request(&factory.declaration(), &source_request).is_ok());
 }

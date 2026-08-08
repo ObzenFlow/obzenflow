@@ -181,7 +181,6 @@ async fn run_5_stage_pipeline() -> anyhow::Result<Duration> {
 
         Ok(flow! {
             journals: disk_journals(journals_base_path),
-            middleware: [],
 
             stages: {
                 src = source!(BenchEvent => source_handler);

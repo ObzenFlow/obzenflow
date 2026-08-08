@@ -22,7 +22,7 @@
 //!
 //! Key concepts demonstrated:
 //! - Policy middleware attaches to live I/O units under FLOWIP-120c H1
-//! - Flow-level policy broadcast is intentionally not used
+//! - Policy is authored only on the stage whose live-I/O unit it protects
 //! - Deterministic transforms stay free of rate-limit/circuit-breaker policy
 //! - Backpressure naturally flows upstream
 //! - Production observability via /metrics endpoint
@@ -123,7 +123,7 @@ fn main() -> Result<()> {
                 [
                     "Source rate limit: 10.0 events/sec",
                     "Transform: deterministic processing with no policy middleware",
-                    "Flow-level policy broadcast: intentionally absent under FLOWIP-120c",
+                    "Policy authoring: targeted to the source intake boundary",
                     "Result: source intake paces the rest of the flow",
                 ],
             )
@@ -185,7 +185,6 @@ fn main() -> Result<()> {
             Ok(flow! {
                 name: "middleware_config_demo",
                 journals: disk_journals(journal_path.clone()),
-                middleware: [],
 
                 stages: {
                     // Source intake is a live I/O unit, so rate limiting belongs here.

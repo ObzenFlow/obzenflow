@@ -193,7 +193,6 @@ async fn build_pipeline(
         let definition = match stage_count {
             1 => flow! {
                 journals: disk_journals(journals_base_path.clone()),
-                middleware: [],
 
                 stages: {
                     src = source!(BenchEvent => source);
@@ -206,7 +205,6 @@ async fn build_pipeline(
             },
             3 => flow! {
                 journals: disk_journals(journals_base_path.clone()),
-                middleware: [],
 
                 stages: {
                     src = source!(BenchEvent => source);
@@ -223,7 +221,6 @@ async fn build_pipeline(
             },
             5 => flow! {
                 journals: disk_journals(journals_base_path.clone()),
-                middleware: [],
 
                 stages: {
                     src = source!(BenchEvent => source);
@@ -244,7 +241,6 @@ async fn build_pipeline(
             },
             10 => flow! {
                 journals: disk_journals(journals_base_path.clone()),
-                middleware: [],
 
                 stages: {
                     src = source!(BenchEvent => source);

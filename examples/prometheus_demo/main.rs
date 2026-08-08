@@ -254,7 +254,6 @@ fn main() -> Result<()> {
             Ok(flow! {
                 name: "prometheus_demo",
                 journals: disk_journals(std::path::PathBuf::from("target/prometheus_demo_journal")),
-                middleware: [],
 
                 stages: {
                     // Source intake is the live I/O boundary where rate limiting belongs.

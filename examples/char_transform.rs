@@ -134,7 +134,6 @@ fn main() -> Result<()> {
             Ok(flow! {
                 name: "char_transform",
                 journals: disk_journals(PathBuf::from("target/char-transform-logs")),
-                middleware: [],
 
                 stages: {
                     characters = source!(CharInput => characters_handler);

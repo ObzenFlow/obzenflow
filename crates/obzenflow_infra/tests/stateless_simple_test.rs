@@ -105,7 +105,6 @@ async fn stateless_pipeline_runs_to_completion() {
         Ok(flow! {
             name: "stateless_simple_test",
             journals: disk_journals(std::path::PathBuf::from("target/stateless_simple_test_logs")),
-            middleware: [],
 
             stages: {
                 numbers = source!(StatelessSimpleEvent => simple_source);

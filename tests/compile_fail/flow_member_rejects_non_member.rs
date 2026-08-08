@@ -9,7 +9,6 @@ fn main() {
     let _ = flow! {
         name: "not_a_member",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             bogus = 42_u32;

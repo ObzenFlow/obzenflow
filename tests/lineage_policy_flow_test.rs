@@ -111,7 +111,6 @@ async fn file_configured_lineage_depth_caps_journalled_parent_ids() {
         Ok(flow! {
             name: "lineage_policy_flow",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 src = source!(Item => source);

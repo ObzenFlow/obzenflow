@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-114c regression test: `build_typed_flow!` must attach composite
+//! FLOWIP-114c regression test: the ordinary flow builder must attach composite
 //! subgraph membership to the topology it passes to `validate_edge_typing`.
 //!
-//! Before the closing-PR fix, `build_typed_flow!` built `topology_stages`
+//! Before the closing-PR fix, the build path assembled `topology_stages`
 //! from `TopologyStageInfo::new(...)` without `.with_subgraph(...)`, and the
 //! validator's composite-internal-edge skip rule could not fire. Any flow
 //! using `ai_map_reduce!` would surface its mixed internal selected feeds as a
@@ -315,13 +315,13 @@ impl FiniteSourceHandler for OneSeedSource {
 }
 
 #[tokio::test]
-async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
+async fn ordinary_flow_builder_accepts_ai_map_reduce_with_subgraph_attached() {
     // The build is the assertion. If `validate_edge_typing` ran against a
     // topology without composite subgraph membership, the mixed selected
     // internal feeds would surface as
     // `FlowBuildError::EdgeTypingMismatch { kind: SingleEdge, .. }` and this
     // `.await` would resolve to `Err`. With the FLOWIP-114c closing-PR fix in
-    // `build_typed_flow!`, subgraph membership is attached before the
+    // the ordinary builder, subgraph membership is attached before the
     // validator runs and the three composite-internal edges are recognized.
     let result = FlowDefinition::materialize(|_runtime_config| {
         let seed_handler = NoEventSource;
@@ -330,7 +330,6 @@ async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
         Ok(flow! {
             name: "amr_build_only",
             journals: memory_journals(),
-            middleware: [],
             effect_ports: test_effect_ports(),
 
             stages: {
@@ -350,11 +349,11 @@ async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
 
     let _handle = result.unwrap_or_else(|err| {
         panic!(
-            "FLOWIP-114c regression: `build_typed_flow!` rejected an ai_map_reduce flow that \
+            "FLOWIP-114c regression: the ordinary flow builder rejected an ai_map_reduce flow that \
              should validate cleanly under the composite-internal-edge skip rule. If you see \
              a SingleEdge mismatch on `digest__chunk -> digest__collect`, the subgraph \
              membership map is being applied AFTER `validate_edge_typing` instead of before. \
-             See `obzenflow_dsl/src/dsl/dsl.rs` around the topology_stages assembly. Error: \
+             See `obzenflow_dsl/src/dsl/flow_builder.rs` around the topology_stages assembly. Error: \
              {err:?}"
         )
     });
@@ -375,7 +374,6 @@ async fn materializer_scope_remains_visible_to_ai_effects_and_effect_ports() {
         Ok(flow! {
             name: "amr_flow_materializer_hygiene",
             journals: memory_journals(),
-            middleware: [],
             effect_ports,
 
             stages: {
@@ -436,7 +434,6 @@ async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
         obzenflow_dsl::test_flow! {
             name: "amr_test_flow_binding_hygiene",
             journals: memory_journals(),
-            middleware: [],
             effect_ports,
 
             stages: {
@@ -523,7 +520,6 @@ async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
         Ok(flow! {
             name: "amr_boundary_payload_contract",
             journals: memory_journals(),
-            middleware: [],
             effect_ports: test_effect_ports(),
 
             stages: {
@@ -591,7 +587,6 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
         Ok(flow! {
             name: "amr_runtime_internal_contracts",
             journals: memory_journals(),
-            middleware: [],
             backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
                 .stall_timeout_ms(3_000),
             effect_ports: test_effect_ports(),
@@ -695,7 +690,6 @@ async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
         Ok(flow! {
             name: "amr_boundary_mismatch",
             journals: memory_journals(),
-            middleware: [],
             effect_ports: test_effect_ports(),
 
             stages: {
@@ -801,7 +795,6 @@ async fn join_reference_resolves_through_composite_boundary_port() {
         Ok(flow! {
             name: "amr_join_reference",
             journals: memory_journals(),
-            middleware: [],
             effect_ports: test_effect_ports(),
 
             stages: {

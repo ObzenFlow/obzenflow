@@ -303,7 +303,6 @@ async fn cycle_guard_fan_out_siblings_converge_without_spurious_abort() -> Resul
         Ok(flow! {
             name: "cycle_guard_fan_out_siblings_converge_without_spurious_abort",
             journals: disk_journals(journal_root_for_flow),
-            middleware: [],
 
             stages: {
                 src = source!(SeedEvent => source_handler);

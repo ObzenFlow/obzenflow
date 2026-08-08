@@ -8,7 +8,6 @@ fn main() {
     let _ = flow! {
         name: "retired_flow_bindings",
         journals: (),
-        middleware: [],
         bindings: |_runtime_config| {
             let _handler = ();
         },

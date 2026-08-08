@@ -267,7 +267,6 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
         Ok(flow! {
             name: "transform_routing_test",
             journals: disk_journals(journal_root_for_flow.clone()),
-            middleware: [],
 
             stages: {
                 source = source!(TransformStageEvent => source_handler);
@@ -433,7 +432,6 @@ async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract()
         Ok(flow! {
             name: "typed_try_map_journal_test",
             journals: disk_journals(journal_root_for_flow.clone()),
-            middleware: [],
 
             stages: {
                 source = source!(TransformStageEvent => source_handler);
@@ -544,7 +542,6 @@ async fn transform_applies_stage_middleware() -> Result<()> {
         Ok(flow! {
             name: "transform_middleware_test",
             journals: disk_journals(journal_root.clone()),
-            middleware: [],
 
             stages: {
                 source = source!(TransformStageEvent => source_handler);

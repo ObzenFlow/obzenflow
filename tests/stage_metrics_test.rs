@@ -146,7 +146,6 @@ async fn test_stage_level_metrics_automatic() -> Result<()> {
         Ok(flow! {
             name: "stage_metrics_test",
             journals: disk_journals(std::path::PathBuf::from("target/stage_metrics_test")),
-            middleware: [],
 
             stages: {
                 test_source = source!(MetricEvent => source);

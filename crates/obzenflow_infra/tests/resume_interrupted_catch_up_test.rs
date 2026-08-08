@@ -156,7 +156,6 @@ fn build_flow(
         Ok(flow! {
             name: "resume_interrupted",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 src = infinite_source!(Tick => ticker);

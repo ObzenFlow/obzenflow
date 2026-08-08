@@ -135,7 +135,6 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
         Ok(flow! {
             name: "replay_verification_error_lane",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 numbers = source!(Input => numbers_handler);

@@ -9,7 +9,6 @@ use obzenflow_runtime::bootstrap::ReplayVerb;
 use obzenflow_topology::TopologyError;
 
 use crate::dsl::typing::EdgeInputRole;
-use crate::middleware_resolution::MiddlewareResolutionError;
 
 // Verb-aware refusal copy for the archive sink delivery-safety gate
 // (FLOWIP-120n F16, extended to both archive verbs by FLOWIP-120v): one
@@ -54,9 +53,6 @@ fn archive_sink_refusal(verb: &ReplayVerb, stage: &str, undeclared: bool) -> Str
 pub enum StageCreationError {
     #[error(transparent)]
     MiddlewareFactory(#[from] MiddlewareFactoryError),
-
-    #[error(transparent)]
-    MiddlewareResolution(#[from] MiddlewareResolutionError),
 
     #[error("{0}")]
     Message(String),
@@ -138,6 +134,17 @@ pub enum FlowBuildError {
     },
 
     #[error(
+        "Duplicate middleware family '{family_label}' in stage '{stage_name}': \
+         '{first_label}' and '{second_label}'"
+    )]
+    DuplicateStageMiddlewareFamily {
+        stage_name: String,
+        family_label: &'static str,
+        first_label: &'static str,
+        second_label: &'static str,
+    },
+
+    #[error(
         "Stage '{stage_name}' declares policy middleware '{middleware}' on a pure sync surface. \
          Policy middleware attaches to live I/O units only: sources, the effect boundary of an \
          effectful stage, or sink delivery (FLOWIP-120c H1). A deterministic handler shell has \
@@ -147,14 +154,6 @@ pub enum FlowBuildError {
         stage_name: String,
         middleware: String,
     },
-
-    #[error(
-        "Flow-level policy middleware '{middleware}' is not allowed. Policy middleware attaches \
-         to live I/O units only: sources, the effect boundary of an effectful stage, or sink \
-         delivery (FLOWIP-120c H1). A flow-level policy would be broadcast onto stages that may \
-         have no protected dependency; attach it to the specific live I/O unit instead."
-    )]
-    PolicyMiddlewareOnFlowScope { middleware: String },
 
     #[error(
         "Stage '{stage_name}' declares policy middleware '{middleware}' on an effectful stateful \

@@ -1,16 +1,15 @@
 error[E0277]: the trait bound `u32: IntoFlowMember` is not satisfied
-  --> tests/compile_fail/flow_member_rejects_non_member.rs:15:21
+  --> tests/compile_fail/flow_member_rejects_non_member.rs:14:21
    |
  9 |       let _ = flow! {
    |  _____________-
 10 | |         name: "not_a_member",
 11 | |         journals: memory_journals(),
-12 | |         middleware: [],
 ...  |
-15 | |             bogus = 42_u32;
+14 | |             bogus = 42_u32;
    | |                     ^^^^^^ the trait `IntoFlowMember` is not implemented for `u32`
 ...  |
-20 | |     };
+19 | |     };
    | |_____- required by a bound introduced by this call
    |
 help: the following other types implement trait `IntoFlowMember`

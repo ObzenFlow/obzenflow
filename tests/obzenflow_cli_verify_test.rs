@@ -82,7 +82,6 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
         Ok(flow! {
             name: "cli_verify",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 ticks = source!(Tick => ticks_handler);

@@ -273,7 +273,6 @@ fn build_flow(
         Ok(flow! {
             name: "seq_fan_in",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 accounts = infinite_source!(AccountRow => accounts_handler);

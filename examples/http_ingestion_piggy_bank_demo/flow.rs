@@ -124,7 +124,6 @@ pub fn build_flow(
         Ok(flow! {
         name: "http_ingestion_piggy_bank_demo",
         journals: disk_journals(PathBuf::from("target/http-ingestion-piggy-bank-demo-logs")),
-        middleware: [],
 
         stages: {
             accounts = async_infinite_source!(AccountOpened => accounts_source);

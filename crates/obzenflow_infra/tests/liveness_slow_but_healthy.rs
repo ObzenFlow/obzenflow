@@ -160,7 +160,6 @@ async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
         Ok(flow! {
             name: "liveness_slow_but_healthy",
             journals: memory_journals(),
-            middleware: [],
 
             stages: {
                 numbers = source!(ProbeEvent => numbers_handler);

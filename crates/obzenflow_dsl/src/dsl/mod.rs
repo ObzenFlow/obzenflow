@@ -263,6 +263,10 @@ pub mod composition;
 #[path = "dsl.rs"]
 mod dsl_impl;
 pub mod error;
+/// Ordinary flow materialisation. Public only because exported authoring
+/// macros must reach it when expanded in downstream crates.
+#[doc(hidden)]
+pub mod flow_builder;
 mod flow_definition;
 #[doc(hidden)]
 pub mod inference;

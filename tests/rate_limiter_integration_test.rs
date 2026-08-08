@@ -232,7 +232,6 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
     let test_handle = test_flow! {
         name: "rate_limiter_low_rate_half_eps",
         journals: disk_journals(unique_journal_dir("rate_limiter_low_rate_half_eps")),
-        middleware: [],
 
         stages: {
             src = source!(RateLimiterTestEvent => source, [
@@ -277,7 +276,6 @@ async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
     let test_handle = test_flow! {
         name: "rate_limiter_weighted_default_burst",
         journals: disk_journals(unique_journal_dir("rate_limiter_weighted_default_burst")),
-        middleware: [],
 
         stages: {
             src = source!(RateLimiterTestEvent => source, [
@@ -314,7 +312,6 @@ async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
     let result = test_flow! {
         name: "rate_limiter_invalid",
         journals: disk_journals(unique_journal_dir("rate_limiter_invalid")),
-        middleware: [],
 
         stages: {
             src = source!(RateLimiterTestEvent => source, [
@@ -468,7 +465,6 @@ async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> R
     let test_handle = test_flow! {
         name: "rate_limiter_source_poll_gating",
         journals: disk_journals(unique_journal_dir("rate_limiter_source_poll_gating")),
-        middleware: [],
 
         stages: {
             src = source!(RateLimiterTestEvent => source, [
@@ -528,7 +524,6 @@ async fn rate_limiter_async_finite_does_not_charge_eof_poll() -> Result<()> {
     let test_handle = test_flow! {
         name: "rate_limiter_async_finite_eof_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_async_finite_eof_no_charge")),
-        middleware: [],
 
         stages: {
             src = async_source!(RateLimiterTestEvent => source, [
@@ -571,7 +566,6 @@ async fn rate_limiter_sync_finite_does_not_charge_eof_poll() -> Result<()> {
     let test_handle = test_flow! {
         name: "rate_limiter_sync_finite_eof_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_sync_finite_eof_no_charge")),
-        middleware: [],
 
         stages: {
             src = source!(RateLimiterTestEvent => source, [
@@ -618,7 +612,6 @@ async fn rate_limiter_async_finite_does_not_charge_empty_batch() -> Result<()> {
     let test_handle = test_flow! {
         name: "rate_limiter_async_empty_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_async_empty_no_charge")),
-        middleware: [],
 
         stages: {
             src = async_source!(RateLimiterTestEvent => source, [
@@ -665,7 +658,6 @@ async fn rate_limiter_sync_finite_does_not_charge_empty_batch() -> Result<()> {
     let test_handle = test_flow! {
         name: "rate_limiter_sync_empty_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_sync_empty_no_charge")),
-        middleware: [],
 
         stages: {
             src = source!(RateLimiterTestEvent => source, [
@@ -712,7 +704,6 @@ async fn rate_limiter_async_finite_does_not_charge_source_error() -> Result<()> 
     let test_handle = test_flow! {
         name: "rate_limiter_async_error_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_async_error_no_charge")),
-        middleware: [],
 
         stages: {
             src = async_source!(RateLimiterTestEvent => source, [
@@ -759,7 +750,6 @@ async fn rate_limiter_sync_finite_does_not_charge_source_error() -> Result<()> {
     let test_handle = test_flow! {
         name: "rate_limiter_sync_error_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_sync_error_no_charge")),
-        middleware: [],
 
         stages: {
             src = source!(RateLimiterTestEvent => source, [
@@ -949,7 +939,6 @@ async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
     let result = test_flow! {
         name: "rate_limiter_join_support",
         journals: disk_journals(unique_journal_dir("rate_limiter_join_support")),
-        middleware: [],
 
         stages: {
             ref_src = source!(RefPayload => reference_source);
@@ -991,7 +980,6 @@ async fn rate_limiter_transform_stage_rejects_rate_limit_middleware() -> Result<
     let result = test_flow! {
         name: "rate_limiter_transform_reject",
         journals: disk_journals(unique_journal_dir("rate_limiter_transform_reject")),
-        middleware: [],
 
         stages: {
             src = source!(RateLimiterTestEvent => source);
@@ -1033,7 +1021,6 @@ async fn rate_limiter_stateful_stage_rejects_rate_limit_middleware() -> Result<(
     let result = test_flow! {
         name: "rate_limiter_stateful_reject",
         journals: disk_journals(unique_journal_dir("rate_limiter_stateful_reject")),
-        middleware: [],
 
         stages: {
             src = source!(RateLimiterTestEvent => source);

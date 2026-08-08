@@ -199,7 +199,6 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
         Ok(flow! {
             name: "replay_verification_multi_source",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 web_orders = source!(OrderPlaced => web_orders_handler);

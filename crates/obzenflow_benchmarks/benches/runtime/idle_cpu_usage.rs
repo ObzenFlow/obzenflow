@@ -163,7 +163,6 @@ async fn build_pipeline(
         let definition = match stage_count {
             1 => flow! {
                 journals: disk_journals(journals_base_path.clone()),
-                middleware: [],
 
                 stages: {
                     src = source!(BenchEvent => source);
@@ -187,7 +186,6 @@ async fn build_pipeline(
 
                 flow! {
                 journals: disk_journals(journals_base_path.clone()),
-                middleware: [],
 
                 stages: {
                     src = source!(BenchEvent => source);
@@ -240,7 +238,6 @@ async fn build_pipeline(
 
                 flow! {
                 journals: disk_journals(journals_base_path.clone()),
-                middleware: [],
 
                 stages: {
                     src = source!(BenchEvent => source);
@@ -304,7 +301,6 @@ async fn build_pipeline(
 
                 flow! {
                     journals: disk_journals(journals_base_path.clone()),
-                    middleware: [],
 
                     stages: {
                         src = source!(BenchEvent => source);
@@ -358,7 +354,6 @@ async fn measure_idle_cpu() -> anyhow::Result<f64> {
 
         Ok(flow! {
             journals: disk_journals(journals_base_path),
-            middleware: [],
 
             stages: {
                 src = source!(BenchEvent => idle_source);

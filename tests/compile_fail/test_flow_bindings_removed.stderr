@@ -5,10 +5,10 @@ error: test_flow!: `bindings:` was removed; construct flow values inside `FlowDe
    |  _____________^
  9 | |         name: "retired_test_flow_bindings",
 10 | |         journals: (),
-11 | |         middleware: [],
+11 | |         bindings: |_runtime_config| {
 ...  |
-17 | |         topology: {}
-18 | |     };
+16 | |         topology: {}
+17 | |     };
    | |_____^
    |
    = note: this error originates in the macro `test_flow` (in Nightly builds, run with -Z macro-backtrace for more info)

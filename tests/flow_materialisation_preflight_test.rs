@@ -43,7 +43,6 @@ fn materialised_probe(
         Ok(flow! {
             name: "flowip_133a_preflight_probe",
             journals: disk_journals(journal_root),
-            middleware: [],
 
             stages: {
                 input = source!(ProbeEvent => input);

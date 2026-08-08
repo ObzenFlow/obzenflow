@@ -218,7 +218,6 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
         Ok(flow! {
             name: "liveness_fan_out",
             journals: memory_journals(),
-            middleware: [],
 
             stages: {
                 numbers = async_source!(ProbeEvent => numbers_handler);

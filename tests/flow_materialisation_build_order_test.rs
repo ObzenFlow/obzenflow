@@ -116,7 +116,6 @@ fn materialised_failure_probe(
         Ok(flow! {
             name: "flowip_133b_build_order_probe",
             journals: disk_journals(journal_base),
-            middleware: [],
             effect_ports,
 
             stages: {
