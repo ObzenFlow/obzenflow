@@ -161,7 +161,6 @@ async fn run_100_stage_pipeline_memory() -> anyhow::Result<Duration> {
 
         Ok(flow! {
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = source!(BenchEvent => timestamped_source);

@@ -906,7 +906,6 @@ fn build_flow(
         Ok(flow! {
             name: "effect_replay_suppression",
             journals: disk_journals(journal_base),
-            middleware: [],
             effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
 
             stages: {
@@ -940,7 +939,6 @@ fn build_source_limiter_flow(
         Ok(flow! {
             name: "effect_replay_source_limiter",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ReplayInput => inputs_handler, [
@@ -980,7 +978,6 @@ fn build_fast_limiter_flow(
         Ok(flow! {
             name: "effect_replay_fast_limiter",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
@@ -1032,7 +1029,6 @@ fn build_blocking_flow(
         Ok(flow! {
             name: "effect_replay_blocking",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
@@ -1079,7 +1075,6 @@ fn build_post_perform_blocking_flow(
         Ok(flow! {
             name: "effect_replay_post_perform_blocking",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
@@ -1121,7 +1116,6 @@ fn build_fan_out_flow(
         Ok(flow! {
             name: "effect_replay_fan_out",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
@@ -1156,7 +1150,6 @@ fn build_stateful_flow(
         Ok(flow! {
             name: "effect_replay_stateful",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
@@ -1198,7 +1191,6 @@ fn build_dishonest_one_fact_stateful_flow(
         Ok(flow! {
             name: "effect_replay_stateful",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
@@ -1237,7 +1229,6 @@ fn build_error_after_commit_stateful_flow(
         Ok(flow! {
             name: "effect_replay_error_after_commit_stateful",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
@@ -1278,7 +1269,6 @@ fn build_apply_rejection_stateful_flow(
         Ok(flow! {
             name: "effect_replay_apply_rejection_stateful",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
@@ -1312,7 +1302,6 @@ fn build_product_stateful_flow(
         Ok(flow! {
             name: "effect_replay_product_stateful",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
@@ -3373,7 +3362,7 @@ async fn resume_incomplete_archive_suppresses_committed_effect_records() {
 // FLOWIP-120a implemented typed and transactional effect ports in the runtime
 // but left the authoring-surface supply path unexercised end to end. These tests
 // drive a populated `EffectPortRegistry` through the `flow!` `effect_ports:`
-// clause into `build_typed_flow!` -> `with_effect_ports`, covering
+// clause into the ordinary flow builder -> `with_effect_ports`, covering
 // materialisation-time `required_ports` validation and live `EffectContext::port`
 // access for both an ordinary ported effect and a transactional
 // execute-and-record port.
@@ -3482,7 +3471,6 @@ fn build_ported_flow(
         Ok(flow! {
             name: "effect_port_supply",
             journals: disk_journals(journal_base),
-            middleware: [],
             effect_ports: ports,
 
             stages: {
@@ -3694,7 +3682,6 @@ fn build_transactional_flow(
         Ok(flow! {
             name: "effect_port_supply_transactional",
             journals: disk_journals(journal_base),
-            middleware: [],
             effect_ports: ports,
 
             stages: {
@@ -3997,7 +3984,6 @@ fn build_fail_fast_rejection_flow(
         Ok(flow! {
             name: "effect_replay_fail_fast_rejection",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
@@ -4037,7 +4023,6 @@ fn build_multi_effect_per_effect_breaker_flow(
         Ok(flow! {
             name: "effect_replay_multi_effect_breaker",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);

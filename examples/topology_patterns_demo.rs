@@ -461,7 +461,6 @@ fn main() -> Result<()> {
             Ok(flow! {
                 name: "topology_patterns",
                 journals: disk_journals(journal_path.clone()),
-                middleware: [],
 
                 stages: {
                     // FAN-IN: Three sources feeding into one aggregator

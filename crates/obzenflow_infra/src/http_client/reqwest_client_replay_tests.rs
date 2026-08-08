@@ -271,7 +271,6 @@ fn pull_flow(
         Ok(flow! {
             name: "flowip_133c_http_pull",
             journals: crate::journal::disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 src = async_source!(HttpFixtureEvent => source);
@@ -310,7 +309,6 @@ fn poll_flow(
         Ok(flow! {
             name: "flowip_133c_http_poll",
             journals: crate::journal::disk_journals(journal_base),
-            middleware: [],
             backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(1)
                 .stall_timeout_ms(10_000),
 

@@ -351,7 +351,6 @@ where
         Ok(flow! {
             name: "one_shot_inference_effect_journal",
             journals: disk_journals(journal_base),
-            middleware: [],
             backpressure: backpressure,
             effect_ports,
 
@@ -399,7 +398,6 @@ fn build_credit_flow(
         Ok(flow! {
             name: "one_shot_inference_credit_retirement",
             journals: disk_journals(journal_base),
-            middleware: [],
             backpressure: enforced_backpressure(3).stall_timeout_ms(5_000),
             effect_ports,
 
@@ -452,7 +450,6 @@ fn build_fan_out_flow(
         Ok(flow! {
             name: "one_shot_inference_fan_out",
             journals: disk_journals(journal_base),
-            middleware: [],
             backpressure: enforced_backpressure(3).stall_timeout_ms(5_000),
             effect_ports,
 

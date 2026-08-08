@@ -109,7 +109,6 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
         Ok(flow! {
             name: "replay_verification_honesty",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 channel_a = source!(Reading => channel_a_handler);

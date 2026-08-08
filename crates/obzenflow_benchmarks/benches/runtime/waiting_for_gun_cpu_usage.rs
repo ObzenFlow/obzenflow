@@ -99,7 +99,6 @@ async fn measure_waiting_for_gun_cpu() -> anyhow::Result<f64> {
 
         Ok(flow! {
             journals: disk_journals(journals_base_path),
-            middleware: [],
 
             stages: {
                 src = source!(BenchEvent => idle_source);

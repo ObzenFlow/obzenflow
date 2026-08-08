@@ -8,7 +8,6 @@ fn main() {
     let _ = test_flow! {
         name: "retired_test_flow_bindings",
         journals: (),
-        middleware: [],
         bindings: |_runtime_config| {
             let _handler = ();
         },

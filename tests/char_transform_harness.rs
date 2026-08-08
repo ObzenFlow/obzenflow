@@ -158,7 +158,6 @@ async fn run_char_transform(base: &Path) -> Result<()> {
             flow! {
                 name: "char_transform_harness",
                 journals: disk_journals(base.to_path_buf()),
-                middleware: [],
 
                 stages: {
                     src = source!(CharEvent => TextCharSource::new());

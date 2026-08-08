@@ -307,7 +307,6 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
         Ok(flow! {
             name: "replay_verification_golden_path",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 orders = source!(OrderPlaced => orders_handler);

@@ -162,7 +162,6 @@ async fn test_dropped_events_detection() -> Result<()> {
         Ok(flow! {
             name: "correlation_test_flow",
             journals: disk_journals(std::path::PathBuf::from("target/dropped_events_test")),
-            middleware: [],
 
             stages: {
                 correlated_source = source!(CorrelatedTestEvent => source);

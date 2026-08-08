@@ -123,7 +123,6 @@ async fn test_basic_flow() -> Result<()> {
         Ok(flow! {
             name: "basic_flow_test",
             journals: disk_journals(std::path::PathBuf::from("target/basic_streaming_basic")),
-            middleware: [],
 
             stages: {
                 source = source!(StreamItem => source_handler);
@@ -188,7 +187,6 @@ async fn test_multi_stage_flow() -> Result<()> {
         Ok(flow! {
             name: "multi_stage_flow_test",
             journals: disk_journals(std::path::PathBuf::from("target/basic_streaming_multi")),
-            middleware: [],
 
             stages: {
                 source = source!(StreamItem => source_handler);
@@ -326,7 +324,6 @@ async fn test_pipeline_topology() -> Result<()> {
             journals: disk_journals(std::path::PathBuf::from(
                 "target/basic_streaming_topology",
             )),
-            middleware: [],
 
             stages: {
                 source = source!(NumberItem => source_handler);

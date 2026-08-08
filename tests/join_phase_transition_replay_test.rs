@@ -286,7 +286,6 @@ fn build_hydrating_flow(journal_base: PathBuf) -> FlowDefinition {
         Ok(flow! {
             name: "join_phase_transition_hydrating",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 ref_src = source!(RefItem => reference_source);
@@ -320,7 +319,6 @@ fn build_live_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefini
         Ok(flow! {
             name: "join_phase_transition_live",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 ref_src = source!(RefItem => reference_source);
@@ -511,7 +509,6 @@ fn build_live_flow_no_effect(journal_base: PathBuf) -> FlowDefinition {
         Ok(flow! {
             name: "join_phase_transition_live_no_effect",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 ref_src = source!(RefItem => reference_source);

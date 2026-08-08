@@ -185,7 +185,6 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
         Ok(flow! {
             name: "source_rate_limiter_interruption",
             journals: disk_journals(journal_base_for_flow),
-            middleware: [],
 
             stages: {
                 src = async_source!(DripEvent => source, [

@@ -509,7 +509,6 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
     let sync_finite = test_flow! {
         name: "flowip_115g_sync_finite_timing",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = source!(PollingEvent => source, [
@@ -553,7 +552,6 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
     let async_finite = test_flow! {
         name: "flowip_115g_async_finite_timing",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = async_source!(PollingEvent => source, [
@@ -597,7 +595,6 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
     let sync_infinite = test_flow! {
         name: "flowip_115g_sync_infinite_timing",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = infinite_source!(PollingEvent => source, [
@@ -638,7 +635,6 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
     let async_infinite = test_flow! {
         name: "flowip_115g_async_infinite_timing",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = async_infinite_source!(PollingEvent => source, [
@@ -707,7 +703,6 @@ fn test_flow_handler_construction_stays_cold_inside_its_enclosing_async_future()
         test_flow! {
             name: "flowip_133a_test_flow_cold_probe",
             journals: memory_journals(),
-            middleware: [],
 
             stages: {
                 src = async_source!(PollingEvent => source);
@@ -745,7 +740,6 @@ async fn timeout_duration_and_error_normalisation_are_inside_the_raw_poll_execut
     let harness = test_flow! {
         name: "flowip_115g_timeout_normalisation",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = async_source!(PollingEvent => source, [
@@ -846,7 +840,6 @@ async fn configured_none_disables_the_finite_source_poll_timeout() -> Result<()>
     let harness = test_flow! {
         name: "flowip_133a_disabled_poll_timeout",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = async_source!(PollingEvent => source, [
@@ -1004,7 +997,6 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
     let sync_harness = test_flow! {
         name: "flowip_115g_sync_backoff",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = source!(PollingEvent => source, [
@@ -1073,7 +1065,6 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
     let async_harness = test_flow! {
         name: "flowip_115g_async_backoff",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = async_source!(PollingEvent => source, [
@@ -1223,7 +1214,6 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
     let harness = test_flow! {
         name: "flowip_115g_async_idle_interrupt",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = async_infinite_source!(PollingEvent => source, [
@@ -1334,7 +1324,6 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
     let eof_harness = test_flow! {
         name: "flowip_115g_eof_no_delay",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = source!(PollingEvent => source, [
@@ -1381,7 +1370,6 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
     let rejected_harness = test_flow! {
         name: "flowip_115g_rejection_no_delay",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = source!(PollingEvent => source, [

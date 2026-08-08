@@ -180,7 +180,6 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
         Ok(flow! {
             name: "observer_evidence_test",
             journals: disk_journals(journal_dir),
-            middleware: [],
 
             stages: {
                 orders = source!(Order => order_source);

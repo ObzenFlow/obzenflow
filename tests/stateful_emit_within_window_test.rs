@@ -359,7 +359,6 @@ async fn emit_within_flushes_final_partial_window_before_authored_eof() -> Resul
     let harness = test_flow! {
         name: "emit_within_final_flush",
         journals: disk_journals(unique_journal_dir("emit_within_final_flush")),
-        middleware: [],
 
         stages: {
             src = source!(WindowInput => source);
@@ -437,7 +436,6 @@ async fn emit_within_final_aggregate_preserves_buffered_input_lineage() -> Resul
     let harness = test_flow! {
         name: "emit_within_lineage",
         journals: disk_journals(unique_journal_dir("emit_within_lineage")),
-        middleware: [],
 
         stages: {
             src = source!(WindowInput => source);
@@ -497,7 +495,6 @@ async fn emit_within_final_aggregate_records_mixed_correlation_ids() -> Result<(
     let harness = test_flow! {
         name: "emit_within_mixed_correlation",
         journals: disk_journals(unique_journal_dir("emit_within_mixed_correlation")),
-        middleware: [],
 
         stages: {
             src = source!(WindowInput => source);
@@ -564,7 +561,6 @@ async fn emit_within_emits_more_than_one_window_aggregate_per_run_and_resets_sta
     let harness = test_flow! {
         name: "emit_within_multi_window",
         journals: disk_journals(unique_journal_dir("emit_within_multi_window")),
-        middleware: [],
 
         stages: {
             src = source!(WindowInput => source);
@@ -620,7 +616,6 @@ async fn forwarded_inbound_eof_does_not_complete_downstream_reader() -> Result<(
     let harness = test_flow! {
         name: "emit_within_forwarded_eof_invariant",
         journals: disk_journals(unique_journal_dir("emit_within_forwarded_eof_invariant")),
-        middleware: [],
 
         stages: {
             src = source!(WindowInput => source);
@@ -706,7 +701,6 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
     let harness = test_flow! {
         name: "emit_within_group_by_lineage",
         journals: disk_journals(unique_journal_dir("emit_within_group_by_lineage")),
-        middleware: [],
 
         stages: {
             src = source!(GroupInput => source);

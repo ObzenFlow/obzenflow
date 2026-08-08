@@ -174,7 +174,6 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
         Ok(flow! {
             name: "circuit_breaker_test",
             journals: disk_journals(std::path::PathBuf::from("target/cb_metrics_e2e")),
-            middleware: [],
 
             stages: {
                 // Typed source-poll binding: three error-marked batches open the breaker.
@@ -359,7 +358,6 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
             journals: disk_journals(std::path::PathBuf::from(
                 "target/cb_metrics_summary_e2e",
             )),
-            middleware: [],
 
             stages: {
                 rapid_source = source!(CircuitMetricEvent => rapid_source_handler, [

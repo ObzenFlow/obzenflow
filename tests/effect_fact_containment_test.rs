@@ -231,7 +231,6 @@ fn undeclared_effect_fact_flow(journal_base: PathBuf) -> FlowDefinition {
         Ok(flow! {
             name: "effect_fact_containment_missing",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ContainmentInput => inputs_handler);
@@ -258,7 +257,6 @@ fn empty_effects_flow(journal_base: PathBuf) -> FlowDefinition {
         Ok(flow! {
             name: "effect_fact_containment_empty_effects",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ContainmentInput => inputs_handler);
@@ -439,7 +437,6 @@ fn colliding_event_type_flow(journal_base: PathBuf) -> FlowDefinition {
         Ok(flow! {
             name: "effect_fact_containment_collision",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 inputs = source!(ContainmentInput => inputs_handler);

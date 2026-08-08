@@ -178,7 +178,7 @@ mod tests {
     use crate::middleware::{
         MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory,
         MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareMaterializationContext,
-        MiddlewareOrigin, MiddlewareOverrideKey, MiddlewareSurface, MiddlewareSurfaceAttachment,
+        MiddlewareOverrideKey, MiddlewareSurface, MiddlewareSurfaceAttachment,
         MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
     };
     use obzenflow_core::StageId;
@@ -284,12 +284,10 @@ mod tests {
                 target: crate::middleware::SinkDeliveryTarget::Stage,
             }),
         };
-        let origin = MiddlewareOrigin::Stage;
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &unit,
-            origin: &origin,
-            declaration_index: crate::middleware::MiddlewareDeclarationIndex::resolved(0),
+            declaration_index: crate::middleware::MiddlewareDeclarationIndex::stage(0),
         };
         let policy = crate::middleware::materialize_factory_checked(
             &factory,

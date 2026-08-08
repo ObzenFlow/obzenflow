@@ -185,7 +185,6 @@ async fn run_3_stage_pipeline_with_runtime(
 
                 Ok(flow! {
                     journals: disk_journals(journals_base_path),
-                    middleware: [],
 
                     stages: {
                         src = source!(BenchEvent => source_handler);
@@ -387,7 +386,6 @@ fn bench_5_stage_control(c: &mut Criterion) {
 
                     Ok(flow! {
                         journals: disk_journals(journals_base_path),
-                        middleware: [],
 
                         stages: {
                             src = source!(BenchEvent => source_handler);

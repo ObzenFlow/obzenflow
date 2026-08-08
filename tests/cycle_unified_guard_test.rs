@@ -255,7 +255,6 @@ async fn cycle_guard_rejects_cycles_with_non_transform_members() {
         Ok(flow! {
             name: "cycle_guard_reject_stateful_cycle",
             journals: disk_journals(std::path::PathBuf::from("target/cycle_guard_reject_stateful_cycle")),
-            middleware: [],
 
             stages: {
                 src = source!(SeedEvent => source);
@@ -308,7 +307,6 @@ async fn cycle_guard_rejects_stateful_emit_within_cycle() {
         Ok(flow! {
             name: "cycle_guard_reject_emit_within",
             journals: disk_journals(std::path::PathBuf::from("target/cycle_guard_reject_emit_within")),
-            middleware: [],
 
             stages: {
                 src = source!(SeedEvent => source);
@@ -353,7 +351,6 @@ async fn cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
         Ok(flow! {
             name: "cycle_guard_bounds",
             journals: disk_journals(base_for_flow),
-            middleware: [],
 
             stages: {
                 src = source!(SeedEvent => source);
@@ -413,7 +410,6 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
     let harness = test_flow! {
         name: "cycle_guard_bounds_data",
         journals: disk_journals(base_for_flow),
-        middleware: [],
 
         stages: {
             src = async_source!(SeedEvent => source);

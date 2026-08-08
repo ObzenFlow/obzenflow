@@ -294,7 +294,6 @@ pub fn build_flow(
         Ok(flow! {
             name: "payment_gateway_resilience_demo",
             journals: disk_journals(journal_root),
-            middleware: [],
 
             stages: {
                 orders = source!(ValidatedOrder => order_feed);

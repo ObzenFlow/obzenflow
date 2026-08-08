@@ -1,12 +1,12 @@
-error[E0046]: not all trait items implemented, missing: `name`, `stage_type`, `create_handle_with_flow_middleware`
+error[E0046]: not all trait items implemented, missing: `name`, `stage_type`, `create_handle`
  --> tests/compile_fail/synchronous_transform_witness/stage_descriptor_sealed.rs:9:1
   |
 9 | impl StageDescriptor for CounterfeitDescriptor {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `name`, `stage_type`, `create_handle_with_flow_middleware` in implementation
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `name`, `stage_type`, `create_handle` in implementation
   |
   = help: implement the missing item: `fn name(&self) -> &str { todo!() }`
   = help: implement the missing item: `fn stage_type(&self) -> obzenflow_core::event::context::stage_type::StageType { todo!() }`
-  = help: implement the missing item: `fn create_handle_with_flow_middleware<'async_trait>(self: Box<Self>, _: StageConfig, _: obzenflow_runtime::stages::resources_builder::StageResources, _: Vec<Box<(dyn obzenflow_adapters::middleware::middleware_factory::MiddlewareFactory + 'static)>>, _: Arc<obzenflow_adapters::middleware::control::provider::ControlMiddlewareAggregator>) -> Pin<Box<(dyn Future<Output = Result<Box<(dyn obzenflow_runtime::stages::common::stage_handle::StageHandle + 'static)>, StageCreationError>> + Send + 'async_trait)>> { todo!() }`
+  = help: implement the missing item: `fn create_handle<'async_trait>(self: Box<Self>, _: StageConfig, _: obzenflow_runtime::stages::resources_builder::StageResources, _: Arc<obzenflow_adapters::middleware::control::provider::ControlMiddlewareAggregator>) -> Pin<Box<(dyn Future<Output = Result<Box<(dyn obzenflow_runtime::stages::common::stage_handle::StageHandle + 'static)>, StageCreationError>> + Send + 'async_trait)>> { todo!() }`
 
 error[E0277]: the trait bound `CounterfeitDescriptor: stage_descriptor::sealed::Sealed` is not satisfied
  --> tests/compile_fail/synchronous_transform_witness/stage_descriptor_sealed.rs:9:26

@@ -206,7 +206,6 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
         Ok(flow! {
             name: "typed_sync_transform_journal_parity",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 tickets = source!(Ticket => ticket_source);

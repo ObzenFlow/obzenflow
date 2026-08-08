@@ -331,37 +331,14 @@ pub struct ProtectedUnitId {
     pub unit: ProtectedUnit,
 }
 
-// ---------------------------------------------------------------------------
-// Origin
-// ---------------------------------------------------------------------------
-
-/// Where the middleware declaration came from: flow-level configuration,
-/// stage-level configuration, or a stage override.
-///
-/// Adapter-owned audit/validation metadata. The DSL binder maps its own
-/// resolution provenance (`obzenflow_dsl::MiddlewareSource`) into this before
-/// calling adapter APIs, so adapter APIs do not depend on DSL resolution types.
-/// It is not the protected-unit key.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MiddlewareOrigin {
-    Flow,
-    Stage,
-    StageOverride {
-        family_label: String,
-        flow_label: String,
-        stage_label: String,
-    },
-}
-
 /// Which ordered declaration lane produced this attachment.
 ///
-/// Adapter-owned so the binder can pass ordering metadata without exposing DSL
-/// resolution types. The lane keeps explicit effect-policy declarations distinct
-/// from the resolved stage/flow middleware list when both attach the same
-/// family to the same protected unit.
+/// Adapter-owned so the binder can keep explicit effect-policy declarations
+/// distinct from the stage middleware list when both attach the same family to
+/// the same protected unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MiddlewareDeclarationScope {
-    ResolvedMiddleware,
+    StageMiddleware,
     EffectPolicy,
 }
 
@@ -373,9 +350,9 @@ pub struct MiddlewareDeclarationIndex {
 }
 
 impl MiddlewareDeclarationIndex {
-    pub fn resolved(index: usize) -> Self {
+    pub fn stage(index: usize) -> Self {
         Self {
-            scope: MiddlewareDeclarationScope::ResolvedMiddleware,
+            scope: MiddlewareDeclarationScope::StageMiddleware,
             index: index as u64,
         }
     }
@@ -397,7 +374,7 @@ impl MiddlewareDeclarationIndex {
 /// Derived from replay-stable binding coordinates, never a fresh
 /// materialization-time ULID, so it survives strict replay and archive-drift
 /// checks. The hashed coordinate includes declaration schema, label, family,
-/// origin, declaration order, concrete surface, and protected unit.
+/// declaration order, concrete surface, and protected unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MiddlewareAttachmentId(obzenflow_core::Ulid);
 
@@ -409,10 +386,9 @@ impl MiddlewareAttachmentId {
         request: &MiddlewareAttachmentRequest<'_>,
     ) -> Self {
         let mut context = Context::new(&SHA256);
-        push_field(&mut context, "schema", "middleware-attachment:v3");
+        push_field(&mut context, "schema", "middleware-attachment:v4");
         push_field(&mut context, "middleware.label", declaration.label);
         push_field(&mut context, "middleware.family", declaration.family_label);
-        push_origin(&mut context, request.origin);
         push_declaration_index(&mut context, request.declaration_index);
         push_surface(&mut context, request.surface);
         push_protected_unit(&mut context, request.protected_unit);
@@ -440,26 +416,9 @@ fn push_stage_id(context: &mut Context, label: &str, stage_id: StageId) {
     push_field(context, label, &stage_id.as_ulid().to_string());
 }
 
-fn push_origin(context: &mut Context, origin: &MiddlewareOrigin) {
-    match origin {
-        MiddlewareOrigin::Flow => push_field(context, "origin.kind", "flow"),
-        MiddlewareOrigin::Stage => push_field(context, "origin.kind", "stage"),
-        MiddlewareOrigin::StageOverride {
-            family_label,
-            flow_label,
-            stage_label,
-        } => {
-            push_field(context, "origin.kind", "stage_override");
-            push_field(context, "origin.family", family_label);
-            push_field(context, "origin.flow_label", flow_label);
-            push_field(context, "origin.stage_label", stage_label);
-        }
-    }
-}
-
 fn push_declaration_index(context: &mut Context, index: MiddlewareDeclarationIndex) {
     let scope = match index.scope {
-        MiddlewareDeclarationScope::ResolvedMiddleware => "resolved_middleware",
+        MiddlewareDeclarationScope::StageMiddleware => "stage_middleware",
         MiddlewareDeclarationScope::EffectPolicy => "effect_policy",
     };
     push_field(context, "declaration.scope", scope);
@@ -976,12 +935,11 @@ pub fn validate_attachment_request(
 // ---------------------------------------------------------------------------
 
 /// The concrete attachment the DSL binder asks the factory to materialize: one
-/// surface, one protected unit, and the resolved origin.
+/// surface, one protected unit, and one declaration position.
 #[derive(Clone, Copy)]
 pub struct MiddlewareAttachmentRequest<'a> {
     pub surface: &'a MiddlewareSurface,
     pub protected_unit: &'a ProtectedUnitId,
-    pub origin: &'a MiddlewareOrigin,
     pub declaration_index: MiddlewareDeclarationIndex,
 }
 
@@ -1515,12 +1473,10 @@ mod tests {
             ],
         );
         let (surface, unit) = ingress_fixture(stage_id);
-        let origin = MiddlewareOrigin::Stage;
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &unit,
-            origin: &origin,
-            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
         };
 
         // A source-owned ingress attachment validates and derives a stable id.
@@ -1556,12 +1512,10 @@ mod tests {
     fn rejects_ingress_without_declared_support_or_control_capability() {
         let stage_id = StageId::new();
         let (surface, unit) = ingress_fixture(stage_id);
-        let origin = MiddlewareOrigin::Stage;
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &unit,
-            origin: &origin,
-            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
         };
 
         // A control declaration that does not list Ingress is UnsupportedSurface.
@@ -1593,12 +1547,10 @@ mod tests {
             stage_id,
             unit: ProtectedUnit::OutputCommit,
         };
-        let origin = MiddlewareOrigin::Stage;
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &protected_unit,
-            origin: &origin,
-            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
         };
 
         let observer =
@@ -1618,7 +1570,7 @@ mod tests {
 
     #[test]
     fn validates_source_poll_and_derives_stable_attachment_id() {
-        let stage_id = StageId::new();
+        let stage_id = StageId::new_const(1);
         let declaration = MiddlewareDeclaration::control_with_family(
             "shared_label",
             "circuit_breaker",
@@ -1632,12 +1584,10 @@ mod tests {
             stage_id,
             unit: ProtectedUnit::SourcePoll(SourcePollUnitId),
         };
-        let origin = MiddlewareOrigin::Stage;
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &protected_unit,
-            origin: &origin,
-            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
         };
 
         let first = validate_attachment_request(&declaration, &request).unwrap();
@@ -1645,19 +1595,14 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(first.as_ulid(), second.as_ulid());
-
-        let other_origin = MiddlewareOrigin::Flow;
-        let other_origin_request = MiddlewareAttachmentRequest {
-            origin: &other_origin,
-            ..request
-        };
-        assert_ne!(
-            first,
-            validate_attachment_request(&declaration, &other_origin_request).unwrap()
+        assert_eq!(
+            first.as_ulid().to_string(),
+            "75HYAEDDXTDZ24V4EGYBD23TFF",
+            "the middleware-attachment:v4 coordinate is a versioned archive boundary"
         );
 
         let other_index_request = MiddlewareAttachmentRequest {
-            declaration_index: MiddlewareDeclarationIndex::resolved(1),
+            declaration_index: MiddlewareDeclarationIndex::stage(1),
             ..request
         };
         assert_ne!(
@@ -1692,12 +1637,184 @@ mod tests {
         let effect_request = MiddlewareAttachmentRequest {
             surface: &effect_surface,
             protected_unit: &effect_unit,
-            origin: &origin,
-            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
         };
         assert_ne!(
             first,
             validate_attachment_request(&declaration, &effect_request).unwrap()
+        );
+
+        let other_stage_id = StageId::new_const(2);
+        let other_stage_surface = MiddlewareSurface::SourcePoll(SourcePollSurface {
+            stage_id: other_stage_id,
+        });
+        let other_stage_unit = ProtectedUnitId {
+            stage_id: other_stage_id,
+            unit: ProtectedUnit::SourcePoll(SourcePollUnitId),
+        };
+        let other_stage_request = MiddlewareAttachmentRequest {
+            surface: &other_stage_surface,
+            protected_unit: &other_stage_unit,
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
+        };
+        assert_ne!(
+            first,
+            validate_attachment_request(&declaration, &other_stage_request).unwrap()
+        );
+
+        let other_lane_request = MiddlewareAttachmentRequest {
+            declaration_index: MiddlewareDeclarationIndex::effect_policy(0),
+            ..request
+        };
+        assert_ne!(
+            first,
+            validate_attachment_request(&declaration, &other_lane_request).unwrap()
+        );
+    }
+
+    #[test]
+    fn retained_attachment_discriminants_separate_effect_sink_and_ingress_units() {
+        let stage_id = StageId::new_const(3);
+
+        let effect_declaration = MiddlewareDeclaration::control_with_family(
+            "effect_control",
+            "effect_control",
+            vec![MiddlewareSurfaceKind::Effect],
+        );
+        let http_surface = MiddlewareSurface::Effect(EffectSurface {
+            stage_id,
+            effect_type: EffectTypeKey::from("http"),
+            safety: EffectSafety::Idempotent,
+        });
+        let http_unit = ProtectedUnitId {
+            stage_id,
+            unit: ProtectedUnit::Effect(EffectUnitId {
+                effect_type: EffectTypeKey::from("http"),
+            }),
+        };
+        let sql_surface = MiddlewareSurface::Effect(EffectSurface {
+            stage_id,
+            effect_type: EffectTypeKey::from("sql"),
+            safety: EffectSafety::Idempotent,
+        });
+        let sql_unit = ProtectedUnitId {
+            stage_id,
+            unit: ProtectedUnit::Effect(EffectUnitId {
+                effect_type: EffectTypeKey::from("sql"),
+            }),
+        };
+        let http_request = MiddlewareAttachmentRequest {
+            surface: &http_surface,
+            protected_unit: &http_unit,
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
+        };
+        let sql_request = MiddlewareAttachmentRequest {
+            surface: &sql_surface,
+            protected_unit: &sql_unit,
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
+        };
+        assert_ne!(
+            validate_attachment_request(&effect_declaration, &http_request).unwrap(),
+            validate_attachment_request(&effect_declaration, &sql_request).unwrap()
+        );
+
+        let sink_declaration = MiddlewareDeclaration::control_with_family(
+            "sink_control",
+            "sink_control",
+            vec![MiddlewareSurfaceKind::SinkDelivery],
+        );
+        let stage_sink_surface = MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
+            stage_id,
+            configured_target: None,
+        });
+        let stage_sink_unit = ProtectedUnitId {
+            stage_id,
+            unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
+                target: SinkDeliveryTarget::Stage,
+            }),
+        };
+        let configured_target = SinkConfiguredTargetKey("primary".to_string());
+        let configured_sink_surface = MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
+            stage_id,
+            configured_target: Some(configured_target.clone()),
+        });
+        let configured_sink_unit = ProtectedUnitId {
+            stage_id,
+            unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
+                target: SinkDeliveryTarget::Configured(configured_target),
+            }),
+        };
+        let stage_sink_request = MiddlewareAttachmentRequest {
+            surface: &stage_sink_surface,
+            protected_unit: &stage_sink_unit,
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
+        };
+        let configured_sink_request = MiddlewareAttachmentRequest {
+            surface: &configured_sink_surface,
+            protected_unit: &configured_sink_unit,
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
+        };
+        assert_ne!(
+            validate_attachment_request(&sink_declaration, &stage_sink_request).unwrap(),
+            validate_attachment_request(&sink_declaration, &configured_sink_request).unwrap()
+        );
+
+        let ingress_declaration = MiddlewareDeclaration::control_with_family(
+            "ingress_control",
+            "ingress_control",
+            vec![MiddlewareSurfaceKind::Ingress],
+        );
+        let stage_key = StageKey("ingress".to_string());
+        let hosted_surface = IngressKey("/events".to_string());
+        let admission_target = HostedIngressTargetKey {
+            surface: hosted_surface.clone(),
+            scope: IngressRouteScope::Admission,
+        };
+        let endpoint_target = HostedIngressTargetKey {
+            surface: hosted_surface,
+            scope: IngressRouteScope::Endpoint(IngressEndpointKind::Events),
+        };
+        let admission_surface = MiddlewareSurface::Ingress(IngressSurface {
+            owner: SourceStageIngressOwner {
+                stage_id,
+                stage_key: stage_key.clone(),
+            },
+            target: admission_target.clone(),
+        });
+        let admission_unit = ProtectedUnitId {
+            stage_id,
+            unit: ProtectedUnit::Ingress(IngressUnitId {
+                source_stage_key: stage_key.clone(),
+                target: admission_target,
+            }),
+        };
+        let endpoint_surface = MiddlewareSurface::Ingress(IngressSurface {
+            owner: SourceStageIngressOwner {
+                stage_id,
+                stage_key: stage_key.clone(),
+            },
+            target: endpoint_target.clone(),
+        });
+        let endpoint_unit = ProtectedUnitId {
+            stage_id,
+            unit: ProtectedUnit::Ingress(IngressUnitId {
+                source_stage_key: stage_key,
+                target: endpoint_target,
+            }),
+        };
+        let admission_request = MiddlewareAttachmentRequest {
+            surface: &admission_surface,
+            protected_unit: &admission_unit,
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
+        };
+        let endpoint_request = MiddlewareAttachmentRequest {
+            surface: &endpoint_surface,
+            protected_unit: &endpoint_unit,
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
+        };
+        assert_ne!(
+            validate_attachment_request(&ingress_declaration, &admission_request).unwrap(),
+            validate_attachment_request(&ingress_declaration, &endpoint_request).unwrap()
         );
     }
 
@@ -1715,12 +1832,10 @@ mod tests {
                 effect_type: EffectTypeKey::from("http"),
             }),
         };
-        let origin = MiddlewareOrigin::Stage;
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &protected_unit,
-            origin: &origin,
-            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+            declaration_index: MiddlewareDeclarationIndex::stage(0),
         };
 
         let err = validate_attachment_request(&declaration, &request).unwrap_err();

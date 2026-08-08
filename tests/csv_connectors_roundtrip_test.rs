@@ -59,7 +59,6 @@ async fn csv_source_to_sink_roundtrip_skips_bad_rows() -> anyhow::Result<()> {
         Ok(flow! {
             name: "csv_connectors_roundtrip_test",
             journals: disk_journals(journals_path),
-            middleware: [],
 
             stages: {
                 src = source!(FlightData => source);
@@ -110,7 +109,6 @@ async fn csv_untyped_source_to_sink_roundtrip_preserves_strings() -> anyhow::Res
         Ok(flow! {
             name: "csv_untyped_connectors_roundtrip_test",
             journals: disk_journals(journals_path),
-            middleware: [],
 
             stages: {
                 src = source!(CsvRow => source);
@@ -160,7 +158,6 @@ async fn csv_source_to_buffered_sink_roundtrip_flushes_on_eof() -> anyhow::Resul
         Ok(flow! {
             name: "csv_buffered_connectors_roundtrip_test",
             journals: disk_journals(journals_path),
-            middleware: [],
 
             stages: {
                 src = source!(FlightData => source);

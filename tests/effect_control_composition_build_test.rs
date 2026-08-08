@@ -414,7 +414,6 @@ macro_rules! single_effect_flow {
             Ok(flow! {
                 name: "effect_control_composition_single",
                 journals: memory_journals(),
-                middleware: [],
 
                 stages: {
                     input = source!(CompositionInput => placeholder!());
@@ -443,7 +442,6 @@ macro_rules! two_effect_flow {
             Ok(flow! {
                 name: "effect_control_composition_two_effects",
                 journals: memory_journals(),
-                middleware: [],
 
                 stages: {
                     input = source!(CompositionInput => placeholder!());
@@ -499,7 +497,6 @@ fn malformed_effect_policy_attachment_flow(
         Ok(flow! {
             name: "malformed_effect_policy_attachment",
             journals: memory_journals(),
-            middleware: [],
 
             stages: {
                 input = source!(CompositionInput => placeholder!());

@@ -91,48 +91,6 @@ impl SinkHandler for NullSink {
 }
 
 #[tokio::test]
-async fn flow_level_policy_middleware_is_rejected_at_build() {
-    let result = FlowDefinition::materialize(move |_runtime_config| {
-        let source_handler = OneShotSource {
-            emitted: false,
-            writer_id: WriterId::from(obzenflow_core::StageId::new()),
-        };
-        let transform_handler = SyncPassthrough;
-        let sink_handler = NullSink;
-
-        Ok(flow! {
-            name: "policy_guard_flow_scope",
-            journals: disk_journals(std::path::PathBuf::from(
-                "target/policy-guard-logs/flow-scope",
-            )),
-            middleware: [breaker(3)],
-
-            stages: {
-                guard_source = source!(GuardEvent => source_handler);
-                guarded = transform!(GuardEvent -> GuardEvent => transform_handler);
-                guard_sink = sink!(GuardEvent => sink_handler);
-            },
-
-            topology: {
-                guard_source |> guarded;
-                guarded |> guard_sink;
-            }
-        })
-    })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
-    .await;
-
-    let err = match result {
-        Ok(_) => panic!("flow-level policy middleware must fail the build"),
-        Err(err) => format!("{err:?}"),
-    };
-    assert!(
-        err.contains("PolicyMiddlewareOnFlowScope") || err.contains("Flow-level policy"),
-        "expected the FLOWIP-120c flow-scope rejection, got: {err}"
-    );
-}
-
-#[tokio::test]
 async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
     let result = FlowDefinition::materialize(move |_runtime_config| {
         let source_handler = OneShotSource {
@@ -147,7 +105,6 @@ async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
             journals: disk_journals(std::path::PathBuf::from(
                 "target/policy-guard-logs/pure-sync",
             )),
-            middleware: [],
 
             stages: {
                 guard_source = source!(GuardEvent => source_handler);

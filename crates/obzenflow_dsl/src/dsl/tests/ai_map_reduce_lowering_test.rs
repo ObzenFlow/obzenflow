@@ -668,7 +668,7 @@ mod tests {
         }
 
         // Construct `StageInfo` carrying subgraph membership on the
-        // composite-internal stages. This mirrors what `build_typed_flow!`
+        // composite-internal stages. This mirrors what the ordinary flow builder
         // should do before calling `validate_edge_typing` (the production
         // attachment happens after the validator today, which is a separate
         // issue called out in the FLOWIP closing-PR notes; this test

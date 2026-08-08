@@ -222,7 +222,6 @@ async fn stop_infinite_source_reports_cancelled() -> Result<()> {
         Ok(flow! {
             name: "stateful_stop_infinite_source",
             journals: disk_journals(journal_root.clone()),
-            middleware: [],
 
             stages: {
                 src = infinite_source!(LifecycleEvent => source_handler);
@@ -281,7 +280,6 @@ async fn stop_finite_source_reports_cancelled() -> Result<()> {
         Ok(flow! {
             name: "stateful_stop_finite_source",
             journals: disk_journals(journal_root.clone()),
-            middleware: [],
 
             stages: {
                 // Large upper bound so the source is still active when Stop is issued.
@@ -341,7 +339,6 @@ async fn stop_cancel_timeout_overrides_cancel_reason() -> Result<()> {
         Ok(flow! {
             name: "stateful_stop_cancel_timeout_reason",
             journals: disk_journals(journal_root.clone()),
-            middleware: [],
 
             stages: {
                 src = infinite_source!(LifecycleEvent => source_handler);

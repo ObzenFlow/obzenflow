@@ -130,7 +130,7 @@ fn standalone_retry_discovery_and_topology_production_stay_absent() {
             ],
         ),
         (
-            "crates/obzenflow_dsl/src/middleware_resolution.rs",
+            "crates/obzenflow_dsl/src/dsl/flow_builder.rs",
             vec![
                 "validate_middleware_combination",
                 "hints().retry",

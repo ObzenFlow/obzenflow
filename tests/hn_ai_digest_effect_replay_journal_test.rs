@@ -599,7 +599,6 @@ fn build_flow_with_chunk_plan(
         Ok(flow! {
             name: "hn_ai_digest_effect_replay_journal",
             journals: disk_journals(journal_base),
-            middleware: [],
             backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(backpressure_window)
                 .stall_timeout_ms(5_000),
             effect_ports,
@@ -663,7 +662,6 @@ fn build_recovery_flow(
         Ok(flow! {
             name: "hn_ai_digest_recovery_composition",
             journals: disk_journals(journal_base),
-            middleware: [],
             backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
                 .stall_timeout_ms(5_000),
             effect_ports,
@@ -727,7 +725,6 @@ fn build_credit_flow(
         Ok(flow! {
             name: "hn_ai_digest_credit_composition",
             journals: disk_journals(journal_base),
-            middleware: [],
             backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
                 .stall_timeout_ms(5_000),
             effect_ports,
@@ -790,7 +787,6 @@ fn build_chunk_interruption_flow(
         Ok(flow! {
             name: "hn_ai_digest_chunk_interruption",
             journals: disk_journals(journal_base),
-            middleware: [],
             backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
                 .stall_timeout_ms(5_000),
             effect_ports,

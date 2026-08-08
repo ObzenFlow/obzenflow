@@ -166,7 +166,6 @@ fn build_flow(
         Ok(flow! {
             name: "stateful_pre_error_bypass",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 input = source!(Input => input_handler);

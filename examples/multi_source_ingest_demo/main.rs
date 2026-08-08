@@ -39,8 +39,8 @@
 //!
 //! # What you'll see if you violate the rule
 //!
-//! Three structured `FlowBuildError` variants are emitted by
-//! `build_typed_flow!`:
+//! Three structured `FlowBuildError` variants are emitted by the ordinary
+//! flow builder:
 //!
 //! - `StageMissingTypingMetadata { stage_name }` when a descriptor has no
 //!   typing metadata (the legacy untyped path, gone after 114c).

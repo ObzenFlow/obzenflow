@@ -278,7 +278,6 @@ fn build_flow(
         Ok(flow! {
             name: "standalone_ai_effect_replay",
             journals: disk_journals(journal_base),
-            middleware: [],
             effect_ports,
 
             stages: {

@@ -186,7 +186,6 @@ fn build_flow_future(
         Ok(flow! {
             name: "effective_config_manifest",
             journals: disk_journals(base),
-            middleware: [],
 
             stages: {
                 src = source!(Item => one_shot_source);
@@ -218,7 +217,6 @@ fn build_rate_limited_flow_future(
         Ok(flow! {
             name: "effective_config_manifest_with_optional_limiter_burst",
             journals: disk_journals(base),
-            middleware: [],
 
             stages: {
                 src = source!(Item => one_shot_source);
@@ -265,7 +263,6 @@ fn build_two_effect_flow_future(
         Ok(flow! {
             name: "effective_config_manifest_two_effects",
             journals: disk_journals(base),
-            middleware: [],
 
             stages: {
                 orders = source!(Item => one_shot_source);

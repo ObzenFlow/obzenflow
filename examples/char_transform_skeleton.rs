@@ -90,7 +90,6 @@ fn main() -> Result<()> {
             Ok(flow! {
                 name: "char_transform_skeleton",
                 journals: disk_journals(PathBuf::from("target/char-transform-skeleton-logs")),
-                middleware: [],
 
                 stages: {
                     characters = source!(CharInput => placeholder!());

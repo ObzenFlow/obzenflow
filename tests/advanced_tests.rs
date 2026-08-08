@@ -156,7 +156,6 @@ async fn test_dsl_pipeline() -> Result<()> {
         Ok(flow! {
             name: "dsl_transformation_test",
             journals: disk_journals(PathBuf::from("target/advanced_tests")),
-            middleware: [],
 
             stages: {
                 generator = source!(AdvancedTestEvent => generator_handler);

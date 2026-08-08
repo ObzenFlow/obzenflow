@@ -12,7 +12,7 @@ use obzenflow_adapters::middleware::{
     EffectAttemptOutcome, EffectPolicy, EffectResilience, EffectSurface, EffectTypeKey,
     EffectUnitId, MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration,
     MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareOverrideKey, MiddlewareSurface,
+    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurface,
     MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, PolicyAdmission, ProtectedUnit,
     ProtectedUnitId, RateLimiter, RateLimiterBuilder, Retry,
 };
@@ -156,7 +156,6 @@ impl MiddlewareFactory for DelegatingFactory {
                 MiddlewareAttachmentRequest {
                     surface: &surface,
                     protected_unit: &protected_unit,
-                    origin: request.origin,
                     declaration_index: request.declaration_index,
                 },
                 context,
@@ -312,13 +311,11 @@ fn materialize_with_safety(
             effect_type: EffectTypeKey::from(EFFECT),
         }),
     };
-    let origin = MiddlewareOrigin::Stage;
     materialize_factory_checked(
         factory,
         MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &protected_unit,
-            origin: &origin,
             declaration_index: MiddlewareDeclarationIndex::effect_policy(0),
         },
         config,

@@ -300,7 +300,6 @@ fn main() -> Result<()> {
             Ok(flow! {
                 name: "ecommerce_analytics",
                 journals: disk_journals(std::path::PathBuf::from("target/ecommerce-logs")),
-                middleware: [],
 
                 stages: {
                     // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)

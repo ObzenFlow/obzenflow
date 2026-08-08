@@ -361,7 +361,6 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>, probes: &Probes) -
         Ok(flow! {
             name: "replay_provenance_labelling",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 orders = source!(OrderPlaced => order_source);

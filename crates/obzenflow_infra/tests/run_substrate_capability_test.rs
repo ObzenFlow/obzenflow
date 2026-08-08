@@ -86,7 +86,6 @@ async fn pre_substrate_failure_carries_no_run_state() {
         Ok(flow! {
             name: "pre_substrate_failure",
             journals: memory_journals(),
-            middleware: [],
 
             stages: {
                 src = source!(TestEvent => placeholder!());
@@ -190,21 +189,20 @@ fn colliding_flow(name: &'static str, base: std::path::PathBuf) -> obzenflow_dsl
         Ok(flow! {
             name: "post_substrate_failure",
             journals: disk_journals(base),
-            middleware: [
-                SlotFactory {
-                    label: name,
-                    key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
-                    slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
-                },
-                SlotFactory {
-                    label: "slot.b",
-                    key: MiddlewareOverrideKey::of::<FamilyB>("family.b"),
-                    slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
-                }
-            ],
 
             stages: {
-                src = source!(TestEvent => placeholder!());
+                src = source!(TestEvent => placeholder!(), [
+                    SlotFactory {
+                        label: name,
+                        key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
+                        slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
+                    },
+                    SlotFactory {
+                        label: "slot.b",
+                        key: MiddlewareOverrideKey::of::<FamilyB>("family.b"),
+                        slot: TopologyMiddlewareConfigSlot::CircuitBreaker,
+                    }
+                ]);
                 snk = sink!(TestEvent => placeholder!());
             },
 
@@ -280,7 +278,6 @@ async fn successful_disk_flow_reports_durable_and_persists_the_manifest() {
         Ok(flow! {
             name: "durable_success",
             journals: journals,
-            middleware: [],
 
             stages: {
                 src = source!(TestEvent => placeholder!());
@@ -318,7 +315,6 @@ async fn successful_memory_flow_reports_ephemeral() {
         Ok(flow! {
             name: "ephemeral_success",
             journals: memory_journals(),
-            middleware: [],
 
             stages: {
                 src = source!(TestEvent => placeholder!());

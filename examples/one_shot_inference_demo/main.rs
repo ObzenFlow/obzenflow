@@ -111,7 +111,6 @@ fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowD
         Ok(flow! {
             name: "one_shot_inference_demo",
             journals: disk_journals(journal_path),
-            middleware: [],
             effect_ports,
 
             stages: {

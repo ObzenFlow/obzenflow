@@ -95,7 +95,6 @@ fn build_flow(
         Ok(flow! {
             name: "csv_demo_support_sla",
             journals: disk_journals(journals_dir),
-            middleware: [],
 
             stages: {
                 customers = source!(Customer => customers);

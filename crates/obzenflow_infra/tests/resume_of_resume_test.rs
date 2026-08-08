@@ -153,7 +153,6 @@ fn build_flow(
         Ok(flow! {
             name: "resume_squared",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 src = infinite_source!(Tick => ticker);

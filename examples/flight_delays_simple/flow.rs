@@ -66,7 +66,6 @@ pub fn run_example() -> Result<()> {
             Ok(flow! {
                 name: "flight_delays",
                 journals: disk_journals(std::path::PathBuf::from("target/flight-delays-logs")),
-                middleware: [],
 
                 stages: {
                     carriers = source!(CarrierDetails => carriers_handler);

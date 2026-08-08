@@ -181,7 +181,6 @@ async fn build_pipeline(
 
             Ok(flow! {
                 journals: disk_journals(journals_base_path.clone()),
-                middleware: [],
 
                 stages: {
                     src = source!(BenchEvent => source);
@@ -207,7 +206,6 @@ async fn build_pipeline(
 
             Ok(flow! {
                 journals: disk_journals(journals_base_path.clone()),
-                middleware: [],
 
                 stages: {
                     src = source!(BenchEvent => source);
@@ -239,7 +237,6 @@ async fn build_pipeline(
 
             Ok(flow! {
                 journals: disk_journals(journals_base_path.clone()),
-                middleware: [],
 
                 stages: {
                     src = source!(BenchEvent => source);
@@ -282,7 +279,6 @@ async fn build_pipeline(
 
                 Ok(flow! {
                     journals: disk_journals(journals_base_path.clone()),
-                    middleware: [],
 
                     stages: {
                         src = source!(BenchEvent => source);

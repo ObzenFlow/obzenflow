@@ -292,7 +292,6 @@ fn build_retry_flow(
         Ok(flow! {
             name: "circuit_breaker_composition",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 // Source breaker stays closed; the scripted source never fails.

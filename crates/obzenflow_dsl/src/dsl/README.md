@@ -29,14 +29,14 @@ flowchart LR
 
 ## `flow!` expansion model
 
-At a high level, `flow!` collects stage descriptors + topology edges and delegates the heavy lifting to `build_typed_flow!` (`dsl.rs`). The result is wrapped in `FlowDefinition` (`flow_definition.rs`) so runners can accept “DSL flows” explicitly.
+At a high level, `flow!` collects stage descriptors and topology edges, lowers composites, then delegates materialisation to ordinary Rust in `flow_builder.rs`. The macro returns a `FlowDefinition` (`flow_definition.rs`) so runners can accept DSL flows explicitly.
 
 ```mermaid
 sequenceDiagram
   participant User as "Caller"
   participant Flow as "flow! macro"
   participant Def as "FlowDefinition"
-  participant Build as "build_typed_flow!"
+  participant Build as "flow_builder::build_flow"
   participant Topo as "obzenflow-topology"
   participant Journals as "FlowJournalFactory"
   participant Res as "StageResourcesBuilder"
@@ -44,10 +44,10 @@ sequenceDiagram
   participant Pipe as "PipelineBuilder"
 
   User->>Flow: flow! { ... }
-  Flow-->>Def: returns Future
+  Flow-->>Def: returns FlowDefinition
 
-  User->>Def: .await
-  Def->>Build: build_typed_flow!(...)
+  User->>Def: .build(context).await
+  Def->>Build: build_flow(...)
 
   Build->>Topo: validate topology + cycles
   Build->>Journals: create system/stage/error journals

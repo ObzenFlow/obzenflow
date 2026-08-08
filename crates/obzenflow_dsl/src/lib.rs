@@ -5,7 +5,6 @@
 #![doc = include_str!("../README.md")]
 
 pub mod dsl;
-pub mod middleware_resolution;
 pub mod prelude;
 pub mod stage_handle_adapter;
 

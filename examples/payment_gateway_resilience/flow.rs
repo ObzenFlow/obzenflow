@@ -181,7 +181,6 @@ pub fn assemble_flow(
         Ok(flow! {
             name: "payment_gateway_resilience_demo",
             journals: disk_journals(journal_root),
-            middleware: [],
 
             stages: {
                 // Sources: two scripted order channels across three phases

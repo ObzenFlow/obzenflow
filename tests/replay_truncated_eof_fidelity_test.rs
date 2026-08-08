@@ -232,7 +232,6 @@ macro_rules! linear_flow {
             Ok(flow! {
                 name: "truncated_fidelity_linear",
                 journals: disk_journals($journal_base),
-                middleware: [],
 
                 stages: {
                     ticks = source!(Tick => ticks);
@@ -484,7 +483,6 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
                 Ok(flow! {
                     name: "truncated_fidelity_fan_in",
                     journals: disk_journals($base),
-                    middleware: [],
 
                     stages: {
                         fast = source!(Tick => fast);
@@ -673,7 +671,6 @@ async fn cycle_flow_truncated_replay_terminates_without_error() {
                 Ok(flow! {
                     name: "truncated_fidelity_cycle",
                     journals: disk_journals($base),
-                    middleware: [],
 
                     stages: {
                         seeds = source!(Tick => seeds);

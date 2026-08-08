@@ -323,7 +323,6 @@ async fn metrics_barrier_smoke_current_thread_paused_time() -> Result<()> {
     let test_handle = test_flow! {
         name: "metrics_barrier_paused_time_smoke",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = source!(MetricEvent => source);
@@ -379,7 +378,6 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
     let test_handle = test_flow! {
         name: "metrics_flow_id_labels",
         journals: disk_journals(unique_journal_dir("metrics_flow_id_labels")),
-        middleware: [],
 
         stages: {
             src = source!(MetricEvent => source, [
@@ -443,7 +441,6 @@ async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
     let test_handle = test_flow! {
         name: "metrics_processing_time_sum",
         journals: disk_journals(unique_journal_dir("metrics_processing_time_sum")),
-        middleware: [],
 
         stages: {
             src = source!(MetricEvent => source);
@@ -534,7 +531,6 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
     let test_handle = test_flow! {
         name: "metrics_cb_exporter",
         journals: disk_journals(unique_journal_dir("metrics_cb_exporter")),
-        middleware: [],
 
         stages: {
             // 1000 events triggers a CircuitBreaker summary (>=1000 processed requests).
@@ -612,7 +608,6 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
     let test_handle = test_flow! {
         name: "metrics_cb_cumulative",
         journals: disk_journals(unique_journal_dir("metrics_cb_cumulative")),
-        middleware: [],
 
         stages: {
             // 1001 events ensures the 1000-threshold summary is emitted before the run completes.
@@ -758,7 +753,6 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
     let test_handle = test_flow! {
         name: "metrics_source_rate_based_cb",
         journals: disk_journals(unique_journal_dir("metrics_source_rate_based_cb")),
-        middleware: [],
 
         stages: {
             src = source!(MetricEvent => source, [
@@ -854,7 +848,6 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
     let test_handle = test_flow! {
         name: "metrics_rl_exporter",
         journals: disk_journals(unique_journal_dir("metrics_rl_exporter")),
-        middleware: [],
 
         stages: {
             src = source!(MetricEvent => source, [
@@ -1014,7 +1007,6 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
     let test_handle = test_flow! {
         name: "metrics_cb_no_summary",
         journals: disk_journals(unique_journal_dir("metrics_cb_no_summary")),
-        middleware: [],
 
         stages: {
             src = source!(MetricEvent => source, [
@@ -1085,7 +1077,6 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
     let test_handle = test_flow! {
         name: "metrics_rl_no_summary",
         journals: disk_journals(unique_journal_dir("metrics_rl_no_summary")),
-        middleware: [],
 
         stages: {
             src = source!(MetricEvent => source, [
@@ -1189,7 +1180,6 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
     let test_handle = test_flow! {
         name: "metrics_contracts_exporter",
         journals: disk_journals(unique_journal_dir("metrics_contracts_exporter")),
-        middleware: [],
 
         stages: {
             src = source!(MetricEvent => source);

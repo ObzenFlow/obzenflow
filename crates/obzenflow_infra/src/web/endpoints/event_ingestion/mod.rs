@@ -1506,7 +1506,6 @@ mod tests {
             Ok(flow! {
                 name: "flowip_084h_ingestion_journal_absence",
                 journals: disk_journals(journal_root_for_flow),
-                middleware: [],
 
                 stages: {
                     source = async_infinite_source!(TestPayload => source);
@@ -1618,7 +1617,6 @@ mod tests {
             Ok(flow! {
                 name: "flowip_115d_ingress_refusal_fact",
                 journals: disk_journals(journal_root_for_flow),
-                middleware: [],
 
                 stages: {
                     // Capacity 1 with a negligible refill: the first POST consumes the

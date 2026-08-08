@@ -312,7 +312,6 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     let harness = test_flow! {
         name: "divergence_mid_flight_abort",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = source!(SeedEvent => source);
@@ -445,7 +444,6 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
     let harness = test_flow! {
         name: "divergence_mid_flight_contract_health",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = source!(SeedEvent => source);
@@ -536,7 +534,6 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
     let harness = test_flow! {
         name: "divergence_fan_in_inside_cycle",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = source!(SeedEvent => source);
@@ -643,7 +640,6 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
     let harness = test_flow! {
         name: "divergence_cycle_depth_abort",
         journals: memory_journals(),
-        middleware: [],
 
         stages: {
             src = source!(SeedEvent => source);

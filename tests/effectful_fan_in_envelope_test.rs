@@ -221,7 +221,6 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
         Ok(flow! {
             name: "effectful_fan_in_envelope",
             journals: disk_journals(journal_base),
-            middleware: [],
 
             stages: {
                 source_a = source!(EnvelopeInput => source_a);
