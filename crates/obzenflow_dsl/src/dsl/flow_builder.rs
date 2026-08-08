@@ -38,6 +38,7 @@ impl FlowBuildOutput {
 
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
+    #[allow(clippy::result_large_err)]
     pub fn into_test_harness(
         self,
     ) -> Result<obzenflow_runtime::testing::FlowTestHarness, crate::FlowBuildFailure> {
@@ -56,6 +57,7 @@ impl FlowBuildOutput {
 
 /// Materialise one already-lowered flow without any flow-scope middleware lane.
 #[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
 pub async fn build_flow<J, P>(
     flow_name: &'static str,
     journal_factory_provider: P,
@@ -592,16 +594,14 @@ where
                                 return Err(FlowBuildError::PolicyMiddlewareOnPureStage {
                                     stage_name: name.clone(),
                                     middleware: factory.label().to_string(),
-                                }
-                                .into());
+                                });
                             }
                             PolicyGuardSurface::EffectfulStatefulPendingBoundary => {
                                 return Err(
                                     FlowBuildError::PolicyMiddlewareOnPendingEffectfulStateful {
                                         stage_name: name.clone(),
                                         middleware: factory.label().to_string(),
-                                    }
-                                    .into(),
+                                    },
                                 );
                             }
                             PolicyGuardSurface::Effectful
@@ -935,7 +935,7 @@ where
         let pipeline_id = SystemId::new();
 
         // Get the journal factory for this specific flow
-        let mut journal_factory = journal_factory_provider(flow_id.clone())
+        let mut journal_factory = journal_factory_provider(flow_id)
             .map_err(|e| FlowBuildError::JournalFactoryFailed(format!("{:?}", e)))?;
 
         // FLOWIP-120u: capture the substrate declaration, then run the
@@ -972,7 +972,7 @@ where
         let control_journal = obzenflow_runtime::journal::FlowJournalFactory::create_system_journal(
                 &mut journal_factory,
                 JournalName::System,
-                JournalOwner::system(pipeline_id.clone()),
+                JournalOwner::system(pipeline_id),
             )
             .map_err(|e| {
                 FlowBuildError::JournalFactoryFailed(format!(
@@ -1288,8 +1288,8 @@ where
             .collect();
 
         let resources_builder = StageResourcesBuilder::new(
-            flow_id.clone(),
-            pipeline_id.clone(),
+            flow_id,
+            pipeline_id,
             topology.clone(),
             control_journal,
             stage_journals,
@@ -1624,7 +1624,7 @@ where
         let builder = PipelineBuilder::new(
                 topology.clone(),
                 stage_resources_set.system_journal.clone(),
-                stage_resources_set.flow_id.clone(),
+                stage_resources_set.flow_id,
             )
             .with_flow_name(flow_name)
             .with_stages(stages)
