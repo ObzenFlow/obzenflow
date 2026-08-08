@@ -1683,7 +1683,6 @@ name = "obzenflow_dsl"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "indexmap",
  "insta",
  "obzenflow-topology",
  "obzenflow_adapters",

@@ -22,7 +22,6 @@ obzenflow_adapters = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }
 tracing = { workspace = true }
-indexmap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
