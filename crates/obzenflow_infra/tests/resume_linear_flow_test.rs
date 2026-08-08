@@ -134,7 +134,7 @@ struct CountingSink {
 #[async_trait]
 impl SinkHandler for CountingSink {
     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if event.event_type() == Doubled::EVENT_TYPE {
+        if Doubled::from_event(&event).is_some() {
             self.delivered.fetch_add(1, Ordering::SeqCst);
         }
         Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
