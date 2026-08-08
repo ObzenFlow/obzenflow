@@ -388,26 +388,23 @@ where
             return None;
         }
 
-        let mut matched_event_types = HashSet::new();
-        let mut selected_total = 0u64;
-        for selected_event_type in selected {
-            let Some((actual_event_type, seq)) =
-                writer_seq_by_event_type
-                    .iter()
-                    .find(|(actual_event_type, _)| {
-                        declared_event_type_matches(
-                            selected_event_type.as_str(),
-                            actual_event_type.as_str(),
-                            None,
-                        )
-                    })
-            else {
-                continue;
-            };
-            if matched_event_types.insert(actual_event_type.clone()) {
-                selected_total = selected_total.saturating_add(seq.0);
-            }
-        }
+        // One semantic feed can be represented by more than one physical
+        // event-type spelling. In particular, an in-band error row retains
+        // its legacy input spelling while successful typed outputs use the
+        // canonical `.vN` spelling. Count every matching physical key once;
+        // selecting only the first match under-advertises the EOF position.
+        let selected_total = writer_seq_by_event_type
+            .iter()
+            .filter(|(actual_event_type, _)| {
+                selected.iter().any(|selected_event_type| {
+                    declared_event_type_matches(
+                        selected_event_type.as_str(),
+                        actual_event_type.as_str(),
+                        None,
+                    )
+                })
+            })
+            .fold(0u64, |total, (_, seq)| total.saturating_add(seq.0));
         Some(SeqNo(selected_total))
     }
 

@@ -10,7 +10,7 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use anyhow::Result;
@@ -25,6 +25,8 @@ use serde_json::json;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct AdvancedTestEvent {
     value: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    doubled: Option<u64>,
 }
 
 impl TypedPayload for AdvancedTestEvent {
@@ -99,25 +101,18 @@ async fn test_dsl_pipeline() -> Result<()> {
         }
     }
 
-    #[async_trait]
-    impl TransformHandler for Doubler {
-        fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-            if let Some(value) = event.payload().get("value").and_then(|v| v.as_u64()) {
-                Ok(vec![ChainEventFactory::data_event(
-                    event.writer_id,
-                    <AdvancedTestEvent as TypedPayload>::EVENT_TYPE,
-                    json!({
-                        "value": value,
-                        "doubled": value * 2,
-                    }),
-                )])
-            } else {
-                Ok(vec![event])
-            }
-        }
+    impl TypedTransformHandler for Doubler {
+        type Input = AdvancedTestEvent;
+        type Output = AdvancedTestEvent;
 
-        async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-            Ok(())
+        fn process(
+            &self,
+            input: AdvancedTestEvent,
+        ) -> std::result::Result<AdvancedTestEvent, HandlerError> {
+            Ok(AdvancedTestEvent {
+                value: input.value,
+                doubled: Some(input.value * 2),
+            })
         }
     }
 

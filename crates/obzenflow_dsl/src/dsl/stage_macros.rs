@@ -1456,58 +1456,39 @@ macro_rules! async_infinite_source {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_transform_untyped {
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        use $crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
-        Box::new(TransformDescriptor {
-            name: $name.to_string(),
-            handler: $handler,
-            middleware: vec![$(Box::new($mw)),*],
-            backpressure: {
-                #[allow(unused_mut)]
-                let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
-                $($( __bp = Some($bp); )?)?
-                __bp
-            },
-        }) as Box<dyn StageDescriptor>
-    }};
-}
-
-#[doc(hidden)]
-#[macro_export]
 macro_rules! __obzenflow_transform_typed {
     // -- exact input, placeholder, explicit output contract --
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_transform_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderTransform::<$in, $out>::new(None),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
+            ::obzenflow_core::stage_fact_set![$($member),+],
+        >();
+        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($mw)),*];
+        #[allow(unused_mut)]
+        let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+        $($( __backpressure = Some($bp); )?)?
+        $crate::dsl::typing::placeholder_transform_descriptor::<
+            $in,
+            $out,
+            ::obzenflow_core::stage_fact_set![$($member),+],
+            _,
+        >($name, None, __middleware, __backpressure)
     }};
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_transform_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderTransform::<$in, $out>::new(Some($msg)),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
+            ::obzenflow_core::stage_fact_set![$($member),+],
+        >();
+        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($mw)),*];
+        #[allow(unused_mut)]
+        let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+        $($( __backpressure = Some($bp); )?)?
+        $crate::dsl::typing::placeholder_transform_descriptor::<
+            $in,
+            $out,
+            ::obzenflow_core::stage_fact_set![$($member),+],
+            _,
+        >($name, Some($msg), __middleware, __backpressure)
     }};
     // -- exact input, real handler, explicit output contract --
     // FLOWIP-120b Option B keeps the flat output contract in the arrow's
@@ -1515,92 +1496,68 @@ macro_rules! __obzenflow_transform_typed {
     // flow.
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
-        fn __obzenflow_assert_output_contract_equality<
-            __Handler,
-            __ArrowToHandlerProof,
-            __HandlerToArrowProof,
-        >(
-            _handler: &__Handler,
-        )
-        where
-            __Handler: ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler<
-                Input = $in,
-            >,
-            <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members:
-                $crate::dsl::typing::ArrowOutputsAreDeclaredByHandler<
-                    <<__Handler as ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler>::Output as ::obzenflow_core::StageFactSet>::Members,
-                    __ArrowToHandlerProof,
-                >,
-            <<__Handler as ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler>::Output as ::obzenflow_core::StageFactSet>::Members:
-                $crate::dsl::typing::HandlerOutputsAreDeclaredByArrow<
-                    <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members,
-                    __HandlerToArrowProof,
-                >,
-        {
-        }
-        __obzenflow_assert_output_contract_equality::<_, _, _>(&__handler);
         const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
             ::obzenflow_core::stage_fact_set![$($member),+],
         >();
-        let __handler =
-            ::obzenflow_runtime::stages::common::handlers::TypedTransformHandlerAdapter::new(
-                __handler,
-            );
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($mw)),*];
+        #[allow(unused_mut)]
+        let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+        $($( __backpressure = Some($bp); )?)?
+        $crate::dsl::typing::typed_transform_descriptor::<
+            _,
+            $in,
+            $out,
+            ::obzenflow_core::stage_fact_set![$($member),+],
+            _,
+            _,
+            _,
+        >($name, __handler, __middleware, __backpressure)
     }};
     // ── exact input, placeholder ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
+        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($mw)),*];
+        #[allow(unused_mut)]
+        let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+        $($( __backpressure = Some($bp); )?)?
+        $crate::dsl::typing::placeholder_transform_descriptor::<$in, $out, $out, _>(
+            $name,
             None,
-        );
-        let __descriptor = $crate::__obzenflow_transform_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderTransform::<$in, $out>::new(None),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+            __middleware,
+            __backpressure,
+        )
     }};
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_transform_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderTransform::<$in, $out>::new(Some($msg)),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($mw)),*];
+        #[allow(unused_mut)]
+        let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+        $($( __backpressure = Some($bp); )?)?
+        $crate::dsl::typing::placeholder_transform_descriptor::<$in, $out, $out, _>(
+            $name,
+            Some($msg),
+            __middleware,
+            __backpressure,
+        )
     }};
     // ── exact input, real handler ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
-        let __handler =
-            $crate::dsl::typing::BoundTransform::<$in, $out, _>::new(__handler);
-        ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($mw)),*];
+        #[allow(unused_mut)]
+        let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+        $($( __backpressure = Some($bp); )?)?
+        $crate::dsl::typing::typed_transform_descriptor::<
+            _,
+            $in,
+            $out,
+            $out,
+            _,
+            _,
+            _,
+        >($name, __handler, __middleware, __backpressure)
     }};
 }
 
@@ -2347,7 +2304,7 @@ macro_rules! __obzenflow_sink_typed {
     // FLOWIP-114c PR D: the previous `assert_sink_input::<_, $in>` check is dropped.
     // Per the proposal's canonical-identity rationale, the declared input is a
     // topology fingerprint, not a Rust type-system constraint, matching the
-    // tautological pattern already used by `BoundTransform` wrappers.
+    // a wrapper whose phantom arrow types would make the proof tautological.
     (input = exact($in:ty), name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
         let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
@@ -3358,7 +3315,7 @@ macro_rules! __obzenflow_join_typed {
     //
     // FLOWIP-114c PR D: __obzenflow_anchor_join JoinTyping bound dropped.
     // The metadata declares ref/stream/output types; the handler does not need
-    // to implement JoinTyping itself, matching the BoundTransform tautology.
+    // to implement JoinTyping itself, which would make the proof tautological.
     (reference = exact, stream = exact, output = $out:ty,
      output_contract = [$($member:ty),+ $(,)?],
      ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
@@ -4185,7 +4142,6 @@ macro_rules! __obzenflow_ai_map_reduce_generated_typed {
             $item_ty,
             $partial_ty,
             $out_ty,
-            _,
             _,
             _,
         >(

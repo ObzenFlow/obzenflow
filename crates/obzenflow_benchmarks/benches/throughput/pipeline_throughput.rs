@@ -20,7 +20,7 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -102,14 +102,12 @@ impl PassthroughStage {
     }
 }
 
-#[async_trait]
-impl TransformHandler for PassthroughStage {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![event])
-    }
+impl TypedTransformHandler for PassthroughStage {
+    type Input = BenchEvent;
+    type Output = BenchEvent;
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, event: BenchEvent) -> Result<BenchEvent, HandlerError> {
+        Ok(event)
     }
 }
 

@@ -49,10 +49,9 @@
 //! let source = sources::finite(readings);
 //! ```
 //!
-//! **Transforms** process events one at a time. Implement
-//! [`obzenflow_runtime::stages::TransformHandler`] for full control, or use
-//! the typed helper facades like [`crate::typed::transforms::map`] for simple
-//! one-to-one mappings.
+//! **Transforms** process typed payloads one at a time. Implement
+//! [`obzenflow_runtime::stages::TypedTransformHandler`], or use helper facades
+//! like [`crate::typed::transforms::map`] for simple one-to-one mappings.
 //!
 //! **Sinks** consume events at the end of a pipeline. Implement
 //! [`obzenflow_runtime::stages::SinkHandler`], or construct a

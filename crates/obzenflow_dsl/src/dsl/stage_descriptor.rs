@@ -68,6 +68,10 @@ use obzenflow_runtime::{
 use std::sync::Arc;
 use std::time::Duration;
 
+pub(crate) mod sealed {
+    pub trait Sealed {}
+}
+
 fn factory_declares_circuit_breaker(factory: &dyn MiddlewareFactory) -> bool {
     factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::CircuitBreaker)
 }
@@ -426,7 +430,7 @@ pub enum PolicyGuardSurface {
 
 /// Trait for stage descriptors that know how to create their supervisors
 #[async_trait]
-pub trait StageDescriptor: Send + Sync {
+pub trait StageDescriptor: sealed::Sealed + Send + Sync {
     /// Get the stage name
     fn name(&self) -> &str;
 
@@ -1186,11 +1190,11 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 }
 
 /// Descriptor for transform stages
-pub struct TransformDescriptor<H: TransformHandler + 'static> {
-    pub name: String,
-    pub handler: H,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
-    pub backpressure: Option<BackpressureClause>,
+pub(crate) struct TransformDescriptor<H: TransformHandler + 'static> {
+    pub(crate) name: String,
+    pub(crate) handler: H,
+    pub(crate) middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
@@ -2706,6 +2710,17 @@ fn check_join_state<H>(state: &JoinState<H>) -> crate::stage_handle_adapter::Sta
         _ => StageStatus::Created,
     }
 }
+
+impl<H: FiniteSourceHandler + 'static> sealed::Sealed for FiniteSourceDescriptor<H> {}
+impl<H: AsyncFiniteSourceHandler + 'static> sealed::Sealed for AsyncFiniteSourceDescriptor<H> {}
+impl<H: InfiniteSourceHandler + 'static> sealed::Sealed for InfiniteSourceDescriptor<H> {}
+impl<H: AsyncInfiniteSourceHandler + 'static> sealed::Sealed for AsyncInfiniteSourceDescriptor<H> {}
+impl<H: TransformHandler + 'static> sealed::Sealed for TransformDescriptor<H> {}
+impl<H: EffectfulTransformHandler + 'static> sealed::Sealed for EffectfulTransformDescriptor<H> {}
+impl<H: SinkHandler + 'static> sealed::Sealed for SinkDescriptor<H> {}
+impl<H: StatefulHandler + 'static> sealed::Sealed for StatefulDescriptor<H> {}
+impl<H: EffectfulStatefulHandler + 'static> sealed::Sealed for EffectfulStatefulDescriptor<H> {}
+impl<H: JoinHandler + 'static> sealed::Sealed for JoinDescriptor<H> {}
 
 #[cfg(test)]
 mod tests {

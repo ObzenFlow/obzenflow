@@ -9,12 +9,12 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::{StageId, StageOutputs, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -24,7 +24,12 @@ use serde_json::json;
 /// contract per FLOWIP-114c.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SeedEvent {
+    kind: String,
+    #[serde(default)]
+    fan_out: u64,
+    #[serde(default)]
     item: u64,
+    #[serde(default)]
     iter: u64,
     target: u64,
 }
@@ -137,149 +142,91 @@ impl FiniteSourceHandler for SingleSeedFanOutSource {
 
 #[derive(Clone, Debug)]
 struct FanOutEntryTransform {
-    writer_id: WriterId,
     processed: Arc<AtomicU64>,
 }
 
 impl FanOutEntryTransform {
     fn new(processed: Arc<AtomicU64>) -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-            processed,
-        }
+        Self { processed }
     }
 }
 
-#[async_trait]
-impl TransformHandler for FanOutEntryTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let ChainEventContent::Data {
-            event_type,
-            payload,
-        } = &event.content
-        else {
-            return Ok(Vec::new());
-        };
+impl TypedTransformHandler for FanOutEntryTransform {
+    type Input = SeedEvent;
+    type Output = StageOutputs<SeedEvent>;
 
+    fn process(
+        &self,
+        event: SeedEvent,
+    ) -> std::result::Result<StageOutputs<SeedEvent>, HandlerError> {
         self.processed.fetch_add(1, Ordering::Relaxed);
 
-        if !SeedEvent::event_type_matches(event_type) {
-            return Ok(Vec::new());
-        }
-
-        let kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        if kind == "seed" {
-            let fan_out = payload.get("fan_out").and_then(|v| v.as_u64()).unwrap_or(0);
-            let target = payload.get("target").and_then(|v| v.as_u64()).unwrap_or(0);
-
-            let mut outputs = Vec::with_capacity(fan_out as usize);
-            for item in 0..fan_out {
-                outputs.push(ChainEventFactory::derived_data_event(
-                    self.writer_id,
-                    &event,
-                    SeedEvent::EVENT_TYPE,
-                    json!({ "kind": "iter", "item": item, "iter": 0u64, "target": target }),
-                    obzenflow_core::config::LineagePolicy::default(),
-                ));
+        if event.kind == "seed" {
+            let mut outputs = Vec::with_capacity(event.fan_out as usize);
+            for item in 0..event.fan_out {
+                outputs.push(SeedEvent {
+                    kind: "iter".to_string(),
+                    fan_out: 0,
+                    item,
+                    iter: 0,
+                    target: event.target,
+                });
             }
-            return Ok(outputs);
+            return Ok(StageOutputs::many(outputs));
         }
 
-        if kind == "iter" {
-            let item = payload.get("item").and_then(|v| v.as_u64()).unwrap_or(0);
-            let iter = payload.get("iter").and_then(|v| v.as_u64()).unwrap_or(0);
-            let target = payload.get("target").and_then(|v| v.as_u64()).unwrap_or(0);
-
-            if iter >= target {
-                return Ok(vec![ChainEventFactory::derived_data_event(
-                    self.writer_id,
-                    &event,
-                    SeedEvent::EVENT_TYPE,
-                    json!({ "kind": "done", "item": item, "iter": iter, "target": target }),
-                    obzenflow_core::config::LineagePolicy::default(),
-                )]);
+        if event.kind == "iter" {
+            if event.iter >= event.target {
+                return Ok(StageOutputs::one(SeedEvent {
+                    kind: "done".to_string(),
+                    ..event
+                }));
             }
-
-            return Ok(vec![ChainEventFactory::derived_data_event(
-                self.writer_id,
-                &event,
-                SeedEvent::EVENT_TYPE,
-                json!({ "kind": "iter", "item": item, "iter": iter, "target": target }),
-                obzenflow_core::config::LineagePolicy::default(),
-            )]);
+            return Ok(StageOutputs::one(event));
         }
 
-        Ok(Vec::new())
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+        Ok(StageOutputs::none())
     }
 }
 
 #[derive(Clone, Debug)]
 struct PassThroughTransform;
 
-#[async_trait]
-impl TransformHandler for PassThroughTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![event])
-    }
+impl TypedTransformHandler for PassThroughTransform {
+    type Input = SeedEvent;
+    type Output = SeedEvent;
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, event: SeedEvent) -> std::result::Result<SeedEvent, HandlerError> {
+        Ok(event)
     }
 }
 
 #[derive(Clone, Debug)]
 struct IterationTransform {
-    writer_id: WriterId,
     processed: Arc<AtomicU64>,
 }
 
 impl IterationTransform {
     fn new(processed: Arc<AtomicU64>) -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-            processed,
-        }
+        Self { processed }
     }
 }
 
-#[async_trait]
-impl TransformHandler for IterationTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let ChainEventContent::Data {
-            event_type,
-            payload,
-        } = &event.content
-        else {
-            return Ok(Vec::new());
-        };
+impl TypedTransformHandler for IterationTransform {
+    type Input = SeedEvent;
+    type Output = StageOutputs<SeedEvent>;
 
-        if !SeedEvent::event_type_matches(event_type)
-            || payload.get("kind").and_then(|v| v.as_str()) != Some("iter")
-        {
-            return Ok(Vec::new());
+    fn process(
+        &self,
+        mut event: SeedEvent,
+    ) -> std::result::Result<StageOutputs<SeedEvent>, HandlerError> {
+        if event.kind != "iter" {
+            return Ok(StageOutputs::none());
         }
 
         self.processed.fetch_add(1, Ordering::Relaxed);
-
-        let item = payload.get("item").and_then(|v| v.as_u64()).unwrap_or(0);
-        let iter = payload.get("iter").and_then(|v| v.as_u64()).unwrap_or(0);
-        let target = payload.get("target").and_then(|v| v.as_u64()).unwrap_or(0);
-
-        Ok(vec![ChainEventFactory::derived_data_event(
-            self.writer_id,
-            &event,
-            SeedEvent::EVENT_TYPE,
-            json!({ "kind": "iter", "item": item, "iter": iter.saturating_add(1), "target": target }),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+        event.iter = event.iter.saturating_add(1);
+        Ok(StageOutputs::one(event))
     }
 }
 

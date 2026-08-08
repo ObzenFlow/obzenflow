@@ -27,7 +27,8 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
+    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, StatefulHandler,
+    TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -153,76 +154,46 @@ impl FiniteSourceHandler for ChannelSource {
 /// Pure 1:1 merge: one `MergedRecord` per consumed input, so the delivered
 /// order is fully witnessed by the output journal.
 #[derive(Clone, Debug)]
-struct MergeTransform {
-    writer_id: WriterId,
-}
+struct MergeTransform;
 
 impl MergeTransform {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl TransformHandler for MergeTransform {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let Some(input) = FanInInput::from_event(&event) else {
-            return Ok(Vec::new());
-        };
-        Ok(vec![ChainEventFactory::derived_data_event(
-            self.writer_id,
-            &event,
-            MergedRecord::EVENT_TYPE,
-            json!(MergedRecord {
-                channel: input.channel,
-                value: input.value,
-            }),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
+impl TypedTransformHandler for MergeTransform {
+    type Input = FanInInput;
+    type Output = MergedRecord;
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, input: FanInInput) -> Result<MergedRecord, HandlerError> {
+        Ok(MergedRecord {
+            channel: input.channel,
+            value: input.value,
+        })
     }
 }
 
 /// Pure 1:1 tap used by the skip-level topology: re-emits each input so the
 /// merge sees both the original event and a derived sibling.
 #[derive(Clone, Debug)]
-struct TapTransform {
-    writer_id: WriterId,
-}
+struct TapTransform;
 
 impl TapTransform {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl TransformHandler for TapTransform {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let Some(input) = FanInInput::from_event(&event) else {
-            return Ok(Vec::new());
-        };
-        Ok(vec![ChainEventFactory::derived_data_event(
-            self.writer_id,
-            &event,
-            FanInInput::EVENT_TYPE,
-            json!(FanInInput {
-                channel: format!("tap:{}", input.channel),
-                value: input.value,
-            }),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
+impl TypedTransformHandler for TapTransform {
+    type Input = FanInInput;
+    type Output = FanInInput;
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, input: FanInInput) -> Result<FanInInput, HandlerError> {
+        Ok(FanInInput {
+            channel: format!("tap:{}", input.channel),
+            value: input.value,
+        })
     }
 }
 

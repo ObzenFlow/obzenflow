@@ -9,14 +9,15 @@ use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{ChainEvent, CycleDepth, StageId, WriterId};
+use obzenflow_core::{ChainEvent, CycleDepth, StageId, StageOutputs, WriterId};
 use obzenflow_dsl::{
     async_source, flow, sink, source, stateful, test_flow, transform, FlowDefinition,
 };
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, FiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
+    AsyncFiniteSourceHandler, FiniteSourceHandler, SinkHandler, StatefulHandler,
+    TypedTransformHandler,
 };
 use obzenflow_runtime::testing::{JournalProbe, TestClock};
 use serde::{Deserialize, Serialize};
@@ -152,30 +153,38 @@ impl SinkHandler for EventCounterSink {
 }
 
 #[derive(Clone, Debug)]
-struct IdentityTransform;
+struct IdentityTransform<T>(std::marker::PhantomData<fn(T)>);
 
-#[async_trait]
-impl TransformHandler for IdentityTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![event])
+impl<T> IdentityTransform<T> {
+    fn new() -> Self {
+        Self(std::marker::PhantomData)
     }
+}
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+impl<T> TypedTransformHandler for IdentityTransform<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Input = T;
+    type Output = T;
+
+    fn process(&self, event: T) -> std::result::Result<T, HandlerError> {
+        Ok(event)
     }
 }
 
 #[derive(Clone, Debug)]
 struct DropAllTransform;
 
-#[async_trait]
-impl TransformHandler for DropAllTransform {
-    fn process(&self, _event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
-    }
+impl TypedTransformHandler for DropAllTransform {
+    type Input = SeedEvent;
+    type Output = StageOutputs<SeedEvent>;
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+    fn process(
+        &self,
+        _event: SeedEvent,
+    ) -> std::result::Result<StageOutputs<SeedEvent>, HandlerError> {
+        Ok(StageOutputs::none())
     }
 }
 
@@ -240,7 +249,7 @@ async fn cycle_guard_rejects_cycles_with_non_transform_members() {
     let definition = FlowDefinition::materialize(move |_runtime_config| {
         let source = TestEventSource::new(1);
         let stateful = NoopStateful;
-        let transform = IdentityTransform;
+        let transform = IdentityTransform::<SeedEvent>::new();
         let (sink, _count) = EventCounterSink::new();
 
         Ok(flow! {
@@ -293,7 +302,7 @@ async fn cycle_guard_rejects_stateful_emit_within_cycle() {
             |acc: &mut WindowCount, _ev: &SeedEvent| acc.count += 1,
         )
         .emit_within(Duration::from_millis(10));
-        let transform = IdentityTransform;
+        let transform = IdentityTransform::<WindowCount>::new();
         let (sink, _count) = EventCounterSink::new();
 
         Ok(flow! {
@@ -338,7 +347,7 @@ async fn cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
 
     let definition = FlowDefinition::materialize(move |_runtime_config| {
         let source = TestEventSource::new(5);
-        let transform_a = IdentityTransform;
+        let transform_a = IdentityTransform::<SeedEvent>::new();
         let transform_b = DropAllTransform;
 
         Ok(flow! {
@@ -398,8 +407,8 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
 
     let (counter_sink, counter) = EventCounterSink::new();
     let source = CorrelatedEventSource::new(Duration::from_millis(500));
-    let transform_a = IdentityTransform;
-    let transform_b = IdentityTransform;
+    let transform_a = IdentityTransform::<SeedEvent>::new();
+    let transform_b = IdentityTransform::<SeedEvent>::new();
 
     let harness = test_flow! {
         name: "cycle_guard_bounds_data",

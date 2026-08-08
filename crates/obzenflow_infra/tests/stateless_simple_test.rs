@@ -15,7 +15,7 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
-use obzenflow_runtime::stages::transform::Map;
+use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -32,7 +32,7 @@ impl TypedPayload for StatelessSimpleEvent {
     const EVENT_TYPE: &'static str = "stateless_simple.event";
 }
 
-/// Output of the `Map` doubler.
+/// Output of the typed map doubler.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct DoubledEvent {
     original: u64,
@@ -96,19 +96,9 @@ impl SinkHandler for Printer {
 async fn stateless_pipeline_runs_to_completion() {
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
         let simple_source = SimpleSource::new(5);
-        let doubler = Map::new(|event| {
-            if let Some(value) = event.payload()["value"].as_u64() {
-                ChainEventFactory::data_event(
-                    WriterId::from(StageId::new()),
-                    DoubledEvent::versioned_event_type(),
-                    json!({
-                        "original": value,
-                        "doubled": value * 2,
-                    }),
-                )
-            } else {
-                event
-            }
+        let doubler = MapTyped::new(|event: StatelessSimpleEvent| DoubledEvent {
+            original: event.value,
+            doubled: event.value * 2,
         });
         let printer = Printer;
 

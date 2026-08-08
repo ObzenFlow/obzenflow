@@ -28,7 +28,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, TransformHandler,
+    EffectfulTransformHandler, FiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
@@ -128,35 +128,20 @@ impl Effect for ChargeEffect {
 /// Pass-through intake: re-emits each order so the fan-in has a derived
 /// input and keeps the Kahn merge (see the module doc).
 #[derive(Clone, Debug)]
-struct Intake {
-    writer_id: WriterId,
-}
+struct Intake;
 
 impl Intake {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl TransformHandler for Intake {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let Some(order) = OrderPlaced::from_event(&event) else {
-            return Ok(Vec::new());
-        };
-        Ok(vec![ChainEventFactory::derived_data_event(
-            self.writer_id,
-            &event,
-            OrderPlaced::EVENT_TYPE,
-            json!(order),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
+impl TypedTransformHandler for Intake {
+    type Input = OrderPlaced;
+    type Output = OrderPlaced;
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, order: OrderPlaced) -> Result<OrderPlaced, HandlerError> {
+        Ok(order)
     }
 }
 

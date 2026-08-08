@@ -1,0 +1,9 @@
+error[E0451]: fields `output` and `framework_observability` of struct `TypedTransformInvocation` are private
+  --> tests/compile_fail/synchronous_transform_witness/invocation_evidence_private.rs:13:9
+   |
+12 |     let _ = TypedTransformInvocation::<First> {
+   |             --------------------------------- in this type
+13 |         output: First,
+   |         ^^^^^^ private field
+14 |         framework_observability: None,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^ private field

@@ -11,4 +11,4 @@ pub use traits::{
     EffectfulTransformHandler, EffectfulTransformHandlerAdapter, TransformHandler,
     UnifiedTransformHandler,
 };
-pub use typed::{TypedTransformHandler, TypedTransformHandlerAdapter};
+pub use typed::{TypedTransformHandler, TypedTransformHandlerAdapter, TypedTransformInvocation};

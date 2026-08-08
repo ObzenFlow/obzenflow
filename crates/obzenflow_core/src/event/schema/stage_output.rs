@@ -11,9 +11,83 @@
 //! exactly as `EffectOutcomeFacts` does; there is no parallel marshalling
 //! stack, and a carrier is never a persisted wrapper event.
 
+use super::member_set::{EmptySet, WithMember};
 use super::stage_fact_set::StageFactSet;
-use super::typed_fact_set::TypedFactSet;
+use super::typed_fact_set::{TypedFact, TypedFactSet, TypedFactSetError, TypedFactType};
 use super::typed_payload::TypedPayload;
+
+/// Lowering-only carrier for zero or more facts of one payload type.
+///
+/// `StageOutputs<T>` supplies dynamic cardinality without turning `Vec<T>` into
+/// framework vocabulary. The carrier is never persisted: each contained value
+/// lowers directly to a `T` fact in insertion order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StageOutputs<T>(Vec<T>);
+
+impl<T: TypedPayload> StageOutputs<T> {
+    /// Return a carrier that lowers to no facts.
+    pub fn none() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Return a carrier that lowers to one fact.
+    pub fn one(value: T) -> Self {
+        Self(vec![value])
+    }
+
+    /// Return a carrier that lowers all supplied values in iteration order.
+    pub fn many(values: impl IntoIterator<Item = T>) -> Self {
+        Self(values.into_iter().collect())
+    }
+}
+
+impl<T> StageFactSet for StageOutputs<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Members = WithMember<T, EmptySet>;
+
+    fn member_fact_types() -> Vec<TypedFactType> {
+        vec![TypedFactType::of::<T>()]
+    }
+}
+
+impl<T> TypedFactSet for StageOutputs<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    fn fact_types() -> Vec<TypedFactType> {
+        vec![TypedFactType::of::<T>()]
+    }
+
+    fn into_facts(self) -> Result<Vec<TypedFact>, TypedFactSetError> {
+        self.0.into_iter().map(TypedFact::from_payload).collect()
+    }
+
+    fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
+        if let Some(unexpected) = facts
+            .iter()
+            .find(|fact| !T::event_type_matches(fact.event_type.as_str()))
+        {
+            return Err(TypedFactSetError::UnexpectedFact {
+                event_type: unexpected.event_type.clone(),
+            });
+        }
+
+        facts
+            .iter()
+            .map(|fact| {
+                serde_json::from_value(fact.payload.clone()).map_err(|error| {
+                    TypedFactSetError::DeserializationFailed {
+                        event_type: fact.event_type.clone(),
+                        error: error.to_string(),
+                    }
+                })
+            })
+            .collect::<Result<Vec<T>, _>>()
+            .map(Self)
+    }
+}
 
 /// Inhabited stage output carrier: a fact set that also lowers to facts.
 ///
@@ -70,7 +144,7 @@ impl<T: TypedPayload + Send + Sync + 'static> OneFactStageOutput for T {}
 mod tests {
     use super::*;
     use crate::event::schema::{StageOutputFacts, TypedFact, TypedFactSetError};
-    use serde::{Deserialize, Serialize};
+    use serde::{Deserialize, Serialize, Serializer};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct Solo {
@@ -79,6 +153,24 @@ mod tests {
 
     impl TypedPayload for Solo {
         const EVENT_TYPE: &'static str = "stage_output.solo";
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+    struct SerializationFails;
+
+    impl Serialize for SerializationFails {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            Err(serde::ser::Error::custom(
+                "deliberate serialization failure",
+            ))
+        }
+    }
+
+    impl TypedPayload for SerializationFails {
+        const EVENT_TYPE: &'static str = "stage_output.serialization_fails";
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +295,50 @@ mod tests {
             .into_facts()
             .expect("empty variant serializes");
         assert!(facts.is_empty());
+    }
+
+    #[test]
+    fn dynamic_homogeneous_outputs_lower_zero_one_and_many_in_order() {
+        assert!(StageOutputs::<Solo>::none()
+            .into_facts()
+            .expect("empty output lowers")
+            .is_empty());
+
+        let one = StageOutputs::one(Solo { value: 4 })
+            .into_facts()
+            .expect("one output lowers");
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].payload, serde_json::json!({ "value": 4 }));
+
+        let many = StageOutputs::many([Solo { value: 3 }, Solo { value: 7 }])
+            .into_facts()
+            .expect("many outputs lower");
+        assert_eq!(many.len(), 2);
+        assert_eq!(many[0].payload, serde_json::json!({ "value": 3 }));
+        assert_eq!(many[1].payload, serde_json::json!({ "value": 7 }));
+        assert_eq!(
+            <StageOutputs<Solo> as StageFactSet>::member_fact_types(),
+            <Solo as StageFactSet>::member_fact_types()
+        );
+    }
+
+    #[test]
+    fn dynamic_homogeneous_outputs_reconstruct_repeated_facts() {
+        let original = StageOutputs::many([Solo { value: 2 }, Solo { value: 2 }]);
+        let facts = original.clone().into_facts().expect("outputs lower");
+        assert_eq!(
+            StageOutputs::<Solo>::try_from_facts(&facts).expect("outputs reconstruct"),
+            original
+        );
+    }
+
+    #[test]
+    fn dynamic_homogeneous_outputs_propagate_serialization_failure() {
+        assert!(matches!(
+            StageOutputs::one(SerializationFails).into_facts(),
+            Err(TypedFactSetError::SerializationFailed(message))
+                if message.contains("deliberate serialization failure")
+        ));
     }
 
     #[test]

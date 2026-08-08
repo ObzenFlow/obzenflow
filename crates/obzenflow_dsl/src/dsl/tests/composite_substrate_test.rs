@@ -82,6 +82,8 @@ mod tests {
         inner: TransformDescriptor<Noop>,
     }
 
+    impl crate::dsl::stage_descriptor::sealed::Sealed for DeclaringDescriptor {}
+
     #[async_trait::async_trait]
     impl StageDescriptor for DeclaringDescriptor {
         fn name(&self) -> &str {

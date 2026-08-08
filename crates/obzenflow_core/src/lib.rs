@@ -39,8 +39,9 @@ extern crate self as obzenflow_core;
 // stage fact sets and membership proofs FLOWIP-120z)
 pub use event::schema::{
     assert_distinct_stage_fact_set, DeclaredStageFactSet, EffectOutcomeFacts, Member,
-    MiddlewareContextKey, OneFactStageOutput, StageFactSet, StageOutputFacts, SubsetOf, TypedFact,
-    TypedFactSet, TypedFactSetError, TypedFactType, TypedMiddlewareEvent, TypedPayload,
+    MiddlewareContextKey, OneFactStageOutput, StageFactSet, StageOutputFacts, StageOutputs,
+    SubsetOf, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedMiddlewareEvent,
+    TypedPayload,
 };
 
 // Re-export typed IDs

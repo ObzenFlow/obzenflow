@@ -11,7 +11,7 @@ use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
-use obzenflow_core::{ChainEvent, EventType};
+use obzenflow_core::{ChainEvent, EventType, WriterId};
 use std::fmt;
 use std::sync::Arc;
 
@@ -84,6 +84,14 @@ pub trait TransformHandler: Send + Sync {
     /// lineage policy. Handlers that create derived events store it; the
     /// default ignores it.
     fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
+
+    /// Install the runtime-owned writer identity for this transform stage.
+    ///
+    /// Framework adapters that create new events use this identity rather
+    /// than inheriting the upstream event's author. Handlers that only pass
+    /// through or otherwise own their envelope construction ignore it.
+    #[doc(hidden)]
+    fn install_writer_id(&mut self, _writer_id: WriterId) {}
 }
 
 mod private {
@@ -116,6 +124,10 @@ pub trait UnifiedTransformHandler: private::SealedUnifiedTransformHandler + Send
 
     /// FLOWIP-010 §7: forwarded to the wrapped handler at stage build.
     fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
+
+    /// Runtime-owned transform-stage identity forwarded to internal adapters.
+    #[doc(hidden)]
+    fn install_writer_id(&mut self, _writer_id: WriterId) {}
 }
 
 impl<T: TransformHandler + Send + Sync> private::SealedUnifiedTransformHandler for T {}
@@ -137,6 +149,10 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 
     fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
         TransformHandler::install_lineage_policy(self, policy)
+    }
+
+    fn install_writer_id(&mut self, writer_id: WriterId) {
+        TransformHandler::install_writer_id(self, writer_id)
     }
 }
 

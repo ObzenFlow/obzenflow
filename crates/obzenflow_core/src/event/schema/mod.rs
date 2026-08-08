@@ -27,7 +27,7 @@ pub use member_set::{
 pub use middleware_context_key::MiddlewareContextKey;
 pub use obzenflow_derive::{EffectOutcomeFacts, StageOutputFacts};
 pub use stage_fact_set::{assert_distinct_stage_fact_set, DeclaredStageFactSet, StageFactSet};
-pub use stage_output::{OneFactStageOutput, StageOutputFacts};
+pub use stage_output::{OneFactStageOutput, StageOutputFacts, StageOutputs};
 pub use typed_fact_set::{
     decode_member_fact, missing_fact_group_error, sum_group_arity_error, TypedFact, TypedFactSet,
     TypedFactSetError, TypedFactType,

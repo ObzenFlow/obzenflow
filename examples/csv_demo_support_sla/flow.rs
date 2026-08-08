@@ -3,22 +3,18 @@
 // https://obzenflow.dev
 
 use super::domain::{
-    due_bucket, plan_sla_cap_hours, priority_sla_hours, Customer, EnrichedTicket, Ticket,
-    TriagedTicket,
+    due_bucket, plan_sla_cap_hours, triage_ticket, Customer, EnrichedTicket, Ticket, TriagedTicket,
 };
 use super::fixtures;
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use obzenflow::sinks::CsvSink;
 use obzenflow::sources::CsvSource;
 use obzenflow::typed::joins;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::TransformHandler;
+use obzenflow_runtime::stages::common::handlers::TypedTransformHandler;
 use std::path::PathBuf;
 
 pub struct DemoPaths {
@@ -56,43 +52,12 @@ impl TicketTriage {
     }
 }
 
-#[async_trait]
-impl TransformHandler for TicketTriage {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        if !Ticket::event_type_matches(&event.event_type()) {
-            return Ok(vec![event]);
-        }
+impl TypedTransformHandler for TicketTriage {
+    type Input = Ticket;
+    type Output = TriagedTicket;
 
-        let Some(ticket) = Ticket::from_event(&event) else {
-            return Ok(vec![event.mark_as_validation_error(
-                "ticket_triage_failed: could not deserialize Ticket payload",
-            )]);
-        };
-
-        let priority_sla_hours = priority_sla_hours(&ticket.priority);
-        let triaged = TriagedTicket {
-            ticket_id: ticket.ticket_id,
-            customer_id: ticket.customer_id,
-            created_at: ticket.created_at,
-            priority: ticket.priority,
-            category: ticket.category,
-            priority_sla_hours,
-        };
-
-        let payload =
-            serde_json::to_value(&triaged).map_err(|e| HandlerError::Other(e.to_string()))?;
-
-        Ok(vec![ChainEventFactory::derived_data_event(
-            event.writer_id,
-            &event,
-            TriagedTicket::versioned_event_type(),
-            payload,
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, ticket: Ticket) -> Result<TriagedTicket, HandlerError> {
+        Ok(triage_ticket(ticket))
     }
 }
 

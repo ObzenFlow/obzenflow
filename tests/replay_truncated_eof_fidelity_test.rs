@@ -16,13 +16,15 @@ use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainEventContent, EventEnvelope};
-use obzenflow_core::{id::StageId, TypedPayload, WriterId};
+use obzenflow_core::{id::StageId, StageOutputs, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, StatefulHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    FiniteSourceHandler, StatefulHandler, TypedTransformHandler,
+};
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -39,6 +41,14 @@ mod replay_testkit;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Tick {
     n: u64,
+    #[serde(default)]
+    depth: u64,
+    #[serde(default = "seed_kind")]
+    kind: String,
+}
+
+fn seed_kind() -> String {
+    "seed".to_string()
 }
 
 impl TypedPayload for Tick {
@@ -96,7 +106,11 @@ impl FiniteSourceHandler for Ticks {
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
             Tick::EVENT_TYPE,
-            json!(Tick { n }),
+            json!(Tick {
+                n,
+                depth: 0,
+                kind: seed_kind(),
+            }),
         )]))
     }
 }
@@ -608,63 +622,35 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
 /// Cycle entry transform: converged seeds emit a done row; everything else
 /// re-enters the loop at the same depth.
 #[derive(Debug, Clone)]
-struct CycleEntry {
-    writer_id: WriterId,
-}
+struct CycleEntry;
 
-#[async_trait]
-impl obzenflow_runtime::stages::common::handlers::TransformHandler for CycleEntry {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let ChainEventContent::Data { payload, .. } = &event.content else {
-            return Ok(Vec::new());
-        };
-        let depth = payload["depth"].as_u64().unwrap_or(0);
-        let kind = payload["kind"].as_str().unwrap_or("seed");
-        if kind == "done" {
-            return Ok(Vec::new());
+impl TypedTransformHandler for CycleEntry {
+    type Input = Tick;
+    type Output = StageOutputs<Tick>;
+
+    fn process(&self, mut event: Tick) -> Result<StageOutputs<Tick>, HandlerError> {
+        if event.kind == "done" {
+            return Ok(StageOutputs::none());
         }
-        let next_kind = if depth >= 2 { "done" } else { "iter" };
-        Ok(vec![ChainEventFactory::derived_data_event(
-            self.writer_id,
-            &event,
-            Tick::EVENT_TYPE,
-            json!({ "n": payload["n"], "depth": depth, "kind": next_kind }),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+        event.kind = if event.depth >= 2 { "done" } else { "iter" }.to_string();
+        Ok(StageOutputs::one(event))
     }
 }
 
 /// Cycle iteration transform: bumps depth on loop rows, ignores done rows.
 #[derive(Debug, Clone)]
-struct CycleIter {
-    writer_id: WriterId,
-}
+struct CycleIter;
 
-#[async_trait]
-impl obzenflow_runtime::stages::common::handlers::TransformHandler for CycleIter {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let ChainEventContent::Data { payload, .. } = &event.content else {
-            return Ok(Vec::new());
-        };
-        if payload["kind"].as_str() != Some("iter") {
-            return Ok(Vec::new());
+impl TypedTransformHandler for CycleIter {
+    type Input = Tick;
+    type Output = StageOutputs<Tick>;
+
+    fn process(&self, mut event: Tick) -> Result<StageOutputs<Tick>, HandlerError> {
+        if event.kind != "iter" {
+            return Ok(StageOutputs::none());
         }
-        let depth = payload["depth"].as_u64().unwrap_or(0);
-        Ok(vec![ChainEventFactory::derived_data_event(
-            self.writer_id,
-            &event,
-            Tick::EVENT_TYPE,
-            json!({ "n": payload["n"], "depth": depth + 1, "kind": "iter" }),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+        event.depth += 1;
+        Ok(StageOutputs::one(event))
     }
 }
 
@@ -680,12 +666,8 @@ async fn cycle_flow_truncated_replay_terminates_without_error() {
         ($base:expr, $delivered:expr) => {
             FlowDefinition::materialize(move |_runtime_config| {
                 let seeds = Ticks::stalling(2);
-                let entry = CycleEntry {
-                    writer_id: WriterId::from(StageId::new()),
-                };
-                let iter = CycleIter {
-                    writer_id: WriterId::from(StageId::new()),
-                };
+                let entry = CycleEntry;
+                let iter = CycleIter;
                 let out = SinkTyped::with_delivery(counting::<Tick>($delivered)).idempotent();
 
                 Ok(flow! {

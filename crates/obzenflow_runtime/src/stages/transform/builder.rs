@@ -12,6 +12,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use obzenflow_core::WriterId;
+
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{JonestownSignalStrategy, SignalGate};
 use crate::stages::common::cycle_guard::CycleGuard;
@@ -123,6 +125,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         // build-resolved lineage policy before the handler is boxed away.
         let mut handler = self.handler;
         handler.install_lineage_policy(self.resources.lineage_policy);
+        handler.install_writer_id(WriterId::from(self.config.stage_id));
         let context = TransformContext {
             handler,
             stage_id: self.config.stage_id,

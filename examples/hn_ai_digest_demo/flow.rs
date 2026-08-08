@@ -412,8 +412,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 ))
             })?;
         let hn_source = HttpPullSource::new(decoder, http_source_config);
-        let formatter = typed_transforms::try_map_with(|story: HnStory| Ok(format_story(story)))
-            .on_error_drop();
+        let formatter = typed_transforms::map(|story: HnStory| format_story(story));
         let digest_seed =
             typed_stateful::reduce(HnTopStories::default(), |acc, story: &FormattedStory| {
                 acc.stories.push(story.clone());

@@ -15,7 +15,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, FiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
-    TransformHandler,
+    TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::typing::StatefulTyping;
@@ -154,14 +154,15 @@ impl FiniteSourceHandler for BatchedSource {
 #[derive(Clone, Debug)]
 struct PassthroughTransform;
 
-#[async_trait]
-impl TransformHandler for PassthroughTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![event])
-    }
+impl TypedTransformHandler for PassthroughTransform {
+    type Input = RateLimiterTestEvent;
+    type Output = RateLimiterTestEvent;
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+    fn process(
+        &self,
+        event: RateLimiterTestEvent,
+    ) -> std::result::Result<RateLimiterTestEvent, HandlerError> {
+        Ok(event)
     }
 }
 

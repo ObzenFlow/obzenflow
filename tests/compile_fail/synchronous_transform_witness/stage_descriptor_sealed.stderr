@@ -1,0 +1,47 @@
+error[E0046]: not all trait items implemented, missing: `name`, `stage_type`, `create_handle_with_flow_middleware`
+ --> tests/compile_fail/synchronous_transform_witness/stage_descriptor_sealed.rs:9:1
+  |
+9 | impl StageDescriptor for CounterfeitDescriptor {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `name`, `stage_type`, `create_handle_with_flow_middleware` in implementation
+  |
+  = help: implement the missing item: `fn name(&self) -> &str { todo!() }`
+  = help: implement the missing item: `fn stage_type(&self) -> obzenflow_core::event::context::stage_type::StageType { todo!() }`
+  = help: implement the missing item: `fn create_handle_with_flow_middleware<'async_trait>(self: Box<Self>, _: StageConfig, _: obzenflow_runtime::stages::resources_builder::StageResources, _: Vec<Box<(dyn obzenflow_adapters::middleware::middleware_factory::MiddlewareFactory + 'static)>>, _: Arc<obzenflow_adapters::middleware::control::provider::ControlMiddlewareAggregator>) -> Pin<Box<(dyn Future<Output = Result<Box<(dyn obzenflow_runtime::stages::common::stage_handle::StageHandle + 'static)>, StageCreationError>> + Send + 'async_trait)>> { todo!() }`
+
+error[E0277]: the trait bound `CounterfeitDescriptor: stage_descriptor::sealed::Sealed` is not satisfied
+ --> tests/compile_fail/synchronous_transform_witness/stage_descriptor_sealed.rs:9:26
+  |
+9 | impl StageDescriptor for CounterfeitDescriptor {}
+  |                          ^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `stage_descriptor::sealed::Sealed` is not implemented for `CounterfeitDescriptor`
+ --> tests/compile_fail/synchronous_transform_witness/stage_descriptor_sealed.rs:7:1
+  |
+7 | struct CounterfeitDescriptor;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: the following other types implement trait `stage_descriptor::sealed::Sealed`:
+            AsyncFiniteSourceDescriptor<H>
+            AsyncInfiniteSourceDescriptor<H>
+            DeterministicOrdererOverride
+            EffectfulStatefulDescriptor<H>
+            EffectfulTransformDescriptor<H>
+            FiniteSourceDescriptor<H>
+            InfiniteSourceDescriptor<H>
+            JoinDescriptor<H>
+          and $N others
+note: required by a bound in `StageDescriptor`
+ --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
+  |
+  | pub trait StageDescriptor: sealed::Sealed + Send + Sync {
+  |                            ^^^^^^^^^^^^^^ required by this bound in `StageDescriptor`
+  = note: `StageDescriptor` is a "sealed trait", because to implement it you also need to implement `obzenflow_dsl::stage_descriptor::sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following types implement the trait:
+            obzenflow_dsl::stage_descriptor::FiniteSourceDescriptor<H>
+            obzenflow_dsl::stage_descriptor::AsyncFiniteSourceDescriptor<H>
+            obzenflow_dsl::stage_descriptor::InfiniteSourceDescriptor<H>
+            obzenflow_dsl::stage_descriptor::AsyncInfiniteSourceDescriptor<H>
+            obzenflow_dsl::stage_descriptor::TransformDescriptor<H>
+            obzenflow_dsl::stage_descriptor::EffectfulTransformDescriptor<H>
+            obzenflow_dsl::stage_descriptor::SinkDescriptor<H>
+            obzenflow_dsl::stage_descriptor::StatefulDescriptor<H>
+          and $N others

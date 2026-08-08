@@ -24,11 +24,12 @@
 //! - Independent journal readers (no coordination needed)
 //! - Natural backpressure handling
 //!
-//! **FLOWIP-080h Update**: Replaced 38-line SmartRouter struct with Map helper
+//! **FLOWIP-080h Update**: Replaced 38-line SmartRouter struct with a typed map helper
 
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::typed::sources;
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     id::StageId,
@@ -40,9 +41,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{SinkHandler, StatefulHandler};
-// ✨ FLOWIP-080h: Import Map helper
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_runtime::stages::transform::Map;
+use obzenflow_runtime::stages::transform::MapTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -56,6 +55,14 @@ struct RawDataEvent {
     source: String,
     id: usize,
     value: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aggregation: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route_value: Option<i64>,
 }
 
 impl TypedPayload for RawDataEvent {
@@ -248,38 +255,28 @@ impl StatefulHandler for MultiSourceAggregator {
 /// Each downstream stage creates its own journal reader
 ///
 /// Replaces 38-line SmartRouter struct with a Map helper (FLOWIP-080h)
-fn smart_router() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone> {
-    Map::new(|event| {
-        let payload = event.payload();
-        let value = payload["value"].as_i64().unwrap_or(0);
-        let source = payload["source"].as_str().unwrap_or("unknown");
-
+fn smart_router(
+) -> MapTyped<RawDataEvent, RawDataEvent, impl Fn(RawDataEvent) -> RawDataEvent + Send + Sync + Clone>
+{
+    MapTyped::new(|mut event: RawDataEvent| {
         // Route to different channels based on value
-        let route = if value < 30 {
+        let route = if event.value < 30 {
             "low"
-        } else if value < 50 {
+        } else if event.value < 50 {
             "medium"
         } else {
             "high"
         };
 
         println!(
-            "[FAN-OUT] Router processing event from '{source}' with value {value} → route: {route}"
+            "[FAN-OUT] Router processing event from '{}' with value {} → route: {route}",
+            event.source, event.value
         );
 
-        // Enrich with routing info
-        let mut enriched = payload.clone();
-        enriched["route"] = json!(route);
-        enriched["route_source"] = json!(source);
-        enriched["route_value"] = json!(value);
-
-        ChainEventFactory::derived_data_event(
-            event.writer_id,
-            &event,
-            "data.routed",
-            enriched,
-            obzenflow_core::config::LineagePolicy::default(),
-        )
+        event.route = Some(route.to_string());
+        event.route_source = Some(event.source.clone());
+        event.route_value = Some(event.value);
+        event
     })
 }
 
@@ -406,6 +403,10 @@ fn main() -> Result<()> {
                         source: source.clone(),
                         id,
                         value: (id * 20) as i64,
+                        aggregation: None,
+                        route: None,
+                        route_source: None,
+                        route_value: None,
                     })
                 }
             });
@@ -420,6 +421,10 @@ fn main() -> Result<()> {
                         source: source.clone(),
                         id,
                         value: (id * 20) as i64,
+                        aggregation: None,
+                        route: None,
+                        route_source: None,
+                        route_value: None,
                     })
                 }
             });
@@ -434,6 +439,10 @@ fn main() -> Result<()> {
                         source: source.clone(),
                         id,
                         value: (id * 20) as i64,
+                        aggregation: None,
+                        route: None,
+                        route_source: None,
+                        route_value: None,
                     })
                 }
             });

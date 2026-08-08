@@ -18,6 +18,10 @@ const LOWERING_IMPLEMENTATIONS: &[&str] = &[
 // Public-surface tests must not be added there.
 const LOWERING_CONTRACT_TESTS: &str =
     "crates/obzenflow_dsl/src/dsl/tests/lowering_helper_contract_test.rs";
+// Negative fixture licensed to name the retired untyped helper solely to prove
+// that downstream code can no longer resolve it (FLOWIP-134b).
+const RETIRED_HELPER_COMPILE_FAIL_FIXTURE: &str =
+    "tests/compile_fail/synchronous_transform_witness/raw_helper_removed.rs";
 
 fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory)
@@ -106,7 +110,7 @@ fn first_party_declarations_do_not_call_exported_lowering_helpers_directly() {
     let allowed: Vec<&str> = LOWERING_IMPLEMENTATIONS
         .iter()
         .copied()
-        .chain([LOWERING_CONTRACT_TESTS])
+        .chain([LOWERING_CONTRACT_TESTS, RETIRED_HELPER_COMPILE_FAIL_FIXTURE])
         .collect();
     let mut violations = Vec::new();
 

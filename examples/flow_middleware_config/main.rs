@@ -38,7 +38,7 @@ use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{SinkHandler, TransformHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedTransformHandler};
 use serde::{Deserialize, Serialize};
 const CONFIG_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -65,14 +65,12 @@ impl PassthroughTransform {
     }
 }
 
-#[async_trait]
-impl TransformHandler for PassthroughTransform {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![event])
-    }
+impl TypedTransformHandler for PassthroughTransform {
+    type Input = CounterEvent;
+    type Output = CounterEvent;
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, event: CounterEvent) -> Result<CounterEvent, HandlerError> {
+        Ok(event)
     }
 }
 

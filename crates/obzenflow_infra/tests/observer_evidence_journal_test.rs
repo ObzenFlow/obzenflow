@@ -36,7 +36,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::journal::DiskJournal;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
-use obzenflow_runtime::stages::transform::Map;
+use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -174,14 +174,7 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
     let journal_dir = base.clone();
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
         let order_source = OrderSource::new(INPUT_COUNT);
-        let process_orders = Map::new(|event| {
-            let id = event.payload()["id"].as_u64().unwrap_or(0);
-            ChainEventFactory::data_event(
-                WriterId::from(StageId::new()),
-                Processed::versioned_event_type(),
-                json!({ "id": id }),
-            )
-        });
+        let process_orders = MapTyped::new(|event: Order| Processed { id: event.id });
         let handoff = Handoff;
 
         Ok(flow! {

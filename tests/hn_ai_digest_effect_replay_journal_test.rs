@@ -29,16 +29,19 @@ use obzenflow_adapters::middleware::control::{
 use obzenflow_adapters::middleware::MiddlewareFactory;
 use obzenflow_core::ai::{
     chat_binding_fingerprint, AiClientError, AiFinaliseRole, AiMapReduceChunkFailed,
-    AiMapReduceJobFailed, AiMapReducePlanningManifest, AiMapReduceRoleFailure,
+    AiMapReduceJobFailed, AiMapReduceMapInput, AiMapReducePlanningFailed,
+    AiMapReducePlanningManifest, AiMapReduceReduceInput, AiMapReduceRoleFailure,
     AiMapReduceTaggedPartial, AiMapRole, AiProvider, AiProviderFailureKind, AiRoleLogicFailure,
     ChatBindingContract, ChatClient, ChatCompletionReply, ChatMessage, ChatParams, ChatRequest,
-    ChatRequestSpec, ChatResponse, ChatTarget, EstimateSource, HeuristicTokenEstimator, Many,
-    ResolvedTokenEstimator, TokenCount, TokenEstimate, TokenEstimator,
-    TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo, CHAT_CLIENT_PORT,
+    ChatRequestSpec, ChatResponse, ChatTarget, ChunkEnvelope, EstimateSource,
+    HeuristicTokenEstimator, Many, OversizeExhaustion, OversizePolicy, ResolvedTokenEstimator,
+    TokenCount, TokenEstimate, TokenEstimator, TokenEstimatorFallbackReason,
+    TokenEstimatorResolutionInfo, CHAT_CLIENT_PORT,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, CircuitBreakerHealthClassification, MiddlewareLifecycle,
     ObservabilityPayload,
@@ -313,6 +316,37 @@ fn observability_only_estimator(calls: Arc<AtomicUsize>) -> ResolvedTokenEstimat
     )
 }
 
+#[derive(Debug)]
+struct AlwaysOversizeEstimator;
+
+impl TokenEstimator for AlwaysOversizeEstimator {
+    fn estimate_text(&self, _text: &str) -> TokenEstimate {
+        TokenEstimate {
+            tokens: TokenCount::new(10),
+            source: EstimateSource::Heuristic,
+        }
+    }
+
+    fn estimate_chat_request(&self, request: &ChatRequest) -> TokenEstimate {
+        HeuristicTokenEstimator::default().estimate_chat_request(request)
+    }
+
+    fn source(&self) -> EstimateSource {
+        EstimateSource::Heuristic
+    }
+}
+
+fn always_oversize_estimator() -> ResolvedTokenEstimator {
+    ResolvedTokenEstimator::new(
+        Arc::new(AlwaysOversizeEstimator),
+        TokenEstimatorResolutionInfo::heuristic(
+            "deterministic",
+            TokenEstimatorFallbackReason::ExplicitHeuristic,
+            None,
+        ),
+    )
+}
+
 fn deferred_chat_port(
     resolutions: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
@@ -445,10 +479,6 @@ struct OneSeed {
 }
 
 impl OneSeed {
-    fn new() -> Self {
-        Self::with_count(5)
-    }
-
     fn with_count(count: u64) -> Self {
         Self {
             emitted: false,
@@ -533,6 +563,15 @@ struct FlowBehaviour {
 }
 
 fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
+    build_flow_with_chunk_plan(behaviour, 5, TokenCount::new(100), OversizePolicy::Error)
+}
+
+fn build_flow_with_chunk_plan(
+    behaviour: FlowBehaviour,
+    seed_count: u64,
+    chunk_budget: TokenCount,
+    oversize_policy: OversizePolicy,
+) -> FlowDefinition {
     let FlowBehaviour {
         journal_base,
         outputs,
@@ -548,7 +587,7 @@ fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let chat = ChatBindingContract::from_resolved(map_request_target, chat_estimator)
             .expect("test chat target and estimator models agree");
-        let seed = OneSeed::new();
+        let seed = OneSeed::with_count(seed_count);
         let map_role = MapRole {
             fail_prepare: map_prepare_failure,
             fail_interpret: map_interpret_failure,
@@ -587,9 +626,9 @@ fn build_flow_with_behaviour(behaviour: FlowBehaviour) -> FlowDefinition {
                                 .collect::<Vec<_>>()
                         },
                         render: |item: &DigestItem, _ctx| item.value.to_string(),
-                        budget: TokenCount::new(100),
+                        budget: chunk_budget,
                         max_items: Some(1),
-                        oversize: error,
+                        oversize: oversize_policy,
                     }
                 );
                 collected = sink!(DigestOut => collected);
@@ -731,6 +770,69 @@ fn build_credit_flow(
     })
 }
 
+fn build_chunk_interruption_flow(
+    journal_base: PathBuf,
+    outputs: Arc<Mutex<Vec<DigestOut>>>,
+    effect_ports: EffectPortRegistry,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let chat = ChatBindingContract::from_resolved(target(), estimator())
+            .expect("test chat target and estimator models agree");
+        let interrupt_seed = OneSeed::with_count(5);
+        let map_role = MapRole {
+            fail_prepare: false,
+            fail_interpret: false,
+            prepare_calls: None,
+        };
+        let finalise_role = FinaliseRole;
+        let interrupt_collected = CollectOut { outputs };
+
+        Ok(flow! {
+            name: "hn_ai_digest_chunk_interruption",
+            journals: disk_journals(journal_base),
+            middleware: [],
+            backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
+                .stall_timeout_ms(5_000),
+            effect_ports,
+
+            stages: {
+                interrupt_seed = source!(DigestSeed => interrupt_seed);
+                interrupt_digest = ai_map_reduce!(
+                    DigestSeed -> DigestOut => {
+                        map: [DigestItem] ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { ai_resilience() }
+                        } DigestPartial => map_role,
+                        reduce: (DigestSeed, [DigestPartial]) ->{
+                            at_least_once(ChatCompletion)
+                                via chat
+                                with { ai_resilience() }
+                        } DigestOut => finalise_role,
+                    },
+                    chunking: by_budget {
+                        items: |seed: &DigestSeed| {
+                            (1..=seed.n)
+                                .map(|value| DigestItem { value })
+                                .collect::<Vec<_>>()
+                        },
+                        render: |item: &DigestItem, _ctx| item.value.to_string(),
+                        budget: TokenCount::new(100),
+                        max_items: Some(1),
+                        oversize: error,
+                    }
+                );
+                interrupt_collected = sink!(DigestOut => interrupt_collected);
+            },
+
+            topology: {
+                interrupt_seed |> interrupt_digest;
+                interrupt_digest |> interrupt_collected;
+            }
+        })
+    })
+}
+
 fn latest_run_dir(base: &Path) -> PathBuf {
     let mut entries = std::fs::read_dir(base.join("flows"))
         .expect("flow archive directory")
@@ -747,6 +849,215 @@ fn archive_manifest(run_dir: &Path) -> serde_json::Value {
             .expect("run manifest is readable"),
     )
     .expect("run manifest is valid JSON")
+}
+
+fn stage_writer(run_dir: &Path, stage_key: &str) -> WriterId {
+    let manifest = archive_manifest(run_dir);
+    let stage_id = manifest["stages"][stage_key]["stage_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("run manifest names stage ID for {stage_key}"))
+        .parse::<StageId>()
+        .unwrap_or_else(|error| panic!("stage ID for {stage_key} parses: {error}"));
+    WriterId::from(stage_id)
+}
+
+fn is_generated_chunk_output(event: &ChainEvent) -> bool {
+    match &event.content {
+        ChainEventContent::Observability(ObservabilityPayload::Metrics(
+            obzenflow_core::event::payloads::observability_payload::MetricsLifecycle::Custom {
+                name,
+                ..
+            },
+        )) => name == "ai_chunking.snapshot",
+        ChainEventContent::Data { event_type, .. } => {
+            AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::event_type_matches(event_type)
+                || AiMapReducePlanningManifest::event_type_matches(event_type)
+                || AiMapReducePlanningFailed::event_type_matches(event_type)
+        }
+        _ => false,
+    }
+}
+
+fn final_eof_event_type_counts(
+    events: &[EventEnvelope<ChainEvent>],
+) -> &std::collections::BTreeMap<obzenflow_core::EventType, obzenflow_core::event::types::SeqNo> {
+    events
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event.content {
+            ChainEventContent::FlowControl(FlowControlPayload::Eof {
+                writer_seq_by_event_type,
+                ..
+            }) => Some(writer_seq_by_event_type),
+            _ => None,
+        })
+        .expect("stage journal contains final EOF accounting")
+}
+
+fn assert_generated_chunk_authorship(
+    run_dir: &Path,
+    seed_events: &[EventEnvelope<ChainEvent>],
+    chunk_events: &[EventEnvelope<ChainEvent>],
+    expected_map_inputs: usize,
+) {
+    let seed = seed_events
+        .iter()
+        .find(|envelope| DigestSeed::event_type_matches(&envelope.event.event_type()))
+        .expect("source journal contains the generated map-reduce seed");
+    let chunk_writer = stage_writer(run_dir, "digest__chunk");
+    assert_ne!(
+        seed.event.writer_id, chunk_writer,
+        "seed and generated chunk stages must have distinct agency"
+    );
+
+    let generated = chunk_events
+        .iter()
+        .filter(|envelope| is_generated_chunk_output(&envelope.event))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        generated.len(),
+        expected_map_inputs + 2,
+        "one snapshot, N map inputs, and one manifest form the generated protocol"
+    );
+
+    let chunk_clock_key = chunk_writer.to_string();
+    let seed_clock_key = seed.event.writer_id.to_string();
+    for envelope in generated {
+        assert_eq!(
+            envelope.event.writer_id, chunk_writer,
+            "new generated facts are authored by the chunk stage"
+        );
+        assert_eq!(
+            envelope.event.causality.parent_ids.first(),
+            Some(&seed.event.id),
+            "generated facts retain the seed parent"
+        );
+        assert!(
+            envelope.vector_clock.get(&chunk_clock_key) > 0,
+            "generated facts advance the chunk-stage clock component"
+        );
+        assert!(
+            envelope.vector_clock.get(&seed_clock_key) > 0,
+            "generated facts merge the seed writer's causal component"
+        );
+    }
+}
+
+async fn assert_zero_chunk_archive(
+    run_dir: &Path,
+    expected_input_items: usize,
+    expected_excluded_items: usize,
+) -> Vec<EventId> {
+    let seed = stage_envelopes(run_dir, "seed").await;
+    let chunk = stage_envelopes(run_dir, "digest__chunk").await;
+    let map = stage_envelopes(run_dir, "digest__map").await;
+    let collect = stage_envelopes(run_dir, "digest__collect").await;
+    let finalise = stage_envelopes(run_dir, "digest__finalize").await;
+
+    assert_generated_chunk_authorship(run_dir, &seed, &chunk, 0);
+    assert_eq!(
+        chunk
+            .iter()
+            .filter_map(|envelope| {
+                AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::from_event(&envelope.event)
+            })
+            .count(),
+        0,
+        "zero-chunk planning emits no map inputs"
+    );
+
+    let manifests = chunk
+        .iter()
+        .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.event))
+        .collect::<Vec<_>>();
+    let [manifest] = manifests.as_slice() else {
+        panic!(
+            "zero-chunk planning must emit exactly one manifest, found {}",
+            manifests.len()
+        );
+    };
+    assert_eq!(manifest.chunk_count, 0);
+    assert_eq!(manifest.planning.input_items_total, expected_input_items);
+    assert_eq!(manifest.planning.planned_items_total, 0);
+    assert_eq!(
+        manifest.planning.excluded_items_total,
+        expected_excluded_items
+    );
+
+    let manifest_key = AiMapReducePlanningManifest::versioned_event_type();
+    let chunk_eof = final_eof_event_type_counts(&chunk);
+    assert_eq!(chunk_eof.len(), 1);
+    assert_eq!(
+        chunk_eof.get(&obzenflow_core::EventType::from(manifest_key.clone())),
+        Some(&obzenflow_core::event::types::SeqNo(1)),
+        "zero-chunk EOF advertises the one canonical manifest feed row"
+    );
+    assert!(!chunk_eof
+        .keys()
+        .any(|key| key.as_str() == AiMapReducePlanningManifest::EVENT_TYPE));
+
+    let map_eof = final_eof_event_type_counts(&map);
+    assert_eq!(map_eof.len(), 1);
+    assert_eq!(
+        map_eof.get(&obzenflow_core::EventType::from(manifest_key)),
+        Some(&obzenflow_core::event::types::SeqNo(1)),
+        "the selected manifest reconciles exactly through the map feed"
+    );
+    assert!(map.iter().all(|envelope| {
+        !matches!(
+            &envelope.event.content,
+            ChainEventContent::Observability(ObservabilityPayload::Metrics(
+                obzenflow_core::event::payloads::observability_payload::MetricsLifecycle::Custom { name, .. }
+            )) if name == "ai_chunking.snapshot"
+        )
+    }), "snapshot observability never enters the selected data feed");
+
+    assert_eq!(
+        map.iter()
+            .filter(|envelope| {
+                EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
+            })
+            .count(),
+        0,
+        "zero-chunk jobs allocate no logical map effect cursor"
+    );
+    assert_atomic_completion_groups(&map, 0);
+
+    let reduce_inputs = collect
+        .iter()
+        .filter_map(|envelope| {
+            AiMapReduceReduceInput::<DigestSeed, Many<DigestPartial>>::from_event(&envelope.event)
+        })
+        .collect::<Vec<_>>();
+    let [reduce_input] = reduce_inputs.as_slice() else {
+        panic!(
+            "the zero-chunk manifest must close collection exactly once, found {} reduce inputs",
+            reduce_inputs.len()
+        );
+    };
+    assert_eq!(reduce_input.job_key, manifest.job_key);
+    assert!(reduce_input.collected.items.is_empty());
+    assert_eq!(reduce_input.planning, manifest.planning);
+    assert_eq!(reduce_input.collected.planning, manifest.planning);
+
+    assert_eq!(
+        finalise
+            .iter()
+            .filter(|envelope| {
+                EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
+            })
+            .count(),
+        1,
+        "an empty collected value still enters the existing finalise effect once"
+    );
+    assert_atomic_completion_groups(&finalise, 1);
+    assert_completion_contract(
+        &finalise,
+        1,
+        "ai_map_reduce.finalise.chat_completion",
+        &target(),
+    );
+    effect_evidence_ids(&finalise)
 }
 
 async fn stage_envelopes(run_dir: &Path, stage_key: &str) -> Vec<EventEnvelope<ChainEvent>> {
@@ -1191,6 +1502,161 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
 }
 
 #[tokio::test]
+async fn zero_chunk_jobs_skip_map_but_finalise_live_and_replay_without_live_chat() {
+    struct Case {
+        name: &'static str,
+        seed_count: u64,
+        chunk_budget: TokenCount,
+        oversize_policy: OversizePolicy,
+        expected_input_items: usize,
+        expected_excluded_items: usize,
+        estimator_factory: fn() -> ResolvedTokenEstimator,
+    }
+
+    let cases = [
+        Case {
+            name: "empty-input",
+            seed_count: 0,
+            chunk_budget: TokenCount::new(100),
+            oversize_policy: OversizePolicy::Error,
+            expected_input_items: 0,
+            expected_excluded_items: 0,
+            estimator_factory: estimator,
+        },
+        Case {
+            name: "all-excluded",
+            seed_count: 1,
+            chunk_budget: TokenCount::new(1),
+            oversize_policy: OversizePolicy::Rerender {
+                max_depth: 1,
+                min_progress_tokens: TokenCount::new(1),
+                exhaustion: OversizeExhaustion::Exclude,
+            },
+            expected_input_items: 1,
+            expected_excluded_items: 1,
+            estimator_factory: always_oversize_estimator,
+        },
+    ];
+
+    for case in cases {
+        let temp = tempfile::tempdir().expect("temporary journal root");
+        let journal_base = temp.path().join("journals");
+        let live_resolutions = Arc::new(AtomicUsize::new(0));
+        let live_calls = Arc::new(AtomicUsize::new(0));
+        let live_outputs = Arc::new(Mutex::new(Vec::new()));
+
+        FlowApplication::builder()
+            .with_cli_args(["obzenflow"])
+            .run_async(build_flow_with_chunk_plan(
+                FlowBehaviour {
+                    journal_base: journal_base.clone(),
+                    outputs: live_outputs.clone(),
+                    effect_ports: deferred_chat_port(
+                        live_resolutions.clone(),
+                        live_calls.clone(),
+                        false,
+                    ),
+                    backpressure_window: 3,
+                    map_request_target: target(),
+                    map_prepare_failure: false,
+                    map_interpret_failure: false,
+                    chat_estimator: (case.estimator_factory)(),
+                    chat_target: target(),
+                    map_prepare_calls: None,
+                },
+                case.seed_count,
+                case.chunk_budget,
+                case.oversize_policy,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{}: live zero-chunk run succeeds: {error}", case.name));
+
+        assert_eq!(
+            live_resolutions.load(Ordering::SeqCst),
+            1,
+            "{}: only the finalise effect resolves the chat port",
+            case.name
+        );
+        assert_eq!(
+            live_calls.load(Ordering::SeqCst),
+            1,
+            "{}: the deterministic live fixture makes one finalise provider call and no map call",
+            case.name
+        );
+        assert_eq!(
+            *live_outputs.lock().expect("live output lock"),
+            vec![DigestOut { total: 0 }],
+            "{}: the finalise role remains the sole authority for Out",
+            case.name
+        );
+
+        let live_archive = latest_run_dir(&journal_base);
+        let live_finalise_ids = assert_zero_chunk_archive(
+            &live_archive,
+            case.expected_input_items,
+            case.expected_excluded_items,
+        )
+        .await;
+
+        let replay_resolutions = Arc::new(AtomicUsize::new(0));
+        let replay_calls = Arc::new(AtomicUsize::new(0));
+        let replay_outputs = Arc::new(Mutex::new(Vec::new()));
+        FlowApplication::builder()
+            .with_cli_args(vec![
+                OsString::from("obzenflow"),
+                OsString::from("--replay-from"),
+                live_archive.as_os_str().to_os_string(),
+            ])
+            .run_async(build_flow_with_chunk_plan(
+                FlowBehaviour {
+                    journal_base: journal_base.clone(),
+                    outputs: replay_outputs.clone(),
+                    effect_ports: deferred_chat_port(
+                        replay_resolutions.clone(),
+                        replay_calls.clone(),
+                        true,
+                    ),
+                    backpressure_window: 3,
+                    map_request_target: target(),
+                    map_prepare_failure: false,
+                    map_interpret_failure: false,
+                    chat_estimator: (case.estimator_factory)(),
+                    chat_target: target(),
+                    map_prepare_calls: None,
+                },
+                case.seed_count,
+                case.chunk_budget,
+                case.oversize_policy,
+            ))
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: strict replay rematerialises the finalise effect: {error}",
+                    case.name
+                )
+            });
+
+        assert_eq!(replay_resolutions.load(Ordering::SeqCst), 0);
+        assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *replay_outputs.lock().expect("replay output lock"),
+            vec![DigestOut { total: 0 }],
+            "{}: replay preserves the successful empty finalisation",
+            case.name
+        );
+
+        let replay_archive = latest_run_dir(&journal_base);
+        let replay_finalise_ids = assert_zero_chunk_archive(
+            &replay_archive,
+            case.expected_input_items,
+            case.expected_excluded_items,
+        )
+        .await;
+        assert_eq!(replay_finalise_ids, live_finalise_ids);
+    }
+}
+
+#[tokio::test]
 async fn live_history_replays_without_resolving_or_invoking_chat() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
@@ -1218,6 +1684,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     );
 
     let live_archive = latest_run_dir(&journal_base);
+    let live_seed = stage_envelopes(&live_archive, "seed").await;
     let live_chunk = stage_envelopes(&live_archive, "digest__chunk").await;
     let live_map = stage_envelopes(&live_archive, "digest__map").await;
     let live_finalise = stage_envelopes(&live_archive, "digest__finalize").await;
@@ -1232,6 +1699,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
         );
     };
     let expected_map_calls = manifest.chunk_count;
+    assert_generated_chunk_authorship(&live_archive, &live_seed, &live_chunk, expected_map_calls);
     assert_eq!(
         live_calls.load(Ordering::SeqCst),
         expected_map_calls + 1,
@@ -1433,8 +1901,16 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
          completion history hits retain their archived observations"
     );
     let replay_archive = latest_run_dir(&journal_base);
+    let replay_seed = stage_envelopes(&replay_archive, "seed").await;
+    let replay_chunk = stage_envelopes(&replay_archive, "digest__chunk").await;
     let replay_map = stage_envelopes(&replay_archive, "digest__map").await;
     let replay_finalise = stage_envelopes(&replay_archive, "digest__finalize").await;
+    assert_generated_chunk_authorship(
+        &replay_archive,
+        &replay_seed,
+        &replay_chunk,
+        expected_map_calls,
+    );
     assert_eq!(
         *replay_outputs.lock().expect("replay output lock"),
         vec![DigestOut { total: 15 }],
@@ -1801,6 +2277,133 @@ async fn generated_map_waits_for_all_three_real_edge_credits_before_second_role_
             .count(),
         2
     );
+}
+
+#[tokio::test]
+async fn resume_closes_a_generated_plan_interrupted_between_snapshot_and_manifest() {
+    let temp = tempfile::tempdir().expect("temporary chunk-interruption journal root");
+    let journal_base = temp.path().join("journals");
+    let gate = BackpressureAckGate::install("interrupt_digest__chunk", "interrupt_digest__map", 0)
+        .expect("the generated chunk-to-map edge freezes before its first acknowledgement");
+    let live_calls = Arc::new(AtomicUsize::new(0));
+
+    let live_task = tokio::spawn({
+        let journal_base = journal_base.clone();
+        let live_calls = live_calls.clone();
+        async move {
+            FlowApplication::builder()
+                .with_cli_args(["obzenflow"])
+                .run_async(build_chunk_interruption_flow(
+                    journal_base,
+                    Arc::new(Mutex::new(Vec::new())),
+                    eager_chat_port(live_calls, false),
+                ))
+                .await
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_for_withheld(3))
+        .await
+        .expect("the first three map inputs commit while their acknowledgements are withheld");
+    live_task.abort();
+    let _ = live_task.await;
+
+    let interrupted = latest_run_dir(&journal_base);
+    let interrupted_chunk = stage_envelopes(&interrupted, "interrupt_digest__chunk").await;
+    assert_eq!(
+        interrupted_chunk
+            .iter()
+            .filter(|envelope| {
+                matches!(
+                    &envelope.event.content,
+                    ChainEventContent::Observability(ObservabilityPayload::Metrics(
+                        obzenflow_core::event::payloads::observability_payload::MetricsLifecycle::Custom { name, .. }
+                    )) if name == "ai_chunking.snapshot"
+                )
+            })
+            .count(),
+        1,
+        "the interrupted prefix contains its snapshot"
+    );
+    assert_eq!(
+        interrupted_chunk
+            .iter()
+            .filter_map(|envelope| { AiMapReducePlanningManifest::from_event(&envelope.event) })
+            .count(),
+        0,
+        "the withheld first acknowledgement prevents the manifest commit"
+    );
+    assert_eq!(
+        interrupted_chunk
+            .iter()
+            .filter_map(|envelope| {
+                AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::from_event(&envelope.event)
+            })
+            .count(),
+        3,
+        "the fixture interrupts after the first credit window and before the manifest"
+    );
+
+    gate.open();
+
+    let resumed_outputs = Arc::new(Mutex::new(Vec::new()));
+    let resumed_calls = Arc::new(AtomicUsize::new(0));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--resume-from"),
+            interrupted.as_os_str().to_os_string(),
+            OsString::from("--allow-incomplete-archive"),
+        ])
+        .run_async(build_chunk_interruption_flow(
+            journal_base.clone(),
+            resumed_outputs.clone(),
+            eager_chat_port(resumed_calls, false),
+        ))
+        .await
+        .expect("resume completes the interrupted generated protocol");
+
+    assert_eq!(
+        *resumed_outputs.lock().expect("resumed outputs lock"),
+        vec![DigestOut { total: 15 }]
+    );
+    let resumed = latest_run_dir(&journal_base);
+    let resumed_chunk = stage_envelopes(&resumed, "interrupt_digest__chunk").await;
+    assert_eq!(
+        resumed_chunk
+            .iter()
+            .filter(|envelope| {
+                matches!(
+                    &envelope.event.content,
+                    ChainEventContent::Observability(ObservabilityPayload::Metrics(
+                        obzenflow_core::event::payloads::observability_payload::MetricsLifecycle::Custom { name, .. }
+                    )) if name == "ai_chunking.snapshot"
+                )
+            })
+            .count(),
+        1,
+        "resume authors one complete invocation snapshot"
+    );
+    let resumed_map_inputs = resumed_chunk
+        .iter()
+        .filter_map(|envelope| {
+            AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::from_event(&envelope.event)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resumed_map_inputs
+            .iter()
+            .map(|input| input.chunk.chunk_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3, 4],
+        "resume authors every map input in the original plan order"
+    );
+    let manifests = resumed_chunk
+        .iter()
+        .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.event))
+        .collect::<Vec<_>>();
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0].chunk_count, 5);
 }
 
 #[tokio::test]

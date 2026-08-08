@@ -32,7 +32,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, JoinHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, JoinHandler, SinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -144,79 +144,49 @@ impl FiniteSourceHandler for StreamSource {
 /// Validation stage: rejects value 3 with a Domain error (in-band routing per
 /// FLOWIP error classification), re-emits everything else.
 #[derive(Clone, Debug)]
-struct Validator {
-    writer_id: WriterId,
-}
+struct Validator;
 
 impl Validator {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl TransformHandler for Validator {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let Some(item) = StreamItem::from_event(&event) else {
-            return Ok(Vec::new());
-        };
+impl TypedTransformHandler for Validator {
+    type Input = StreamItem;
+    type Output = StreamItem;
+
+    fn process(&self, item: StreamItem) -> Result<StreamItem, HandlerError> {
         if item.value == 3 {
             return Err(HandlerError::Domain(format!(
                 "rejected stream value {}",
                 item.value
             )));
         }
-        Ok(vec![ChainEventFactory::derived_data_event(
-            self.writer_id,
-            &event,
-            StreamItem::EVENT_TYPE,
-            json!(item),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+        Ok(item)
     }
 }
 
 #[derive(Clone, Debug)]
-struct RefValidator {
-    writer_id: WriterId,
-}
+struct RefValidator;
 
 impl RefValidator {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl TransformHandler for RefValidator {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let Some(item) = RefItem::from_event(&event) else {
-            return Ok(Vec::new());
-        };
+impl TypedTransformHandler for RefValidator {
+    type Input = RefItem;
+    type Output = RefItem;
+
+    fn process(&self, item: RefItem) -> Result<RefItem, HandlerError> {
         if item.key == "r4" {
             return Err(HandlerError::Domain(
                 "rejected reference value 4".to_string(),
             ));
         }
-        Ok(vec![ChainEventFactory::derived_data_event(
-            self.writer_id,
-            &event,
-            RefItem::EVENT_TYPE,
-            json!(item),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+        Ok(item)
     }
 }
 

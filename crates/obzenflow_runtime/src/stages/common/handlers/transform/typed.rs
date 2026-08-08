@@ -5,20 +5,75 @@
 //! Typed pure transform handlers (FLOWIP-120z).
 
 use super::traits::TransformHandler;
-use crate::stages::common::handler_error::HandlerError;
+use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
+use obzenflow_core::event::payloads::observability_payload::ObservabilityPayload;
 use obzenflow_core::event::schema::{StageOutputFacts, TypedFactSet, TypedPayload};
-use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::event::{
+    ChainEventContent, ChainEventFactory, StageFatalCode, StageFatalReason,
+};
+use obzenflow_core::{ChainEvent, WriterId};
+
+/// One typed transform invocation before runtime-owned envelope lowering.
+///
+/// Authored handlers cannot construct framework observability. The only
+/// evidence-bearing constructor is crate-private and reserved for sealed
+/// runtime strategies such as chunk planning.
+#[doc(hidden)]
+pub struct TypedTransformInvocation<O> {
+    output: O,
+    framework_observability: Option<ObservabilityPayload>,
+}
+
+impl<O> TypedTransformInvocation<O> {
+    fn facts_only(output: O) -> Self {
+        Self {
+            output,
+            framework_observability: None,
+        }
+    }
+
+    pub(crate) fn with_framework_observability(
+        output: O,
+        observability: ObservabilityPayload,
+    ) -> Self {
+        Self {
+            output,
+            framework_observability: Some(observability),
+        }
+    }
+
+    fn into_parts(self) -> (O, Option<ObservabilityPayload>) {
+        (self.output, self.framework_observability)
+    }
+}
 
 /// Pure typed transform surface whose returned carrier is the handler's
 /// exhaustive output contract.
+#[diagnostic::on_unimplemented(
+    message = "this transform handler does not witness its arrow contract",
+    label = "this handler does not implement the typed synchronous transform contract",
+    note = "implement TypedTransformHandler with Input and Output matching the transform! arrow (FLOWIP-134b)"
+)]
 pub trait TypedTransformHandler: Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
     type Output: StageOutputFacts;
 
     fn process(&self, input: Self::Input) -> Result<Self::Output, HandlerError>;
+
+    /// Runtime-only invocation hook for sealed framework observability.
+    ///
+    /// User handlers implement `process`; this default prevents framework
+    /// evidence from becoming an authored data or routing capability.
+    #[doc(hidden)]
+    fn process_invocation(
+        &self,
+        input: Self::Input,
+    ) -> Result<TypedTransformInvocation<Self::Output>, HandlerError> {
+        self.process(input)
+            .map(TypedTransformInvocation::facts_only)
+    }
 }
 
 /// Adapter lowering a typed output carrier through the ordinary transform
@@ -28,6 +83,7 @@ pub trait TypedTransformHandler: Send + Sync {
 pub struct TypedTransformHandlerAdapter<H> {
     handler: H,
     lineage: obzenflow_core::config::LineagePolicy,
+    writer_id: Option<WriterId>,
 }
 
 impl<H> TypedTransformHandlerAdapter<H> {
@@ -35,6 +91,7 @@ impl<H> TypedTransformHandlerAdapter<H> {
         Self {
             handler,
             lineage: obzenflow_core::config::LineagePolicy::default(),
+            writer_id: None,
         }
     }
 }
@@ -53,27 +110,43 @@ where
     H: TypedTransformHandler + Send + Sync,
 {
     fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        let writer_id = self.writer_id.ok_or_else(|| {
+            HandlerError::Fatal(StageFatal::new(
+                StageFatalCode::Configuration,
+                StageFatalReason::ConfigurationInvariant,
+                "typed transform adapter invoked before runtime writer identity installation",
+            ))
+        })?;
         let input = H::Input::try_from_event(&event)
             .map_err(|error| HandlerError::Deserialization(error.to_string()))?;
-        let output = self.handler.process(input)?;
+        let invocation = self.handler.process_invocation(input)?;
+        let (output, framework_observability) = invocation.into_parts();
         let facts = output.into_facts().map_err(|error| {
             HandlerError::Other(format!(
                 "typed transform output serialization failed: {error}"
             ))
         })?;
 
-        Ok(facts
-            .into_iter()
-            .map(|fact| {
-                ChainEventFactory::derived_data_event(
-                    event.writer_id,
-                    &event,
-                    fact.event_type,
-                    fact.payload,
-                    self.lineage,
-                )
-            })
-            .collect())
+        let mut events =
+            Vec::with_capacity(facts.len() + usize::from(framework_observability.is_some()));
+        if let Some(observability) = framework_observability {
+            events.push(ChainEventFactory::derived_event(
+                writer_id,
+                &event,
+                ChainEventContent::Observability(observability),
+                self.lineage,
+            ));
+        }
+        events.extend(facts.into_iter().map(|fact| {
+            ChainEventFactory::derived_data_event(
+                writer_id,
+                &event,
+                fact.event_type,
+                fact.payload,
+                self.lineage,
+            )
+        }));
+        Ok(events)
     }
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
@@ -82,6 +155,10 @@ where
 
     fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
         self.lineage = policy;
+    }
+
+    fn install_writer_id(&mut self, writer_id: WriterId) {
+        self.writer_id = Some(writer_id);
     }
 }
 
@@ -142,13 +219,15 @@ mod tests {
 
     #[test]
     fn adapter_lowers_carrier_fields_in_order_as_derived_events() {
-        let writer_id = WriterId::from(StageId::new());
+        let upstream_writer_id = WriterId::from(StageId::new());
+        let transform_writer_id = WriterId::from(StageId::new());
         let parent = ChainEventFactory::data_event(
-            writer_id,
+            upstream_writer_id,
             Input::versioned_event_type(),
             serde_json::json!(Input { value: 7 }),
         );
-        let adapter = TypedTransformHandlerAdapter::new(Classifier);
+        let mut adapter = TypedTransformHandlerAdapter::new(Classifier);
+        TransformHandler::install_writer_id(&mut adapter, transform_writer_id);
 
         let outputs = TransformHandler::process(&adapter, parent.clone()).expect("classifies");
 
@@ -160,5 +239,30 @@ mod tests {
         assert!(outputs
             .iter()
             .all(|event| event.causality.parent_ids.first() == Some(&parent.id)));
+        assert!(outputs
+            .iter()
+            .all(|event| event.writer_id == transform_writer_id));
+    }
+
+    #[test]
+    fn adapter_fails_closed_without_runtime_writer_identity() {
+        let parent = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            Input::versioned_event_type(),
+            serde_json::json!(Input { value: 7 }),
+        );
+        let adapter = TypedTransformHandlerAdapter::new(Classifier);
+
+        let error = TransformHandler::process(&adapter, parent)
+            .expect_err("unbound adapter must not inherit the upstream author");
+
+        let HandlerError::Fatal(fatal) = error else {
+            panic!("missing runtime identity must be a stage fatal")
+        };
+        assert_eq!(fatal.code, StageFatalCode::Configuration);
+        assert_eq!(fatal.reason, StageFatalReason::ConfigurationInvariant);
+        assert!(fatal
+            .detail
+            .contains("before runtime writer identity installation"));
     }
 }

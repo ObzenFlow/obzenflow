@@ -22,7 +22,7 @@ mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainEventContent, EventEnvelope};
@@ -35,7 +35,7 @@ use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InfiniteSourceHandler, SinkHandler, TransformHandler,
+    InfiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -98,42 +98,27 @@ impl InfiniteSourceHandler for BoundedTicker {
 /// can be interrupted while this stage is still re-processing the prefix.
 #[derive(Clone, Debug)]
 struct SlowDouble {
-    writer_id: WriterId,
     delay_ms: u64,
 }
 
 impl SlowDouble {
     fn new(delay_ms: u64) -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-            delay_ms,
-        }
+        Self { delay_ms }
     }
 }
 
-#[async_trait]
-impl TransformHandler for SlowDouble {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let Some(tick) = Tick::from_event(&event) else {
-            return Ok(Vec::new());
-        };
+impl TypedTransformHandler for SlowDouble {
+    type Input = Tick;
+    type Output = Doubled;
+
+    fn process(&self, tick: Tick) -> Result<Doubled, HandlerError> {
         if self.delay_ms > 0 {
             std::thread::sleep(Duration::from_millis(self.delay_ms));
         }
-        Ok(vec![ChainEventFactory::derived_data_event(
-            self.writer_id,
-            &event,
-            Doubled::EVENT_TYPE,
-            json!(Doubled {
-                n: tick.n,
-                doubled: tick.n * 2,
-            }),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+        Ok(Doubled {
+            n: tick.n,
+            doubled: tick.n * 2,
+        })
     }
 }
 

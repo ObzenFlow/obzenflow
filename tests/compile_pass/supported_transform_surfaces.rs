@@ -3,11 +3,11 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::{ChainEvent, TypedPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, TransformHandler, UnifiedTransformHandler,
+    EffectfulTransformHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 
@@ -28,14 +28,12 @@ impl TypedPayload for Output {
 #[derive(Clone, Debug)]
 struct PureTransform;
 
-#[async_trait]
-impl TransformHandler for PureTransform {
-    fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
-    }
+impl TypedTransformHandler for PureTransform {
+    type Input = Input;
+    type Output = Output;
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, _input: Input) -> Result<Output, HandlerError> {
+        Ok(Output)
     }
 }
 
@@ -60,11 +58,7 @@ impl EffectfulTransformHandler for ExternalWorkTransform {
     }
 }
 
-fn assert_unified<T: UnifiedTransformHandler>() {}
-
 fn main() {
-    assert_unified::<PureTransform>();
-
     let _ = obzenflow_dsl::transform!(Input -> Output => PureTransform);
     let _ = obzenflow_dsl::effectful_transform!(
         Input -> Output => ExternalWorkTransform,

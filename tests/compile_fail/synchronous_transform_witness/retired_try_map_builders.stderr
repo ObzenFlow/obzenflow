@@ -1,0 +1,29 @@
+error[E0599]: no method named `on_error_journal` found for opaque type `impl TypedTransformHandler` in the current scope
+  --> tests/compile_fail/synchronous_transform_witness/retired_try_map_builders.rs:14:22
+   |
+14 |     let _ = mapper().on_error_journal();
+   |                      ^^^^^^^^^^^^^^^^ method not found in `impl TypedTransformHandler`
+
+error[E0599]: no method named `on_error_emit` found for opaque type `impl TypedTransformHandler` in the current scope
+  --> tests/compile_fail/synchronous_transform_witness/retired_try_map_builders.rs:15:22
+   |
+15 |     let _ = mapper().on_error_emit("failure.event");
+   |                      ^^^^^^^^^^^^^ method not found in `impl TypedTransformHandler`
+
+error[E0599]: no method named `on_error_emit_with` found for opaque type `impl TypedTransformHandler` in the current scope
+  --> tests/compile_fail/synchronous_transform_witness/retired_try_map_builders.rs:16:22
+   |
+16 |     let _ = mapper().on_error_emit_with(|_| First);
+   |                      ^^^^^^^^^^^^^^^^^^ method not found in `impl TypedTransformHandler`
+
+error[E0599]: no method named `on_error_drop` found for opaque type `impl TypedTransformHandler` in the current scope
+  --> tests/compile_fail/synchronous_transform_witness/retired_try_map_builders.rs:17:22
+   |
+17 |     let _ = mapper().on_error_drop();
+   |                      ^^^^^^^^^^^^^ method not found in `impl TypedTransformHandler`
+
+error[E0599]: no method named `on_error_with` found for opaque type `impl TypedTransformHandler` in the current scope
+  --> tests/compile_fail/synchronous_transform_witness/retired_try_map_builders.rs:18:22
+   |
+18 |     let _ = mapper().on_error_with(|_| First);
+   |                      ^^^^^^^^^^^^^ method not found in `impl TypedTransformHandler`

@@ -13,11 +13,12 @@ use crate::pipeline::config::CycleGuardConfig;
 use crate::stages::common::control_strategies::JonestownSignalStrategy;
 use crate::stages::common::cycle_guard::CycleGuard;
 use crate::stages::common::handler_error::HandlerError;
-use crate::stages::common::handlers::TransformHandler;
+use crate::stages::common::handlers::{TransformHandler, TypedTransformHandlerAdapter};
 use crate::stages::resources_builder::SubscriptionFactory;
 use crate::stages::transform::fsm::{
     DirectFactContinuation, DirectFactContinuationStart, DirectFactPollState,
 };
+use crate::stages::transform::TryMapTyped;
 use crate::supervised_base::HandlerSupervised;
 use async_trait::async_trait;
 use obzenflow_core::event::event_envelope::EventEnvelope;
@@ -30,9 +31,10 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, StageId, TypedPayload, WriterId};
 use obzenflow_fsm::FsmAction;
 use obzenflow_topology::TopologyBuilder;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
@@ -316,6 +318,15 @@ impl TransformHandler for FilterHandler {
     async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FallibleTypedValue {
+    index: u64,
+}
+
+impl TypedPayload for FallibleTypedValue {
+    const EVENT_TYPE: &'static str = "flowip_134b.try_map.supervisor_value";
 }
 
 fn generated_continuation(
@@ -607,6 +618,98 @@ async fn filter_transform_acks_upstream_even_with_zero_outputs() {
         1,
         "filter must ack upstream even when it emits 0 outputs"
     );
+}
+
+#[tokio::test]
+async fn typed_try_map_failure_has_identical_running_and_draining_credit_contracts() {
+    for draining in [false, true] {
+        let (mut supervisor, mut ctx, registry, s, t, k, upstream_journal, data_journal) =
+            build_transform_harness(
+                |_| {
+                    TypedTransformHandlerAdapter::new(TryMapTyped::new(
+                        |value: FallibleTypedValue| -> Result<FallibleTypedValue, &'static str> {
+                            if value.index == 0 {
+                                Err("index zero is invalid")
+                            } else {
+                                Ok(value)
+                            }
+                        },
+                    ))
+                },
+                1,
+                1,
+            )
+            .await;
+        TransformHandler::install_writer_id(&mut ctx.handler, WriterId::from(t));
+
+        let upstream_writer = registry.writer(s);
+        upstream_writer.reserve(1).expect("seed reserve").commit(1);
+        upstream_journal
+            .append(
+                ChainEventFactory::data_event(
+                    WriterId::from(s),
+                    FallibleTypedValue::versioned_event_type(),
+                    json!({ "index": 0 }),
+                ),
+                None,
+            )
+            .await
+            .expect("append typed try-map input");
+
+        let directive = if draining {
+            supervisor
+                .dispatch_state(&TransformState::Draining, &mut ctx)
+                .await
+                .expect("dispatch typed try-map failure while draining")
+        } else {
+            supervisor
+                .dispatch_state(&TransformState::Running, &mut ctx)
+                .await
+                .expect("dispatch typed try-map failure while running")
+        };
+        assert!(
+            matches!(directive, EventLoopDirective::Continue),
+            "draining={draining}, directive={directive:?}"
+        );
+
+        let errors = ctx
+            .error_journal
+            .read_causally_ordered()
+            .await
+            .expect("read typed try-map error journal")
+            .into_iter()
+            .filter(|envelope| envelope.event.is_data())
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1, "one terminal error parent is journalled");
+        assert!(matches!(
+            &errors[0].event.processing_info.status,
+            obzenflow_core::event::status::processing_status::ProcessingStatus::Error {
+                kind: Some(obzenflow_core::event::status::processing_status::ErrorKind::Unknown),
+                message,
+                ..
+            } if message.contains("typed try-map failed: index zero is invalid")
+        ));
+
+        assert!(
+            data_journal
+                .read_causally_ordered()
+                .await
+                .expect("read typed try-map data journal")
+                .iter()
+                .all(|envelope| !envelope.event.is_data()),
+            "a failed conversion authors no data fact"
+        );
+        assert_eq!(
+            registry.edge_in_flight(t, k),
+            Some(0),
+            "a failed conversion consumes no downstream data credit"
+        );
+        assert_eq!(
+            upstream_writer.min_downstream_credit(),
+            1,
+            "the failed input is acknowledged after its error parent commits"
+        );
+    }
 }
 
 #[tokio::test]

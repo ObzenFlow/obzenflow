@@ -75,6 +75,19 @@ pub fn priority_sla_hours(priority: &str) -> u32 {
     }
 }
 
+/// Deterministic domain projection shared by the example and its replay oracle.
+pub fn triage_ticket(ticket: Ticket) -> TriagedTicket {
+    let priority_sla_hours = priority_sla_hours(&ticket.priority);
+    TriagedTicket {
+        ticket_id: ticket.ticket_id,
+        customer_id: ticket.customer_id,
+        created_at: ticket.created_at,
+        priority: ticket.priority,
+        category: ticket.category,
+        priority_sla_hours,
+    }
+}
+
 pub fn plan_sla_cap_hours(plan: &str) -> u32 {
     match plan.to_ascii_lowercase().as_str() {
         "enterprise" => 8,

@@ -16,7 +16,7 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::{StageId, StageOutputs, WriterId};
 use obzenflow_dsl::{sink, source, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 #[cfg(feature = "test-support")]
@@ -24,7 +24,7 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
@@ -118,28 +118,27 @@ impl FiniteSourceHandler for ErrorAfterFirstSource {
 #[derive(Clone, Debug)]
 struct PassthroughTransform;
 
-#[async_trait]
-impl TransformHandler for PassthroughTransform {
-    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![event])
-    }
+impl TypedTransformHandler for PassthroughTransform {
+    type Input = MetricEvent;
+    type Output = MetricEvent;
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, event: MetricEvent) -> std::result::Result<MetricEvent, HandlerError> {
+        Ok(event)
     }
 }
 
 #[derive(Clone, Debug)]
 struct DropTransform;
 
-#[async_trait]
-impl TransformHandler for DropTransform {
-    fn process(&self, _event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
-    }
+impl TypedTransformHandler for DropTransform {
+    type Input = MetricEvent;
+    type Output = StageOutputs<MetricEvent>;
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
+    fn process(
+        &self,
+        _event: MetricEvent,
+    ) -> std::result::Result<StageOutputs<MetricEvent>, HandlerError> {
+        Ok(StageOutputs::none())
     }
 }
 

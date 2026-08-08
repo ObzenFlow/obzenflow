@@ -8,10 +8,8 @@
 //! `ai_map_reduce!` macro is the only public authoring surface and expands to
 //! the fixed four-stage FLOWIP-128g protocol.
 
-mod chunk;
 mod effects;
 
-use self::chunk::GeneratedAiChunkHandler;
 use self::effects::{GeneratedAiFinaliseHandler, GeneratedAiMapHandler};
 use crate::dsl::ai_effect::require_generated_chat_resilience;
 use crate::dsl::composition::{CompositeBuildContext, CompositeBuildError, CompositeDescriptor};
@@ -30,8 +28,9 @@ use obzenflow_core::ai::{
 use obzenflow_core::id::CompositeId;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{Effect, EffectDeclaration};
-use obzenflow_runtime::stages::common::handlers::TransformHandler;
 use obzenflow_runtime::stages::stateful::SeededCollectByInput;
+use obzenflow_runtime::stages::transform::strategies::ai_chunking::generated_ai_chunk_handler;
+use obzenflow_runtime::stages::transform::ChunkByBudgetTyped;
 use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
@@ -47,9 +46,9 @@ type GeneratedMapReduceTypes<Seed, Item, Partial, Out> = fn() -> (Seed, Item, Pa
 /// The concrete role adapters, effect declarations, collector, and
 /// direct-fact bounds are fixed as one generated call graph.
 #[doc(hidden)]
-pub fn generated_map_reduce<Seed, Item, Partial, Out, Chunker, MapRole, FinaliseRole>(
+pub fn generated_map_reduce<Seed, Item, Partial, Out, MapRole, FinaliseRole>(
     name: impl Into<String>,
-    roles: (Chunker, MapRole, FinaliseRole),
+    roles: (ChunkByBudgetTyped<Seed, Item>, MapRole, FinaliseRole),
     chat_bindings: (ChatBindingContract, ChatBindingContract),
     policies: GeneratedEffectPolicies,
 ) -> Box<dyn CompositeDescriptor>
@@ -71,7 +70,6 @@ where
         + Sync
         + 'static,
     Out: Clone + TypedPayload + Send + Sync + 'static,
-    Chunker: TransformHandler + Clone + fmt::Debug + Send + Sync + 'static,
     MapRole: AiMapRole<Item, Partial>,
     FinaliseRole: AiFinaliseRole<Seed, Many<Partial>, Out>,
 {
@@ -91,17 +89,9 @@ where
     })
 }
 
-struct GeneratedAiMapReduceCompositeDescriptor<
-    Seed,
-    Item,
-    Partial,
-    Out,
-    Chunker,
-    MapRole,
-    FinaliseRole,
-> {
+struct GeneratedAiMapReduceCompositeDescriptor<Seed, Item, Partial, Out, MapRole, FinaliseRole> {
     name: String,
-    chunker: Chunker,
+    chunker: ChunkByBudgetTyped<Seed, Item>,
     map_role: MapRole,
     finalise_role: FinaliseRole,
     map_chat_binding: ChatBindingContract,
@@ -111,16 +101,8 @@ struct GeneratedAiMapReduceCompositeDescriptor<
     _types: PhantomData<GeneratedMapReduceTypes<Seed, Item, Partial, Out>>,
 }
 
-impl<Seed, Item, Partial, Out, Chunker, MapRole, FinaliseRole> CompositeDescriptor
-    for GeneratedAiMapReduceCompositeDescriptor<
-        Seed,
-        Item,
-        Partial,
-        Out,
-        Chunker,
-        MapRole,
-        FinaliseRole,
-    >
+impl<Seed, Item, Partial, Out, MapRole, FinaliseRole> CompositeDescriptor
+    for GeneratedAiMapReduceCompositeDescriptor<Seed, Item, Partial, Out, MapRole, FinaliseRole>
 where
     Seed: Clone
         + fmt::Debug
@@ -139,7 +121,6 @@ where
         + Sync
         + 'static,
     Out: Clone + TypedPayload + Send + Sync + 'static,
-    Chunker: TransformHandler + Clone + fmt::Debug + Send + Sync + 'static,
     MapRole: AiMapRole<Item, Partial>,
     FinaliseRole: AiFinaliseRole<Seed, Many<Partial>, Out>,
 {
@@ -189,10 +170,7 @@ where
         let composite_id = CompositeId::new(format!("ai_map_reduce:{}", self.name));
         let direct_bound = NonZeroU64::MIN.saturating_add(2);
 
-        let chunk_handler = GeneratedAiChunkHandler::<ChunkEnvelope<Item>, _>::new(
-            self.chunker,
-            composite_id.clone(),
-        );
+        let chunk_handler = generated_ai_chunk_handler(self.chunker, composite_id.clone());
         let chunk_descriptor = wrap_typed_descriptor(
             Box::new(TransformDescriptor {
                 name: "chunk".to_string(),

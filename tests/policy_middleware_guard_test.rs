@@ -17,7 +17,7 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -62,14 +62,12 @@ impl FiniteSourceHandler for OneShotSource {
 #[derive(Clone, Debug)]
 struct SyncPassthrough;
 
-#[async_trait]
-impl TransformHandler for SyncPassthrough {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![event])
-    }
+impl TypedTransformHandler for SyncPassthrough {
+    type Input = GuardEvent;
+    type Output = GuardEvent;
 
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
+    fn process(&self, event: GuardEvent) -> Result<GuardEvent, HandlerError> {
+        Ok(event)
     }
 }
 
