@@ -4,7 +4,10 @@
 
 use super::classifier::FailureClassification;
 use super::state::CircuitState;
-use super::{CircuitBreakerMiddleware, EffectAdmissionEpoch, EffectAdmissionFence};
+use super::{
+    CircuitBreakerMiddleware, CircuitBreakerOpenEvidence, EffectAdmissionEpoch,
+    EffectAdmissionFence,
+};
 use crate::middleware::context_keys::{
     CircuitBreakerIsProbe, CircuitBreakerProbeGeneration, CircuitBreakerProbeSlot,
     CircuitBreakerProbeSlotGuard,
@@ -275,6 +278,7 @@ impl CircuitBreakerMiddleware {
                         let (transitioned, event) = self.transition_to_inner_locked(
                             &recovery_state_gate,
                             CircuitState::HalfOpen,
+                            None,
                         );
                         if transitioned {
                             self.probe_generation.fetch_add(1, Ordering::SeqCst);
@@ -475,7 +479,10 @@ impl CircuitBreakerMiddleware {
                     // Probe failed — try to reopen the circuit. Only the
                     // CAS winner transitions; a late-arriving probe whose
                     // CAS fails is a no-op (another probe already decided).
-                    if self.transition_to(CircuitState::Open, ctx) {
+                    if self.transition_to_open(
+                        CircuitBreakerOpenEvidence::failed_half_open_probe(),
+                        ctx,
+                    ) {
                         tracing::warn!("Circuit breaker probe failed, circuit reopened");
                     }
                 }

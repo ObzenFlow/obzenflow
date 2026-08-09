@@ -141,7 +141,7 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
                 gate = effectful_transform!(
                     Input -> { Accepted } => gate_handler,
                     effects: [],
-                    middleware: []
+                    observers: []
                 );
                 out = sink!(Accepted => out_handler);
             },

@@ -511,14 +511,15 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
         journals: memory_journals(),
 
         stages: {
-            src = source!(PollingEvent => source, [
+            src = source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
                         ..PolicySettings::default()
                     },
                     Arc::new(PolicyLog::default()),
-                ),
+                )
+            ], observers: [
                 SourceContractObserverFactory { log: sync_finite_observer_for_flow }
             ]);
             snk = sink!(PollingEvent => sink);
@@ -554,14 +555,15 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
         journals: memory_journals(),
 
         stages: {
-            src = async_source!(PollingEvent => source, [
+            src = async_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
                         ..PolicySettings::default()
                     },
                     Arc::new(PolicyLog::default()),
-                ),
+                )
+            ], observers: [
                 SourceContractObserverFactory { log: async_finite_observer_for_flow }
             ]);
             snk = sink!(PollingEvent => sink);
@@ -597,14 +599,15 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
         journals: memory_journals(),
 
         stages: {
-            src = infinite_source!(PollingEvent => source, [
+            src = infinite_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
                         ..PolicySettings::default()
                     },
                     Arc::new(PolicyLog::default()),
-                ),
+                )
+            ], observers: [
                 SourceContractObserverFactory { log: sync_infinite_observer_for_flow }
             ]);
             snk = sink!(PollingEvent => sink);
@@ -637,14 +640,15 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
         journals: memory_journals(),
 
         stages: {
-            src = async_infinite_source!(PollingEvent => source, [
+            src = async_infinite_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
                         ..PolicySettings::default()
                     },
                     Arc::new(PolicyLog::default()),
-                ),
+                )
+            ], observers: [
                 SourceContractObserverFactory { log: async_infinite_observer_for_flow }
             ]);
             snk = sink!(PollingEvent => sink);
@@ -742,14 +746,15 @@ async fn timeout_duration_and_error_normalisation_are_inside_the_raw_poll_execut
         journals: memory_journals(),
 
         stages: {
-            src = async_source!(PollingEvent => source, [
+            src = async_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
                         ..PolicySettings::default()
                     },
                     policy_log_for_flow,
-                ),
+                )
+            ], observers: [
                 SourceContractObserverFactory { log: observer_log_for_flow }
             ]);
             snk = sink!(PollingEvent => sink);
@@ -842,11 +847,12 @@ async fn configured_none_disables_the_finite_source_poll_timeout() -> Result<()>
         journals: memory_journals(),
 
         stages: {
-            src = async_source!(PollingEvent => source, [
+            src = async_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings::default(),
                     policy_log_for_flow,
-                ),
+                )
+            ], observers: [
                 SourceContractObserverFactory { log: observer_log_for_flow }
             ]);
             snk = sink!(PollingEvent => sink);
@@ -999,14 +1005,15 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
         journals: memory_journals(),
 
         stages: {
-            src = source!(PollingEvent => source, [
+            src = source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_after_poll: true,
                         ..PolicySettings::default()
                     },
                     Arc::new(PolicyLog::default()),
-                ),
+                )
+            ], observers: [
                 SourceContractObserverFactory { log: Arc::new(ObserverLog::default()) }
             ]);
             snk = sink!(PollingEvent => sink);
@@ -1067,14 +1074,15 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
         journals: memory_journals(),
 
         stages: {
-            src = async_source!(PollingEvent => source, [
+            src = async_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_after_poll: true,
                         ..PolicySettings::default()
                     },
                     Arc::new(PolicyLog::default()),
-                ),
+                )
+            ], observers: [
                 SourceContractObserverFactory { log: Arc::new(ObserverLog::default()) }
             ]);
             snk = sink!(PollingEvent => sink);
@@ -1216,14 +1224,15 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
         journals: memory_journals(),
 
         stages: {
-            src = async_infinite_source!(PollingEvent => source, [
+            src = async_infinite_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_after_poll: true,
                         ..PolicySettings::default()
                     },
                     Arc::new(PolicyLog::default()),
-                ),
+                )
+            ], observers: [
                 SourceContractObserverFactory { log: Arc::new(ObserverLog::default()) }
             ]);
             snk = sink!(PollingEvent => sink);
@@ -1326,14 +1335,15 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
         journals: memory_journals(),
 
         stages: {
-            src = source!(PollingEvent => source, [
+            src = source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_on_observe: true,
                         ..PolicySettings::default()
                     },
                     eof_policy_log_for_flow,
-                ),
+                )
+            ], observers: [
                 SourceContractObserverFactory { log: Arc::new(ObserverLog::default()) }
             ]);
             snk = sink!(PollingEvent => sink);
@@ -1372,14 +1382,15 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
         journals: memory_journals(),
 
         stages: {
-            src = source!(PollingEvent => source, [
+            src = source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         reject: true,
                         ..PolicySettings::default()
                     },
                     Arc::new(PolicyLog::default()),
-                ),
+                )
+            ], observers: [
                 SourceContractObserverFactory { log: rejected_observer_log_for_flow }
             ]);
             snk = sink!(PollingEvent => sink);

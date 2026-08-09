@@ -403,11 +403,9 @@ impl IngestionState {
             }
         };
 
-        if let Some(boundary) = self.ingress_boundary() {
+        let accepted_boundary = if let Some(boundary) = self.ingress_boundary() {
             match boundary.on_ingress(&attempt) {
-                IngressAdmissionDecision::Accept => {
-                    boundary.observe(&attempt, IngressAdmissionOutcome::AcceptedForEnqueue);
-                }
+                IngressAdmissionDecision::Accept => Some(boundary),
                 IngressAdmissionDecision::Reject { retry_after } => {
                     boundary.observe(&attempt, IngressAdmissionOutcome::RejectedBy);
                     drop(permit);
@@ -463,7 +461,9 @@ impl IngestionState {
                     };
                 }
             }
-        }
+        } else {
+            None
+        };
 
         submission.ingress_handoff = Some(SubmissionIngressContext {
             accepted_at_ns: unix_now_nanos(),
@@ -472,6 +472,9 @@ impl IngestionState {
             attempt_seq: attempt.attempt_seq,
         });
         permit.send(submission);
+        if let Some(boundary) = accepted_boundary {
+            boundary.observe(&attempt, IngressAdmissionOutcome::AcceptedForEnqueue);
+        }
         IngressSubmitOutcome::Accepted {
             attempt_seq: attempt.attempt_seq,
             event_count: attempt.event_count,

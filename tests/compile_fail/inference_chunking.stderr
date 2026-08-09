@@ -4,7 +4,7 @@ error: inference!: `chunking` is not supported; use `ai_map!` or `ai_map_reduce!
  8 |       let _ = inference!(
    |  _____________^
  9 | |         Input ->{
-10 | |             at_least_once(ChatCompletion) via chat with { policy }
+10 | |             at_least_once(ChatCompletion) via chat with policy
 11 | |         } Output => role,
 12 | |         chunking: by_budget { placeholder }
 13 | |     );

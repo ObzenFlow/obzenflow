@@ -147,18 +147,16 @@ fn indicator_samples(events: &[ChainEvent]) -> Vec<IndicatorSample> {
         .collect()
 }
 
-fn logging_row_count(events: &[ChainEvent]) -> usize {
+fn logging_rows(events: &[ChainEvent]) -> Vec<&serde_json::Value> {
     events
         .iter()
-        .filter(|event| {
-            matches!(
-                &event.content,
-                ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::User(user),
-                )) if user.event_type == "obzenflow.logging"
-            )
+        .filter_map(|event| match &event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::User(user),
+            )) if user.event_type == "obzenflow.logging" => Some(&user.payload),
+            _ => None,
         })
-        .count()
+        .collect()
 }
 
 fn data_output_count(events: &[ChainEvent], event_type: &str) -> usize {
@@ -183,14 +181,14 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
 
             stages: {
                 orders = source!(Order => order_source);
-                process = transform!(Order -> Processed => process_orders, [
+                process = transform!(Order -> Processed => process_orders, observers: [
                     indicator()
                         .operation("checkout.process")
                         .kind(IndicatorKind::Latency)
                         .indicator("process.latency")
                         .tag("dependency", "ledger")
                 ]);
-                handoff = sink!(Processed => handoff, middleware: [
+                handoff = sink!(Processed => handoff, observers: [
                     log().prefix("handoff")
                 ]);
             },
@@ -233,14 +231,23 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
         // no such field, and applying a threshold is read-side (FLOWIP-115l).
     }
 
-    // 2. Logging evidence is published per sink delivery. The logging observer
-    //    emits a before/after pair per delivery, so each handoff produces two
-    //    journalled `obzenflow.logging` rows.
+    // 2. Logging evidence is published once per resolved sink delivery. This
+    //    observer has only a post-outcome hook, so its action must describe the
+    //    outcome it actually observed.
+    let logging_rows = logging_rows(&handoff_events);
     assert_eq!(
-        logging_row_count(&handoff_events),
-        INPUT_COUNT * 2,
-        "a before/after logging evidence pair per sink delivery"
+        logging_rows.len(),
+        INPUT_COUNT,
+        "exactly one logging evidence row per sink delivery"
     );
+    assert!(logging_rows.iter().all(|payload| {
+        payload["action"] == "sink_delivery_observed"
+            && payload["details"]["outcome"]["kind"] == "delivered"
+            && payload["details"]["stage_input_position"].is_u64()
+    }));
+    assert!(logging_rows.iter().all(|payload| {
+        payload["action"] != "before_sink_delivery" && payload["action"] != "after_sink_delivery"
+    }));
 
     // 3. No indicator or logging evidence mirrors into the system journal.
     assert!(

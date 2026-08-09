@@ -291,66 +291,62 @@ mod tests {
 
         let _ = crate::source!(
             name: "finite",
-            Out => finite,
-            [],
+            Out => finite with [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::async_source!(
             name: "async_finite",
-            Out => async_finite,
-            [],
+            Out => async_finite with [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::infinite_source!(
             name: "infinite",
-            Out => infinite,
-            [],
+            Out => infinite with [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::async_infinite_source!(
             name: "async_infinite",
-            Out => async_infinite,
-            [],
+            Out => async_infinite with [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::transform!(
             name: "transform",
             In -> Out => transform,
-            [],
+            observers: [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::effectful_transform!(
             name: "effectful_transform",
             In -> Out => effectful_transform,
             effects: [],
-            middleware: [],
+            observers: [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::stateful!(
             name: "stateful",
             In -> Out => stateful,
             emit_interval = std::time::Duration::from_millis(1),
-            [],
+            observers: [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::effectful_stateful!(
             name: "effectful_stateful",
             In -> Out => effectful_stateful,
             effects: [],
-            middleware: [],
+            observers: [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
         let _ = crate::join!(
             name: "join",
             catalog reference_stage: In,
             In -> Out => join,
-            []
+            observers: []
         );
         let _ = crate::sink!(
             name: "sink",
             Out => sink,
             delivery: idempotent,
-            middleware: []
+            observers: []
         );
     }
 
@@ -361,7 +357,7 @@ mod tests {
     }
     #[test]
     fn source_typed_mw() {
-        let _ = crate::source!(Out => Src, []);
+        let _ = crate::source!(Out => Src with []);
     }
     #[test]
     fn source_typed_name() {
@@ -369,7 +365,7 @@ mod tests {
     }
     #[test]
     fn source_typed_name_mw() {
-        let _ = crate::source!(name: "s", Out => Src, []);
+        let _ = crate::source!(name: "s", Out => Src with []);
     }
     #[test]
     fn source_accepts_a_qualified_unit_path() {
@@ -391,7 +387,7 @@ mod tests {
     }
     #[test]
     fn async_source_typed_mw() {
-        let _ = crate::async_source!(Out => AsyncSrc, []);
+        let _ = crate::async_source!(Out => AsyncSrc with []);
     }
     #[test]
     fn async_source_typed_name() {
@@ -399,7 +395,7 @@ mod tests {
     }
     #[test]
     fn async_source_typed_name_mw() {
-        let _ = crate::async_source!(name: "s", Out => AsyncSrc, []);
+        let _ = crate::async_source!(name: "s", Out => AsyncSrc with []);
     }
 
     // ── infinite_source! ────────────────────────────────────────────────────
@@ -409,7 +405,7 @@ mod tests {
     }
     #[test]
     fn infinite_source_typed_mw() {
-        let _ = crate::infinite_source!(Out => InfSrc, []);
+        let _ = crate::infinite_source!(Out => InfSrc with []);
     }
     #[test]
     fn infinite_source_typed_name() {
@@ -417,7 +413,7 @@ mod tests {
     }
     #[test]
     fn infinite_source_typed_name_mw() {
-        let _ = crate::infinite_source!(name: "s", Out => InfSrc, []);
+        let _ = crate::infinite_source!(name: "s", Out => InfSrc with []);
     }
 
     // ── async_infinite_source! ──────────────────────────────────────────────
@@ -427,7 +423,7 @@ mod tests {
     }
     #[test]
     fn async_infinite_source_typed_mw() {
-        let _ = crate::async_infinite_source!(Out => AsyncInfSrc, []);
+        let _ = crate::async_infinite_source!(Out => AsyncInfSrc with []);
     }
     #[test]
     fn async_infinite_source_typed_name() {
@@ -435,7 +431,7 @@ mod tests {
     }
     #[test]
     fn async_infinite_source_typed_name_mw() {
-        let _ = crate::async_infinite_source!(name: "s", Out => AsyncInfSrc, []);
+        let _ = crate::async_infinite_source!(name: "s", Out => AsyncInfSrc with []);
     }
 
     // ── transform! ──────────────────────────────────────────────────────────
@@ -445,7 +441,7 @@ mod tests {
     }
     #[test]
     fn transform_typed_mw() {
-        let _ = crate::transform!(In -> Out => Tr, []);
+        let _ = crate::transform!(In -> Out => Tr, observers: []);
     }
     #[test]
     fn transform_typed_name() {
@@ -453,34 +449,34 @@ mod tests {
     }
     #[test]
     fn transform_typed_name_mw() {
-        let _ = crate::transform!(name: "t", In -> Out => Tr, []);
+        let _ = crate::transform!(name: "t", In -> Out => Tr, observers: []);
     }
 
     // ── effectful_transform! ──────────────────────────────────────────
     #[test]
     fn effectful_transform_typed_bare() {
-        let _ = crate::effectful_transform!(In -> Out => FxTr, effects: [], middleware: []);
+        let _ = crate::effectful_transform!(In -> Out => FxTr, effects: [], observers: []);
     }
     #[test]
     fn effectful_transform_typed_mw() {
-        let _ = crate::effectful_transform!(In -> Out => FxTr, effects: [], middleware: []);
+        let _ = crate::effectful_transform!(In -> Out => FxTr, effects: [], observers: []);
     }
     #[test]
     fn effectful_transform_typed_name() {
         let _ =
-            crate::effectful_transform!(name: "t", In -> Out => FxTr, effects: [], middleware: []);
+            crate::effectful_transform!(name: "t", In -> Out => FxTr, effects: [], observers: []);
     }
     #[test]
     fn effectful_transform_typed_name_mw() {
         let _ =
-            crate::effectful_transform!(name: "t", In -> Out => FxTr, effects: [], middleware: []);
+            crate::effectful_transform!(name: "t", In -> Out => FxTr, effects: [], observers: []);
     }
     #[test]
     fn effectful_transform_transactional_effect_clause_declares_executor() {
         let descriptor = crate::effectful_transform!(
             In -> Out => TxFxTr,
             effects: [transactional(TxEffect, "tx")],
-            middleware: []
+            observers: []
         );
 
         let declarations = descriptor.effect_declarations();
@@ -501,7 +497,7 @@ mod tests {
     }
     #[test]
     fn stateful_typed_mw() {
-        let _ = crate::stateful!(In -> Out => St, []);
+        let _ = crate::stateful!(In -> Out => St, observers: []);
     }
     #[test]
     fn stateful_typed_name() {
@@ -509,27 +505,27 @@ mod tests {
     }
     #[test]
     fn stateful_typed_name_mw() {
-        let _ = crate::stateful!(name: "s", In -> Out => St, []);
+        let _ = crate::stateful!(name: "s", In -> Out => St, observers: []);
     }
 
     // ── effectful_stateful! ─────────────────────────────────────────────────
     #[test]
     fn effectful_stateful_typed_bare() {
-        let _ = crate::effectful_stateful!(In -> Out => FxSt, effects: [], middleware: []);
+        let _ = crate::effectful_stateful!(In -> Out => FxSt, effects: [], observers: []);
     }
     #[test]
     fn effectful_stateful_typed_mw() {
-        let _ = crate::effectful_stateful!(In -> Out => FxSt, effects: [], middleware: []);
+        let _ = crate::effectful_stateful!(In -> Out => FxSt, effects: [], observers: []);
     }
     #[test]
     fn effectful_stateful_typed_name() {
         let _ =
-            crate::effectful_stateful!(name: "s", In -> Out => FxSt, effects: [], middleware: []);
+            crate::effectful_stateful!(name: "s", In -> Out => FxSt, effects: [], observers: []);
     }
     #[test]
     fn effectful_stateful_typed_name_mw() {
         let _ =
-            crate::effectful_stateful!(name: "s", In -> Out => FxSt, effects: [], middleware: []);
+            crate::effectful_stateful!(name: "s", In -> Out => FxSt, effects: [], observers: []);
     }
 
     // ── sink! ───────────────────────────────────────────────────────────────
@@ -539,7 +535,7 @@ mod tests {
     }
     #[test]
     fn sink_typed_mw() {
-        let _ = crate::sink!(Out => Sn, middleware: []);
+        let _ = crate::sink!(Out => Sn, observers: []);
     }
     #[test]
     fn sink_typed_name() {
@@ -547,7 +543,7 @@ mod tests {
     }
     #[test]
     fn sink_typed_name_mw() {
-        let _ = crate::sink!(name: "s", Out => Sn, middleware: []);
+        let _ = crate::sink!(name: "s", Out => Sn, observers: []);
     }
     #[test]
     fn sink_typed_delivery_clause() {
@@ -556,7 +552,7 @@ mod tests {
         let idempotent_sink = SinkTyped::new(|_out: Out| async move {});
         let _ = crate::sink!(Out => idempotent_sink, delivery: idempotent);
         let non_idempotent_sink = SinkTyped::new(|_out: Out| async move {});
-        let _ = crate::sink!(Out => non_idempotent_sink, delivery: non_idempotent, middleware: []);
+        let _ = crate::sink!(Out => non_idempotent_sink, delivery: non_idempotent, observers: []);
     }
     #[test]
     fn sink_exact_contract_one_arg_closure() {
@@ -565,7 +561,7 @@ mod tests {
         let idempotent_sink = SinkTyped::new(|_out: Out| async move {});
         let _ = crate::sink!(Out => idempotent_sink, delivery: idempotent);
         let named_sink = SinkTyped::new(|_out: Out| async move {});
-        let _ = crate::sink!(name: "s", Out => named_sink, middleware: []);
+        let _ = crate::sink!(name: "s", Out => named_sink, observers: []);
     }
     #[test]
     fn sink_exact_contract_delivery_closure() {
@@ -578,7 +574,7 @@ mod tests {
             name: "s",
             Out => named_sink,
             delivery: idempotent,
-            middleware: []
+            observers: []
         );
     }
 }

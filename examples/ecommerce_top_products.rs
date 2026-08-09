@@ -303,7 +303,7 @@ fn main() -> Result<()> {
 
                 stages: {
                     // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
-                    orders = source!(OrderEvent => orders_handler, [
+                    orders = source!(OrderEvent => orders_handler with [
                         RateLimiterBuilder::new(3.0).build()
                     ]); // Pace source intake for demo visibility.
 

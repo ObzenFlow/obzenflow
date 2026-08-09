@@ -12,11 +12,11 @@ fn main() {
     let _ = obzenflow_dsl::effectful_transform!(
         Input -> { First } => first_handler,
         effects: [],
-        middleware: []
+        observers: []
     );
     let _ = obzenflow_dsl::effectful_transform!(
         Input -> { First, Second } => handler,
         effects: [],
-        middleware: []
+        observers: []
     );
 }

@@ -48,6 +48,6 @@ fn main() {
     let _ = obzenflow_dsl::effectful_stateful!(
         Input -> First => RawStateful,
         effects: [],
-        middleware: []
+        observers: []
     );
 }

@@ -14,7 +14,7 @@ fn main() {
     // the handler is also an expression.
     let _ = obzenflow_dsl::sink!(
         Input => Handler::new(),
-        middleware: [],
+        observers: [],
         delivery: idempotent
     );
 
@@ -24,7 +24,7 @@ fn main() {
         name: "bad_delivery",
         Input => Handler::new(),
         delivery: retryable,
-        middleware: []
+        observers: []
     );
 
     // Placeholder recognition also precedes the generic expression fallback;
@@ -42,7 +42,7 @@ fn main() {
     );
     let _ = obzenflow_dsl::source!(
         Output => Handler::new(),
-        middleware: []
+        observers: []
     );
     let _ = obzenflow_dsl::transform!(
         Input -> Output => Handler::new(),
@@ -50,14 +50,14 @@ fn main() {
     );
     let _ = obzenflow_dsl::effectful_transform!(
         Input -> Output => Handler::new(),
-        middleware: [],
+        observers: [],
         effects: [Effect]
     );
 
     // The unsupported inference chunking clause remains primary too.
     let _ = obzenflow_dsl::inference!(
         Input -> {
-            at_least_once(ChatCompletion) via chat with { policy }
+            at_least_once(ChatCompletion) via chat with policy
         } Output => Handler::new(),
         chunking: by_budget { fixture }
     );
@@ -65,17 +65,17 @@ fn main() {
     // Effect-row acknowledgement errors also precede role-slot errors.
     let _ = obzenflow_dsl::inference!(
         Input -> {
-            ChatCompletion via chat with { policy }
+            ChatCompletion via chat with policy
         } Output => Handler::new()
     );
 
     let _ = obzenflow_dsl::ai_map_reduce!(
         Seed -> Output => {
             map: [Item] -> {
-                ChatCompletion via chat with { policy }
+                ChatCompletion via chat with policy
             } Partial => Handler::new(),
             reduce: (Seed, [Partial]) -> {
-                at_least_once(ChatCompletion) via chat with { policy }
+                at_least_once(ChatCompletion) via chat with policy
             } Output => finalise_role,
         },
         chunking: by_budget { fixture }

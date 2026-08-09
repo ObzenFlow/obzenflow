@@ -133,19 +133,18 @@ where
                 });
             }
 
-            // FLOWIP-115r: middleware has one authoring lane, so duplicate
-            // families are a property of the stage declaration itself. Keep
-            // this validation before substrate selection just like the
-            // resolver-era same-scope check it replaces.
+            // FLOWIP-115s: retain grammar positions through the pre-substrate
+            // duplicate-family check so a cross-position conflict names both
+            // protected-unit positions instead of flattening them to labels.
             let mut seen_middleware_families = HashMap::new();
-            for factory in descriptor.stage_middleware_factories() {
+            for (position, factory) in descriptor.positioned_stage_middleware_factories() {
                 let key = factory.override_key();
-                if let Some(first_label) = seen_middleware_families.insert(key, factory.label()) {
+                if let Some(first_position) = seen_middleware_families.insert(key, position) {
                     return Err(FlowBuildError::DuplicateStageMiddlewareFamily {
                         stage_name: descriptor.name().to_string(),
                         family_label: key.family_label(),
-                        first_label,
-                        second_label: factory.label(),
+                        first_position: first_position.syntax_label(),
+                        second_position: position.syntax_label(),
                     });
                 }
             }
@@ -581,93 +580,39 @@ where
             use obzenflow_runtime::runtime_config::DslCandidates;
 
             let mut __dsl_candidates = DslCandidates::default();
-            for (name, descriptor) in descriptors.iter() {
+            for (_name, descriptor) in descriptors.iter() {
                 for factory in descriptor.stage_middleware_factories() {
-                    // FLOWIP-120c H1: policy middleware attaches to live I/O
-                    // units only. Pure sync surfaces hard-reject, and
-                    // effectful-stateful rejects until FLOWIP-120l installs
-                    // its boundary.
-                    if factory.declaration().is_control() {
-                        use crate::dsl::stage_descriptor::PolicyGuardSurface;
-                        match descriptor.policy_guard_surface() {
-                            PolicyGuardSurface::PureSync => {
-                                return Err(FlowBuildError::PolicyMiddlewareOnPureStage {
-                                    stage_name: name.clone(),
-                                    middleware: factory.label().to_string(),
-                                });
-                            }
-                            PolicyGuardSurface::EffectfulStatefulPendingBoundary => {
-                                return Err(
-                                    FlowBuildError::PolicyMiddlewareOnPendingEffectfulStateful {
-                                        stage_name: name.clone(),
-                                        middleware: factory.label().to_string(),
-                                    },
-                                );
-                            }
-                            PolicyGuardSurface::Effectful
-                            | PolicyGuardSurface::Source
-                            | PolicyGuardSurface::Sink => {}
-                        }
-                    }
-                    let exact_effect = if matches!(
-                        descriptor.policy_guard_surface(),
-                        crate::dsl::stage_descriptor::PolicyGuardSurface::Effectful
-                    ) && factory.declaration().is_control()
-                    {
-                        let effects = descriptor.effect_declarations();
-                        (effects.len() == 1).then(|| effects[0].effect_type)
-                    } else {
-                        None
-                    };
                     for key_path in factory.consumed_config_keys() {
-                        if let Some(effect_type) = exact_effect {
-                            __dsl_candidates.declare_effect_consumption(
-                                key_path,
-                                obzenflow_core::StageKey::from(descriptor.name()),
-                                obzenflow_core::event::EffectType::from(effect_type),
-                            );
-                        } else {
-                            __dsl_candidates.declare_stage_consumption(
-                                key_path,
-                                obzenflow_core::StageKey::from(descriptor.name()),
-                            );
-                        }
+                        __dsl_candidates.declare_stage_consumption(
+                            key_path,
+                            obzenflow_core::StageKey::from(descriptor.name()),
+                        );
                     }
                     for default in factory.dsl_config_defaults() {
-                        if let Some(effect_type) = exact_effect {
-                            __dsl_candidates.declare_for_effect(
-                                default.key_path,
-                                obzenflow_core::StageKey::from(descriptor.name()),
-                                obzenflow_core::event::EffectType::from(effect_type),
-                                default.value,
-                            );
-                        } else {
-                            __dsl_candidates.declare(
-                                default.key_path,
-                                ConfigScope::stage(descriptor.name()),
-                                default.value,
-                            );
-                        }
+                        __dsl_candidates.declare(
+                            default.key_path,
+                            ConfigScope::stage(descriptor.name()),
+                            default.value,
+                        );
                     }
                 }
 
                 for attachment in descriptor.effect_policy_attachments() {
-                    for factory in &attachment.factories {
-                        for key_path in factory.consumed_config_keys() {
-                            __dsl_candidates.declare_effect_consumption(
-                                key_path,
-                                obzenflow_core::StageKey::from(descriptor.name()),
-                                obzenflow_core::event::EffectType::from(attachment.effect_type),
-                            );
-                        }
-                        for default in factory.dsl_config_defaults() {
-                            __dsl_candidates.declare_for_effect(
-                                default.key_path,
-                                obzenflow_core::StageKey::from(descriptor.name()),
-                                obzenflow_core::event::EffectType::from(attachment.effect_type),
-                                default.value,
-                            );
-                        }
+                    let factory = &attachment.factory;
+                    for key_path in factory.consumed_config_keys() {
+                        __dsl_candidates.declare_effect_consumption(
+                            key_path,
+                            obzenflow_core::StageKey::from(descriptor.name()),
+                            obzenflow_core::event::EffectType::from(attachment.effect_type),
+                        );
+                    }
+                    for default in factory.dsl_config_defaults() {
+                        __dsl_candidates.declare_for_effect(
+                            default.key_path,
+                            obzenflow_core::StageKey::from(descriptor.name()),
+                            obzenflow_core::event::EffectType::from(attachment.effect_type),
+                            default.value,
+                        );
                     }
                 }
 

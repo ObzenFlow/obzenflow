@@ -80,7 +80,7 @@ fn deleted_flow_middleware_plumbing_stays_absent() {
             "retired adapter provenance token resurfaced: {retired}"
         );
     }
-    assert!(carrier.contains("middleware-attachment:v4"));
+    assert!(carrier.contains("middleware-attachment:v5"));
 
     let adapter_exports = source(&root, "crates/obzenflow_adapters/src/middleware/mod.rs");
     assert!(!adapter_exports.contains("MiddlewareOrigin"));

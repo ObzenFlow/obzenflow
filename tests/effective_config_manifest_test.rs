@@ -220,7 +220,7 @@ fn build_rate_limited_flow_future(
 
             stages: {
                 src = source!(Item => one_shot_source);
-                snk = sink!(Item => null_sink, middleware: [limiter]);
+                snk = sink!(Item => null_sink with [limiter]);
             },
 
             topology: {
@@ -269,10 +269,10 @@ fn build_two_effect_flow_future(
                 authorize_payment = effectful_transform!(
                     Item -> PaymentEffectFact => payment_effects,
                     effects: [
-                        AuthorizePayment with [authorize_resilience],
-                        RefundPayment with [refund_resilience]
+                        AuthorizePayment with authorize_resilience,
+                        RefundPayment with refund_resilience
                     ],
-                    middleware: []
+                    observers: []
                 );
                 output = sink!(PaymentEffectFact => null_sink);
             },

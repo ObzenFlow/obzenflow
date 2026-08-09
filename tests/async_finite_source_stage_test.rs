@@ -249,7 +249,7 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
             journals: disk_journals(journal_root),
 
             stages: {
-                source = async_source!(AsyncTestEvent => source, [
+                source = async_source!(AsyncTestEvent => source, observers: [
                     CountDataCommitFactory { calls: observer_calls_for_flow }
                 ]);
                 sink = sink!(AsyncTestEvent => sink);

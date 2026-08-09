@@ -14,12 +14,13 @@ use crate::middleware::{
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, CircuitBreakerRejectionReason, MiddlewareLifecycle, ObservabilityPayload,
+    CircuitBreakerEvent, CircuitBreakerOpenTrigger, CircuitBreakerRejectionReason,
+    MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{
-    ChainEventFactory, CircuitBreakerSummaryEventParams, EffectFailureCode, EffectFailureSource,
-    RetryDisposition,
+    ChainEventFactory, CircuitBreakerOpenedEventParams, CircuitBreakerSummaryEventParams,
+    EffectFailureCode, EffectFailureSource, RetryDisposition,
 };
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::control_plane::cb_state;
@@ -55,6 +56,93 @@ pub(in crate::middleware::control) use window::FailureWindow;
 use window::{CallSample, FailureWindowState};
 
 const CIRCUIT_BREAKER_ABORT_SOURCE: &str = "circuit_breaker";
+
+/// Immutable evidence captured at the decision point and carried to the CAS
+/// winner that authors the durable Opened row.
+#[derive(Debug, Clone, Copy)]
+struct CircuitBreakerOpenEvidence {
+    trigger: CircuitBreakerOpenTrigger,
+    observed_calls: u64,
+    error_rate: f64,
+    failure_count: u64,
+    slow_call_rate: Option<f64>,
+    slow_call_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RateWindowOpeningSnapshot {
+    observed_calls: usize,
+    failure_count: usize,
+    error_rate: f64,
+    slow_call_count: usize,
+    slow_call_rate: f64,
+    open_on_failures: bool,
+    open_on_slow_calls: bool,
+    slow_call_trigger_configured: bool,
+}
+
+impl CircuitBreakerOpenEvidence {
+    fn consecutive_failures(failure_count: usize) -> Self {
+        Self {
+            trigger: CircuitBreakerOpenTrigger::ConsecutiveFailures,
+            observed_calls: failure_count as u64,
+            error_rate: 1.0,
+            failure_count: failure_count as u64,
+            slow_call_rate: None,
+            slow_call_count: None,
+        }
+    }
+
+    fn rate_window(snapshot: RateWindowOpeningSnapshot) -> Self {
+        let RateWindowOpeningSnapshot {
+            observed_calls,
+            failure_count,
+            error_rate,
+            slow_call_count,
+            slow_call_rate,
+            open_on_failures,
+            open_on_slow_calls,
+            slow_call_trigger_configured,
+        } = snapshot;
+        let trigger = match (open_on_failures, open_on_slow_calls) {
+            (true, true) => CircuitBreakerOpenTrigger::FailureAndSlowCallRate,
+            (true, false) => CircuitBreakerOpenTrigger::FailureRate,
+            (false, true) => CircuitBreakerOpenTrigger::SlowCallRate,
+            (false, false) => unreachable!("rate-window evidence requires an opening trigger"),
+        };
+        Self {
+            trigger,
+            observed_calls: observed_calls as u64,
+            error_rate,
+            failure_count: failure_count as u64,
+            slow_call_rate: slow_call_trigger_configured.then_some(slow_call_rate),
+            slow_call_count: slow_call_trigger_configured.then_some(slow_call_count as u64),
+        }
+    }
+
+    fn failed_half_open_probe() -> Self {
+        Self {
+            trigger: CircuitBreakerOpenTrigger::HalfOpenProbeFailure,
+            observed_calls: 1,
+            error_rate: 1.0,
+            failure_count: 1,
+            slow_call_rate: None,
+            slow_call_count: None,
+        }
+    }
+
+    fn into_event_params(self) -> CircuitBreakerOpenedEventParams {
+        CircuitBreakerOpenedEventParams {
+            trigger: self.trigger,
+            observed_calls: self.observed_calls,
+            error_rate: self.error_rate,
+            failure_count: self.failure_count,
+            slow_call_rate: self.slow_call_rate,
+            slow_call_count: self.slow_call_count,
+            last_error: None,
+        }
+    }
+}
 
 /// Write-once circuit epoch captured by an effect recovery session.
 ///
@@ -337,7 +425,9 @@ impl CircuitBreakerMiddleware {
         match &self.failure_mode {
             CircuitBreakerFailureMode::Consecutive { max_failures } => {
                 if counted_as_failure && (consecutive_failures as u32) >= max_failures.get() {
-                    let event = self.transition_to_inner(CircuitState::Open).1;
+                    let evidence =
+                        CircuitBreakerOpenEvidence::consecutive_failures(consecutive_failures);
+                    let event = self.transition_to_open_inner(evidence).1;
                     if event.is_some() {
                         tracing::warn!(
                             "Circuit breaker opened after {} consecutive failures",
@@ -402,7 +492,20 @@ impl CircuitBreakerMiddleware {
                                 .is_some_and(|threshold| slow_rate >= threshold.get());
 
                             if open_on_failures || open_on_slow {
-                                let event = self.transition_to_inner(CircuitState::Open).1;
+                                let evidence = CircuitBreakerOpenEvidence::rate_window(
+                                    RateWindowOpeningSnapshot {
+                                        observed_calls: observed,
+                                        failure_count: failures,
+                                        error_rate: failure_rate,
+                                        slow_call_count: slow_calls,
+                                        slow_call_rate: slow_rate,
+                                        open_on_failures,
+                                        open_on_slow_calls: open_on_slow,
+                                        slow_call_trigger_configured: slow_call_rate_threshold
+                                            .is_some(),
+                                    },
+                                );
+                                let event = self.transition_to_open_inner(evidence).1;
                                 if event.is_some() {
                                     tracing::warn!(
                                         "Circuit breaker opened (rate-based) after {} calls (failures: {})",
@@ -587,11 +690,27 @@ impl CircuitBreakerMiddleware {
     /// the CAS race and the transition was applied, `false` if another thread
     /// already moved the state (or old == new).
     fn transition_to_inner(&self, new_state: CircuitState) -> (bool, Option<ChainEvent>) {
+        assert_ne!(
+            new_state,
+            CircuitState::Open,
+            "Open transitions require decision-point evidence"
+        );
         let recovery_state_gate = self
             .effect_recovery_state_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.transition_to_inner_locked(&recovery_state_gate, new_state)
+        self.transition_to_inner_locked(&recovery_state_gate, new_state, None)
+    }
+
+    fn transition_to_open_inner(
+        &self,
+        evidence: CircuitBreakerOpenEvidence,
+    ) -> (bool, Option<ChainEvent>) {
+        let recovery_state_gate = self
+            .effect_recovery_state_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.transition_to_inner_locked(&recovery_state_gate, CircuitState::Open, Some(evidence))
     }
 
     /// Apply a breaker transition while the caller holds the recovery state
@@ -601,7 +720,13 @@ impl CircuitBreakerMiddleware {
         &self,
         _recovery_state_gate: &MutexGuard<'_, ()>,
         new_state: CircuitState,
+        open_evidence: Option<CircuitBreakerOpenEvidence>,
     ) -> (bool, Option<ChainEvent>) {
+        assert_eq!(
+            new_state == CircuitState::Open,
+            open_evidence.is_some(),
+            "only transitions into Open may carry opening evidence"
+        );
         let old_state = self.current_state();
         if old_state == new_state {
             return (false, None);
@@ -664,17 +789,12 @@ impl CircuitBreakerMiddleware {
         // Emit lifecycle event for state transition
         let event = match (old_state, new_state) {
             (CircuitState::Closed | CircuitState::HalfOpen, CircuitState::Open) => {
-                let failure_count = self.failure_count.load(Ordering::Relaxed) as u64;
-                let successes_total = self.successes_total.load(Ordering::Relaxed);
-                let failures_total = self.failures_total.load(Ordering::Relaxed);
-                let total = successes_total.saturating_add(failures_total);
-                let error_rate = if total > 0 {
-                    (failures_total as f64) / (total as f64)
-                } else {
-                    0.0
-                };
-
-                ChainEventFactory::circuit_breaker_opened(self.writer_id, error_rate, failure_count)
+                let evidence = open_evidence
+                    .expect("every transition into Open must carry decision-point evidence");
+                ChainEventFactory::circuit_breaker_opened(
+                    self.writer_id,
+                    evidence.into_event_params(),
+                )
             }
             (CircuitState::Open, CircuitState::HalfOpen) => ChainEventFactory::observability_event(
                 self.writer_id,
@@ -729,6 +849,18 @@ impl CircuitBreakerMiddleware {
     /// reflects the transition.
     fn transition_to(&self, new_state: CircuitState, ctx: &mut MiddlewareContext) -> bool {
         let (transitioned, event) = self.transition_to_inner(new_state);
+        if let Some(event) = event {
+            ctx.write_control_event(event);
+        }
+        transitioned
+    }
+
+    fn transition_to_open(
+        &self,
+        evidence: CircuitBreakerOpenEvidence,
+        ctx: &mut MiddlewareContext,
+    ) -> bool {
+        let (transitioned, event) = self.transition_to_open_inner(evidence);
         if let Some(event) = event {
             ctx.write_control_event(event);
         }
@@ -867,7 +999,10 @@ impl CircuitBreakerMiddleware {
                     }
                     SourceOutcome::Failure { .. } => {
                         self.failures_total.fetch_add(1, Ordering::Relaxed);
-                        self.transition_to_inner(CircuitState::Open).1
+                        self.transition_to_open_inner(
+                            CircuitBreakerOpenEvidence::failed_half_open_probe(),
+                        )
+                        .1
                     }
                     SourceOutcome::Inconclusive | SourceOutcome::NotExecuted => None,
                 };
@@ -1021,12 +1156,49 @@ impl CircuitBreakerMiddleware {
 mod tests {
     use super::config::RateThreshold;
     use super::*;
-    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::event::{ChainEventContent, ChainEventFactory};
     use obzenflow_core::MiddlewareExecutionScope;
     use serde_json::json;
 
     fn event() -> ChainEvent {
         ChainEventFactory::data_event(WriterId::from(StageId::new()), "test.input", json!({}))
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct OpenedEvidence {
+        error_rate: f64,
+        failure_count: u64,
+        trigger: CircuitBreakerOpenTrigger,
+        observed_calls: u64,
+        slow_call_rate: Option<f64>,
+        slow_call_count: Option<u64>,
+    }
+
+    fn opened_evidence(ctx: &MiddlewareContext) -> OpenedEvidence {
+        ctx.control_events()
+            .iter()
+            .find_map(|event| match &event.content {
+                ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::Opened {
+                        error_rate,
+                        failure_count,
+                        trigger,
+                        observed_calls,
+                        slow_call_rate,
+                        slow_call_count,
+                        ..
+                    }),
+                )) => Some(OpenedEvidence {
+                    error_rate: *error_rate,
+                    failure_count: *failure_count,
+                    trigger: *trigger,
+                    observed_calls: *observed_calls,
+                    slow_call_rate: *slow_call_rate,
+                    slow_call_count: *slow_call_count,
+                }),
+                _ => None,
+            })
+            .expect("expected a circuit-breaker Opened event")
     }
 
     #[test]
@@ -1041,6 +1213,17 @@ mod tests {
         assert_eq!(breaker.current_state(), CircuitState::Open);
         assert_eq!(breaker.requests_total.load(Ordering::Relaxed), 2);
         assert_eq!(breaker.failures_total.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            opened_evidence(&ctx),
+            OpenedEvidence {
+                error_rate: 1.0,
+                failure_count: 2,
+                trigger: CircuitBreakerOpenTrigger::ConsecutiveFailures,
+                observed_calls: 2,
+                slow_call_rate: None,
+                slow_call_count: None,
+            }
+        );
     }
 
     #[test]
@@ -1065,6 +1248,87 @@ mod tests {
 
         assert_eq!(breaker.slow_total.load(Ordering::Relaxed), 1);
         assert_eq!(breaker.current_state(), CircuitState::Open);
+        assert_eq!(
+            opened_evidence(&ctx),
+            OpenedEvidence {
+                error_rate: 0.0,
+                failure_count: 0,
+                trigger: CircuitBreakerOpenTrigger::SlowCallRate,
+                observed_calls: 1,
+                slow_call_rate: Some(1.0),
+                slow_call_count: Some(1),
+            }
+        );
+    }
+
+    #[test]
+    fn opened_event_reports_trigger_window_instead_of_cumulative_rate() {
+        let mut breaker = CircuitBreakerMiddleware::new(5);
+        breaker.failure_mode = CircuitBreakerFailureMode::RateBased {
+            window: FailureWindow::Count { size: 5 },
+            failure_rate_threshold: Some(
+                RateThreshold::checked(0.6, "failure_rate_threshold").unwrap(),
+            ),
+            slow_call_rate_threshold: None,
+            slow_call_duration_threshold: None,
+            minimum_calls: NonZeroU32::new(5).unwrap(),
+        };
+        breaker.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(5))));
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+
+        // Lifetime totals end at 3/11, while the triggering window is 3/5.
+        for _ in 0..8 {
+            breaker.settle_classified_call(&FailureClassification::Success, &mut ctx);
+        }
+        for _ in 0..3 {
+            breaker.settle_classified_call(&FailureClassification::TransientFailure, &mut ctx);
+        }
+
+        assert_eq!(breaker.successes_total.load(Ordering::Relaxed), 8);
+        assert_eq!(breaker.failures_total.load(Ordering::Relaxed), 3);
+        assert_eq!(breaker.current_state(), CircuitState::Open);
+        assert_eq!(
+            opened_evidence(&ctx),
+            OpenedEvidence {
+                error_rate: 0.6,
+                failure_count: 3,
+                trigger: CircuitBreakerOpenTrigger::FailureRate,
+                observed_calls: 5,
+                slow_call_rate: None,
+                slow_call_count: None,
+            }
+        );
+    }
+
+    #[test]
+    fn failed_half_open_probe_reports_its_own_opening_evidence() {
+        let breaker = CircuitBreakerMiddleware::new(1);
+        let mut initial_ctx =
+            MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        breaker.settle_classified_call(&FailureClassification::TransientFailure, &mut initial_ctx);
+        breaker.expire_effect_cooldown_for_test();
+
+        let mut probe_ctx =
+            MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        let epoch = breaker.effect_precheck(&mut probe_ctx, None).unwrap();
+        assert!(matches!(
+            breaker.effect_admit(&mut probe_ctx, EffectAdmissionFence::new(epoch, epoch)),
+            crate::middleware::PolicyAdmission::Admit
+        ));
+        breaker.settle_classified_call(&FailureClassification::TransientFailure, &mut probe_ctx);
+
+        assert_eq!(breaker.current_state(), CircuitState::Open);
+        assert_eq!(
+            opened_evidence(&probe_ctx),
+            OpenedEvidence {
+                error_rate: 1.0,
+                failure_count: 1,
+                trigger: CircuitBreakerOpenTrigger::HalfOpenProbeFailure,
+                observed_calls: 1,
+                slow_call_rate: None,
+                slow_call_count: None,
+            }
+        );
     }
 
     #[test]

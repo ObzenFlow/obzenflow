@@ -7,7 +7,7 @@ use obzenflow_dsl::inference;
 fn main() {
     let _ = inference!(
         Input ->{
-            at_least_once(ChatCompletion) via chat with { policy }
+            at_least_once(ChatCompletion) via chat with policy
         } Output => role,
         chunking: by_budget { placeholder }
     );

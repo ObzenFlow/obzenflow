@@ -302,8 +302,8 @@ pub fn build_flow(
                         PaymentAuthorized,
                         PaymentAuthorizationUnavailable
                     } => authorize_payment,
-                    effects: [ScriptedAuthorizePayment with [gateway_resilience]],
-                    middleware: []
+                    effects: [ScriptedAuthorizePayment with gateway_resilience],
+                    observers: []
                 );
                 paid_orders = sink!(PaymentAuthorized => record_authorized);
                 manual_review = sink!(PaymentAuthorizationUnavailable => record_unavailable);

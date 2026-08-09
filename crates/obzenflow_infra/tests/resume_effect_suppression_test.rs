@@ -213,7 +213,7 @@ fn build_flow(
                 enrich = effectful_transform!(
                     Reading -> { Enriched, EffectValue } => enrich_transform,
                     effects: [CountingEffect],
-                    middleware: []
+                    observers: []
                 );
                 snk = sink!(Enriched => counting_sink);
             },

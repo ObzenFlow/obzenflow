@@ -41,6 +41,7 @@
 use super::domain::*;
 use super::handlers::Checkbook;
 use obzenflow::typed::{joins, sinks};
+use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_adapters::sinks::SnapshotTableFormatter;
 use obzenflow_adapters::sources::http::HttpSourceTyped;
 use obzenflow_dsl::{async_infinite_source, flow, join, sink, stateful, FlowDefinition};
@@ -69,6 +70,7 @@ pub fn build_flow(
             },
         );
         let checkbook_handler = Checkbook::new().with_emission(EmitAlways);
+        let accounts_route_limiter = RateLimiterBuilder::new(10.0).with_burst(1.0).build();
         let printer_sink = sinks::console::<CheckbookSnapshot, _>(
             SnapshotTableFormatter::new(
                 &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],
@@ -126,7 +128,10 @@ pub fn build_flow(
         journals: disk_journals(PathBuf::from("target/http-ingestion-piggy-bank-demo-logs")),
 
         stages: {
-            accounts = async_infinite_source!(AccountOpened => accounts_source);
+            accounts = async_infinite_source!(
+                AccountOpened => accounts_source,
+                ingress with accounts_route_limiter
+            );
             tx = async_infinite_source!(LedgerEntry => tx_source);
 
             posted = join!(catalog accounts: AccountOpened, LedgerEntry -> PostedEntry => post_entry);

@@ -146,7 +146,7 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
                 slow = effectful_transform!(
                     ProbeEvent -> ProbeOutputEvent => slow_handler,
                     effects: [],
-                    middleware: [],
+                    observers: [],
                 );
                 sink = sink!(ProbeOutputEvent => sink_handler);
             },

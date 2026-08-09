@@ -41,7 +41,7 @@ fn test_flowip_054_middleware_factory_integration() {
     let descriptor = Box::new(TransformDescriptor {
         name: stage_name.to_string(),
         handler: TestTransform,
-        middleware: vec![], // FLOWIP-056-666: Monitoring disabled
+        observers: vec![], // FLOWIP-056-666: Monitoring disabled
     });
 
     // 2. Create stage config with specific context
@@ -83,7 +83,7 @@ fn test_multiple_stages_get_unique_context() {
         let descriptor = Box::new(TransformDescriptor {
             name: stage_name.to_string(),
             handler: TestTransform,
-            middleware: vec![],
+            observers: vec![],
         });
 
         let journal = Arc::new(MemoryJournal::new());
@@ -114,7 +114,7 @@ fn test_monitoring_factories_support_factory_pattern() {
         let descriptor = Box::new(TransformDescriptor {
             name: stage_name.clone(),
             handler: TestTransform,
-            middleware: vec![factory],
+            observers: vec![factory],
         });
 
         let journal = Arc::new(MemoryJournal::new());

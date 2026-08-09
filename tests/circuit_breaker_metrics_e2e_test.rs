@@ -177,7 +177,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
 
             stages: {
                 // Typed source-poll binding: three error-marked batches open the breaker.
-                cb_source = source!(CircuitMetricEvent => source, [
+                cb_source = source!(CircuitMetricEvent => source with [
                     CircuitBreaker::builder()
                         .consecutive_failures(3)
                         .open_for(Duration::from_millis(100))
@@ -360,7 +360,7 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
             )),
 
             stages: {
-                rapid_source = source!(CircuitMetricEvent => rapid_source_handler, [
+                rapid_source = source!(CircuitMetricEvent => rapid_source_handler with [
                     CircuitBreaker::builder()
                         .consecutive_failures(10)
                         .build()

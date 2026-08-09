@@ -65,7 +65,7 @@ brief = inference!(
     ReducedEvidence -> {
         at_least_once(ChatCompletion)
             via chat
-            with { ai_resilience() }
+            with ai_resilience()
     } DecisionBrief => brief_role
 );
 ```

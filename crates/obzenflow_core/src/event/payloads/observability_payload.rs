@@ -128,12 +128,32 @@ pub enum MiddlewareLifecycle {
 }
 
 // ---- Circuit breaker ------------------------------------------------------
+/// The condition whose observed evidence caused a circuit to open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CircuitBreakerOpenTrigger {
+    ConsecutiveFailures,
+    FailureRate,
+    SlowCallRate,
+    FailureAndSlowCallRate,
+    HalfOpenProbeFailure,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum CircuitBreakerEvent {
     Opened {
+        /// Failure rate in the population that caused this transition, not the
+        /// breaker's cumulative lifetime failure rate.
         error_rate: f64,
+        /// Failures in the population that caused this transition.
         failure_count: u64,
+        trigger: CircuitBreakerOpenTrigger,
+        observed_calls: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        slow_call_rate: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        slow_call_count: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         last_error: Option<String>,
     },

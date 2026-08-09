@@ -1,0 +1,27 @@
+error: an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)
+  --> tests/compile_fail/ai_map_reduce_bracketed_policy.rs:17:13
+   |
+17 |       let _ = ai_map_reduce!(
+   |  _____________^
+18 | |         Seed -> Output => {
+19 | |             map: [Item] ->{
+20 | |                 at_least_once(ChatCompletion) via chat with [map_policy]
+...  |
+33 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_ai_chat_effect_row` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0282]: type annotations needed
+  --> tests/compile_fail/ai_map_reduce_bracketed_policy.rs:17:13
+   |
+17 |       let _ = ai_map_reduce!(
+   |  _____________^
+18 | |         Seed -> Output => {
+19 | |             map: [Item] ->{
+20 | |                 at_least_once(ChatCompletion) via chat with [map_policy]
+...  |
+33 | |     );
+   | |_____^ cannot infer type
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_ai_map_reduce_build` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)

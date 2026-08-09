@@ -8,10 +8,10 @@ fn main() {
     let _ = ai_map_reduce!(
         Seed -> Out => {
             map: [Item] ->{
-                at_least_once(ChatCompletion) via chat with { policy }
+                at_least_once(ChatCompletion) via chat with policy
             } Partial => map_role,
             reduce: (Seed, [Partial]) ->{
-                at_least_once(ChatCompletion) via chat with { policy }
+                at_least_once(ChatCompletion) via chat with policy
             } Out => finalise_role,
         },
         chunking: by_budget {

@@ -61,14 +61,14 @@ error: transform!: the handler slot takes a name, not an expression. Bind the ha
    |  _____________^
 41 | |         name: "transform",
 42 | |         Input -> { Output, Alternate } => Handler::new(),
-43 | |         [middleware],
+43 | |         observers: [middleware],
 44 | |         backpressure: backpressure
 45 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `obzenflow_dsl::transform` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: effectful_transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], middleware: [...]);
+error: effectful_transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);
   --> tests/compile_fail/handler_path_decorated_matrix.rs:46:13
    |
 46 |       let _ = obzenflow_dsl::effectful_transform!(
@@ -76,7 +76,7 @@ error: effectful_transform!: the handler slot takes a name, not an expression. B
 47 | |         name: "effectful_transform",
 48 | |         Input -> { Output, Alternate } => Handler::new(),
 49 | |         effects: [Effect],
-50 | |         middleware: [middleware],
+50 | |         observers: [middleware],
 51 | |         backpressure: backpressure
 52 | |     );
    | |_____^
@@ -91,14 +91,14 @@ error: stateful!: the handler slot takes a name, not an expression. Bind the han
 54 | |         name: "stateful",
 55 | |         Input -> { Output, Alternate } => Handler::new(),
 56 | |         emit_interval = interval,
-57 | |         [middleware],
+57 | |         observers: [middleware],
 58 | |         backpressure: backpressure
 59 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `obzenflow_dsl::stateful` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: effectful_stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], middleware: [...]);
+error: effectful_stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], observers: [...]);
   --> tests/compile_fail/handler_path_decorated_matrix.rs:60:13
    |
 60 |       let _ = obzenflow_dsl::effectful_stateful!(
@@ -106,7 +106,7 @@ error: effectful_stateful!: the handler slot takes a name, not an expression. Bi
 61 | |         name: "effectful_stateful",
 62 | |         Input -> { Output, Alternate } => Handler::new(),
 63 | |         effects: [Effect],
-64 | |         middleware: [middleware],
+64 | |         observers: [middleware],
 65 | |         backpressure: backpressure
 66 | |     );
    | |_____^
@@ -121,7 +121,7 @@ error: join!: the handler slot takes a name, not an expression. Bind the handler
 68 | |         name: "join",
 69 | |         catalog reference: Reference,
 70 | |         Input -> { Output, Alternate } => Handler::new(),
-71 | |         [middleware]
+71 | |         observers: [middleware]
 72 | |     );
    | |_____^
    |
@@ -135,7 +135,7 @@ error: sink!: the handler slot takes a name, not an expression. Bind the handler
 74 | |         name: "sink",
 75 | |         Input => Handler::new(),
 76 | |         delivery: idempotent,
-77 | |         middleware: [middleware]
+77 | |         observers: [middleware]
 78 | |     );
    | |_____^
    |

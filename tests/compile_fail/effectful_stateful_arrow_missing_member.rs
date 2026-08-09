@@ -10,6 +10,6 @@ fn main() {
     let _ = obzenflow_dsl::effectful_stateful!(
         Input -> { First, Second } => StatefulFirstOnly,
         effects: [],
-        middleware: []
+        observers: []
     );
 }

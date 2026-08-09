@@ -196,12 +196,12 @@ pub fn assemble_flow(
                 // (FLOWIP-115a). These are local scripted fixtures, so a source
                 // circuit breaker would be misleading here; the breaker belongs
                 // on external dependencies such as the gateway effect below.
-                web_orders = source!(CustomerOrderPlaced => web_orders_feed, [
+                web_orders = source!(CustomerOrderPlaced => web_orders_feed with [
                     RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
                         .with_burst(SOURCE_RATE_LIMIT_BURST)
                         .build()
                 ]);
-                store_orders = source!(CustomerOrderPlaced => store_orders_feed, [
+                store_orders = source!(CustomerOrderPlaced => store_orders_feed with [
                     RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
                         .with_burst(SOURCE_RATE_LIMIT_BURST)
                         .build()
@@ -251,7 +251,7 @@ pub fn assemble_flow(
                         OrderCancelled,
                         PaymentAuthorizationUnavailable
                     } => gateway_transform,
-                    effects: [AuthorizePayment with [gateway_resilience]],
+                    effects: [AuthorizePayment with gateway_resilience],
                     // Record a per-execution service-level-indicator sample for the
                     // authorization handler. This is end-to-end handler wall time, so it
                     // includes effect-boundary admission, dependency execution, recovery,
@@ -262,7 +262,7 @@ pub fn assemble_flow(
                     // (e.g. "under five seconds"), and aggregation into percentiles and
                     // SLOs, are FLOWIP-115l's job, applied at read time over these
                     // journalled samples rather than baked into the wide event.
-                    middleware: [
+                    observers: [
                         indicator()
                             .operation("payment.authorization")
                             .kind(IndicatorKind::Latency)
@@ -288,14 +288,14 @@ pub fn assemble_flow(
                 // reason to skip the write.
                 cancelled_orders = sink!(OrderCancelled => record_cancelled, delivery: idempotent);
 
-                // Unavailable-authorization sink, tier 2 with middleware: failed
+                // Unavailable-authorization sink, tier 2 with observers: failed
                 // gateway call or breaker refusal. No payment decision was
                 // reached, so the order is not cancelled; it goes to manual
                 // review.
                 manual_review = sink!(
                     PaymentAuthorizationUnavailable => record_unavailable,
                     delivery: idempotent,
-                    middleware: [
+                    observers: [
                         // Publish journalled operator-handoff evidence for each
                         // unavailable-authorization delivery. Observe-only: it does
                         // not change routing or delivery. The stage data journal is

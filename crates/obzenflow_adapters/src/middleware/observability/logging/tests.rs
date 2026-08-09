@@ -24,6 +24,15 @@ fn is_logging_diagnostic(event: &obzenflow_core::ChainEvent) -> bool {
     )
 }
 
+fn logging_payload(event: &obzenflow_core::ChainEvent) -> &serde_json::Value {
+    match &event.content {
+        ChainEventContent::Observability(ObservabilityPayload::Middleware(
+            MiddlewareLifecycle::User(user),
+        )) if user.event_type == "obzenflow.logging" => &user.payload,
+        _ => panic!("expected logging diagnostic"),
+    }
+}
+
 #[test]
 fn test_logging_middleware_counts_events() {
     let middleware = LoggingMiddleware::with_prefix("TEST");
@@ -80,17 +89,43 @@ fn test_logging_middleware_observes_sink_delivery() {
         json!({ "data": "test" }),
     );
 
-    let ctx = SinkDeliveryObserverContext {
-        stage_id: obzenflow_core::StageId::new(),
-        stage_name: "test_sink",
-        scope: MiddlewareExecutionScope::LiveSinkDeliveryBoundary,
-        input: &event,
-        stage_input_position: Some(1),
-        outcome: SinkDeliveryObserverOutcome::Delivered,
-    };
+    let cases = [
+        (SinkDeliveryObserverOutcome::Delivered, "delivered"),
+        (
+            SinkDeliveryObserverOutcome::Failed {
+                message: "delivery failed".to_string(),
+            },
+            "failed",
+        ),
+        (
+            SinkDeliveryObserverOutcome::Rejected {
+                reason: "circuit open".to_string(),
+            },
+            "rejected",
+        ),
+    ];
 
-    let report = SinkDeliveryObserver::after_sink_delivery(&middleware, &ctx);
-    assert_eq!(report.diagnostics.len(), 2);
-    assert!(report.diagnostics.iter().all(is_logging_diagnostic));
-    assert_eq!(middleware.events_processed(), 1);
+    for (index, (outcome, expected_kind)) in cases.into_iter().enumerate() {
+        let stage_input_position = index as u64 + 1;
+        let ctx = SinkDeliveryObserverContext {
+            stage_id: obzenflow_core::StageId::new(),
+            stage_name: "test_sink",
+            scope: MiddlewareExecutionScope::LiveSinkDeliveryBoundary,
+            input: &event,
+            stage_input_position: Some(stage_input_position),
+            outcome,
+        };
+
+        let report = SinkDeliveryObserver::after_sink_delivery(&middleware, &ctx);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert!(is_logging_diagnostic(&report.diagnostics[0]));
+        let payload = logging_payload(&report.diagnostics[0]);
+        assert_eq!(payload["action"], "sink_delivery_observed");
+        assert_eq!(payload["details"]["outcome"]["kind"], expected_kind);
+        assert_eq!(
+            payload["details"]["stage_input_position"],
+            stage_input_position
+        );
+    }
+    assert_eq!(middleware.events_processed(), 3);
 }

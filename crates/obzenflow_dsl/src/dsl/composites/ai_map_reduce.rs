@@ -35,10 +35,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
 
-type GeneratedEffectPolicies = (
-    Vec<Box<dyn MiddlewareFactory>>,
-    Vec<Box<dyn MiddlewareFactory>>,
-);
+type GeneratedEffectPolicies = (Box<dyn MiddlewareFactory>, Box<dyn MiddlewareFactory>);
 type GeneratedMapReduceTypes<Seed, Item, Partial, Out> = fn() -> (Seed, Item, Partial, Out);
 
 /// Macro-only constructor for the FLOWIP-128g generated protocol.
@@ -96,8 +93,8 @@ struct GeneratedAiMapReduceCompositeDescriptor<Seed, Item, Partial, Out, MapRole
     finalise_role: FinaliseRole,
     map_chat_binding: ChatBindingContract,
     finalise_chat_binding: ChatBindingContract,
-    map_policies: Vec<Box<dyn MiddlewareFactory>>,
-    finalise_policies: Vec<Box<dyn MiddlewareFactory>>,
+    map_policies: Box<dyn MiddlewareFactory>,
+    finalise_policies: Box<dyn MiddlewareFactory>,
     _types: PhantomData<GeneratedMapReduceTypes<Seed, Item, Partial, Out>>,
 }
 
@@ -156,14 +153,14 @@ where
             "ai_map_reduce!",
             "role",
             "map",
-            self.map_policies.iter().map(Box::as_ref),
+            std::iter::once(self.map_policies.as_ref()),
         )
         .map_err(CompositeBuildError::new)?;
         require_generated_chat_resilience(
             "ai_map_reduce!",
             "role",
             "reduce",
-            self.finalise_policies.iter().map(Box::as_ref),
+            std::iter::once(self.finalise_policies.as_ref()),
         )
         .map_err(CompositeBuildError::new)?;
 
@@ -175,7 +172,7 @@ where
             Box::new(TransformDescriptor {
                 name: "chunk".to_string(),
                 handler: chunk_handler,
-                middleware: Vec::new(),
+                observers: Vec::new(),
                 backpressure: None,
             }),
             StageTypingMetadata::transform(
@@ -202,7 +199,7 @@ where
                 vec![EffectDeclaration::at_least_once::<ChatCompletion>()],
                 vec![EffectPolicyAttachment {
                     effect_type: ChatCompletion::EFFECT_TYPE,
-                    factories: self.map_policies,
+                    factory: self.map_policies,
                 }],
                 direct_bound,
             )),
@@ -231,7 +228,7 @@ where
                 name: "collect".to_string(),
                 handler: collector,
                 emit_interval: None,
-                middleware: Vec::new(),
+                observers: Vec::new(),
                 backpressure: None,
             }),
             StageTypingMetadata::stateful(
@@ -258,7 +255,7 @@ where
                 vec![EffectDeclaration::at_least_once::<ChatCompletion>()],
                 vec![EffectPolicyAttachment {
                     effect_type: ChatCompletion::EFFECT_TYPE,
-                    factories: self.finalise_policies,
+                    factory: self.finalise_policies,
                 }],
                 direct_bound,
             )),

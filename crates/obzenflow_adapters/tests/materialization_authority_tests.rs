@@ -316,7 +316,7 @@ fn materialize_with_safety(
         MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &protected_unit,
-            declaration_index: MiddlewareDeclarationIndex::effect_policy(0),
+            declaration_index: MiddlewareDeclarationIndex::effect_with(),
         },
         config,
         StageType::Transform,

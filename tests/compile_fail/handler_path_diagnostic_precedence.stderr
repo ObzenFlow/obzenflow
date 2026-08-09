@@ -1,10 +1,10 @@
-error: sink!: clause order is `delivery:` then `middleware:`
+error: sink!: clause order is 'with [...]', then 'delivery:', then 'observers:'
   --> tests/compile_fail/handler_path_diagnostic_precedence.rs:15:13
    |
 15 |       let _ = obzenflow_dsl::sink!(
    |  _____________^
 16 | |         Input => Handler::new(),
-17 | |         middleware: [],
+17 | |         observers: [],
 18 | |         delivery: idempotent
 19 | |     );
    | |_____^
@@ -19,7 +19,7 @@ error: sink!: `delivery:` accepts `idempotent` or `non_idempotent`
 24 | |         name: "bad_delivery",
 25 | |         Input => Handler::new(),
 26 | |         delivery: retryable,
-27 | |         middleware: []
+27 | |         observers: []
 28 | |     );
    | |_____^
    |
@@ -46,20 +46,20 @@ error: no rules expected `source_name`
 note: while trying to match meta-variable `$name:literal`
   --> crates/obzenflow_dsl/src/dsl/stage_macros.rs
    |
-   |     (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
+   |     (name: $name:literal, { $($out:ty),+ $(,)? } => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
    |            ^^^^^^^^^^^^^
 
-error: no rules expected `middleware`
+error: no rules expected `observers`
   --> tests/compile_fail/handler_path_diagnostic_precedence.rs:45:9
    |
-45 |         middleware: []
-   |         ^^^^^^^^^^ no rules expected this token in macro call
+45 |         observers: []
+   |         ^^^^^^^^^ no rules expected this token in macro call
    |
-note: while trying to match `[`
+note: while trying to match `middleware`
   --> crates/obzenflow_dsl/src/dsl/stage_macros.rs
    |
-   |     ($out:ty => $handler:expr $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
-   |                                   ^
+   |     ($out:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+   |                                ^^^^^^^^^^
 
 error: transform!: expected `-> OutputType => handler` after input type
   --> tests/compile_fail/handler_path_diagnostic_precedence.rs:47:13
@@ -79,7 +79,7 @@ error: effectful_transform!: expected `-> OutputType => handler` after input typ
 51 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
 52 | |         Input -> Output => Handler::new(),
-53 | |         middleware: [],
+53 | |         observers: [],
 54 | |         effects: [Effect]
 55 | |     );
    | |_____^
@@ -92,7 +92,7 @@ error: inference!: `chunking` is not supported; use `ai_map!` or `ai_map_reduce!
 58 |       let _ = obzenflow_dsl::inference!(
    |  _____________^
 59 | |         Input -> {
-60 | |             at_least_once(ChatCompletion) via chat with { policy }
+60 | |             at_least_once(ChatCompletion) via chat with policy
 61 | |         } Output => Handler::new(),
 62 | |         chunking: by_budget { fixture }
 63 | |     );
@@ -106,7 +106,7 @@ error: inference!: paid non-idempotent ChatCompletion requires `at_least_once(Ch
 66 |       let _ = obzenflow_dsl::inference!(
    |  _____________^
 67 | |         Input -> {
-68 | |             ChatCompletion via chat with { policy }
+68 | |             ChatCompletion via chat with policy
 69 | |         } Output => Handler::new()
 70 | |     );
    | |_____^
@@ -120,7 +120,7 @@ error: ai_map_reduce!: paid non-idempotent ChatCompletion requires `at_least_onc
    |  _____________^
 73 | |         Seed -> Output => {
 74 | |             map: [Item] -> {
-75 | |                 ChatCompletion via chat with { policy }
+75 | |                 ChatCompletion via chat with policy
 ...  |
 81 | |         chunking: by_budget { fixture }
 82 | |     );

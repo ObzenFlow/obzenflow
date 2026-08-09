@@ -133,7 +133,7 @@ pub use carrier::{
     EffectTypeKey, EffectUnitId, HostedIngressTargetKey, IngressEndpointKind, IngressRouteScope,
     IngressSurface, IngressUnitId, MiddlewareAttachmentId, MiddlewareAttachmentRequest,
     MiddlewareAttachmentValidationError, MiddlewareAuthorityError, MiddlewareCapability,
-    MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareDeclarationScope,
+    MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareDeclarationPosition,
     MiddlewareMaterializationContext, MiddlewareSurface, MiddlewareSurfaceAttachment,
     MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId, SinkConfiguredTargetKey,
     SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SourcePollAttachment,

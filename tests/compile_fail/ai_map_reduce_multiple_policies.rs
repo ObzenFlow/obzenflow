@@ -21,7 +21,7 @@ fn main() {
                 at_least_once(ChatCompletion) via chat with { first, second }
             } Partial => map_role,
             reduce: (Seed, [Partial]) ->{
-                at_least_once(ChatCompletion) via chat with { policy }
+                at_least_once(ChatCompletion) via chat with policy
             } Output => finalise_role,
         },
         chunking: by_budget {

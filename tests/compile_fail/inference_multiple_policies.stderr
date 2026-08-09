@@ -1,4 +1,4 @@
-error: AI effect rows accept exactly one EffectResilience policy; multi-policy composition belongs to FLOWIP-132b
+error: an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)
   --> tests/compile_fail/inference_multiple_policies.rs:16:13
    |
 16 |       let _ = inference!(

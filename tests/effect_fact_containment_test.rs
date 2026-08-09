@@ -263,7 +263,7 @@ fn empty_effects_flow(journal_base: PathBuf) -> FlowDefinition {
                 effectful = effectful_transform!(
                     ContainmentInput -> { ContainmentOutput } => effectful_handler,
                     effects: [],
-                    middleware: []);
+                    observers: []);
                 drops = sink!(ContainmentOutput => drops_handler);
             },
 

@@ -13,7 +13,7 @@ fn main() {
     let role = InferenceRole;
     let _ = inference!(
         Input ->{
-            at_least_once(ChatCompletion) via chat with { retry(3) }
+            at_least_once(ChatCompletion) via chat with retry(3)
         } Output => role
     );
 }

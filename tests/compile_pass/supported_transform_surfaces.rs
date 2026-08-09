@@ -63,6 +63,6 @@ fn main() {
     let _ = obzenflow_dsl::effectful_transform!(
         Input -> Output => ExternalWorkTransform,
         effects: [],
-        middleware: []
+        observers: []
     );
 }

@@ -144,11 +144,9 @@ impl HttpEndpoint for SingleEventEndpoint {
                 // already had precedence); now run fail-fast ingress admission.
                 // Token exhaustion is RateLimited/429; the limiter never waits
                 // while holding the listener request.
-                if let Some(boundary) = self.state.ingress_boundary() {
+                let accepted_boundary = if let Some(boundary) = self.state.ingress_boundary() {
                     match boundary.on_ingress(&attempt) {
-                        IngressAdmissionDecision::Accept => {
-                            boundary.observe(&attempt, IngressAdmissionOutcome::AcceptedForEnqueue);
-                        }
+                        IngressAdmissionDecision::Accept => Some(boundary),
                         IngressAdmissionDecision::Reject { retry_after } => {
                             boundary.observe(&attempt, IngressAdmissionOutcome::RejectedBy);
                             drop(permit);
@@ -205,7 +203,9 @@ impl HttpEndpoint for SingleEventEndpoint {
                             return Ok(response.into());
                         }
                     }
-                }
+                } else {
+                    None
+                };
                 submission.ingress_handoff = Some(SubmissionIngressContext {
                     accepted_at_ns: unix_now_nanos(),
                     ingress_key: self.state.ingress_key().clone(),
@@ -213,6 +213,9 @@ impl HttpEndpoint for SingleEventEndpoint {
                     attempt_seq: attempt.attempt_seq,
                 });
                 permit.send(submission);
+                if let Some(boundary) = accepted_boundary {
+                    boundary.observe(&attempt, IngressAdmissionOutcome::AcceptedForEnqueue);
+                }
                 let response = Response::ok()
                     .with_json(&SubmissionResponse {
                         accepted: 1,

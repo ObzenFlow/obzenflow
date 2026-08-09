@@ -15,9 +15,9 @@
 //! infinite_source!(Out => handler)
 //! async_infinite_source!(Out => handler)
 //! transform!(In -> Out => handler)
-//! effectful_transform!(In -> Out => handler, effects: [], middleware: [])
+//! effectful_transform!(In -> Out => handler, effects: [], observers: [])
 //! stateful!(In -> Out => handler)
-//! effectful_stateful!(In -> Out => handler, effects: [], middleware: [])
+//! effectful_stateful!(In -> Out => handler, effects: [], observers: [])
 //! sink!(In => handler)
 //! join!(catalog CatalogStage: Catalog, Stream -> Out => handler)
 //! inference!(In -> { /* effect row */ } Out => role)
@@ -33,7 +33,7 @@
 //! `placeholder!()` and `placeholder!("reason")` remain the sketching forms.
 //!
 //! The decoration matrix covers binding-derived and explicit names plus each
-//! family's applicable contract, middleware, backpressure, effect,
+//! family's applicable contract, control `with`, observer, backpressure, effect,
 //! emit-interval, delivery, and catalog clauses. Async-source poll timeout is
 //! configured on the handler and exposed through its `poll_timeout()` method;
 //! it is not a stage-macro clause or positional tuple.
@@ -126,6 +126,15 @@ macro_rules! __obzenflow_async_source_timeout_diagnostic {
     };
 }
 
+/// Teaching diagnostic for the retired authority-erasing stage clause.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_stage_middleware_removed {
+    () => {
+        compile_error!("'middleware:' has been removed; use 'observers:' for passive observer middleware and attach control middleware with the live I/O unit it protects (FLOWIP-115s)")
+    };
+}
+
 // ============================================================================
 // source!  +  __obzenflow_source_typed!
 // ============================================================================
@@ -133,7 +142,19 @@ macro_rules! __obzenflow_async_source_timeout_diagnostic {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_source_typed {
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:tt, middleware = [] $(, backpressure = [$($bp:expr)?])?) => {
+        compile_error!("source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
+    };
+    (output = $out:ty, name = $name:literal, handler = $handler:tt, middleware = [] $(, backpressure = [$($bp:expr)?])?) => {
+        compile_error!("source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
+    };
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($legacy:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
+        compile_error!("source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
+    };
+    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($legacy:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
+        compile_error!("source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
+    };
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -143,12 +164,12 @@ macro_rules! __obzenflow_source_typed {
         let __descriptor = $crate::__obzenflow_source_untyped!(
             name = $name,
             handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(None),
-            middleware = [$($mw),*]
+            source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*]
             $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -158,12 +179,12 @@ macro_rules! __obzenflow_source_typed {
         let __descriptor = $crate::__obzenflow_source_untyped!(
             name = $name,
             handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(Some($msg)),
-            middleware = [$($mw),*]
+            source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*]
             $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -175,12 +196,12 @@ macro_rules! __obzenflow_source_typed {
         let __descriptor = $crate::__obzenflow_source_untyped!(
             name = $name,
             handler = __handler,
-            middleware = [$($mw),*]
+            source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*]
             $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+    (output = $out:ty, name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -189,12 +210,12 @@ macro_rules! __obzenflow_source_typed {
         let __descriptor = $crate::__obzenflow_source_untyped!(
             name = $name,
             handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(None),
-            middleware = [$($mw),*]
+            source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*]
             $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -203,12 +224,12 @@ macro_rules! __obzenflow_source_typed {
         let __descriptor = $crate::__obzenflow_source_untyped!(
             name = $name,
             handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(Some($msg)),
-            middleware = [$($mw),*]
+            source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*]
             $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+    (output = $out:ty, name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -219,7 +240,7 @@ macro_rules! __obzenflow_source_typed {
         let __descriptor = $crate::__obzenflow_source_untyped!(
             name = $name,
             handler = __handler,
-            middleware = [$($mw),*]
+            source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*]
             $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
@@ -229,12 +250,14 @@ macro_rules! __obzenflow_source_typed {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_source_untyped {
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+    (name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::{FiniteSourceDescriptor, StageDescriptor};
         Box::new(FiniteSourceDescriptor {
             name: $name.to_string(),
             handler: $handler,
-            middleware: vec![$(Box::new($mw)),*],
+            source_policies: vec![$(Box::new($policy)),*],
+            ingress_policy: None $(.or_else(|| Some(Box::new($ingress))))?,
+            observers: vec![$(Box::new($observer)),*],
             backpressure: {
                 #[allow(unused_mut)]
                 let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
@@ -248,6 +271,79 @@ macro_rules! __obzenflow_source_untyped {
 /// Create a finite source stage descriptor.
 #[macro_export]
 macro_rules! source {
+    ({ $($out:ty),+ $(,)? } => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    ($out:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (name: $name:literal, { $($out:ty),+ $(,)? } => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (name: $name:literal, $out:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    ({ $($out:ty),+ $(,)? } => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ($out:ty => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, { $($out:ty),+ $(,)? } => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, $out:ty => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ({ $($out:ty),+ $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, { $($out:ty),+ $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    // FLOWIP-115s: grammar positions retain authority structurally.
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    ($out:ty => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    ($out:ty => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    (name: $name:literal, $out:ty => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    (name: $name:literal, $out:ty => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
     // ── typed (binding-derived name) ──
     ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_source_typed!(
@@ -434,9 +530,11 @@ macro_rules! source {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_source_untyped {
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+    (name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let mut __desc = $crate::dsl::stage_descriptor::AsyncFiniteSourceDescriptor::new($name, $handler)
-            $(.with_middleware($mw))*;
+            $(.with_source_policy($policy))*
+            $(.with_ingress_policy($ingress))?
+            $(.with_observer($observer))*;
         {
             #[allow(unused_mut)]
             let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
@@ -445,11 +543,55 @@ macro_rules! __obzenflow_async_source_untyped {
         }
         __desc.build()
     }};
+    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
+        compile_error!("async_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
+    };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_source_typed {
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($legacy:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
+        compile_error!("async_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
+    };
+    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($legacy:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
+        compile_error!("async_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
+    };
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, None)
+            .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, Some(($msg).to_string()))
+            .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __handler = $handler;
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), false, None)
+            .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_source_untyped!(name = $name, handler = __handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, None);
+        let __descriptor = $crate::__obzenflow_async_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, Some(($msg).to_string()));
+        let __descriptor = $crate::__obzenflow_async_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __handler = $handler;
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), false, None);
+        let __descriptor = $crate::__obzenflow_async_source_untyped!(name = $name, handler = __handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -546,6 +688,78 @@ macro_rules! __obzenflow_async_source_typed {
 /// Create an async finite source stage descriptor.
 #[macro_export]
 macro_rules! async_source {
+    ({ $($out:ty),+ $(,)? } => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    ($out:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (name: $name:literal, { $($out:ty),+ $(,)? } => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (name: $name:literal, $out:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    ({ $($out:ty),+ $(,)? } => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ($out:ty => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, { $($out:ty),+ $(,)? } => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, $out:ty => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ({ $($out:ty),+ $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, { $($out:ty),+ $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    ($out:ty => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    ($out:ty => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    (name: $name:literal, $out:ty => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    (name: $name:literal, $out:ty => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
+    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?)
+    };
     // ── typed (binding-derived name) ──
     ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [] $(, backpressure = [$bp])?)
@@ -678,12 +892,14 @@ macro_rules! async_source {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_infinite_source_untyped {
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+    (name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::{InfiniteSourceDescriptor, StageDescriptor};
         Box::new(InfiniteSourceDescriptor {
             name: $name.to_string(),
             handler: $handler,
-            middleware: vec![$(Box::new($mw)),*],
+            source_policies: vec![$(Box::new($policy)),*],
+            ingress_policy: None $(.or_else(|| Some(Box::new($ingress))))?,
+            observers: vec![$(Box::new($observer)),*],
             backpressure: {
                 #[allow(unused_mut)]
                 let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
@@ -692,11 +908,52 @@ macro_rules! __obzenflow_infinite_source_untyped {
             },
         }) as Box<dyn StageDescriptor>
     }};
+    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
+        compile_error!("infinite_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
+    };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_infinite_source_typed {
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($legacy:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
+        compile_error!("infinite_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
+    };
+    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($legacy:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
+        compile_error!("infinite_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
+    };
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, None).with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(None), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, Some(($msg).to_string())).with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(Some($msg)), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __handler = $handler;
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), false, None).with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = __handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, None);
+        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(None), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, Some(($msg).to_string()));
+        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(Some($msg)), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __handler = $handler;
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), false, None);
+        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = __handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -793,6 +1050,54 @@ macro_rules! __obzenflow_infinite_source_typed {
 /// Create an infinite source stage descriptor.
 #[macro_export]
 macro_rules! infinite_source {
+    ({ $($out:ty),+ $(,)? } => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    ($out:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (name: $name:literal, { $($out:ty),+ $(,)? } => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (name: $name:literal, $out:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    ({ $($out:ty),+ $(,)? } => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ($out:ty => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, { $($out:ty),+ $(,)? } => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, $out:ty => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ({ $($out:ty),+ $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, { $($out:ty),+ $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    ($out:ty => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    ($out:ty => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    (name: $name:literal, $out:ty => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $out, name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    (name: $name:literal, $out:ty => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $out, name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_infinite_source_typed!(output = $out, name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
     // ── typed (binding-derived name) ──
     ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
@@ -1057,9 +1362,11 @@ macro_rules! infinite_source {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_infinite_source_untyped {
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+    (name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let mut __desc = $crate::dsl::stage_descriptor::AsyncInfiniteSourceDescriptor::new($name, $handler)
-            $(.with_middleware($mw))*;
+            $(.with_source_policy($policy))*
+            $(.with_ingress_policy($ingress))?
+            $(.with_observer($observer))*;
         {
             #[allow(unused_mut)]
             let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
@@ -1068,11 +1375,52 @@ macro_rules! __obzenflow_async_infinite_source_untyped {
         }
         __desc.build()
     }};
+    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
+        compile_error!("async_infinite_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
+    };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_infinite_source_typed {
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($legacy:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
+        compile_error!("async_infinite_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
+    };
+    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($legacy:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
+        compile_error!("async_infinite_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
+    };
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, None).with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, Some(($msg).to_string())).with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __handler = $handler;
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), false, None).with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = __handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, None);
+        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, Some(($msg).to_string()));
+        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __handler = $handler;
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), false, None);
+        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = __handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -1169,6 +1517,54 @@ macro_rules! __obzenflow_async_infinite_source_typed {
 /// Create an async infinite source stage descriptor.
 #[macro_export]
 macro_rules! async_infinite_source {
+    ({ $($out:ty),+ $(,)? } => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    ($out:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (name: $name:literal, { $($out:ty),+ $(,)? } => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (name: $name:literal, $out:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    ({ $($out:ty),+ $(,)? } => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ($out:ty => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, { $($out:ty),+ $(,)? } => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, $out:ty => $handler:expr, ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ({ $($out:ty),+ $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, { $($out:ty),+ $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)* with [$($source_policy:expr),* $(,)?], ingress with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)")
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    ($out:ty => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    ($out:ty => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    ($out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    (name: $name:literal, $out:ty => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $out, name = $name, handler = placeholder!(), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    (name: $name:literal, $out:ty => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $out, name = $name, handler = placeholder!($msg), source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
+    (name: $name:literal, $out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(with [$($policy:expr),* $(,)?])? $(, ingress with $ingress:expr)? $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?) => { $crate::__obzenflow_async_infinite_source_typed!(output = $out, name = $name, handler = $handler_head $(:: $handler_tail)*, source_policies = [$($($policy),*)?], ingress_policy = [$($ingress)?], observers = [$($($observer),*)?] $(, backpressure = [$bp])?) };
     // ── typed (binding-derived name) ──
     ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
@@ -1462,7 +1858,7 @@ macro_rules! __obzenflow_transform_typed {
         const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
             ::obzenflow_core::stage_fact_set![$($member),+],
         >();
-        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
             vec![$(Box::new($mw)),*];
         #[allow(unused_mut)]
         let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
@@ -1472,13 +1868,13 @@ macro_rules! __obzenflow_transform_typed {
             $out,
             ::obzenflow_core::stage_fact_set![$($member),+],
             _,
-        >($name, None, __middleware, __backpressure)
+        >($name, None, __observers, __backpressure)
     }};
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
             ::obzenflow_core::stage_fact_set![$($member),+],
         >();
-        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
             vec![$(Box::new($mw)),*];
         #[allow(unused_mut)]
         let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
@@ -1488,7 +1884,7 @@ macro_rules! __obzenflow_transform_typed {
             $out,
             ::obzenflow_core::stage_fact_set![$($member),+],
             _,
-        >($name, Some($msg), __middleware, __backpressure)
+        >($name, Some($msg), __observers, __backpressure)
     }};
     // -- exact input, real handler, explicit output contract --
     // FLOWIP-120b Option B keeps the flat output contract in the arrow's
@@ -1499,7 +1895,7 @@ macro_rules! __obzenflow_transform_typed {
         const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
             ::obzenflow_core::stage_fact_set![$($member),+],
         >();
-        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
             vec![$(Box::new($mw)),*];
         #[allow(unused_mut)]
         let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
@@ -1512,11 +1908,11 @@ macro_rules! __obzenflow_transform_typed {
             _,
             _,
             _,
-        >($name, __handler, __middleware, __backpressure)
+        >($name, __handler, __observers, __backpressure)
     }};
     // ── exact input, placeholder ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
             vec![$(Box::new($mw)),*];
         #[allow(unused_mut)]
         let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
@@ -1524,12 +1920,12 @@ macro_rules! __obzenflow_transform_typed {
         $crate::dsl::typing::placeholder_transform_descriptor::<$in, $out, $out, _>(
             $name,
             None,
-            __middleware,
+            __observers,
             __backpressure,
         )
     }};
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
             vec![$(Box::new($mw)),*];
         #[allow(unused_mut)]
         let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
@@ -1537,14 +1933,14 @@ macro_rules! __obzenflow_transform_typed {
         $crate::dsl::typing::placeholder_transform_descriptor::<$in, $out, $out, _>(
             $name,
             Some($msg),
-            __middleware,
+            __observers,
             __backpressure,
         )
     }};
     // ── exact input, real handler ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
-        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
             vec![$(Box::new($mw)),*];
         #[allow(unused_mut)]
         let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
@@ -1557,7 +1953,7 @@ macro_rules! __obzenflow_transform_typed {
             _,
             _,
             _,
-        >($name, __handler, __middleware, __backpressure)
+        >($name, __handler, __observers, __backpressure)
     }};
 }
 
@@ -1566,6 +1962,15 @@ macro_rules! __obzenflow_transform_typed {
 macro_rules! __obzenflow_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($out:ty),+ $(,)? } => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
     };
     (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
@@ -1589,7 +1994,7 @@ macro_rules! __obzenflow_transform_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1600,7 +2005,7 @@ macro_rules! __obzenflow_transform_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1622,7 +2027,7 @@ macro_rules! __obzenflow_transform_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1655,7 +2060,7 @@ macro_rules! __obzenflow_transform_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!(), observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1666,7 +2071,7 @@ macro_rules! __obzenflow_transform_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr), observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1688,7 +2093,7 @@ macro_rules! __obzenflow_transform_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1719,7 +2124,7 @@ macro_rules! __obzenflow_transform_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1729,7 +2134,7 @@ macro_rules! __obzenflow_transform_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1749,7 +2154,7 @@ macro_rules! __obzenflow_transform_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1759,19 +2164,19 @@ macro_rules! __obzenflow_transform_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, observers: [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "transform!",
             "let handler = MyTransform::new(...); output = transform!(Input -> Output => handler);"
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr $(, observers: [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "transform!",
             "let handler = MyTransform::new(...); output = transform!(Input -> Output => handler);"
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr $(, observers: [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "transform!",
             "let handler = MyTransform::new(...); output = transform!(Input -> Output => handler);"
@@ -1836,11 +2241,8 @@ macro_rules! __obzenflow_effect_declarations_vec {
 }
 
 /// Entry parser for the `effects:` clause with inline per-effect policy
-/// attachments (FLOWIP-120c H7): `Effect with [policy, ...]`. A declared
-/// effect carries its policies in place, so the macro knows by position
-/// which effect a builder guards; there is deliberately no shorthand for
-/// one policy spec across all effects, because two guarded dependencies are
-/// two policies.
+/// attachments: `Effect with policy`. Each effect position accepts exactly
+/// one aggregate policy expression.
 ///
 /// Entry type tokens accumulate one token at a time until `with` or `,`;
 /// wrap a generic effect type containing top-level commas in parentheses.
@@ -1854,14 +2256,20 @@ macro_rules! __obzenflow_effect_entries {
     };
 
     // ── paid non-idempotent acknowledgement entries ──────────────────
-    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with [$($policy:expr),* $(,)?], $($rest:tt)*) => {
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
+    };
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with { $($policy:tt)* } $($rest:tt)*) => {
+        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
+    };
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with $policy:expr, $($rest:tt)*) => {
         $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
-        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, [$($policy),*]);
+        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
-    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with [$($policy:expr),* $(,)?]) => {
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with $policy:expr) => {
         $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
-        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, [$($policy),*]);
+        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
     };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty), $($rest:tt)*) => {
         $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
@@ -1872,14 +2280,20 @@ macro_rules! __obzenflow_effect_entries {
     };
 
     // ── transactional entries (recognized at entry start) ─────────────
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with [$($policy:expr),* $(,)?], $($rest:tt)*) => {
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
+    };
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with { $($policy:tt)* } $($rest:tt)*) => {
+        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
+    };
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with $policy:expr, $($rest:tt)*) => {
         $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
-        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, [$($policy),*]);
+        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with [$($policy:expr),* $(,)?]) => {
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with $policy:expr) => {
         $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
-        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, [$($policy),*]);
+        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
     };
     (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr), $($rest:tt)*) => {
         $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
@@ -1889,15 +2303,21 @@ macro_rules! __obzenflow_effect_entries {
         $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
     };
 
-    // ── `with [...]` attachment terminator ─────────────────────────────
-    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], with [$($policy:expr),* $(,)?], $($rest:tt)*) => {
+    // ── bare `with` attachment terminator ──────────────────────────────
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
+    };
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], with { $($policy:tt)* } $($rest:tt)*) => {
+        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
+    };
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], with $policy:expr, $($rest:tt)*) => {
         $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
-        $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, [$($policy),*]);
+        $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, $policy);
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
-    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], with [$($policy:expr),* $(,)?]) => {
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], with $policy:expr) => {
         $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
-        $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, [$($policy),*]);
+        $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, $policy);
     };
 
     // ── comma terminator ────────────────────────────────────────────────
@@ -1912,23 +2332,43 @@ macro_rules! __obzenflow_effect_entries {
     };
 
     // ── attachment construction ─────────────────────────────────────────
-    (@attach $atts:ident, $effect:ty, [$($policy:expr),*]) => {{
+    (@attach $atts:ident, $effect:ty, $policy:expr) => {{
         let __effect_type: &'static str =
             <$effect as ::obzenflow_runtime::effects::Effect>::EFFECT_TYPE;
-        let mut __factories: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
-            Vec::new();
-        $(
-            {
-                let __factory: Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory> =
-                    $policy;
-                __factories.push(__factory);
-            }
-        )*
+        let __factory: Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory> = $policy;
         $atts.push($crate::dsl::stage_descriptor::EffectPolicyAttachment {
             effect_type: __effect_type,
-            factories: __factories,
+            factory: __factory,
         });
     }};
+}
+
+/// Fail before handler/type-contract expansion when an ordinary effect row
+/// uses a delimiter reserved by FLOWIP-115s. Keeping this as a token scanner
+/// lets qualified and generic effect types pass through without reconstructing
+/// a Rust type grammar in the public macro.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effect_policy_syntax_gate {
+    (effects = [$($effects:tt)*], then = [$($then:tt)*]) => {
+        $crate::__obzenflow_effect_policy_syntax_gate!(
+            @scan then = [$($then)*], $($effects)*
+        )
+    };
+    (@scan then = [$($then:tt)*],) => {
+        $($then)*
+    };
+    (@scan then = [$($then:tt)*], with [$($policy:tt)*] $($rest:tt)*) => {
+        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
+    };
+    (@scan then = [$($then:tt)*], with { $($policy:tt)* } $($rest:tt)*) => {
+        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
+    };
+    (@scan then = [$($then:tt)*], $next:tt $($rest:tt)*) => {
+        $crate::__obzenflow_effect_policy_syntax_gate!(
+            @scan then = [$($then)*], $($rest)*
+        )
+    };
 }
 
 /// Type-only mirror of [`__obzenflow_effect_entries!`]. Policy expressions
@@ -1944,10 +2384,10 @@ macro_rules! __obzenflow_effect_manifest_types {
         ::obzenflow_runtime::effect_set![$($types,)* $($acc)+]
     };
 
-    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) with [$($policy:expr),* $(,)?], $($rest:tt)*) => {
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) with $policy:expr, $($rest:tt)*) => {
         $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
     };
-    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) with [$($policy:expr),* $(,)?]) => {
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) with $policy:expr) => {
         ::obzenflow_runtime::effect_set![$($types,)* $effect]
     };
     (@entry [$($types:ty,)*], [], at_least_once($effect:ty), $($rest:tt)*) => {
@@ -1957,10 +2397,10 @@ macro_rules! __obzenflow_effect_manifest_types {
         ::obzenflow_runtime::effect_set![$($types,)* $effect]
     };
 
-    (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr) with [$($policy:expr),* $(,)?], $($rest:tt)*) => {
+    (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr) with $policy:expr, $($rest:tt)*) => {
         $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
     };
-    (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr) with [$($policy:expr),* $(,)?]) => {
+    (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr) with $policy:expr) => {
         ::obzenflow_runtime::effect_set![$($types,)* $effect]
     };
     (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr), $($rest:tt)*) => {
@@ -1970,10 +2410,10 @@ macro_rules! __obzenflow_effect_manifest_types {
         ::obzenflow_runtime::effect_set![$($types,)* $effect]
     };
 
-    (@entry [$($types:ty,)*], [$($acc:tt)+], with [$($policy:expr),* $(,)?], $($rest:tt)*) => {
+    (@entry [$($types:ty,)*], [$($acc:tt)+], with $policy:expr, $($rest:tt)*) => {
         $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $($acc)+,], [], $($rest)*)
     };
-    (@entry [$($types:ty,)*], [$($acc:tt)+], with [$($policy:expr),* $(,)?]) => {
+    (@entry [$($types:ty,)*], [$($acc:tt)+], with $policy:expr) => {
         ::obzenflow_runtime::effect_set![$($types,)* $($acc)+]
     };
     (@entry [$($types:ty,)*], [$($acc:tt)+], , $($rest:tt)*) => {
@@ -2086,7 +2526,7 @@ macro_rules! __obzenflow_assert_effectful_stateful_contract {
 macro_rules! __obzenflow_effectful_transform_untyped {
     (name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
-        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
             vec![$(Box::new($mw)),*];
         let mut __obzenflow_effects: Vec<::obzenflow_runtime::effects::EffectDeclaration> =
             Vec::new();
@@ -2100,7 +2540,7 @@ macro_rules! __obzenflow_effectful_transform_untyped {
             $name,
             $handler,
             __obzenflow_effects,
-            __middleware,
+            __observers,
             __obzenflow_attachments,
             {
                 #[allow(unused_mut)]
@@ -2164,57 +2604,72 @@ macro_rules! __obzenflow_effectful_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_effectful_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effectful_transform_typed!(
-            input = exact($($in)+),
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = $handler_head $(:: $handler_tail)*,
-            effects = [$($effects)*],
-            middleware = [$($mw),*]
-            $(, backpressure = [$bp])?
-        )
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($out:ty),+ $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effectful_transform_typed!(
-            input = exact($($in)+),
-            output = $out,
-            output_contract = [$($member),+],
-            name = $name,
-            handler = $handler_head $(:: $handler_tail)*,
-            effects = [$($effects)*],
-            middleware = [$($mw),*]
-            $(, backpressure = [$bp])?
-        )
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effectful_transform_typed!(
-            input = exact($($in)+),
-            output = $out,
-            name = $name,
-            handler = $handler_head $(:: $handler_tail)*,
-            effects = [$($effects)*],
-            middleware = [$($mw),*]
-            $(, backpressure = [$bp])?
-        )
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
+            $crate::__obzenflow_effectful_transform_typed!(
+                input = exact($($in)+),
+                output = $first,
+                output_contract = [$first $(, $member)*],
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)*],
+                middleware = [$($mw),*]
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
+            $crate::__obzenflow_effectful_transform_typed!(
+                input = exact($($in)+),
+                output = $out,
+                output_contract = [$($member),+],
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)*],
+                middleware = [$($mw),*]
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
+            $crate::__obzenflow_effectful_transform_typed!(
+                input = exact($($in)+),
+                output = $out,
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)*],
+                middleware = [$($mw),*]
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "effectful_transform!",
-            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], middleware: [...]);"
+            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);"
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "effectful_transform!",
-            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], middleware: [...]);"
+            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);"
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "effectful_transform!",
-            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], middleware: [...]);"
+            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);"
         )
     };
     (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
@@ -2253,12 +2708,13 @@ macro_rules! effectful_transform {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_sink_untyped {
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (name = $name:literal, handler = $handler:expr, sink_policies = [$($policy:expr),*], observers = [$($observer:expr),*]) => {{
         use $crate::dsl::stage_descriptor::{SinkDescriptor, StageDescriptor};
         Box::new(SinkDescriptor {
             name: $name.to_string(),
             handler: $handler,
-            middleware: vec![$(Box::new($mw)),*],
+            sink_policies: vec![$(Box::new($policy)),*],
+            observers: vec![$(Box::new($observer)),*],
         }) as Box<dyn StageDescriptor>
     }};
 }
@@ -2267,7 +2723,7 @@ macro_rules! __obzenflow_sink_untyped {
 #[macro_export]
 macro_rules! __obzenflow_sink_typed {
     // ── exact input, placeholder ──
-    (input = exact($in:ty), name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), name = $name:literal, handler = placeholder!(), sink_policies = [$($policy:expr),*], observers = [$($observer:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             true,
@@ -2276,11 +2732,11 @@ macro_rules! __obzenflow_sink_typed {
         let __descriptor = $crate::__obzenflow_sink_untyped!(
             name = $name,
             handler = $crate::dsl::typing::PlaceholderSink::<$in>::new(None),
-            middleware = [$($mw),*]
+            sink_policies = [$($policy),*], observers = [$($observer),*]
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (input = exact($in:ty), name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), name = $name:literal, handler = placeholder!($msg:expr), sink_policies = [$($policy:expr),*], observers = [$($observer:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             true,
@@ -2289,7 +2745,7 @@ macro_rules! __obzenflow_sink_typed {
         let __descriptor = $crate::__obzenflow_sink_untyped!(
             name = $name,
             handler = $crate::dsl::typing::PlaceholderSink::<$in>::new(Some($msg)),
-            middleware = [$($mw),*]
+            sink_policies = [$($policy),*], observers = [$($observer),*]
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
@@ -2305,14 +2761,14 @@ macro_rules! __obzenflow_sink_typed {
     // Per the proposal's canonical-identity rationale, the declared input is a
     // topology fingerprint, not a Rust type-system constraint, matching the
     // a wrapper whose phantom arrow types would make the proof tautological.
-    (input = exact($in:ty), name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), name = $name:literal, handler = $handler:expr, sink_policies = [$($policy:expr),*], observers = [$($observer:expr),*]) => {{
         let __handler = $handler;
         let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             false,
             None,
         );
-        let __descriptor = $crate::__obzenflow_sink_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
+        let __descriptor = $crate::__obzenflow_sink_untyped!(name = $name, handler = __handler, sink_policies = [$($policy),*], observers = [$($observer),*]);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
 }
@@ -2340,19 +2796,25 @@ macro_rules! __obzenflow_sink_delivery {
 
 /// Create a sink stage descriptor.
 ///
-/// Canonical grammar: `InputType => handler_path`, then an optional
-/// `delivery: idempotent | non_idempotent` safety clause, then an optional
-/// named `middleware: [ ... ]` clause. Construct closure-tier `SinkTyped`
+/// Canonical grammar: `InputType => handler_path`, optional `with [...]`,
+/// optional `delivery: idempotent | non_idempotent`, then optional
+/// `observers: [ ... ]`. Construct closure-tier `SinkTyped`
 /// adapters and sink facades in ordinary Rust inside the materialiser, then
 /// pass the resulting binding by path.
 #[macro_export]
 macro_rules! sink {
-    // ── typed (binding-derived name): exact input ──
-    ($in:ty => placeholder!() $(, middleware: [$($mw:expr),* $(,)?])?) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [$($($mw),*)?])
+    ($in:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
     };
-    ($in:ty => placeholder!($msg:expr) $(, middleware: [$($mw:expr),* $(,)?])?) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($($mw),*)?])
+    (name: $name:literal, $in:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    // ── typed (binding-derived name): exact input ──
+    ($in:ty => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, observers: [$($observer:expr),* $(,)?])?) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!(), sink_policies = [$($($policy),*)?], observers = [$($($observer),*)?])
+    };
+    ($in:ty => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, observers: [$($observer:expr),* $(,)?])?) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), sink_policies = [$($($policy),*)?], observers = [$($($observer),*)?])
     };
     (|$($closure:tt)*) => {
         $crate::__obzenflow_handler_path_diagnostic!(
@@ -2378,25 +2840,26 @@ macro_rules! sink {
             "let output = SinkTyped::new(...); events = sink!(Event => output);"
         )
     };
-    ($in:ty => sinks::$factory:ident($($args:tt)*) $(, middleware: [$($mw:expr),* $(,)?])?) => {
+    ($in:ty => sinks::$factory:ident($($args:tt)*) $(, observers: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
             "let output = sinks::json::<Event>(); events = sink!(Event => output);"
         )
     };
     ($in:ty => $handler_head:ident $(:: $handler_tail:ident)*
+        $(with [$($policy:expr),* $(,)?])?
         $(, delivery: $delivery:ident)?
-        $(, middleware: [$($mw:expr),* $(,)?])?
+        $(, observers: [$($observer:expr),* $(,)?])?
     ) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = $crate::__obzenflow_sink_delivery!($handler_head $(:: $handler_tail)* $(, $delivery)?), middleware = [$($($mw),*)?])
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = $crate::__obzenflow_sink_delivery!($handler_head $(:: $handler_tail)* $(, $delivery)?), sink_policies = [$($($policy),*)?], observers = [$($($observer),*)?])
     };
 
     // ── typed (explicit name override): exact input ──
-    (name: $name:literal, $in:ty => placeholder!() $(, middleware: [$($mw:expr),* $(,)?])?) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!(), middleware = [$($($mw),*)?])
+    (name: $name:literal, $in:ty => placeholder!() $(with [$($policy:expr),* $(,)?])? $(, observers: [$($observer:expr),* $(,)?])?) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!(), sink_policies = [$($($policy),*)?], observers = [$($($observer),*)?])
     };
-    (name: $name:literal, $in:ty => placeholder!($msg:expr) $(, middleware: [$($mw:expr),* $(,)?])?) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!($msg), middleware = [$($($mw),*)?])
+    (name: $name:literal, $in:ty => placeholder!($msg:expr) $(with [$($policy:expr),* $(,)?])? $(, observers: [$($observer:expr),* $(,)?])?) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!($msg), sink_policies = [$($($policy),*)?], observers = [$($($observer),*)?])
     };
     (name: $name:literal, |$($closure:tt)*) => {
         $crate::__obzenflow_handler_path_diagnostic!(
@@ -2422,59 +2885,60 @@ macro_rules! sink {
             "let output = SinkTyped::new(...); events = sink!(name: \"events\", Event => output);"
         )
     };
-    (name: $name:literal, $in:ty => sinks::$factory:ident($($args:tt)*) $(, middleware: [$($mw:expr),* $(,)?])?) => {
+    (name: $name:literal, $in:ty => sinks::$factory:ident($($args:tt)*) $(, observers: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
             "let output = sinks::json::<Event>(); events = sink!(name: \"events\", Event => output);"
         )
     };
     (name: $name:literal, $in:ty => $handler_head:ident $(:: $handler_tail:ident)*
+        $(with [$($policy:expr),* $(,)?])?
         $(, delivery: $delivery:ident)?
-        $(, middleware: [$($mw:expr),* $(,)?])?
+        $(, observers: [$($observer:expr),* $(,)?])?
     ) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = $crate::__obzenflow_sink_delivery!($handler_head $(:: $handler_tail)* $(, $delivery)?), middleware = [$($($mw),*)?])
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = $crate::__obzenflow_sink_delivery!($handler_head $(:: $handler_tail)* $(, $delivery)?), sink_policies = [$($($policy),*)?], observers = [$($($observer),*)?])
     };
 
-    // ── clause-order guardrails (FLOWIP-120s): `delivery:` precedes `middleware:` ──
-    ($in:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?], delivery: $delivery:ident) => {
-        compile_error!("sink!: clause order is `delivery:` then `middleware:`")
+    // ── clause-order guardrails: `with`, then `delivery:`, then `observers:` ──
+    ($in:ty => $handler:expr, observers: [$($mw:expr),* $(,)?], delivery: $delivery:ident) => {
+        compile_error!("sink!: clause order is 'with [...]', then 'delivery:', then 'observers:'")
     };
-    (name: $name:literal, $in:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?], delivery: $delivery:ident) => {
-        compile_error!("sink!: clause order is `delivery:` then `middleware:`")
+    (name: $name:literal, $in:ty => $handler:expr, observers: [$($mw:expr),* $(,)?], delivery: $delivery:ident) => {
+        compile_error!("sink!: clause order is 'with [...]', then 'delivery:', then 'observers:'")
     };
-    ($in:ty => $handler:expr, delivery: idempotent $(, middleware: [$($mw:expr),* $(,)?])?) => {
+    ($in:ty => $handler:expr, delivery: idempotent $(, observers: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
             "let output = SinkTyped::new(...); events = sink!(Event => output);"
         )
     };
-    ($in:ty => $handler:expr, delivery: non_idempotent $(, middleware: [$($mw:expr),* $(,)?])?) => {
+    ($in:ty => $handler:expr, delivery: non_idempotent $(, observers: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
             "let output = SinkTyped::new(...); events = sink!(Event => output);"
         )
     };
-    ($in:ty => $handler:expr, delivery: $other:ident $(, middleware: [$($mw:expr),* $(,)?])?) => {
+    ($in:ty => $handler:expr, delivery: $other:ident $(, observers: [$($mw:expr),* $(,)?])?) => {
         compile_error!("sink!: `delivery:` accepts `idempotent` or `non_idempotent`")
     };
-    (name: $name:literal, $in:ty => $handler:expr, delivery: idempotent $(, middleware: [$($mw:expr),* $(,)?])?) => {
+    (name: $name:literal, $in:ty => $handler:expr, delivery: idempotent $(, observers: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
             "let output = SinkTyped::new(...); events = sink!(name: \"events\", Event => output);"
         )
     };
-    (name: $name:literal, $in:ty => $handler:expr, delivery: non_idempotent $(, middleware: [$($mw:expr),* $(,)?])?) => {
+    (name: $name:literal, $in:ty => $handler:expr, delivery: non_idempotent $(, observers: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
             "let output = SinkTyped::new(...); events = sink!(name: \"events\", Event => output);"
         )
     };
-    (name: $name:literal, $in:ty => $handler:expr, delivery: $other:ident $(, middleware: [$($mw:expr),* $(,)?])?) => {
+    (name: $name:literal, $in:ty => $handler:expr, delivery: $other:ident $(, observers: [$($mw:expr),* $(,)?])?) => {
         compile_error!("sink!: `delivery:` accepts `idempotent` or `non_idempotent`")
     };
     ($in:ty => $handler:expr
         $(, delivery: $delivery:ident)?
-        $(, middleware: [$($mw:expr),* $(,)?])?
+        $(, observers: [$($mw:expr),* $(,)?])?
     ) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
@@ -2483,7 +2947,7 @@ macro_rules! sink {
     };
     (name: $name:literal, $in:ty => $handler:expr
         $(, delivery: $delivery:ident)?
-        $(, middleware: [$($mw:expr),* $(,)?])?
+        $(, observers: [$($mw:expr),* $(,)?])?
     ) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "sink!",
@@ -2502,7 +2966,7 @@ macro_rules! __obzenflow_stateful_untyped {
     (name = $name:literal, handler = $handler:expr, emit = none, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::StatefulDescriptor;
         let mut __desc = StatefulDescriptor::new($name, $handler)
-            $(.with_middleware($mw))*;
+            $(.with_observer($mw))*;
         {
             #[allow(unused_mut)]
             let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
@@ -2515,7 +2979,7 @@ macro_rules! __obzenflow_stateful_untyped {
         use $crate::dsl::stage_descriptor::StatefulDescriptor;
         let mut __desc = StatefulDescriptor::new($name, $handler)
             .with_emit_interval($emit_interval)
-            $(.with_middleware($mw))*;
+            $(.with_observer($mw))*;
         {
             #[allow(unused_mut)]
             let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
@@ -2731,6 +3195,12 @@ macro_rules! __obzenflow_stateful_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_stateful_exact_contract!(@collect name = $name, in = (), $($rest)+)
     };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($out:ty),+ $(,)? } => $handler:expr $(, emit_interval = $emit_interval:expr)?, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr $(, emit_interval = $emit_interval:expr)?, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
     (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
@@ -2755,7 +3225,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2767,7 +3237,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2803,7 +3273,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), emit_interval = $emit_interval:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), emit_interval = $emit_interval:expr, observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2815,7 +3285,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), emit_interval = $emit_interval:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), emit_interval = $emit_interval:expr, observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2839,7 +3309,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2863,7 +3333,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, emit_interval = $emit_interval:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, emit_interval = $emit_interval:expr, observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2897,7 +3367,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -2908,7 +3378,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -2941,7 +3411,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), emit_interval = $emit_interval:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), emit_interval = $emit_interval:expr, observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -2952,7 +3422,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), emit_interval = $emit_interval:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), emit_interval = $emit_interval:expr, observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -2974,7 +3444,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -2996,7 +3466,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, emit_interval = $emit_interval:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, emit_interval = $emit_interval:expr, observers: [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -3007,13 +3477,13 @@ macro_rules! __obzenflow_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, emit_interval = $emit_interval:expr)? $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, emit_interval = $emit_interval:expr)? $(, observers: [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "stateful!",
             "let handler = MyStateful::new(...); output = stateful!(Input -> Output => handler);"
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr $(, emit_interval = $emit_interval:expr)? $(, [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr $(, emit_interval = $emit_interval:expr)? $(, observers: [$($mw:expr),*])? $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "stateful!",
             "let handler = MyStateful::new(...); output = stateful!(Input -> Output => handler);"
@@ -3061,7 +3531,7 @@ macro_rules! __obzenflow_effectful_stateful_untyped {
         use $crate::dsl::stage_descriptor::EffectfulStatefulDescriptor;
         let mut __desc = EffectfulStatefulDescriptor::new($name, $handler)
             .with_effect_declarations($crate::__obzenflow_effect_declarations_vec!($($effects)*))
-            $(.with_middleware($mw))*;
+            $(.with_observer($mw))*;
         {
             #[allow(unused_mut)]
             let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
@@ -3124,7 +3594,13 @@ macro_rules! __obzenflow_effectful_stateful_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_effectful_stateful_exact_contract!(@collect name = $name, in = (), $($rest)+)
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($out:ty),+ $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_effectful_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -3136,7 +3612,7 @@ macro_rules! __obzenflow_effectful_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_effectful_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -3147,16 +3623,16 @@ macro_rules! __obzenflow_effectful_stateful_exact_contract {
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "effectful_stateful!",
-            "let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], middleware: [...]);"
+            "let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], observers: [...]);"
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "effectful_stateful!",
-            "let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], middleware: [...]);"
+            "let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], observers: [...]);"
         )
     };
     (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
@@ -3203,7 +3679,7 @@ macro_rules! __obzenflow_join_untyped {
             reference_stage_id: StageId::new(),
             reference_stage_var: Some(stringify!($ref_var)),
             handler: $handler,
-            middleware: vec![$(Box::new($mw)),*],
+            observers: vec![$(Box::new($mw)),*],
         }) as Box<dyn StageDescriptor>
     }};
 }
@@ -3403,6 +3879,26 @@ macro_rules! __obzenflow_join_exact_stream_contract {
      reference = $ref_hint:tt,
      ref_type = $ref_type:tt,
      stream = ($($stream:tt)+),
+     -> { $($out:ty),+ $(,)? } => $handler:expr,
+     middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = $ref_hint:tt,
+     ref_type = $ref_type:tt,
+     stream = ($($stream:tt)+),
+     -> $out:ty => $handler:expr,
+     middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
+        $crate::__obzenflow_stage_middleware_removed!()
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = $ref_hint:tt,
+     ref_type = $ref_type:tt,
+     stream = ($($stream:tt)+),
      -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
         $crate::__obzenflow_join_typed!(
             reference = $ref_hint,
@@ -3444,7 +3940,7 @@ macro_rules! __obzenflow_join_exact_stream_contract {
      ref_type = $ref_type:tt,
      stream = ($($stream:tt)+),
      -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(),
-     [$($mw:expr),*]) => {
+     observers: [$($mw:expr),*]) => {
         $crate::__obzenflow_join_typed!(
             reference = $ref_hint,
             stream = exact,
@@ -3465,7 +3961,7 @@ macro_rules! __obzenflow_join_exact_stream_contract {
      ref_type = $ref_type:tt,
      stream = ($($stream:tt)+),
      -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr),
-     [$($mw:expr),*]) => {
+     observers: [$($mw:expr),*]) => {
         $crate::__obzenflow_join_typed!(
             reference = $ref_hint,
             stream = exact,
@@ -3506,7 +4002,7 @@ macro_rules! __obzenflow_join_exact_stream_contract {
      ref_type = $ref_type:tt,
      stream = ($($stream:tt)+),
      -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*,
-     [$($mw:expr),*]) => {
+     observers: [$($mw:expr),*]) => {
         $crate::__obzenflow_join_typed!(
             reference = $ref_hint,
             stream = exact,
@@ -3527,7 +4023,7 @@ macro_rules! __obzenflow_join_exact_stream_contract {
      ref_type = $ref_type:tt,
      stream = ($($stream:tt)+),
      -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr
-     $(, [$($mw:expr),*])?) => {
+     $(, observers: [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "join!",
             "let handler = joins::inner::<Reference, Stream, Output, _, _, _, _>(...); output = join!(catalog reference: Reference, Stream -> Output => handler);"
@@ -3578,7 +4074,7 @@ macro_rules! __obzenflow_join_exact_stream_contract {
      ref_type = $ref_type:tt,
      stream = ($($stream:tt)+),
      -> $out:ty => placeholder!(),
-     [$($mw:expr),*]) => {
+     observers: [$($mw:expr),*]) => {
         $crate::__obzenflow_join_typed!(
             reference = $ref_hint,
             stream = exact,
@@ -3598,7 +4094,7 @@ macro_rules! __obzenflow_join_exact_stream_contract {
      ref_type = $ref_type:tt,
      stream = ($($stream:tt)+),
      -> $out:ty => placeholder!($msg:expr),
-     [$($mw:expr),*]) => {
+     observers: [$($mw:expr),*]) => {
         $crate::__obzenflow_join_typed!(
             reference = $ref_hint,
             stream = exact,
@@ -3637,7 +4133,7 @@ macro_rules! __obzenflow_join_exact_stream_contract {
      ref_type = $ref_type:tt,
      stream = ($($stream:tt)+),
      -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*,
-     [$($mw:expr),*]) => {
+     observers: [$($mw:expr),*]) => {
         $crate::__obzenflow_join_typed!(
             reference = $ref_hint,
             stream = exact,
@@ -3657,7 +4153,7 @@ macro_rules! __obzenflow_join_exact_stream_contract {
      ref_type = $ref_type:tt,
      stream = ($($stream:tt)+),
      -> $out:ty => $handler:expr
-     $(, [$($mw:expr),*])?) => {
+     $(, observers: [$($mw:expr),*])?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "join!",
             "let handler = joins::inner::<Reference, Stream, Output, _, _, _, _>(...); output = join!(catalog reference: Reference, Stream -> Output => handler);"
@@ -3870,7 +4366,18 @@ macro_rules! __obzenflow_ai_chat_effect_row {
         row = {
             at_least_once(ChatCompletion)
                 via $binding:ident
-                with { retry($($retry:tt)*) $(,)? }
+                with { $($policy:tt)* }
+            $(,)?
+        }
+    ) => {
+        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
+    };
+    (
+        surface = $surface:tt,
+        row = {
+            at_least_once(ChatCompletion)
+                via $binding:ident
+                with retry($($retry:tt)*)
             $(,)?
         }
     ) => {
@@ -3884,13 +4391,12 @@ macro_rules! __obzenflow_ai_chat_effect_row {
         row = {
             at_least_once(ChatCompletion)
                 via $binding:ident
-                with { $first:expr, $($rest:expr),+ $(,)? }
+                with [$($policy:expr),* $(,)?]
             $(,)?
         }
     ) => {
         compile_error!(
-            "AI effect rows accept exactly one EffectResilience policy; \
-             multi-policy composition belongs to FLOWIP-132b"
+            "an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)"
         )
     };
     (
@@ -3898,7 +4404,7 @@ macro_rules! __obzenflow_ai_chat_effect_row {
         row = {
             at_least_once(ChatCompletion)
                 via $binding:ident
-                with { $policy:expr $(,)? }
+                with $policy:expr
             $(,)?
         }
     ) => {{
@@ -3933,7 +4439,7 @@ macro_rules! __obzenflow_ai_chat_effect_row {
         compile_error!(concat!(
             $surface,
             ": expected `at_least_once(ChatCompletion) via <chat binding> \
-             with { <EffectResilience> }`"
+             with <EffectResilience>`"
         ))
     };
 }
@@ -3951,7 +4457,19 @@ macro_rules! __obzenflow_ai_effect_row_syntax_then {
         row = {
             at_least_once(ChatCompletion)
                 via $binding:ident
-                with { retry($($retry:tt)*) $(,)? }
+                with { $($policy:tt)* }
+            $(,)?
+        },
+        then = { $($then:tt)* }
+    ) => {
+        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
+    };
+    (
+        surface = $surface:tt,
+        row = {
+            at_least_once(ChatCompletion)
+                via $binding:ident
+                with retry($($retry:tt)*)
             $(,)?
         },
         then = { $($then:tt)* }
@@ -3966,14 +4484,13 @@ macro_rules! __obzenflow_ai_effect_row_syntax_then {
         row = {
             at_least_once(ChatCompletion)
                 via $binding:ident
-                with { $first:expr, $($rest:expr),+ $(,)? }
+                with [$($policy:expr),* $(,)?]
             $(,)?
         },
         then = { $($then:tt)* }
     ) => {
         compile_error!(
-            "AI effect rows accept exactly one EffectResilience policy; \
-             multi-policy composition belongs to FLOWIP-132b"
+            "an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)"
         )
     };
     (
@@ -3981,7 +4498,7 @@ macro_rules! __obzenflow_ai_effect_row_syntax_then {
         row = {
             at_least_once(ChatCompletion)
                 via $binding:ident
-                with { $policy:expr $(,)? }
+                with $policy:expr
             $(,)?
         },
         then = { $($then:tt)* }
@@ -4017,7 +4534,7 @@ macro_rules! __obzenflow_ai_effect_row_syntax_then {
         compile_error!(concat!(
             $surface,
             ": expected `at_least_once(ChatCompletion) via <chat binding> \
-             with { <EffectResilience> }`"
+             with <EffectResilience>`"
         ))
     };
 }
@@ -4087,7 +4604,7 @@ macro_rules! __obzenflow_inference_contract {
     ) => {
         compile_error!(
             "inference!: expected `Input -> { at_least_once(ChatCompletion) \
-             via <chat binding> with { <EffectResilience> } } Output => role`"
+             via <chat binding> with <EffectResilience> } Output => role`"
         )
     };
     (
@@ -4148,7 +4665,7 @@ macro_rules! __obzenflow_ai_map_reduce_generated_typed {
             $name,
             ($chunker, $map_role, $finalise_role),
             ($map_chat, $finalise_chat),
-            (vec![$map_policy], vec![$finalise_policy]),
+            ($map_policy, $finalise_policy),
         )
     }};
 }
@@ -4370,7 +4887,7 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
     ) => {
         compile_error!(
             "ai_map_reduce!: expected role-local `-> { at_least_once(ChatCompletion) \
-             via <chat binding> with { <EffectResilience> } }` rows on map and reduce"
+             via <chat binding> with <EffectResilience> }` rows on map and reduce"
         )
     };
     (
@@ -4433,7 +4950,7 @@ mod backpressure_clause_macro_tests {
         let descriptor = crate::source!(
             name: "s",
             TestFact => placeholder!(),
-            [],
+            observers: [],
             backpressure: enforced(1000)
         );
         assert_eq!(descriptor.name(), "s");
@@ -4444,7 +4961,9 @@ mod backpressure_clause_macro_tests {
         let inner = crate::__obzenflow_source_untyped!(
             name = "s_inner",
             handler = crate::dsl::typing::PlaceholderFiniteSource::<TestFact>::new(None),
-            middleware = [],
+            source_policies = [],
+            ingress_policy = [],
+            observers = [],
             backpressure = [enforced(1000)]
         );
         assert!(inner.backpressure_clause().is_some());
@@ -4455,7 +4974,9 @@ mod backpressure_clause_macro_tests {
         let inner = crate::__obzenflow_source_untyped!(
             name = "s_none",
             handler = crate::dsl::typing::PlaceholderFiniteSource::<TestFact>::new(None),
-            middleware = []
+            source_policies = [],
+            ingress_policy = [],
+            observers = []
         );
         assert!(inner.backpressure_clause().is_none());
     }

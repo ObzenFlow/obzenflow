@@ -112,13 +112,13 @@
 //! struct Out;
 //! let handler = ();
 //!
-//! // Missing the mandatory `effects:` clause (jumping straight to `middleware:`).
-//! let _ = effectful_transform!(In -> Out => handler, middleware: []);
+//! // Missing the mandatory `effects:` clause (jumping straight to `observers:`).
+//! let _ = effectful_transform!(In -> Out => handler, observers: []);
 //! ```
 //!
 //! ## FLOWIP-120c H7: per-effect policies attach inline in `effects:`
 //!
-//! A policy attaches to the exact effect it guards (`Effect with [...]`).
+//! A policy attaches to the exact effect it guards (`Effect with policy`).
 //!
 //! A malformed attachment (a `with` clause without its policy list) must not
 //! compile either.
@@ -131,14 +131,14 @@
 //! struct MyEffect;
 //! let handler = ();
 //!
-//! // `with` must be followed by a bracketed policy list.
-//! let _ = effectful_transform!(In -> Out => handler, effects: [MyEffect with], middleware: []);
+//! // `with` must be followed by one bare policy expression.
+//! let _ = effectful_transform!(In -> Out => handler, effects: [MyEffect with], observers: []);
 //! ```
 //!
-//! ## FLOWIP-120s: the canonical `sink!` grammar
+//! ## FLOWIP-115s: the canonical `sink!` grammar
 //!
-//! Positional trailing middleware is deleted; the named `middleware:` clause
-//! is the only spelling.
+//! Control policies use handler-adjacent `with [...]`; passive middleware uses
+//! the named `observers: [...]` clause.
 //!
 //! ```compile_fail
 //! use obzenflow_dsl::sink;
@@ -150,7 +150,7 @@
 //! let _ = sink!(Out => handler, []);
 //! ```
 //!
-//! The clause order is `delivery:` then `middleware:`; the reverse must not
+//! The clause order is `with [...]`, then `delivery:`, then `observers:`; the reverse must not
 //! compile.
 //!
 //! ```compile_fail
@@ -159,8 +159,8 @@
 //! struct Out;
 //! let handler = ();
 //!
-//! // Misordered clauses: `middleware:` before `delivery:`.
-//! let _ = sink!(Out => handler, middleware: [], delivery: idempotent);
+//! // Misordered clauses: `observers:` before `delivery:`.
+//! let _ = sink!(Out => handler, observers: [], delivery: idempotent);
 //! ```
 //!
 //! The `delivery:` clause accepts only `idempotent` or `non_idempotent`.
@@ -248,7 +248,7 @@
 //! struct Out;
 //! struct Handler;
 //!
-//! let _ = effectful_sink!(Out => Handler, effects: [], middleware: []);
+//! let _ = effectful_sink!(Out => Handler, effects: [], observers: []);
 //! ```
 
 #[doc(hidden)]

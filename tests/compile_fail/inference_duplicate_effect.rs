@@ -14,10 +14,9 @@ fn main() {
     let policy = obzenflow_adapters::middleware::control::ai_resilience();
     let _ = inference!(
         Input ->{
-            at_least_once(ChatCompletion) via chat with { policy }
-            at_least_once(ChatCompletion) via chat with {
+            at_least_once(ChatCompletion) via chat with policy
+            at_least_once(ChatCompletion) via chat with
                 obzenflow_adapters::middleware::control::ai_resilience()
-            }
         } Output => role
     );
 }

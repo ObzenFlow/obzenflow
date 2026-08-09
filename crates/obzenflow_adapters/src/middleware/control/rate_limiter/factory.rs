@@ -777,7 +777,7 @@ mod tests {
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::ingress_with(),
         };
         // Burst capacity 1 (events_per_second defaults the burst), 1 event/sec.
         let boundary = materialize_factory_checked(

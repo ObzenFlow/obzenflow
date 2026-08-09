@@ -5,7 +5,7 @@ error: ai_map_reduce!: ChatCompletion is NonIdempotentAtLeastOnce; retry is forb
    |  _____________^
 17 | |         Seed -> Output => {
 18 | |             map: [Item] ->{
-19 | |                 at_least_once(ChatCompletion) via chat with { retry(3) }
+19 | |                 at_least_once(ChatCompletion) via chat with retry(3)
 ...  |
 32 | |     );
    | |_____^
@@ -19,7 +19,7 @@ error[E0282]: type annotations needed
    |  _____________^
 17 | |         Seed -> Output => {
 18 | |             map: [Item] ->{
-19 | |                 at_least_once(ChatCompletion) via chat with { retry(3) }
+19 | |                 at_least_once(ChatCompletion) via chat with retry(3)
 ...  |
 32 | |     );
    | |_____^ cannot infer type

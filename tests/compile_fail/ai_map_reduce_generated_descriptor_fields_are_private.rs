@@ -14,7 +14,7 @@ fn main() {
         name: "counterfeit-generated-stage".to_string(),
         handler: FirstOnly,
         effects: Vec::new(),
-        middleware: Vec::new(),
+        observers: Vec::new(),
         effect_policies: Vec::new(),
         direct_fact_plan: DirectFactPlan::default(),
         pass_through_event_type: None,

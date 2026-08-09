@@ -269,7 +269,7 @@ fn build_flow(
                 effectful = effectful_transform!(
                     Merged -> { AbortOutput, EffectValue } => effectful_tail,
                     effects: [CountingEffect],
-                    middleware: []
+                    observers: []
                 );
                 collect = sink!(AbortOutput => counting_sink);
             },

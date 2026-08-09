@@ -207,7 +207,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
                 charge = effectful_transform!(
                     OrderPlaced -> { Charged } => charge_handler,
                     effects: [ChargeEffect],
-                    middleware: []
+                    observers: []
                 );
                 receipts = sink!(Charged => receipts_handler);
             },

@@ -1,0 +1,94 @@
+error: 'middleware:' has been removed; use 'observers:' for passive observer middleware and attach control middleware with the live I/O unit it protects (FLOWIP-115s)
+  --> tests/compile_fail/flowip_115s_stage_middleware_matrix.rs:13:13
+   |
+13 |     let _ = obzenflow_dsl::source!(Output => Handler, middleware: [observer]);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_stage_middleware_removed` which comes from the expansion of the macro `obzenflow_dsl::source` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: 'middleware:' has been removed; use 'observers:' for passive observer middleware and attach control middleware with the live I/O unit it protects (FLOWIP-115s)
+  --> tests/compile_fail/flowip_115s_stage_middleware_matrix.rs:14:13
+   |
+14 |     let _ = obzenflow_dsl::async_source!(Output => Handler, middleware: [observer]);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_stage_middleware_removed` which comes from the expansion of the macro `obzenflow_dsl::async_source` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: 'middleware:' has been removed; use 'observers:' for passive observer middleware and attach control middleware with the live I/O unit it protects (FLOWIP-115s)
+  --> tests/compile_fail/flowip_115s_stage_middleware_matrix.rs:15:13
+   |
+15 |     let _ = obzenflow_dsl::infinite_source!(Output => Handler, middleware: [observer]);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_stage_middleware_removed` which comes from the expansion of the macro `obzenflow_dsl::infinite_source` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: 'middleware:' has been removed; use 'observers:' for passive observer middleware and attach control middleware with the live I/O unit it protects (FLOWIP-115s)
+  --> tests/compile_fail/flowip_115s_stage_middleware_matrix.rs:16:13
+   |
+16 |     let _ = obzenflow_dsl::async_infinite_source!(Output => Handler, middleware: [observer]);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_stage_middleware_removed` which comes from the expansion of the macro `obzenflow_dsl::async_infinite_source` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: 'middleware:' has been removed; use 'observers:' for passive observer middleware and attach control middleware with the live I/O unit it protects (FLOWIP-115s)
+  --> tests/compile_fail/flowip_115s_stage_middleware_matrix.rs:17:13
+   |
+17 |     let _ = obzenflow_dsl::transform!(Input -> Output => Handler, middleware: [observer]);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_stage_middleware_removed` which comes from the expansion of the macro `obzenflow_dsl::transform` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: 'middleware:' has been removed; use 'observers:' for passive observer middleware and attach control middleware with the live I/O unit it protects (FLOWIP-115s)
+  --> tests/compile_fail/flowip_115s_stage_middleware_matrix.rs:18:13
+   |
+18 |       let _ = obzenflow_dsl::effectful_transform!(
+   |  _____________^
+19 | |         Input -> Output => Handler,
+20 | |         effects: [Effect],
+21 | |         middleware: [observer]
+22 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_stage_middleware_removed` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: 'middleware:' has been removed; use 'observers:' for passive observer middleware and attach control middleware with the live I/O unit it protects (FLOWIP-115s)
+  --> tests/compile_fail/flowip_115s_stage_middleware_matrix.rs:23:13
+   |
+23 |     let _ = obzenflow_dsl::stateful!(Input -> Output => Handler, middleware: [observer]);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_stage_middleware_removed` which comes from the expansion of the macro `obzenflow_dsl::stateful` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: 'middleware:' has been removed; use 'observers:' for passive observer middleware and attach control middleware with the live I/O unit it protects (FLOWIP-115s)
+  --> tests/compile_fail/flowip_115s_stage_middleware_matrix.rs:24:13
+   |
+24 |       let _ = obzenflow_dsl::effectful_stateful!(
+   |  _____________^
+25 | |         Input -> Output => Handler,
+26 | |         effects: [Effect],
+27 | |         middleware: [observer]
+28 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_stage_middleware_removed` which comes from the expansion of the macro `obzenflow_dsl::effectful_stateful` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: 'middleware:' has been removed; use 'observers:' for passive observer middleware and attach control middleware with the live I/O unit it protects (FLOWIP-115s)
+  --> tests/compile_fail/flowip_115s_stage_middleware_matrix.rs:29:13
+   |
+29 |       let _ = obzenflow_dsl::join!(
+   |  _____________^
+30 | |         catalog reference: Reference,
+31 | |         Input -> Output => Handler,
+32 | |         middleware: [observer]
+33 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_stage_middleware_removed` which comes from the expansion of the macro `obzenflow_dsl::join` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: 'middleware:' has been removed; use 'observers:' for passive observer middleware and attach control middleware with the live I/O unit it protects (FLOWIP-115s)
+  --> tests/compile_fail/flowip_115s_stage_middleware_matrix.rs:34:13
+   |
+34 |     let _ = obzenflow_dsl::sink!(Input => Handler, middleware: [observer]);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_stage_middleware_removed` which comes from the expansion of the macro `obzenflow_dsl::sink` (in Nightly builds, run with -Z macro-backtrace for more info)

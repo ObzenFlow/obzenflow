@@ -360,7 +360,7 @@ where
                     ReducedEvidence ->{
                         at_least_once(ChatCompletion)
                             via chat
-                            with { brief_policy }
+                            with brief_policy
                     } DecisionBrief => brief_role
                 );
                 collected = sink!(DecisionBrief => collected_handler);
@@ -407,7 +407,7 @@ fn build_credit_flow(
                     ReducedEvidence ->{
                         at_least_once(ChatCompletion)
                             via chat
-                            with { ai_resilience() }
+                            with ai_resilience()
                     } DecisionBrief => brief_role
                 );
                 credit_collected = sink!(DecisionBrief => credit_collected);
@@ -459,7 +459,7 @@ fn build_fan_out_flow(
                     ReducedEvidence ->{
                         at_least_once(ChatCompletion)
                             via chat
-                            with { ai_resilience() }
+                            with ai_resilience()
                     } DecisionBrief => brief_role
                 );
                 fast_collected = sink!(DecisionBrief => fast_collected);

@@ -43,7 +43,8 @@ mod tests {
         Box::new(SinkDescriptor {
             name: name.to_string(),
             handler,
-            middleware: vec![],
+            sink_policies: vec![],
+            observers: vec![],
         })
     }
 
