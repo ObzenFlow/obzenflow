@@ -328,7 +328,7 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
             journals: disk_journals(journal_root),
 
             stages: {
-                source = async_infinite_source!(AsyncInfiniteEvent => source with [
+                source = async_infinite_source!(AsyncInfiniteEvent => source, observers: [
                     CountDataCommitFactory { calls: observer_calls_for_flow }
                 ]);
                 sink = sink!(AsyncInfiniteEvent => sink);

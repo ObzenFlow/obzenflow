@@ -181,6 +181,16 @@ struct MiddlewarePlacement {
     expects_rate_limiter: bool,
 }
 
+/// Grammar-owned source middleware inputs kept together so the source planner
+/// receives one structural description instead of an expanding positional
+/// argument list.
+struct SourceMiddlewarePlan {
+    source_policy_factories: Vec<Box<dyn MiddlewareFactory>>,
+    ingress_policy_factory: Option<Box<dyn MiddlewareFactory>>,
+    observer_factories: Vec<Box<dyn MiddlewareFactory>>,
+    hosted_ingress_slot: Option<obzenflow_core::ingress::HostedIngressBindingSlot>,
+}
+
 fn reject_control_in_observers(factory: &dyn MiddlewareFactory) -> StageCreationResult<()> {
     let declaration = factory.declaration();
     if declaration.is_control() {
@@ -258,12 +268,15 @@ fn build_source_middleware_and_register_policies(
     config: &StageConfig,
     stage_type: StageType,
     writer_id: WriterId,
-    source_policy_factories: Vec<Box<dyn MiddlewareFactory>>,
-    ingress_policy_factory: Option<Box<dyn MiddlewareFactory>>,
-    observer_factories: Vec<Box<dyn MiddlewareFactory>>,
-    hosted_ingress_slot: Option<obzenflow_core::ingress::HostedIngressBindingSlot>,
+    plan: SourceMiddlewarePlan,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
 ) -> StageCreationResult<SourceMiddlewareBinding> {
+    let SourceMiddlewarePlan {
+        source_policy_factories,
+        ingress_policy_factory,
+        observer_factories,
+        hosted_ingress_slot,
+    } = plan;
     let observer_placement =
         plan_stage_observers(config, stage_type, observer_factories, control_middleware)?;
     let observers = observer_placement.observers;
@@ -702,10 +715,12 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             &config,
             StageType::FiniteSource,
             writer_id,
-            self.source_policies,
-            self.ingress_policy,
-            self.observers,
-            None,
+            SourceMiddlewarePlan {
+                source_policy_factories: self.source_policies,
+                ingress_policy_factory: self.ingress_policy,
+                observer_factories: self.observers,
+                hosted_ingress_slot: None,
+            },
             &control_middleware,
         )?;
 
@@ -877,10 +892,12 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             &config,
             StageType::FiniteSource,
             writer_id,
-            self.source_policies,
-            self.ingress_policy,
-            self.observers,
-            None,
+            SourceMiddlewarePlan {
+                source_policy_factories: self.source_policies,
+                ingress_policy_factory: self.ingress_policy,
+                observer_factories: self.observers,
+                hosted_ingress_slot: None,
+            },
             &control_middleware,
         )?;
 
@@ -1012,10 +1029,12 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             &config,
             StageType::InfiniteSource,
             writer_id,
-            self.source_policies,
-            self.ingress_policy,
-            self.observers,
-            None,
+            SourceMiddlewarePlan {
+                source_policy_factories: self.source_policies,
+                ingress_policy_factory: self.ingress_policy,
+                observer_factories: self.observers,
+                hosted_ingress_slot: None,
+            },
             &control_middleware,
         )?;
 
@@ -1195,10 +1214,12 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             &config,
             StageType::InfiniteSource,
             writer_id,
-            self.source_policies,
-            self.ingress_policy,
-            self.observers,
-            hosted_ingress_slot,
+            SourceMiddlewarePlan {
+                source_policy_factories: self.source_policies,
+                ingress_policy_factory: self.ingress_policy,
+                observer_factories: self.observers,
+                hosted_ingress_slot,
+            },
             &control_middleware,
         )?;
 
@@ -3097,10 +3118,12 @@ mod tests {
             &config,
             StageType::InfiniteSource,
             WriterId::from(stage_id),
-            vec![],
-            Some(limiter),
-            vec![],
-            Some(slot.clone()),
+            SourceMiddlewarePlan {
+                source_policy_factories: vec![],
+                ingress_policy_factory: Some(limiter),
+                observer_factories: vec![],
+                hosted_ingress_slot: Some(slot.clone()),
+            },
             &control,
         )
         .expect("source middleware build");
@@ -3153,10 +3176,12 @@ mod tests {
             &config,
             StageType::InfiniteSource,
             WriterId::from(stage_id),
-            vec![],
-            Some(limiter),
-            vec![],
-            None,
+            SourceMiddlewarePlan {
+                source_policy_factories: vec![],
+                ingress_policy_factory: Some(limiter),
+                observer_factories: vec![],
+                hosted_ingress_slot: None,
+            },
             &Arc::new(ControlMiddlewareAggregator::new()),
         ) {
             Ok(_) => panic!("an ingress position without a hosted route must fail"),
@@ -3189,10 +3214,12 @@ mod tests {
             &config,
             StageType::InfiniteSource,
             WriterId::from(stage_id),
-            vec![limiter],
-            None,
-            vec![],
-            Some(slot.clone()),
+            SourceMiddlewarePlan {
+                source_policy_factories: vec![limiter],
+                ingress_policy_factory: None,
+                observer_factories: vec![],
+                hosted_ingress_slot: Some(slot.clone()),
+            },
             &Arc::new(ControlMiddlewareAggregator::new()),
         ) {
             Ok(_) => panic!("a hosted drain must not acquire a source-poll limiter"),
@@ -3324,10 +3351,12 @@ mod tests {
             &config,
             StageType::InfiniteSource,
             WriterId::from(stage_id),
-            vec![],
-            Some(Box::new(AllowOnceIngressFactory)),
-            vec![],
-            Some(slot.clone()),
+            SourceMiddlewarePlan {
+                source_policy_factories: vec![],
+                ingress_policy_factory: Some(Box::new(AllowOnceIngressFactory)),
+                observer_factories: vec![],
+                hosted_ingress_slot: Some(slot.clone()),
+            },
             &control,
         )
         .expect("source middleware build");
@@ -4029,28 +4058,30 @@ mod observer_placement_negative_tests {
             &config,
             StageType::FiniteSource,
             WriterId::from(stage_id),
-            vec![
-                Box::new(
-                    RecordingSourceControlFactory::<FirstRecordingSourceFamily> {
-                        label: "first-source-control",
-                        calls: calls.clone(),
-                        _family: std::marker::PhantomData,
-                    },
-                ),
-                Box::new(
-                    RecordingSourceControlFactory::<SecondRecordingSourceFamily> {
-                        label: "second-source-control",
-                        calls: calls.clone(),
-                        _family: std::marker::PhantomData,
-                    },
-                ),
-            ],
-            None,
-            vec![Box::new(RecordingObserverFactory {
-                label: "source-observer",
-                calls: calls.clone(),
-            })],
-            None,
+            SourceMiddlewarePlan {
+                source_policy_factories: vec![
+                    Box::new(
+                        RecordingSourceControlFactory::<FirstRecordingSourceFamily> {
+                            label: "first-source-control",
+                            calls: calls.clone(),
+                            _family: std::marker::PhantomData,
+                        },
+                    ),
+                    Box::new(
+                        RecordingSourceControlFactory::<SecondRecordingSourceFamily> {
+                            label: "second-source-control",
+                            calls: calls.clone(),
+                            _family: std::marker::PhantomData,
+                        },
+                    ),
+                ],
+                ingress_policy_factory: None,
+                observer_factories: vec![Box::new(RecordingObserverFactory {
+                    label: "source-observer",
+                    calls: calls.clone(),
+                })],
+                hosted_ingress_slot: None,
+            },
             &control,
         )
         .expect("positioned source middleware should materialize");
