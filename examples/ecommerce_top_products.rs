@@ -4,8 +4,9 @@
 
 //! E-commerce Top Products Demo - Using FLOWIP-080j & FLOWIP-082a
 //!
-//! Demonstrates TopNByTyped for tracking best-selling products by total revenue,
-//! accumulating multiple orders for the same product throughout the day.
+//! Demonstrates both first-class ranking accumulators:
+//! - `TopNBy` tracks best-selling products by cumulative revenue.
+//! - `TopN` tracks the highest latest order value per product by replacement.
 //!
 //! Run with: cargo run --package obzenflow --example ecommerce_top_products
 
@@ -58,6 +59,25 @@ impl TypedPayload for TopProductsUpdate {
     const EVENT_TYPE: &'static str = "ecommerce.top_products_update";
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TopCurrentOrderEntry {
+    rank: usize,
+    key: String,
+    score: f64,
+    metadata: OrderEvent,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TopCurrentOrdersUpdate {
+    top_n: Vec<TopCurrentOrderEntry>,
+    capacity: usize,
+    count: usize,
+}
+
+impl TypedPayload for TopCurrentOrdersUpdate {
+    const EVENT_TYPE: &'static str = "ecommerce.top_current_orders_update";
+}
+
 fn main() -> Result<()> {
     let presentation = Presentation::new(
         Banner::new("E-commerce Top Products Analytics")
@@ -79,12 +99,12 @@ fn main() -> Result<()> {
                 ],
             )
             .bullets(
-                "FLOWIP-080j TopNByTyped",
+                "First-class TopN and TopNBy",
                 [
                     "Type-safe key and score extraction",
+                    "TopN replaces a key's current score",
+                    "TopNBy accumulates a key's score and count",
                     "No ChainEvent manipulation, work with OrderEvent directly",
-                    "Compile-time safety for field access",
-                    "Memory is bounded to N items regardless of stream size",
                 ],
             )
     });
@@ -277,6 +297,26 @@ fn main() -> Result<()> {
                 },
             )
             .emit_every_n(5);
+            let top_current_orders_handler = typed_stateful::top_n(
+                5,
+                |order: &OrderEvent| order.product_id.clone(),
+                |order: &OrderEvent| order.total_value,
+                |snapshot| TopCurrentOrdersUpdate {
+                    top_n: snapshot
+                        .top_n
+                        .into_iter()
+                        .map(|entry| TopCurrentOrderEntry {
+                            rank: entry.rank,
+                            key: entry.key,
+                            score: entry.score,
+                            metadata: entry.metadata,
+                        })
+                        .collect(),
+                    capacity: snapshot.capacity,
+                    count: snapshot.count,
+                },
+            )
+            .emit_every_n(5);
             let dashboard_handler = SinkTyped::new(|update: TopProductsUpdate| async move {
                 println!("\n📊 TOP SELLING PRODUCTS DASHBOARD 📊");
                 println!("====================================");
@@ -311,6 +351,21 @@ fn main() -> Result<()> {
                 println!("====================================\n");
             })
             .idempotent();
+            let current_orders_handler =
+                SinkTyped::new(|update: TopCurrentOrdersUpdate| async move {
+                    println!("\n📈 HIGHEST CURRENT ORDER VALUE PER PRODUCT 📈");
+                    for entry in &update.top_n {
+                        println!(
+                            "#{} {}: ${:.2} ({})",
+                            entry.rank, entry.metadata.product_name, entry.score, entry.key
+                        );
+                    }
+                    println!(
+                        "Tracking {} current product values (capacity {}).\n",
+                        update.count, update.capacity
+                    );
+                })
+                .idempotent();
 
             Ok(flow! {
                 name: "ecommerce_analytics",
@@ -322,14 +377,20 @@ fn main() -> Result<()> {
                         RateLimiterBuilder::new(3.0).build()
                     ]); // Pace source intake for demo visibility.
 
-                    // FLOWIP-080j: TopNByTyped - Type-safe accumulation with no ChainEvent!
+                    // Cumulative score and count per product.
                     top_products = stateful!(OrderEvent -> TopProductsUpdate => top_products_handler);
                     dashboard = sink!(TopProductsUpdate => dashboard_handler);
+
+                    // Replacement semantics: each product keeps its latest order value.
+                    top_current_orders = stateful!(OrderEvent -> TopCurrentOrdersUpdate => top_current_orders_handler);
+                    current_orders = sink!(TopCurrentOrdersUpdate => current_orders_handler);
                 },
 
                 topology: {
                     orders |> top_products;
                     top_products |> dashboard;
+                    orders |> top_current_orders;
+                    top_current_orders |> current_orders;
                 }
             })
         }))?;

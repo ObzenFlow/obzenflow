@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-134e journal oracle for plain typed stateful handlers and facades.
+//! FLOWIP-134e journal oracle for plain typed stateful handlers and accumulators.
 
 use obzenflow::typed::stateful as typed_stateful;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -109,6 +109,27 @@ impl TypedPayload for GroupSnapshot {
     const EVENT_TYPE: &'static str = "flowip_134e.group_snapshot";
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct CurrentRanking {
+    keys: Vec<String>,
+    scores: Vec<u64>,
+}
+
+impl TypedPayload for CurrentRanking {
+    const EVENT_TYPE: &'static str = "flowip_134e.current_ranking";
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct AggregateRanking {
+    keys: Vec<String>,
+    total_scores: Vec<u64>,
+    counts: Vec<u64>,
+}
+
+impl TypedPayload for AggregateRanking {
+    const EVENT_TYPE: &'static str = "flowip_134e.aggregate_ranking";
+}
+
 #[derive(Clone, Debug)]
 struct ValuesSource {
     values: Vec<Input>,
@@ -199,8 +220,49 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
             },
         )
         .emit_on_eof();
+        let current_ranking = typed_stateful::top_n(
+            2,
+            |input: &Input| input.key.clone(),
+            |input: &Input| input.value as f64,
+            |snapshot: typed_stateful::TopNSnapshot<String, Input>| CurrentRanking {
+                keys: snapshot
+                    .top_n
+                    .iter()
+                    .map(|entry| entry.key.clone())
+                    .collect(),
+                scores: snapshot
+                    .top_n
+                    .iter()
+                    .map(|entry| entry.score as u64)
+                    .collect(),
+            },
+        )
+        .emit_on_eof();
+        let aggregate_ranking = typed_stateful::top_n_by(
+            2,
+            |input: &Input| input.key.clone(),
+            |input: &Input| input.value as f64,
+            |snapshot: typed_stateful::TopNBySnapshot<String, Input>| AggregateRanking {
+                keys: snapshot
+                    .top_n
+                    .iter()
+                    .map(|entry| entry.key.clone())
+                    .collect(),
+                total_scores: snapshot
+                    .top_n
+                    .iter()
+                    .map(|entry| entry.total_score as u64)
+                    .collect(),
+                counts: snapshot.top_n.iter().map(|entry| entry.count).collect(),
+            },
+        )
+        .emit_on_eof();
         let fold_sink = SinkTyped::new(|_snapshot: FoldSnapshot| async move {}).idempotent();
         let group_sink = SinkTyped::new(|_snapshot: GroupSnapshot| async move {}).idempotent();
+        let current_ranking_sink =
+            SinkTyped::new(|_snapshot: CurrentRanking| async move {}).idempotent();
+        let aggregate_ranking_sink =
+            SinkTyped::new(|_snapshot: AggregateRanking| async move {}).idempotent();
 
         Ok(flow! {
             name: "typed_stateful_journal_parity",
@@ -211,16 +273,24 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
                 validate = transform!(Input -> Input => validate_handler);
                 fold = stateful!(Input -> FoldSnapshot => fold_handler);
                 grouped = stateful!(Input -> GroupSnapshot => grouped);
+                current_ranking = stateful!(Input -> CurrentRanking => current_ranking);
+                aggregate_ranking = stateful!(Input -> AggregateRanking => aggregate_ranking);
                 fold_sink = sink!(FoldSnapshot => fold_sink);
                 group_sink = sink!(GroupSnapshot => group_sink);
+                current_ranking_sink = sink!(CurrentRanking => current_ranking_sink);
+                aggregate_ranking_sink = sink!(AggregateRanking => aggregate_ranking_sink);
             },
 
             topology: {
                 inputs |> validate;
                 validate |> fold;
                 validate |> grouped;
+                validate |> current_ranking;
+                validate |> aggregate_ranking;
                 fold |> fold_sink;
                 grouped |> group_sink;
+                current_ranking |> current_ranking_sink;
+                aggregate_ranking |> aggregate_ranking_sink;
             }
         })
     })
@@ -344,15 +414,32 @@ fn parent_values(output: &ChainEvent, inputs_by_id: &HashMap<EventId, Input>) ->
         .collect()
 }
 
-fn assert_stateful_projection(
-    run_dir: &Path,
-    validate: &[EventEnvelope<ChainEvent>],
-    validate_errors: &[EventEnvelope<ChainEvent>],
-    fold: &[EventEnvelope<ChainEvent>],
-    grouped: &[EventEnvelope<ChainEvent>],
-    fold_sink: &[EventEnvelope<ChainEvent>],
-    group_sink: &[EventEnvelope<ChainEvent>],
-) {
+struct ProjectionJournals<'a> {
+    validate: &'a [EventEnvelope<ChainEvent>],
+    validate_errors: &'a [EventEnvelope<ChainEvent>],
+    fold: &'a [EventEnvelope<ChainEvent>],
+    grouped: &'a [EventEnvelope<ChainEvent>],
+    current_ranking: &'a [EventEnvelope<ChainEvent>],
+    aggregate_ranking: &'a [EventEnvelope<ChainEvent>],
+    fold_sink: &'a [EventEnvelope<ChainEvent>],
+    group_sink: &'a [EventEnvelope<ChainEvent>],
+    current_ranking_sink: &'a [EventEnvelope<ChainEvent>],
+    aggregate_ranking_sink: &'a [EventEnvelope<ChainEvent>],
+}
+
+fn assert_stateful_projection(run_dir: &Path, journals: ProjectionJournals<'_>) {
+    let ProjectionJournals {
+        validate,
+        validate_errors,
+        fold,
+        grouped,
+        current_ranking,
+        aggregate_ranking,
+        fold_sink,
+        group_sink,
+        current_ranking_sink,
+        aggregate_ranking_sink,
+    } = journals;
     assert!(
         validate_errors.is_empty(),
         "ordinary in-band transform errors remain on the data path"
@@ -477,10 +564,47 @@ fn assert_stateful_projection(
         );
     }
 
+    assert_eq!(
+        facts::<CurrentRanking>(current_ranking),
+        vec![CurrentRanking {
+            keys: vec!["b".into(), "a".into()],
+            scores: vec![6, 5],
+        }],
+        "TopN ranks each key's latest value by replacement"
+    );
+    assert_eq!(
+        facts::<AggregateRanking>(aggregate_ranking),
+        vec![AggregateRanking {
+            keys: vec!["b".into(), "a".into()],
+            total_scores: vec![12, 6],
+            counts: vec![3, 2],
+        }],
+        "TopNBy ranks cumulative per-key aggregates"
+    );
+    for (stage_name, rows) in [
+        ("current_ranking", current_ranking),
+        ("aggregate_ranking", aggregate_ranking),
+    ] {
+        let row = rows
+            .iter()
+            .find(|envelope| matches!(envelope.event.content, ChainEventContent::Data { .. }))
+            .unwrap_or_else(|| panic!("{stage_name} authored one data row"));
+        assert_eq!(row.event.writer_id, stage_writer(run_dir, stage_name));
+        assert_eq!(
+            parent_values(&row.event, &successful_inputs),
+            vec![1, 2, 4, 5, 6],
+            "{stage_name} retains the complete whole-batch contribution frontier"
+        );
+    }
+
     assert_eq!(delivery_count(fold_sink), 3);
     assert_eq!(delivery_count(group_sink), 2);
+    assert_eq!(delivery_count(current_ranking_sink), 1);
+    assert_eq!(delivery_count(aggregate_ranking_sink), 1);
     assert_canonical_fact_and_eof::<FoldSnapshot>(fold, 3);
     assert_canonical_fact_and_eof::<GroupSnapshot>(grouped, 2);
+    assert_canonical_fact_and_eof::<CurrentRanking>(current_ranking, 1);
+    assert_canonical_fact_and_eof::<AggregateRanking>(aggregate_ranking, 1);
 }
 
 async fn run(journal_base: &Path, replay_from: Option<&Path>) {
@@ -507,16 +631,26 @@ async fn typed_stateful_boundaries_have_live_replay_journal_parity() {
     let live_validate_errors = read_stage_errors(&live, "validate").await;
     let live_fold = read_stage(&live, "fold").await;
     let live_grouped = read_stage(&live, "grouped").await;
+    let live_current_ranking = read_stage(&live, "current_ranking").await;
+    let live_aggregate_ranking = read_stage(&live, "aggregate_ranking").await;
     let live_fold_sink = read_stage(&live, "fold_sink").await;
     let live_group_sink = read_stage(&live, "group_sink").await;
+    let live_current_ranking_sink = read_stage(&live, "current_ranking_sink").await;
+    let live_aggregate_ranking_sink = read_stage(&live, "aggregate_ranking_sink").await;
     assert_stateful_projection(
         &live,
-        &live_validate,
-        &live_validate_errors,
-        &live_fold,
-        &live_grouped,
-        &live_fold_sink,
-        &live_group_sink,
+        ProjectionJournals {
+            validate: &live_validate,
+            validate_errors: &live_validate_errors,
+            fold: &live_fold,
+            grouped: &live_grouped,
+            current_ranking: &live_current_ranking,
+            aggregate_ranking: &live_aggregate_ranking,
+            fold_sink: &live_fold_sink,
+            group_sink: &live_group_sink,
+            current_ranking_sink: &live_current_ranking_sink,
+            aggregate_ranking_sink: &live_aggregate_ranking_sink,
+        },
     );
 
     run(&journal_base, Some(&live)).await;
@@ -526,16 +660,26 @@ async fn typed_stateful_boundaries_have_live_replay_journal_parity() {
     let replay_validate_errors = read_stage_errors(&replay, "validate").await;
     let replay_fold = read_stage(&replay, "fold").await;
     let replay_grouped = read_stage(&replay, "grouped").await;
+    let replay_current_ranking = read_stage(&replay, "current_ranking").await;
+    let replay_aggregate_ranking = read_stage(&replay, "aggregate_ranking").await;
     let replay_fold_sink = read_stage(&replay, "fold_sink").await;
     let replay_group_sink = read_stage(&replay, "group_sink").await;
+    let replay_current_ranking_sink = read_stage(&replay, "current_ranking_sink").await;
+    let replay_aggregate_ranking_sink = read_stage(&replay, "aggregate_ranking_sink").await;
     assert_stateful_projection(
         &replay,
-        &replay_validate,
-        &replay_validate_errors,
-        &replay_fold,
-        &replay_grouped,
-        &replay_fold_sink,
-        &replay_group_sink,
+        ProjectionJournals {
+            validate: &replay_validate,
+            validate_errors: &replay_validate_errors,
+            fold: &replay_fold,
+            grouped: &replay_grouped,
+            current_ranking: &replay_current_ranking,
+            aggregate_ranking: &replay_aggregate_ranking,
+            fold_sink: &replay_fold_sink,
+            group_sink: &replay_group_sink,
+            current_ranking_sink: &replay_current_ranking_sink,
+            aggregate_ranking_sink: &replay_aggregate_ranking_sink,
+        },
     );
 
     assert_eq!(
@@ -547,4 +691,12 @@ async fn typed_stateful_boundaries_have_live_replay_journal_parity() {
     live_groups.sort_by(|left, right| left.key.cmp(&right.key));
     replay_groups.sort_by(|left, right| left.key.cmp(&right.key));
     assert_eq!(replay_groups, live_groups);
+    assert_eq!(
+        facts::<CurrentRanking>(&replay_current_ranking),
+        facts::<CurrentRanking>(&live_current_ranking)
+    );
+    assert_eq!(
+        facts::<AggregateRanking>(&replay_aggregate_ranking),
+        facts::<AggregateRanking>(&live_aggregate_ranking)
+    );
 }

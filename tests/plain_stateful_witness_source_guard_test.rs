@@ -224,3 +224,59 @@ fn stateful_macro_and_builder_keep_the_typed_erasure_boundary() {
         "the runtime must install stage authorship before initialisation"
     );
 }
+
+#[test]
+fn first_class_accumulator_catalogue_cannot_be_collapsed_or_shrunk() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let accumulator_root =
+        root.join("crates/obzenflow_runtime/src/stages/stateful/strategies/accumulators");
+    let module_source =
+        fs::read_to_string(accumulator_root.join("mod.rs")).expect("read accumulator module");
+    let helper_source = fs::read_to_string(root.join("src/typed/stateful.rs"))
+        .expect("read typed stateful constructors");
+
+    for (module, concept) in [
+        ("reduce", "Reduce"),
+        ("conflate", "Conflate"),
+        ("group_by", "GroupBy"),
+        ("top_n", "TopN"),
+        ("top_n_by", "TopNBy"),
+    ] {
+        let path = accumulator_root.join(format!("{module}.rs"));
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("missing first-class {concept} module: {error}"));
+        assert!(
+            module_source.contains(&format!("pub mod {module};")),
+            "{concept} must remain a public accumulator module"
+        );
+        assert!(
+            source.contains(&format!("pub struct {concept}")),
+            "{concept} must remain a primary public strategy type"
+        );
+        assert!(
+            helper_source.contains(&format!("pub fn {module}")),
+            "typed::stateful::{module} must remain a convenience constructor"
+        );
+        for combinator in [
+            "emit_on_eof",
+            "emit_every_n",
+            "emit_within",
+            "emit_always",
+            "with_emission",
+        ] {
+            assert!(
+                source.contains(combinator),
+                "{concept} lost emission combinator {combinator}"
+            );
+        }
+    }
+
+    assert!(
+        module_source.contains("pub use wrapper::{Accumulator,"),
+        "Accumulator must remain a public first-class strategy contract"
+    );
+    assert!(
+        !accumulator_root.join("typed_facades.rs").exists(),
+        "the first-class catalogue must not be collapsed into typed_facades.rs"
+    );
+}

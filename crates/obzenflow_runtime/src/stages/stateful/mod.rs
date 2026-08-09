@@ -12,7 +12,7 @@
 //! - Type-safe state management (State: Clone + Send + Sync)
 //! - Proper lifecycle with Accumulating → Draining → Drained states
 //! - Control event strategies for customizing behavior
-//! - Typed composition facades for reduction and keyed aggregation
+//! - First-class typed accumulation and emission strategies
 //!
 //! # Example
 //!
@@ -61,8 +61,13 @@ pub use config::StatefulConfig;
 pub use fsm::{StatefulEvent, StatefulState};
 pub use handle::{StatefulHandle, StatefulHandleExt};
 
-// FLOWIP-080c: Re-export commonly used strategies for convenience
-pub use strategies::accumulators::{StatefulWithEmission, TopNByEntry, TopNBySnapshot};
+// FLOWIP-080c/FLOWIP-134e: first-class accumulation strategies.
+pub use strategies::accumulators::{
+    Accumulator, Conflate, ConflateState, ConflateTyped, GroupBy, GroupByState, GroupByTyped,
+    Reduce, ReduceState, ReduceTyped, StatefulWithEmission, TopN, TopNBy, TopNByEntry,
+    TopNBySnapshot, TopNByState, TopNByTyped, TopNEntry, TopNSnapshot, TopNState, TopNTyped,
+    WrapperState,
+};
 pub use strategies::emissions::{EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow};
 
 // FLOWIP-128g: sealed seeded AI map-reduce collector

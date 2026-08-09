@@ -23,7 +23,7 @@ type AccumulatorTransition<S, O> = (
     Option<Vec<TraceState>>,
 );
 
-/// Explicit domain and cadence state for an accumulator facade.
+/// Explicit domain and cadence state for an accumulator strategy.
 #[derive(Clone, Debug)]
 pub struct WrapperState<S> {
     pub inner: S,
@@ -82,14 +82,14 @@ where
     }
 }
 
-/// One typed accumulator projection plus optional exact contribution evidence.
+/// One accumulator projection plus optional framework-owned contribution evidence.
 #[doc(hidden)]
-pub struct TypedAccumulatorOutput<O> {
+pub struct AccumulatorOutput<O> {
     pub(crate) output: O,
     pub(crate) trace: Option<TraceState>,
 }
 
-impl<O> TypedAccumulatorOutput<O> {
+impl<O> AccumulatorOutput<O> {
     pub(crate) fn whole_batch(output: O) -> Self {
         Self {
             output,
@@ -105,21 +105,27 @@ impl<O> TypedAccumulatorOutput<O> {
     }
 }
 
-/// Crate-private typed facade primitive. Contribution evidence is available
-/// only through this framework-owned lane.
-pub(crate) mod sealed {
-    pub trait Sealed {}
-}
-
-#[doc(hidden)]
-pub trait TypedAccumulator: sealed::Sealed + Send + Sync + Debug {
+/// A first-class typed stateful accumulation strategy.
+///
+/// An accumulator owns the domain fold and its value projection. It composes
+/// with an [`EmissionStrategy`] through [`StatefulWithEmission`] to become a
+/// [`TypedStatefulHandler`]. Implementations work only with typed values; event
+/// envelopes, writer identity, and contribution evidence remain runtime-owned.
+pub trait Accumulator: Send + Sync + Debug {
     type State: Clone + Send + Sync + Debug;
     type Input: TypedPayload + Send + Sync + 'static;
     type Output: OneFactStageOutput + Send + Sync + 'static;
 
     fn initial_state(&self) -> Self::State;
     fn accumulate(&self, state: &mut Self::State, input: Self::Input);
+    fn outputs(&self, state: &Self::State) -> Vec<Self::Output>;
 
+    /// Runtime-only accumulation hook for opaque contribution evidence.
+    ///
+    /// External accumulators inherit whole-batch attribution and cannot inspect
+    /// the contribution token. Framework accumulators may override this hook to
+    /// retain exact per-output partitions.
+    #[doc(hidden)]
     fn accumulate_with_contribution(
         &self,
         state: &mut Self::State,
@@ -129,19 +135,33 @@ pub trait TypedAccumulator: sealed::Sealed + Send + Sync + Debug {
         self.accumulate(state, input);
     }
 
-    fn outputs(&self, state: &Self::State) -> Vec<TypedAccumulatorOutput<Self::Output>>;
+    /// Runtime-only projection hook for exact contribution partitions.
+    ///
+    /// The default deliberately applies the adapter's whole-batch frontier to
+    /// every projected value. Evidence-bearing constructors remain private to
+    /// the runtime, so authored accumulators cannot manufacture provenance.
+    #[doc(hidden)]
+    fn outputs_with_contribution(
+        &self,
+        state: &Self::State,
+    ) -> Vec<AccumulatorOutput<Self::Output>> {
+        self.outputs(state)
+            .into_iter()
+            .map(AccumulatorOutput::whole_batch)
+            .collect()
+    }
 }
 
 impl<A, E> StatefulWithEmission<A, E>
 where
-    A: TypedAccumulator,
+    A: Accumulator,
     E: EmissionStrategy,
 {
     fn typed_outputs(
         &self,
         state: &WrapperState<A::State>,
     ) -> (Vec<A::Output>, Option<Vec<TraceState>>) {
-        let projected = self.accumulator.outputs(&state.inner);
+        let projected = self.accumulator.outputs_with_contribution(&state.inner);
         let exact = projected.iter().all(|item| item.trace.is_some());
         let mut outputs = Vec::with_capacity(projected.len());
         let mut traces = exact.then(|| Vec::with_capacity(projected.len()));
@@ -180,7 +200,7 @@ where
 
 impl<A, E> TypedStatefulHandler for StatefulWithEmission<A, E>
 where
-    A: TypedAccumulator + 'static,
+    A: Accumulator + 'static,
     E: EmissionStrategy + Clone + 'static,
 {
     type State = WrapperState<A::State>;
