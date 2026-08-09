@@ -122,7 +122,8 @@ impl std::fmt::Debug for MiddlewareContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::event::payloads::observability_payload::CircuitBreakerOpenTrigger;
+    use obzenflow_core::event::{ChainEventFactory, CircuitBreakerOpenedEventParams};
     use obzenflow_core::WriterId;
     use serde_json::json;
 
@@ -160,8 +161,16 @@ mod tests {
 
         // Write a circuit breaker opened event
         ctx.write_control_event(ChainEventFactory::circuit_breaker_opened(
-            writer_id, 0.75, // error_rate
-            10,   // failure_count
+            writer_id,
+            CircuitBreakerOpenedEventParams {
+                trigger: CircuitBreakerOpenTrigger::ConsecutiveFailures,
+                observed_calls: 10,
+                error_rate: 1.0,
+                failure_count: 10,
+                slow_call_rate: None,
+                slow_call_count: None,
+                last_error: None,
+            },
         ));
 
         // Write a metrics state snapshot event

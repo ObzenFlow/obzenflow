@@ -187,14 +187,7 @@ impl SinkDeliveryObserver for LoggingMiddleware {
     }
 
     fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) -> ObserverReport {
-        let processing_message = self.log_processing(ctx.input);
-        let mut report = ObserverReport::empty().with_diagnostic(self.diagnostic_event(
-            ctx.stage_id,
-            "before_sink_delivery",
-            processing_message,
-            Some(ctx.input),
-            json!({}),
-        ));
+        self.add_processed(1);
         let (message, outcome) = match &ctx.outcome {
             SinkDeliveryObserverOutcome::Delivered => (
                 format!("Sink delivered {}", ctx.input.id),
@@ -210,13 +203,15 @@ impl SinkDeliveryObserver for LoggingMiddleware {
             ),
         };
         self.emit(message.clone());
-        report = report.with_diagnostic(self.diagnostic_event(
+        ObserverReport::empty().with_diagnostic(self.diagnostic_event(
             ctx.stage_id,
-            "after_sink_delivery",
+            "sink_delivery_observed",
             message,
             Some(ctx.input),
-            json!({ "outcome": outcome }),
-        ));
-        report
+            json!({
+                "outcome": outcome,
+                "stage_input_position": ctx.stage_input_position,
+            }),
+        ))
     }
 }

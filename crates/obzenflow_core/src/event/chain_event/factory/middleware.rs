@@ -4,7 +4,7 @@
 
 use super::ChainEventFactory;
 use crate::event::chain_event::{
-    ChainEvent, CircuitBreakerAttemptSettledEventParams,
+    ChainEvent, CircuitBreakerAttemptSettledEventParams, CircuitBreakerOpenedEventParams,
     CircuitBreakerRecoveryCompletedEventParams, CircuitBreakerSummaryEventParams,
 };
 use crate::event::context::causality_context::CausalityContext;
@@ -149,19 +149,32 @@ impl ChainEventFactory {
         )
     }
 
-    /// Create a circuit breaker opened event
+    /// Create a circuit breaker opened event carrying the exact evidence that
+    /// caused the state transition.
     pub fn circuit_breaker_opened(
         writer_id: WriterId,
-        error_rate: f64,
-        failure_count: u64,
+        params: CircuitBreakerOpenedEventParams,
     ) -> ChainEvent {
+        let CircuitBreakerOpenedEventParams {
+            trigger,
+            observed_calls,
+            error_rate,
+            failure_count,
+            slow_call_rate,
+            slow_call_count,
+            last_error,
+        } = params;
         Self::observability_event(
             writer_id,
             ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
                 CircuitBreakerEvent::Opened {
                     error_rate,
                     failure_count,
-                    last_error: None,
+                    trigger,
+                    observed_calls,
+                    slow_call_rate,
+                    slow_call_count,
+                    last_error,
                 },
             )),
         )

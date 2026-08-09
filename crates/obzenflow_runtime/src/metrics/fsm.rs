@@ -12,7 +12,8 @@ use obzenflow_core::event::chain_event::ChainEventContent;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::observability::{HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot};
 use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload,
+    CircuitBreakerEvent, CircuitBreakerOpenTrigger, MetricsLifecycle, MiddlewareLifecycle,
+    ObservabilityPayload,
 };
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{JournalEvent, WriterId};
@@ -1729,13 +1730,20 @@ impl FsmAction for MetricsAggregatorAction {
                         CircuitBreakerEvent::Opened {
                             error_rate: _,
                             failure_count,
+                            trigger,
                             ..
                         } => {
                             store.record_circuit_breaker_transition(stage_id, "open");
                             store.circuit_breaker_state.insert(stage_id, 1.0);
-                            store
-                                .circuit_breaker_consecutive_failures
-                                .insert(stage_id, *failure_count as f64);
+                            if matches!(trigger, CircuitBreakerOpenTrigger::ConsecutiveFailures) {
+                                store
+                                    .circuit_breaker_consecutive_failures
+                                    .insert(stage_id, *failure_count as f64);
+                            } else {
+                                // Window failures and failed probes are not a
+                                // consecutive-failure gauge.
+                                store.circuit_breaker_consecutive_failures.remove(&stage_id);
+                            }
                         }
                         CircuitBreakerEvent::Closed { .. } => {
                             store.record_circuit_breaker_transition(stage_id, "closed");

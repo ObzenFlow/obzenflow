@@ -4540,6 +4540,10 @@ impl MiddlewareSseState {
                     CircuitBreakerEvent::Opened {
                         error_rate,
                         failure_count,
+                        trigger,
+                        observed_calls,
+                        slow_call_rate,
+                        slow_call_count,
                         last_error,
                     } => {
                         let state_to = "open".to_string();
@@ -4553,6 +4557,8 @@ impl MiddlewareSseState {
                             "context": {
                                 "error_rate": error_rate,
                                 "failure_count": failure_count,
+                                "trigger": trigger,
+                                "observed_calls": observed_calls,
                             }
                         });
                         if let Some(from) = previous_state {
@@ -4560,6 +4566,12 @@ impl MiddlewareSseState {
                         }
                         if let Some(err) = last_error {
                             payload["context"]["last_error"] = json!(err);
+                        }
+                        if let Some(slow_call_rate) = slow_call_rate {
+                            payload["context"]["slow_call_rate"] = json!(slow_call_rate);
+                        }
+                        if let Some(slow_call_count) = slow_call_count {
+                            payload["context"]["slow_call_count"] = json!(slow_call_count);
                         }
                         Some(payload)
                     }
