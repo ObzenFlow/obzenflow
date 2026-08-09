@@ -15,7 +15,7 @@ fn main() {
     let estimator = ();
     let _ = inference!(
         Input ->{
-            at_least_once(ChatCompletion) via chat with { policy },
+            at_least_once(ChatCompletion) via chat with policy,
             estimator: estimator
         } Output => role
     );

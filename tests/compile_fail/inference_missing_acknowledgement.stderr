@@ -4,7 +4,7 @@ error: inference!: paid non-idempotent ChatCompletion requires `at_least_once(Ch
 15 |       let _ = inference!(
    |  _____________^
 16 | |         Input ->{
-17 | |             ChatCompletion via chat with { policy }
+17 | |             ChatCompletion via chat with policy
 18 | |         } Output => role
 19 | |     );
    | |_____^

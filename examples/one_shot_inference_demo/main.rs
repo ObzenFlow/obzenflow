@@ -119,7 +119,7 @@ fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowD
                     ReducedEvidence -> {
                         at_least_once(ChatCompletion)
                             via chat
-                            with { ai_resilience() }
+                            with ai_resilience()
                     } DecisionBrief => brief_role
                 );
                 display = sink!(DecisionBrief => display_brief);

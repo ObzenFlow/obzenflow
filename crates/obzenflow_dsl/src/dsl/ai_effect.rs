@@ -89,7 +89,7 @@ pub(crate) fn require_generated_chat_resilience<'a>(
 
     Err(format!(
         "{surface}: generated {owner_kind} '{owner}' requires exactly one EffectResilience \
-         policy on 'ChatCompletion'; attach `with {{ ai_resilience() }}` to the effect row \
+         policy on 'ChatCompletion'; attach `with ai_resilience()` to the effect row \
          (found {resilience_count} EffectResilience policies across {} attachments)",
         declarations.len()
     ))

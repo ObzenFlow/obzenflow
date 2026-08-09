@@ -545,7 +545,7 @@ async fn transform_applies_stage_middleware() -> Result<()> {
 
             stages: {
                 source = source!(TransformStageEvent => source_handler);
-                mw_transform = transform!(TransformStageEvent -> TransformStageEvent => transform_handler, [
+                mw_transform = transform!(TransformStageEvent -> TransformStageEvent => transform_handler, observers: [
                     CountDataCommitFactory { calls: observer_calls_for_flow.clone() }
                 ]);
                 sink = sink!(TransformStageEvent => sink_handler);

@@ -5,7 +5,7 @@ error: ai_map_reduce!: paid non-idempotent ChatCompletion requires `at_least_onc
    |  _____________^
 17 | |         Seed -> Output => {
 18 | |             map: [Item] ->{
-19 | |                 ChatCompletion via chat with { policy }
+19 | |                 ChatCompletion via chat with policy
 ...  |
 32 | |     );
    | |_____^
@@ -19,7 +19,7 @@ error[E0282]: type annotations needed
    |  _____________^
 17 | |         Seed -> Output => {
 18 | |             map: [Item] ->{
-19 | |                 ChatCompletion via chat with { policy }
+19 | |                 ChatCompletion via chat with policy
 ...  |
 32 | |     );
    | |_____^ cannot infer type

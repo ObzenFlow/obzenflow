@@ -331,37 +331,84 @@ pub struct ProtectedUnitId {
     pub unit: ProtectedUnit,
 }
 
-/// Which ordered declaration lane produced this attachment.
+/// The grammar position that produced an attachment.
 ///
-/// Adapter-owned so the binder can keep explicit effect-policy declarations
-/// distinct from the stage middleware list when both attach the same family to
-/// the same protected unit.
+/// These variants are archive vocabulary. Their stable labels are written into
+/// the attachment-id preimage explicitly; Rust discriminants are never hashed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MiddlewareDeclarationScope {
-    StageMiddleware,
-    EffectPolicy,
+pub enum MiddlewareDeclarationPosition {
+    SourceWith,
+    IngressWith,
+    EffectWith,
+    SinkWith,
+    Observers,
 }
 
-/// Replay-stable declaration position within an adapter-owned declaration lane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MiddlewareDeclarationIndex {
-    pub scope: MiddlewareDeclarationScope,
-    pub index: u64,
-}
-
-impl MiddlewareDeclarationIndex {
-    pub fn stage(index: usize) -> Self {
-        Self {
-            scope: MiddlewareDeclarationScope::StageMiddleware,
-            index: index as u64,
+impl MiddlewareDeclarationPosition {
+    pub const fn stable_label(self) -> &'static str {
+        match self {
+            Self::SourceWith => "source_with",
+            Self::IngressWith => "ingress_with",
+            Self::EffectWith => "effect_with",
+            Self::SinkWith => "sink_with",
+            Self::Observers => "observers",
         }
     }
 
-    pub fn effect_policy(index: usize) -> Self {
-        Self {
-            scope: MiddlewareDeclarationScope::EffectPolicy,
-            index: index as u64,
+    pub const fn syntax_label(self) -> &'static str {
+        match self {
+            Self::SourceWith => "source with",
+            Self::IngressWith => "ingress with",
+            Self::EffectWith => "effect with",
+            Self::SinkWith => "sink with",
+            Self::Observers => "observers:",
         }
+    }
+}
+
+/// Replay-stable ordinal within one grammar-owned declaration position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MiddlewareDeclarationIndex {
+    position: MiddlewareDeclarationPosition,
+    ordinal: u64,
+}
+
+impl MiddlewareDeclarationIndex {
+    const fn new(position: MiddlewareDeclarationPosition, ordinal: u64) -> Self {
+        Self { position, ordinal }
+    }
+
+    pub fn source_with(ordinal: usize) -> Self {
+        Self::new(MiddlewareDeclarationPosition::SourceWith, ordinal as u64)
+    }
+
+    pub const fn ingress_with() -> Self {
+        Self::new(MiddlewareDeclarationPosition::IngressWith, 0)
+    }
+
+    pub const fn effect_with() -> Self {
+        Self::new(MiddlewareDeclarationPosition::EffectWith, 0)
+    }
+
+    pub fn sink_with(ordinal: usize) -> Self {
+        Self::new(MiddlewareDeclarationPosition::SinkWith, ordinal as u64)
+    }
+
+    pub fn observers(ordinal: usize) -> Self {
+        Self::new(MiddlewareDeclarationPosition::Observers, ordinal as u64)
+    }
+
+    pub const fn position(self) -> MiddlewareDeclarationPosition {
+        self.position
+    }
+
+    pub const fn ordinal(self) -> u64 {
+        self.ordinal
+    }
+
+    #[cfg(test)]
+    fn for_test(position: MiddlewareDeclarationPosition, ordinal: u64) -> Self {
+        Self { position, ordinal }
     }
 }
 
@@ -386,7 +433,7 @@ impl MiddlewareAttachmentId {
         request: &MiddlewareAttachmentRequest<'_>,
     ) -> Self {
         let mut context = Context::new(&SHA256);
-        push_field(&mut context, "schema", "middleware-attachment:v4");
+        push_field(&mut context, "schema", "middleware-attachment:v5");
         push_field(&mut context, "middleware.label", declaration.label);
         push_field(&mut context, "middleware.family", declaration.family_label);
         push_declaration_index(&mut context, request.declaration_index);
@@ -417,12 +464,12 @@ fn push_stage_id(context: &mut Context, label: &str, stage_id: StageId) {
 }
 
 fn push_declaration_index(context: &mut Context, index: MiddlewareDeclarationIndex) {
-    let scope = match index.scope {
-        MiddlewareDeclarationScope::StageMiddleware => "stage_middleware",
-        MiddlewareDeclarationScope::EffectPolicy => "effect_policy",
-    };
-    push_field(context, "declaration.scope", scope);
-    push_field(context, "declaration.index", &index.index.to_string());
+    push_field(
+        context,
+        "declaration.position",
+        index.position().stable_label(),
+    );
+    push_field(context, "declaration.ordinal", &index.ordinal().to_string());
 }
 
 fn push_surface(context: &mut Context, surface: &MiddlewareSurface) {
@@ -557,8 +604,9 @@ pub struct MiddlewareDeclaration {
     pub capability: MiddlewareCapability,
     /// The surfaces this factory can attach to. A control middleware may span
     /// several (the rate limiter declares source poll, effect, sink delivery,
-    /// and ingress); the binder picks the concrete surface per call site and
-    /// validates membership. A declaration always names at least one surface.
+    /// and ingress); the grammar position's typed binder supplies the concrete
+    /// surface and this carrier validates membership. A declaration always
+    /// names at least one surface.
     pub surfaces: Vec<MiddlewareSurfaceKind>,
     materialization_claim: MaterializationClaim,
 }
@@ -840,6 +888,16 @@ pub enum MiddlewareAttachmentValidationError {
         surface: MiddlewareSurfaceKind,
         unit: ProtectedUnit,
     },
+
+    #[error(
+        "declaration position {position:?} at ordinal {ordinal} cannot carry {capability:?} middleware on {surface:?}"
+    )]
+    DeclarationPositionMismatch {
+        position: MiddlewareDeclarationPosition,
+        ordinal: u64,
+        capability: MiddlewareCapability,
+        surface: MiddlewareSurfaceKind,
+    },
 }
 
 /// Validate the pre-erasure declaration against one concrete binding request
@@ -873,6 +931,48 @@ pub fn validate_attachment_request(
             capability: declaration.capability,
             surface,
         });
+    }
+
+    // FLOWIP-115s: the grammar position is an authority-bearing coordinate,
+    // not a descriptive tag inferred from capability or surface after the
+    // fact. Validate the complete position/capability/surface matrix before an
+    // identity can be minted. Bare singleton positions additionally reserve
+    // ordinal zero until their owning follow-up proposal changes the grammar.
+    let position = request.declaration_index.position();
+    let ordinal = request.declaration_index.ordinal();
+    let position_matches = match position {
+        MiddlewareDeclarationPosition::SourceWith => {
+            declaration.capability == MiddlewareCapability::Control
+                && surface == MiddlewareSurfaceKind::SourcePoll
+        }
+        MiddlewareDeclarationPosition::IngressWith => {
+            ordinal == 0
+                && declaration.capability == MiddlewareCapability::Control
+                && surface == MiddlewareSurfaceKind::Ingress
+        }
+        MiddlewareDeclarationPosition::EffectWith => {
+            ordinal == 0
+                && declaration.capability == MiddlewareCapability::Control
+                && surface == MiddlewareSurfaceKind::Effect
+        }
+        MiddlewareDeclarationPosition::SinkWith => {
+            declaration.capability == MiddlewareCapability::Control
+                && surface == MiddlewareSurfaceKind::SinkDelivery
+        }
+        MiddlewareDeclarationPosition::Observers => {
+            declaration.capability == MiddlewareCapability::Observer
+                && crate::middleware::observer::OBSERVER_SURFACE_KINDS.contains(&surface)
+        }
+    };
+    if !position_matches {
+        return Err(
+            MiddlewareAttachmentValidationError::DeclarationPositionMismatch {
+                position,
+                ordinal,
+                capability: declaration.capability,
+                surface,
+            },
+        );
     }
 
     let surface_stage = request
@@ -1476,7 +1576,7 @@ mod tests {
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::ingress_with(),
         };
 
         // A source-owned ingress attachment validates and derives a stable id.
@@ -1515,7 +1615,7 @@ mod tests {
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::ingress_with(),
         };
 
         // A control declaration that does not list Ingress is UnsupportedSurface.
@@ -1550,7 +1650,7 @@ mod tests {
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &protected_unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::observers(0),
         };
 
         let observer =
@@ -1587,7 +1687,7 @@ mod tests {
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &protected_unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::source_with(0),
         };
 
         let first = validate_attachment_request(&declaration, &request).unwrap();
@@ -1597,12 +1697,12 @@ mod tests {
         assert_eq!(first.as_ulid(), second.as_ulid());
         assert_eq!(
             first.as_ulid().to_string(),
-            "75HYAEDDXTDZ24V4EGYBD23TFF",
-            "the middleware-attachment:v4 coordinate is a versioned archive boundary"
+            "4PSQFY5Q4PTGAJB1RCWBE4XY6A",
+            "the middleware-attachment:v5 coordinate is a versioned archive boundary"
         );
 
         let other_index_request = MiddlewareAttachmentRequest {
-            declaration_index: MiddlewareDeclarationIndex::stage(1),
+            declaration_index: MiddlewareDeclarationIndex::source_with(1),
             ..request
         };
         assert_ne!(
@@ -1637,7 +1737,7 @@ mod tests {
         let effect_request = MiddlewareAttachmentRequest {
             surface: &effect_surface,
             protected_unit: &effect_unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::effect_with(),
         };
         assert_ne!(
             first,
@@ -1655,20 +1755,280 @@ mod tests {
         let other_stage_request = MiddlewareAttachmentRequest {
             surface: &other_stage_surface,
             protected_unit: &other_stage_unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::source_with(0),
         };
         assert_ne!(
             first,
             validate_attachment_request(&declaration, &other_stage_request).unwrap()
         );
 
-        let other_lane_request = MiddlewareAttachmentRequest {
-            declaration_index: MiddlewareDeclarationIndex::effect_policy(0),
-            ..request
-        };
+        assert_eq!(
+            MiddlewareDeclarationPosition::SourceWith.stable_label(),
+            "source_with"
+        );
+    }
+
+    fn surface_fixture(
+        kind: MiddlewareSurfaceKind,
+        stage_id: StageId,
+    ) -> (MiddlewareSurface, ProtectedUnitId) {
+        match kind {
+            MiddlewareSurfaceKind::SourcePoll => (
+                MiddlewareSurface::SourcePoll(SourcePollSurface { stage_id }),
+                ProtectedUnitId {
+                    stage_id,
+                    unit: ProtectedUnit::SourcePoll(SourcePollUnitId),
+                },
+            ),
+            MiddlewareSurfaceKind::Effect => (
+                MiddlewareSurface::Effect(EffectSurface {
+                    stage_id,
+                    effect_type: EffectTypeKey::from("matrix.effect"),
+                    safety: EffectSafety::Idempotent,
+                }),
+                ProtectedUnitId {
+                    stage_id,
+                    unit: ProtectedUnit::Effect(EffectUnitId {
+                        effect_type: EffectTypeKey::from("matrix.effect"),
+                    }),
+                },
+            ),
+            MiddlewareSurfaceKind::SinkDelivery => (
+                MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
+                    stage_id,
+                    configured_target: None,
+                }),
+                ProtectedUnitId {
+                    stage_id,
+                    unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
+                        target: SinkDeliveryTarget::Stage,
+                    }),
+                },
+            ),
+            MiddlewareSurfaceKind::Ingress => ingress_fixture(stage_id),
+            MiddlewareSurfaceKind::Handler => (
+                MiddlewareSurface::Handler { stage_id },
+                ProtectedUnitId {
+                    stage_id,
+                    unit: ProtectedUnit::Handler,
+                },
+            ),
+            MiddlewareSurfaceKind::Stateful => (
+                MiddlewareSurface::Stateful { stage_id },
+                ProtectedUnitId {
+                    stage_id,
+                    unit: ProtectedUnit::Stateful,
+                },
+            ),
+            MiddlewareSurfaceKind::Join => (
+                MiddlewareSurface::Join { stage_id },
+                ProtectedUnitId {
+                    stage_id,
+                    unit: ProtectedUnit::Join,
+                },
+            ),
+            MiddlewareSurfaceKind::OutputCommit => (
+                MiddlewareSurface::OutputCommit { stage_id },
+                ProtectedUnitId {
+                    stage_id,
+                    unit: ProtectedUnit::OutputCommit,
+                },
+            ),
+            MiddlewareSurfaceKind::StageLifecycle => (
+                MiddlewareSurface::StageLifecycle { stage_id },
+                ProtectedUnitId {
+                    stage_id,
+                    unit: ProtectedUnit::StageLifecycle,
+                },
+            ),
+        }
+    }
+
+    #[test]
+    fn five_position_labels_are_exact_and_pairwise_distinct_in_the_v5_preimage() {
+        let positions = [
+            MiddlewareDeclarationPosition::SourceWith,
+            MiddlewareDeclarationPosition::IngressWith,
+            MiddlewareDeclarationPosition::EffectWith,
+            MiddlewareDeclarationPosition::SinkWith,
+            MiddlewareDeclarationPosition::Observers,
+        ];
+        assert_eq!(
+            positions.map(MiddlewareDeclarationPosition::stable_label),
+            [
+                "source_with",
+                "ingress_with",
+                "effect_with",
+                "sink_with",
+                "observers",
+            ]
+        );
+
+        let stage_id = StageId::new_const(11);
+        let (surface, protected_unit) =
+            surface_fixture(MiddlewareSurfaceKind::SourcePoll, stage_id);
+        let declaration = MiddlewareDeclaration::control(
+            "position-separation",
+            vec![MiddlewareSurfaceKind::SourcePoll],
+        );
+        let ids = positions
+            .into_iter()
+            .map(|position| {
+                let request = MiddlewareAttachmentRequest {
+                    surface: &surface,
+                    protected_unit: &protected_unit,
+                    declaration_index: MiddlewareDeclarationIndex::for_test(position, 0),
+                };
+                MiddlewareAttachmentId::from_declaration_and_request(&declaration, &request)
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            ids.len(),
+            5,
+            "every stable position label separates identity"
+        );
+    }
+
+    #[test]
+    fn position_capability_surface_matrix_fails_closed() {
+        let positions = [
+            MiddlewareDeclarationPosition::SourceWith,
+            MiddlewareDeclarationPosition::IngressWith,
+            MiddlewareDeclarationPosition::EffectWith,
+            MiddlewareDeclarationPosition::SinkWith,
+            MiddlewareDeclarationPosition::Observers,
+        ];
+        let surfaces = [
+            MiddlewareSurfaceKind::SourcePoll,
+            MiddlewareSurfaceKind::Effect,
+            MiddlewareSurfaceKind::SinkDelivery,
+            MiddlewareSurfaceKind::Ingress,
+            MiddlewareSurfaceKind::Handler,
+            MiddlewareSurfaceKind::Stateful,
+            MiddlewareSurfaceKind::Join,
+            MiddlewareSurfaceKind::OutputCommit,
+            MiddlewareSurfaceKind::StageLifecycle,
+        ];
+
+        for position in positions {
+            for capability in [
+                MiddlewareCapability::Control,
+                MiddlewareCapability::Observer,
+            ] {
+                for surface_kind in surfaces {
+                    let stage_id = StageId::new_const(12);
+                    let (surface, protected_unit) = surface_fixture(surface_kind, stage_id);
+                    let declaration = match capability {
+                        MiddlewareCapability::Control => {
+                            MiddlewareDeclaration::control("matrix", vec![surface_kind])
+                        }
+                        MiddlewareCapability::Observer => {
+                            MiddlewareDeclaration::observer("matrix", vec![surface_kind])
+                        }
+                    };
+                    let request = MiddlewareAttachmentRequest {
+                        surface: &surface,
+                        protected_unit: &protected_unit,
+                        declaration_index: MiddlewareDeclarationIndex::for_test(position, 0),
+                    };
+                    let accepted = validate_attachment_request(&declaration, &request).is_ok();
+                    let expected = match position {
+                        MiddlewareDeclarationPosition::SourceWith => {
+                            capability == MiddlewareCapability::Control
+                                && surface_kind == MiddlewareSurfaceKind::SourcePoll
+                        }
+                        MiddlewareDeclarationPosition::IngressWith => {
+                            capability == MiddlewareCapability::Control
+                                && surface_kind == MiddlewareSurfaceKind::Ingress
+                        }
+                        MiddlewareDeclarationPosition::EffectWith => {
+                            capability == MiddlewareCapability::Control
+                                && surface_kind == MiddlewareSurfaceKind::Effect
+                        }
+                        MiddlewareDeclarationPosition::SinkWith => {
+                            capability == MiddlewareCapability::Control
+                                && surface_kind == MiddlewareSurfaceKind::SinkDelivery
+                        }
+                        MiddlewareDeclarationPosition::Observers => {
+                            capability == MiddlewareCapability::Observer
+                                && crate::middleware::observer::OBSERVER_SURFACE_KINDS
+                                    .contains(&surface_kind)
+                        }
+                    };
+                    assert_eq!(
+                        accepted, expected,
+                        "matrix mismatch for {position:?}/{capability:?}/{surface_kind:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn singleton_positions_reject_non_zero_ordinals_before_identity_is_minted() {
+        for (position, surface_kind) in [
+            (
+                MiddlewareDeclarationPosition::IngressWith,
+                MiddlewareSurfaceKind::Ingress,
+            ),
+            (
+                MiddlewareDeclarationPosition::EffectWith,
+                MiddlewareSurfaceKind::Effect,
+            ),
+        ] {
+            let stage_id = StageId::new_const(13);
+            let (surface, protected_unit) = surface_fixture(surface_kind, stage_id);
+            let declaration = MiddlewareDeclaration::control("singleton", vec![surface_kind]);
+            let request = MiddlewareAttachmentRequest {
+                surface: &surface,
+                protected_unit: &protected_unit,
+                declaration_index: MiddlewareDeclarationIndex::for_test(position, 1),
+            };
+            assert!(matches!(
+                validate_attachment_request(&declaration, &request),
+                Err(
+                    MiddlewareAttachmentValidationError::DeclarationPositionMismatch {
+                        ordinal: 1,
+                        ..
+                    }
+                )
+            ));
+        }
+    }
+
+    #[test]
+    fn observer_fan_out_reuses_one_lane_coordinate_while_surfaces_separate_ids() {
+        let stage_id = StageId::new_const(14);
+        let declaration = MiddlewareDeclaration::observer(
+            "fan-out",
+            vec![
+                MiddlewareSurfaceKind::Handler,
+                MiddlewareSurfaceKind::StageLifecycle,
+            ],
+        );
+        let declaration_index = MiddlewareDeclarationIndex::observers(3);
+        let ids = [
+            MiddlewareSurfaceKind::Handler,
+            MiddlewareSurfaceKind::StageLifecycle,
+        ]
+        .map(|surface_kind| {
+            let (surface, protected_unit) = surface_fixture(surface_kind, stage_id);
+            let request = MiddlewareAttachmentRequest {
+                surface: &surface,
+                protected_unit: &protected_unit,
+                declaration_index,
+            };
+            validate_attachment_request(&declaration, &request).unwrap()
+        });
+
+        assert_eq!(
+            declaration_index.position(),
+            MiddlewareDeclarationPosition::Observers
+        );
+        assert_eq!(declaration_index.ordinal(), 3);
         assert_ne!(
-            first,
-            validate_attachment_request(&declaration, &other_lane_request).unwrap()
+            ids[0], ids[1],
+            "surface remains a separate identity coordinate"
         );
     }
 
@@ -1706,12 +2066,12 @@ mod tests {
         let http_request = MiddlewareAttachmentRequest {
             surface: &http_surface,
             protected_unit: &http_unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::effect_with(),
         };
         let sql_request = MiddlewareAttachmentRequest {
             surface: &sql_surface,
             protected_unit: &sql_unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::effect_with(),
         };
         assert_ne!(
             validate_attachment_request(&effect_declaration, &http_request).unwrap(),
@@ -1747,12 +2107,12 @@ mod tests {
         let stage_sink_request = MiddlewareAttachmentRequest {
             surface: &stage_sink_surface,
             protected_unit: &stage_sink_unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::sink_with(0),
         };
         let configured_sink_request = MiddlewareAttachmentRequest {
             surface: &configured_sink_surface,
             protected_unit: &configured_sink_unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::sink_with(0),
         };
         assert_ne!(
             validate_attachment_request(&sink_declaration, &stage_sink_request).unwrap(),
@@ -1805,12 +2165,12 @@ mod tests {
         let admission_request = MiddlewareAttachmentRequest {
             surface: &admission_surface,
             protected_unit: &admission_unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::ingress_with(),
         };
         let endpoint_request = MiddlewareAttachmentRequest {
             surface: &endpoint_surface,
             protected_unit: &endpoint_unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::ingress_with(),
         };
         assert_ne!(
             validate_attachment_request(&ingress_declaration, &admission_request).unwrap(),
@@ -1835,7 +2195,7 @@ mod tests {
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &protected_unit,
-            declaration_index: MiddlewareDeclarationIndex::stage(0),
+            declaration_index: MiddlewareDeclarationIndex::source_with(0),
         };
 
         let err = validate_attachment_request(&declaration, &request).unwrap_err();

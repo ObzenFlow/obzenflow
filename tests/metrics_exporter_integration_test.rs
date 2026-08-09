@@ -380,7 +380,7 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
         journals: disk_journals(unique_journal_dir("metrics_flow_id_labels")),
 
         stages: {
-            src = source!(MetricEvent => source, [
+            src = source!(MetricEvent => source with [
                 // No summaries/threshold crossings required; utilization is derived from bucket state.
                 rate_limit_with_burst(10_000.0, 10_000.0),
                 CircuitBreaker::builder().consecutive_failures(10).build().expect("source breaker")
@@ -535,7 +535,7 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
         stages: {
             // 1000 events triggers a CircuitBreaker summary (>=1000 processed requests).
             // Use 1001 so the summary is not emitted on the final stage output.
-            src = source!(MetricEvent => source, [
+            src = source!(MetricEvent => source with [
                 CircuitBreaker::builder().consecutive_failures(10).build().expect("source breaker")
             ]);
             // Drop downstream data outputs to keep journaling light; the circuit breaker
@@ -612,7 +612,7 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
         stages: {
             // 1001 events ensures the 1000-threshold summary is emitted before the run completes.
             // First poll succeeds, second poll fails (Timeout), opening the breaker.
-            src = source!(MetricEvent => source, [
+            src = source!(MetricEvent => source with [
                 CircuitBreaker::builder()
                     .consecutive_failures(1)
                     .open_for(Duration::from_millis(1))
@@ -755,7 +755,7 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
         journals: disk_journals(unique_journal_dir("metrics_source_rate_based_cb")),
 
         stages: {
-            src = source!(MetricEvent => source, [
+            src = source!(MetricEvent => source with [
                 CircuitBreaker::builder()
                     .count_window(2)
                     .minimum_calls(2)
@@ -850,7 +850,7 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
         journals: disk_journals(unique_journal_dir("metrics_rl_exporter")),
 
         stages: {
-            src = source!(MetricEvent => source, [
+            src = source!(MetricEvent => source with [
                 // Force deterministic backpressure: small burst + low rate so at least
                 // one event must block while still allowing the run to complete
                 // within the metrics wait window on slower CI hosts.
@@ -1009,7 +1009,7 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
         journals: disk_journals(unique_journal_dir("metrics_cb_no_summary")),
 
         stages: {
-            src = source!(MetricEvent => source, [
+            src = source!(MetricEvent => source with [
                 CircuitBreaker::builder().consecutive_failures(10).build().expect("source breaker")
             ]);
             trans = transform!(MetricEvent -> MetricEvent => transform);
@@ -1079,7 +1079,7 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
         journals: disk_journals(unique_journal_dir("metrics_rl_no_summary")),
 
         stages: {
-            src = source!(MetricEvent => source, [
+            src = source!(MetricEvent => source with [
                 // High rate + high burst ensures no time-based (10s) or count-based (1000)
                 // WindowUtilization summary is *not* required for correct totals or utilization.
                 rate_limit_with_burst(10_000.0, 10_000.0)

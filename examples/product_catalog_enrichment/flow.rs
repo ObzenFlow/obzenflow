@@ -206,8 +206,9 @@ fn build_flow() -> FlowDefinition {
             );
 
             per_order_printer = sink!(
-                EnrichedOrderWithPromo => per_order_printer_handler,
-                middleware: [RateLimiterBuilder::new(0.5).build()]
+                EnrichedOrderWithPromo => per_order_printer_handler with [
+                    RateLimiterBuilder::new(0.5).build()
+                ]
             );
 
             catalog_stats = stateful!(EnrichedOrderWithPromo -> CatalogAnalyticsSummary => catalog_stats_handler);

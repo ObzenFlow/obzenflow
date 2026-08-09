@@ -4,7 +4,7 @@ error[E0277]: inference!: binding `embeddings` is not a ChatBindingContract
 15 |       let _ = inference!(
    |  _____________^
 16 | |         Input ->{
-17 | |             at_least_once(ChatCompletion) via embeddings with { policy }
+17 | |             at_least_once(ChatCompletion) via embeddings with policy
 18 | |         } Output => role
 19 | |     );
    | |_____^ expected a ChatBindingContract here

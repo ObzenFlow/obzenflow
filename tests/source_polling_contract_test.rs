@@ -511,7 +511,7 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
         journals: memory_journals(),
 
         stages: {
-            src = source!(PollingEvent => source, [
+            src = source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
@@ -554,7 +554,7 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
         journals: memory_journals(),
 
         stages: {
-            src = async_source!(PollingEvent => source, [
+            src = async_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
@@ -597,7 +597,7 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
         journals: memory_journals(),
 
         stages: {
-            src = infinite_source!(PollingEvent => source, [
+            src = infinite_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
@@ -637,7 +637,7 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
         journals: memory_journals(),
 
         stages: {
-            src = async_infinite_source!(PollingEvent => source, [
+            src = async_infinite_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
@@ -742,7 +742,7 @@ async fn timeout_duration_and_error_normalisation_are_inside_the_raw_poll_execut
         journals: memory_journals(),
 
         stages: {
-            src = async_source!(PollingEvent => source, [
+            src = async_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         after_poll_delay: policy_delay,
@@ -842,7 +842,7 @@ async fn configured_none_disables_the_finite_source_poll_timeout() -> Result<()>
         journals: memory_journals(),
 
         stages: {
-            src = async_source!(PollingEvent => source, [
+            src = async_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings::default(),
                     policy_log_for_flow,
@@ -999,7 +999,7 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
         journals: memory_journals(),
 
         stages: {
-            src = source!(PollingEvent => source, [
+            src = source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_after_poll: true,
@@ -1067,7 +1067,7 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
         journals: memory_journals(),
 
         stages: {
-            src = async_source!(PollingEvent => source, [
+            src = async_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_after_poll: true,
@@ -1216,7 +1216,7 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
         journals: memory_journals(),
 
         stages: {
-            src = async_infinite_source!(PollingEvent => source, [
+            src = async_infinite_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_after_poll: true,
@@ -1326,7 +1326,7 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
         journals: memory_journals(),
 
         stages: {
-            src = source!(PollingEvent => source, [
+            src = source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         emit_on_observe: true,
@@ -1372,7 +1372,7 @@ async fn eof_and_boundary_rejection_do_not_reenter_live_polling() -> Result<()> 
         journals: memory_journals(),
 
         stages: {
-            src = source!(PollingEvent => source, [
+            src = source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
                         reject: true,

@@ -16,9 +16,9 @@ use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::StageObserverSet;
 use obzenflow_adapters::middleware::{
     validate_middleware_safety, CheckedMiddlewareSurfaceAttachment, MiddlewareDeclaration,
-    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareSurfaceKind, PerEffectPolicyBoundary,
-    PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary, SinkPolicy,
-    TopologyMiddlewareConfigSlot,
+    MiddlewareDeclarationIndex, MiddlewareDeclarationPosition, MiddlewareFactory,
+    MiddlewareSurfaceKind, PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary,
+    PerSourcePolicyBoundary, SinkPolicy, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
@@ -181,84 +181,102 @@ struct MiddlewarePlacement {
     expects_rate_limiter: bool,
 }
 
-fn plan_stage_middleware(
+fn reject_control_in_observers(factory: &dyn MiddlewareFactory) -> StageCreationResult<()> {
+    let declaration = factory.declaration();
+    if declaration.is_control() {
+        return Err(format!(
+            "'observers:' accepts observer middleware only; attach control middleware '{}' in the 'with [...]' clause of the live I/O unit it protects (FLOWIP-115s)",
+            declaration.label
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn plan_positioned_stage_observers(
     config: &StageConfig,
     stage_type: StageType,
-    middleware: Vec<Box<dyn MiddlewareFactory>>,
+    observer_factories: Vec<(usize, Box<dyn MiddlewareFactory>)>,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
 ) -> StageCreationResult<MiddlewarePlacement> {
-    let expects_circuit_breaker = middleware
-        .iter()
-        .any(|factory| factory_declares_circuit_breaker(factory.as_ref()));
-    let expects_rate_limiter = middleware.iter().any(|factory| {
-        factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
-    });
-
     let mut observers = create_system_observers(config);
     let observer_surfaces = observer_surfaces_for_stage(stage_type);
 
-    for (middleware_index, factory) in middleware.into_iter().enumerate() {
+    for (observer_index, factory) in observer_factories {
         let declaration = factory.declaration();
-        if declaration.is_observer() {
-            let mut placed = false;
-            for surface in observer_surfaces {
-                if !declaration.supports(*surface) {
-                    continue;
-                }
-                let attachment = crate::dsl::binder::materialize_observer(
-                    factory.as_ref(),
-                    config,
-                    stage_type,
-                    control_middleware,
-                    *surface,
-                    MiddlewareDeclarationIndex::stage(middleware_index),
-                )?;
-                push_observer_attachment(&mut observers, attachment)?;
-                placed = true;
+        reject_control_in_observers(factory.as_ref())?;
+        let mut placed = false;
+        for surface in observer_surfaces {
+            if !declaration.supports(*surface) {
+                continue;
             }
-            if !placed {
-                return Err(format!(
-                    "observer middleware '{}' declares surfaces {:?}, but stage '{}' ({stage_type:?}) has no compatible observer surface",
-                    declaration.label,
-                    declaration.surfaces,
-                    config.name
-                )
-                .into());
-            }
-            continue;
+            let attachment = crate::dsl::binder::materialize_observer(
+                factory.as_ref(),
+                config,
+                stage_type,
+                control_middleware,
+                *surface,
+                MiddlewareDeclarationIndex::observers(observer_index),
+            )?;
+            push_observer_attachment(&mut observers, attachment)?;
+            placed = true;
         }
-
-        return Err(format!(
-            "middleware '{}' declares hook surfaces {:?}, but stage '{}' ({stage_type:?}) has no compatible placement",
-            declaration.label,
-            declaration.surfaces,
-            config.name
-        )
-        .into());
+        if !placed {
+            return Err(format!(
+                "observer middleware '{}' declares capability {:?} and surfaces {:?}, but stage '{}' ({stage_type:?}) has no compatible observer surface",
+                declaration.label,
+                declaration.capability,
+                declaration.surfaces,
+                config.name
+            )
+            .into());
+        }
     }
 
     Ok(MiddlewarePlacement {
         observers,
-        expects_circuit_breaker,
-        expects_rate_limiter,
+        expects_circuit_breaker: false,
+        expects_rate_limiter: false,
     })
+}
+
+fn plan_stage_observers(
+    config: &StageConfig,
+    stage_type: StageType,
+    observer_factories: Vec<Box<dyn MiddlewareFactory>>,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+) -> StageCreationResult<MiddlewarePlacement> {
+    plan_positioned_stage_observers(
+        config,
+        stage_type,
+        observer_factories.into_iter().enumerate().collect(),
+        control_middleware,
+    )
 }
 
 fn build_source_middleware_and_register_policies(
     config: &StageConfig,
     stage_type: StageType,
     writer_id: WriterId,
-    middleware: Vec<Box<dyn MiddlewareFactory>>,
+    source_policy_factories: Vec<Box<dyn MiddlewareFactory>>,
+    ingress_policy_factory: Option<Box<dyn MiddlewareFactory>>,
+    observer_factories: Vec<Box<dyn MiddlewareFactory>>,
     hosted_ingress_slot: Option<obzenflow_core::ingress::HostedIngressBindingSlot>,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
 ) -> StageCreationResult<SourceMiddlewareBinding> {
-    let mut observers = create_system_observers(config);
-    let expects_circuit_breaker = middleware
+    let observer_placement =
+        plan_stage_observers(config, stage_type, observer_factories, control_middleware)?;
+    let observers = observer_placement.observers;
+    let expects_circuit_breaker = source_policy_factories
         .iter()
+        .chain(ingress_policy_factory.iter())
         .any(|factory| factory_declares_circuit_breaker(factory.as_ref()));
-    let expects_rate_limiter = middleware.iter().any(|factory| {
-        factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
-    });
+    let expects_rate_limiter = source_policy_factories
+        .iter()
+        .chain(ingress_policy_factory.iter())
+        .any(|factory| {
+            factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
+        });
 
     let mut completion_gate: Option<Arc<dyn CompletionGate>> = None;
     // Source-policy composition is binder-local. The flow-scoped control
@@ -271,82 +289,44 @@ fn build_source_middleware_and_register_policies(
     let mut ingress_boundary: Option<Arc<dyn obzenflow_core::ingress::IngressBoundaryMiddleware>> =
         None;
 
-    for (middleware_index, factory) in middleware.into_iter().enumerate() {
-        let declaration = factory.declaration();
-        if declaration.is_observer() {
-            let mut placed = false;
-            for surface in observer_surfaces_for_stage(stage_type) {
-                if !declaration.supports(*surface) {
-                    continue;
-                }
-                let attachment = crate::dsl::binder::materialize_observer(
-                    factory.as_ref(),
-                    config,
-                    stage_type,
-                    control_middleware,
-                    *surface,
-                    MiddlewareDeclarationIndex::stage(middleware_index),
-                )?;
-                push_observer_attachment(&mut observers, attachment)?;
-                placed = true;
-            }
-            if !placed {
-                return Err(format!(
-                    "observer middleware '{}' declares surfaces {:?}, but source stage '{}' has no compatible observer surface",
-                    declaration.label,
-                    declaration.surfaces,
-                    config.name
-                )
-                .into());
-            }
-            continue;
+    for (source_policy_index, factory) in source_policy_factories.into_iter().enumerate() {
+        if hosted_ingress_slot.is_some()
+            && factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
+        {
+            return Err(format!(
+                "stage '{}' hosts an ingress route; attach its rate limiter as 'ingress with <policy>', not to the post-admission drain in 'with [...]' (FLOWIP-115s)",
+                config.name,
+            )
+            .into());
         }
-
-        // FLOWIP-115d AC42: a source-backed hosted ingress source binds a control
-        // middleware that declares Ingress to the ingress boundary, not source
-        // poll, and does not also pace the internal mpsc-drain source poll. This
-        // branch precedes the source-poll branch so a limiter declaring both
-        // surfaces routes to Ingress for hosted sources.
-        if let Some(slot) = hosted_ingress_slot.as_ref() {
-            if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::Ingress) {
-                let boundary = crate::dsl::binder::materialize_ingress(
-                    factory.as_ref(),
-                    config,
-                    stage_type,
-                    control_middleware,
-                    slot.ingress_key(),
-                    MiddlewareDeclarationIndex::stage(middleware_index),
-                )?;
-                ingress_boundary = Some(boundary);
-                continue;
-            }
+        let binding = crate::dsl::binder::materialize_source_poll(
+            factory.as_ref(),
+            config,
+            stage_type,
+            control_middleware,
+            MiddlewareDeclarationIndex::source_with(source_policy_index),
+        )?;
+        source_policies.push(binding.policy);
+        if binding.completion_gate.is_some() {
+            completion_gate = binding.completion_gate;
         }
+    }
 
-        // FLOWIP-115b: hook-bound control middleware that attaches to the source
-        // poll surface is placed directly by its typed declaration.
-        // It is materialized into a source policy collected in declared order so
-        // it composes with the other source policies, and
-        // it supplies the completion-gate companion that shares its state view.
-        if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::SourcePoll) {
-            let binding = crate::dsl::binder::materialize_source_poll(
-                factory.as_ref(),
-                config,
-                stage_type,
-                control_middleware,
-                MiddlewareDeclarationIndex::stage(middleware_index),
-            )?;
-            source_policies.push(binding.policy);
-            if binding.completion_gate.is_some() {
-                completion_gate = binding.completion_gate;
-            }
-            continue;
-        }
-
-        return Err(format!(
-            "middleware '{}' declares capability {:?} and surfaces {:?}, but source stage '{}' has no matching typed binding",
-            declaration.label, declaration.capability, declaration.surfaces, config.name
-        )
-        .into());
+    if let Some(factory) = ingress_policy_factory {
+        let slot = hosted_ingress_slot.as_ref().ok_or_else(|| {
+            format!(
+                "'ingress with <policy>' requires a hosted ingress route on stage '{}' (FLOWIP-115s)",
+                config.name,
+            )
+        })?;
+        ingress_boundary = Some(crate::dsl::binder::materialize_ingress(
+            factory.as_ref(),
+            config,
+            stage_type,
+            control_middleware,
+            slot.ingress_key(),
+            MiddlewareDeclarationIndex::ingress_with(),
+        )?);
     }
 
     // FLOWIP-115d: fill the hosted-ingress binding slot during source-stage
@@ -473,10 +453,23 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
 
     /// Structural: return configured stage-level middleware factories (for topology config extraction)
     ///
-    /// Default implementation returns an empty slice; concrete descriptors that
-    /// carry middleware should override this to expose their factories for `config_snapshot()`.
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &[]
+    /// Each descriptor exposes the union of its grammar-owned attachment
+    /// positions for configuration/topology bookkeeping. Placement never uses
+    /// this view; lowering passes each position to its typed binder directly.
+    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
+        Vec::new()
+    }
+
+    /// The grammar-owned position of every stage-scoped middleware factory.
+    /// This is bookkeeping and validation evidence only: materialisation uses
+    /// the descriptor's separate typed fields and never routes this union.
+    fn positioned_stage_middleware_factories(
+        &self,
+    ) -> Vec<(MiddlewareDeclarationPosition, &dyn MiddlewareFactory)> {
+        self.stage_middleware_factories()
+            .into_iter()
+            .map(|factory| (MiddlewareDeclarationPosition::Observers, factory))
+            .collect()
     }
 
     /// Surviving inline effect-policy attachments. Configuration collection
@@ -630,7 +623,9 @@ fn validate_effect_declarations(
 pub struct FiniteSourceDescriptor<H: FiniteSourceHandler + 'static> {
     pub name: String,
     pub handler: H,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    pub ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    pub observers: Vec<Box<dyn MiddlewareFactory>>,
     pub backpressure: Option<BackpressureClause>,
 }
 
@@ -655,14 +650,38 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
-        self.middleware
-            .iter()
+        self.stage_middleware_factories()
+            .into_iter()
             .map(|f| f.label().to_string())
             .collect()
     }
 
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &self.middleware
+    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
+        self.source_policies
+            .iter()
+            .map(Box::as_ref)
+            .chain(self.ingress_policy.iter().map(Box::as_ref))
+            .chain(self.observers.iter().map(Box::as_ref))
+            .collect()
+    }
+
+    fn positioned_stage_middleware_factories(
+        &self,
+    ) -> Vec<(MiddlewareDeclarationPosition, &dyn MiddlewareFactory)> {
+        self.source_policies
+            .iter()
+            .map(|factory| (MiddlewareDeclarationPosition::SourceWith, factory.as_ref()))
+            .chain(
+                self.ingress_policy
+                    .iter()
+                    .map(|factory| (MiddlewareDeclarationPosition::IngressWith, factory.as_ref())),
+            )
+            .chain(
+                self.observers
+                    .iter()
+                    .map(|factory| (MiddlewareDeclarationPosition::Observers, factory.as_ref())),
+            )
+            .collect()
     }
 
     async fn create_handle(
@@ -679,14 +698,13 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        // Take ownership of the declared stage middleware.
-        let middleware = self.middleware;
-
         let source_binding = build_source_middleware_and_register_policies(
             &config,
             StageType::FiniteSource,
             writer_id,
-            middleware,
+            self.source_policies,
+            self.ingress_policy,
+            self.observers,
             None,
             &control_middleware,
         )?;
@@ -741,7 +759,9 @@ pub struct AsyncFiniteSourceDescriptor<H: AsyncFiniteSourceHandler + 'static> {
     pub name: String,
     pub handler: H,
     poll_timeout: Option<Duration>,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    pub ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    pub observers: Vec<Box<dyn MiddlewareFactory>>,
     pub backpressure: Option<BackpressureClause>,
 }
 
@@ -755,14 +775,25 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             name: name.into(),
             handler,
             poll_timeout,
-            middleware: Vec::new(),
+            source_policies: Vec::new(),
+            ingress_policy: None,
+            observers: Vec::new(),
             backpressure: None,
         }
     }
 
-    /// Add middleware to the chain.
-    pub fn with_middleware<M: MiddlewareFactory + 'static>(mut self, mw: M) -> Self {
-        self.middleware.push(Box::new(mw));
+    pub fn with_source_policy<M: MiddlewareFactory + 'static>(mut self, policy: M) -> Self {
+        self.source_policies.push(Box::new(policy));
+        self
+    }
+
+    pub fn with_ingress_policy<M: MiddlewareFactory + 'static>(mut self, policy: M) -> Self {
+        self.ingress_policy = Some(Box::new(policy));
+        self
+    }
+
+    pub fn with_observer<M: MiddlewareFactory + 'static>(mut self, observer: M) -> Self {
+        self.observers.push(Box::new(observer));
         self
     }
 
@@ -793,14 +824,38 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
-        self.middleware
-            .iter()
+        self.stage_middleware_factories()
+            .into_iter()
             .map(|f| f.label().to_string())
             .collect()
     }
 
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &self.middleware
+    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
+        self.source_policies
+            .iter()
+            .map(Box::as_ref)
+            .chain(self.ingress_policy.iter().map(Box::as_ref))
+            .chain(self.observers.iter().map(Box::as_ref))
+            .collect()
+    }
+
+    fn positioned_stage_middleware_factories(
+        &self,
+    ) -> Vec<(MiddlewareDeclarationPosition, &dyn MiddlewareFactory)> {
+        self.source_policies
+            .iter()
+            .map(|factory| (MiddlewareDeclarationPosition::SourceWith, factory.as_ref()))
+            .chain(
+                self.ingress_policy
+                    .iter()
+                    .map(|factory| (MiddlewareDeclarationPosition::IngressWith, factory.as_ref())),
+            )
+            .chain(
+                self.observers
+                    .iter()
+                    .map(|factory| (MiddlewareDeclarationPosition::Observers, factory.as_ref())),
+            )
+            .collect()
     }
 
     async fn create_handle(
@@ -818,14 +873,13 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        // Take ownership of the declared stage middleware.
-        let middleware = self.middleware;
-
         let source_binding = build_source_middleware_and_register_policies(
             &config,
             StageType::FiniteSource,
             writer_id,
-            middleware,
+            self.source_policies,
+            self.ingress_policy,
+            self.observers,
             None,
             &control_middleware,
         )?;
@@ -879,7 +933,9 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 pub struct InfiniteSourceDescriptor<H: InfiniteSourceHandler + 'static> {
     pub name: String,
     pub handler: H,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    pub ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    pub observers: Vec<Box<dyn MiddlewareFactory>>,
     pub backpressure: Option<BackpressureClause>,
 }
 
@@ -904,14 +960,38 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
-        self.middleware
-            .iter()
+        self.stage_middleware_factories()
+            .into_iter()
             .map(|f| f.label().to_string())
             .collect()
     }
 
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &self.middleware
+    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
+        self.source_policies
+            .iter()
+            .map(Box::as_ref)
+            .chain(self.ingress_policy.iter().map(Box::as_ref))
+            .chain(self.observers.iter().map(Box::as_ref))
+            .collect()
+    }
+
+    fn positioned_stage_middleware_factories(
+        &self,
+    ) -> Vec<(MiddlewareDeclarationPosition, &dyn MiddlewareFactory)> {
+        self.source_policies
+            .iter()
+            .map(|factory| (MiddlewareDeclarationPosition::SourceWith, factory.as_ref()))
+            .chain(
+                self.ingress_policy
+                    .iter()
+                    .map(|factory| (MiddlewareDeclarationPosition::IngressWith, factory.as_ref())),
+            )
+            .chain(
+                self.observers
+                    .iter()
+                    .map(|factory| (MiddlewareDeclarationPosition::Observers, factory.as_ref())),
+            )
+            .collect()
     }
 
     async fn create_handle(
@@ -928,14 +1008,13 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        // Take ownership of the declared stage middleware.
-        let middleware = self.middleware;
-
         let source_binding = build_source_middleware_and_register_policies(
             &config,
             StageType::InfiniteSource,
             writer_id,
-            middleware,
+            self.source_policies,
+            self.ingress_policy,
+            self.observers,
             None,
             &control_middleware,
         )?;
@@ -990,7 +1069,9 @@ pub struct AsyncInfiniteSourceDescriptor<H: AsyncInfiniteSourceHandler + 'static
     pub name: String,
     pub handler: H,
     poll_timeout: Option<Duration>,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    pub ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    pub observers: Vec<Box<dyn MiddlewareFactory>>,
     pub backpressure: Option<BackpressureClause>,
 }
 
@@ -1007,14 +1088,25 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             name: name.into(),
             handler,
             poll_timeout,
-            middleware: Vec::new(),
+            source_policies: Vec::new(),
+            ingress_policy: None,
+            observers: Vec::new(),
             backpressure: None,
         }
     }
 
-    /// Add middleware to the chain.
-    pub fn with_middleware<M: MiddlewareFactory + 'static>(mut self, mw: M) -> Self {
-        self.middleware.push(Box::new(mw));
+    pub fn with_source_policy<M: MiddlewareFactory + 'static>(mut self, policy: M) -> Self {
+        self.source_policies.push(Box::new(policy));
+        self
+    }
+
+    pub fn with_ingress_policy<M: MiddlewareFactory + 'static>(mut self, policy: M) -> Self {
+        self.ingress_policy = Some(Box::new(policy));
+        self
+    }
+
+    pub fn with_observer<M: MiddlewareFactory + 'static>(mut self, observer: M) -> Self {
+        self.observers.push(Box::new(observer));
         self
     }
 
@@ -1045,14 +1137,38 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
-        self.middleware
-            .iter()
+        self.stage_middleware_factories()
+            .into_iter()
             .map(|f| f.label().to_string())
             .collect()
     }
 
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &self.middleware
+    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
+        self.source_policies
+            .iter()
+            .map(Box::as_ref)
+            .chain(self.ingress_policy.iter().map(Box::as_ref))
+            .chain(self.observers.iter().map(Box::as_ref))
+            .collect()
+    }
+
+    fn positioned_stage_middleware_factories(
+        &self,
+    ) -> Vec<(MiddlewareDeclarationPosition, &dyn MiddlewareFactory)> {
+        self.source_policies
+            .iter()
+            .map(|factory| (MiddlewareDeclarationPosition::SourceWith, factory.as_ref()))
+            .chain(
+                self.ingress_policy
+                    .iter()
+                    .map(|factory| (MiddlewareDeclarationPosition::IngressWith, factory.as_ref())),
+            )
+            .chain(
+                self.observers
+                    .iter()
+                    .map(|factory| (MiddlewareDeclarationPosition::Observers, factory.as_ref())),
+            )
+            .collect()
     }
 
     async fn create_handle(
@@ -1069,8 +1185,6 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let middleware = self.middleware;
-
         // FLOWIP-115d: a source-backed hosted ingress source (e.g. http_ingress)
         // exposes its binding slot here; the DSL fills it during this source
         // stage's materialization with the stage id, replay-stable key, and the
@@ -1081,7 +1195,9 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             &config,
             StageType::InfiniteSource,
             writer_id,
-            middleware,
+            self.source_policies,
+            self.ingress_policy,
+            self.observers,
             hosted_ingress_slot,
             &control_middleware,
         )?;
@@ -1133,7 +1249,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 pub(crate) struct TransformDescriptor<H: TransformHandler + 'static> {
     pub(crate) name: String,
     pub(crate) handler: H,
-    pub(crate) middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) backpressure: Option<BackpressureClause>,
 }
 
@@ -1158,14 +1274,14 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
-        self.middleware
+        self.observers
             .iter()
             .map(|f| f.label().to_string())
             .collect()
     }
 
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &self.middleware
+    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
+        self.observers.iter().map(Box::as_ref).collect()
     }
 
     async fn create_handle(
@@ -1175,7 +1291,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
         // Validate middleware safety
-        for factory in &self.middleware {
+        for factory in &self.observers {
             // Validate safety
             let validation_result =
                 validate_middleware_safety(factory.as_ref(), StageType::Transform, &self.name);
@@ -1188,9 +1304,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             }
         }
 
-        // Create control strategy before moving middleware
-        // Take ownership of the declared stage middleware.
-        let middleware = self.middleware;
+        // Create control strategy before moving observer factories.
+        let observers = self.observers;
         let control_strategy = create_default_signal_strategy();
 
         // Create instrumentation configuration
@@ -1199,10 +1314,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let placement = plan_stage_middleware(
+        let placement = plan_stage_observers(
             &config,
             StageType::Transform,
-            middleware,
+            observers,
             &control_middleware,
         )?;
 
@@ -1248,11 +1363,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
     }
 }
 
-/// Per-effect policy attachment: the policies declared inline on one
-/// `effects:` entry (`Effect with [...]`).
+/// The single control policy declared inline on one `effects:` entry.
 pub struct EffectPolicyAttachment {
     pub effect_type: &'static str,
-    pub factories: Vec<Box<dyn MiddlewareFactory>>,
+    pub factory: Box<dyn MiddlewareFactory>,
 }
 
 fn validate_effect_policy_attachments(
@@ -1265,10 +1379,17 @@ fn validate_effect_policy_attachments(
         .map(|declaration| declaration.effect_type)
         .collect::<std::collections::HashSet<_>>();
 
+    let mut attached_effect_types = std::collections::HashSet::new();
     for attachment in attachments {
         if !declared_effect_types.contains(attachment.effect_type) {
             return Err(format!(
                 "Effectful stage '{stage_name}' attaches policy middleware to undeclared effect '{}'",
+                attachment.effect_type
+            ));
+        }
+        if !attached_effect_types.insert(attachment.effect_type) {
+            return Err(format!(
+                "Effectful stage '{stage_name}' attaches more than one policy to effect '{}'; each effect has one bare `with` position",
                 attachment.effect_type
             ));
         }
@@ -1282,7 +1403,7 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     name: String,
     handler: H,
     effects: Vec<EffectDeclaration>,
-    middleware: Vec<Box<dyn MiddlewareFactory>>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
     /// Per-effect policy attachments from the `effects:` clause
     /// (FLOWIP-120c H7).
     effect_policies: Vec<EffectPolicyAttachment>,
@@ -1300,7 +1421,7 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
         name: impl Into<String>,
         handler: H,
         effects: Vec<EffectDeclaration>,
-        middleware: Vec<Box<dyn MiddlewareFactory>>,
+        observers: Vec<Box<dyn MiddlewareFactory>>,
         effect_policies: Vec<EffectPolicyAttachment>,
         backpressure: Option<BackpressureClause>,
     ) -> Self {
@@ -1308,7 +1429,7 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
             name: name.into(),
             handler,
             effects,
-            middleware,
+            observers,
             effect_policies,
             direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan::default(
             ),
@@ -1416,14 +1537,14 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
-        self.middleware
+        self.observers
             .iter()
             .map(|f| f.label().to_string())
             .collect()
     }
 
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &self.middleware
+    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
+        self.observers.iter().map(Box::as_ref).collect()
     }
 
     fn effect_policy_attachments(&self) -> &[EffectPolicyAttachment] {
@@ -1447,8 +1568,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                         attachment.effect_type
                             == <obzenflow_adapters::ai::ChatCompletion as obzenflow_runtime::effects::Effect>::EFFECT_TYPE
                     })
-                    .flat_map(|attachment| attachment.factories.iter())
-                    .map(Box::as_ref),
+                    .map(|attachment| attachment.factory.as_ref()),
             )?;
         }
         if let Some(bound) = self.direct_fact_plan.maximum_bound() {
@@ -1479,7 +1599,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         resources.effect_declarations = effect_declarations.clone();
         resources.direct_fact_plan = self.direct_fact_plan.clone();
 
-        for factory in &self.middleware {
+        for factory in &self.observers {
             let validation_result =
                 validate_middleware_safety(factory.as_ref(), StageType::Transform, &self.name);
 
@@ -1490,7 +1610,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             }
         }
 
-        let middleware = self.middleware;
+        let observer_factories = self.observers;
         let control_strategy = create_default_signal_strategy();
 
         let instrumentation_config = InstrumentationConfig::default();
@@ -1498,66 +1618,56 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        // Policy kinds guard individual effects at the boundary; observation
-        // and structural kinds stay on the handler shell. A stage-level
-        // policy attaches only when the stage declares one effect; a
-        // multi-effect stage must name the protected effect per entry.
+        // `observers:` is already an observation-only lane. Effect observers
+        // fan out over the declared effects while the same declaration index is
+        // reused for every surface/subject produced by that one list entry.
         let mut shell_specs = Vec::new();
-        let mut transitional_policy_specs = Vec::new();
-        let mut pending_effect_observer_specs = Vec::new();
-        for (middleware_index, factory) in middleware.into_iter().enumerate() {
+        let mut effect_observers = StageObserverSet::default();
+        for (observer_index, factory) in observer_factories.into_iter().enumerate() {
             let declaration = factory.declaration();
-            if declaration.is_observer() && declaration.supports(MiddlewareSurfaceKind::Effect) {
-                pending_effect_observer_specs.push((middleware_index, factory, declaration));
-            } else if declaration.is_control() {
-                transitional_policy_specs.push((middleware_index, factory, declaration));
-            } else {
-                shell_specs.push((middleware_index, factory));
+            reject_control_in_observers(factory.as_ref())?;
+            let observes_effect = declaration.supports(MiddlewareSurfaceKind::Effect);
+            let observes_shell =
+                declaration_has_stage_observer_surface(&declaration, StageType::Transform);
+            if observes_effect {
+                materialize_effect_observers_for_declarations(
+                    &mut effect_observers,
+                    factory.as_ref(),
+                    EffectObserverMaterialization {
+                        config: &config,
+                        stage_type: StageType::Transform,
+                        control_middleware: &control_middleware,
+                        declaration_index: MiddlewareDeclarationIndex::observers(observer_index),
+                        effect_declarations: &effect_declarations,
+                    },
+                )?;
+            }
+            if observes_shell {
+                shell_specs.push((observer_index, factory));
+            } else if !observes_effect {
+                return Err(format!(
+                    "observer middleware '{}' has no compatible surface on effectful stage '{}'",
+                    declaration.label, self.name
+                )
+                .into());
             }
         }
 
-        let inline_policy_declarations: Vec<Vec<MiddlewareDeclaration>> = self
+        let inline_policy_declarations: Vec<MiddlewareDeclaration> = self
             .effect_policies
             .iter()
-            .map(|attachment| {
-                attachment
-                    .factories
-                    .iter()
-                    .map(|factory| factory.declaration())
-                    .collect()
-            })
+            .map(|attachment| attachment.factory.declaration())
             .collect();
 
-        if !transitional_policy_specs.is_empty() && effect_declarations.len() != 1 {
-            return Err(format!(
-                "Stage '{}' declares policy middleware in `middleware:` but {} effects; \
-                 attach each policy to the effect it guards (FLOWIP-120c H7)",
-                self.name,
-                effect_declarations.len()
-            )
-            .into());
-        }
-
-        // Validate the complete declaration set before materialising any
-        // factory. This prevents a breaker-only aggregate plus a standalone
-        // limiter from mutating the shared registry and only then discovering
-        // the forbidden composition.
+        // Validate before materialising any factory.
         for effect in &effect_declarations {
-            let mut declarations = Vec::new();
-            if effect_declarations.len() == 1 {
-                declarations.extend(
-                    transitional_policy_specs
-                        .iter()
-                        .map(|(_, _, declaration)| declaration.clone()),
-                );
-            }
-            declarations.extend(
-                self.effect_policies
-                    .iter()
-                    .zip(&inline_policy_declarations)
-                    .filter(|(attachment, _)| attachment.effect_type == effect.effect_type)
-                    .flat_map(|(_, declarations)| declarations.iter().cloned()),
-            );
+            let declarations = self
+                .effect_policies
+                .iter()
+                .zip(&inline_policy_declarations)
+                .filter(|(attachment, _)| attachment.effect_type == effect.effect_type)
+                .map(|(_, declaration)| declaration.clone())
+                .collect::<Vec<_>>();
             obzenflow_adapters::middleware::validate_effect_control_composition(
                 &self.name,
                 effect.effect_type,
@@ -1566,83 +1676,38 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             .map_err(|error| error.to_string())?;
         }
 
-        let mut effect_observers = StageObserverSet::default();
-        for (middleware_index, factory, declaration) in pending_effect_observer_specs {
-            materialize_effect_observers_for_declarations(
-                &mut effect_observers,
-                factory.as_ref(),
-                EffectObserverMaterialization {
-                    config: &config,
-                    stage_type: StageType::Transform,
-                    control_middleware: &control_middleware,
-                    declaration_index: MiddlewareDeclarationIndex::stage(middleware_index),
-                    effect_declarations: &effect_declarations,
-                },
-            )?;
-            if declaration_has_stage_observer_surface(&declaration, StageType::Transform) {
-                shell_specs.push((middleware_index, factory));
-            }
-        }
-        shell_specs.sort_by_key(|(middleware_index, _)| *middleware_index);
-        let shell_middleware = shell_specs
-            .into_iter()
-            .map(|(_, factory)| factory)
-            .collect();
-
         let mut effect_chains: std::collections::HashMap<
             &'static str,
             Vec<obzenflow_adapters::middleware::EffectPolicyAttachment>,
         > = std::collections::HashMap::new();
 
-        if !transitional_policy_specs.is_empty() {
-            let effect_type = effect_declarations[0].effect_type;
-            for (middleware_index, factory, declaration) in transitional_policy_specs {
-                let policy = crate::dsl::binder::bind_effect_policy(
-                    crate::dsl::binder::DeclaredMiddlewareFactory::new(
-                        factory.as_ref(),
-                        &declaration,
-                    ),
-                    &config,
-                    StageType::Transform,
-                    &control_middleware,
-                    &effect_declarations[0],
-                    MiddlewareDeclarationIndex::stage(middleware_index),
-                )?;
-                effect_chains.entry(effect_type).or_default().push(policy);
-            }
-        }
-
-        for (attachment, declarations) in
+        for (attachment, declaration) in
             self.effect_policies.iter().zip(&inline_policy_declarations)
         {
-            for ((middleware_index, factory), declaration) in
-                attachment.factories.iter().enumerate().zip(declarations)
-            {
-                let effect_declaration = effect_declarations
-                    .iter()
-                    .find(|effect| effect.effect_type == attachment.effect_type)
-                    .ok_or_else(|| {
-                        format!(
-                            "Effectful stage '{}' attaches policy middleware to undeclared effect '{}'",
-                            self.name, attachment.effect_type
-                        )
-                    })?;
-                let policy = crate::dsl::binder::bind_effect_policy(
-                    crate::dsl::binder::DeclaredMiddlewareFactory::new(
-                        factory.as_ref(),
-                        declaration,
-                    ),
-                    &config,
-                    StageType::Transform,
-                    &control_middleware,
-                    effect_declaration,
-                    MiddlewareDeclarationIndex::effect_policy(middleware_index),
-                )?;
-                effect_chains
-                    .entry(attachment.effect_type)
-                    .or_default()
-                    .push(policy);
-            }
+            let effect_declaration = effect_declarations
+                .iter()
+                .find(|effect| effect.effect_type == attachment.effect_type)
+                .ok_or_else(|| {
+                    format!(
+                        "Effectful stage '{}' attaches policy middleware to undeclared effect '{}'",
+                        self.name, attachment.effect_type
+                    )
+                })?;
+            let policy = crate::dsl::binder::bind_effect_policy(
+                crate::dsl::binder::DeclaredMiddlewareFactory::new(
+                    attachment.factory.as_ref(),
+                    declaration,
+                ),
+                &config,
+                StageType::Transform,
+                &control_middleware,
+                effect_declaration,
+                MiddlewareDeclarationIndex::effect_with(),
+            )?;
+            effect_chains
+                .entry(attachment.effect_type)
+                .or_default()
+                .push(policy);
         }
 
         let effect_policy_chains: std::collections::HashMap<
@@ -1653,10 +1718,10 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             .map(|(effect_type, chain)| (effect_type, Arc::new(chain)))
             .collect();
 
-        let placement = plan_stage_middleware(
+        let placement = plan_positioned_stage_observers(
             &config,
             StageType::Transform,
-            shell_middleware,
+            shell_specs,
             &control_middleware,
         )?;
         let mut observers = placement.observers;
@@ -1716,7 +1781,8 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 pub struct SinkDescriptor<H: SinkHandler + 'static> {
     pub name: String,
     pub handler: H,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub sink_policies: Vec<Box<dyn MiddlewareFactory>>,
+    pub observers: Vec<Box<dyn MiddlewareFactory>>,
 }
 
 #[async_trait]
@@ -1748,14 +1814,32 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
-        self.middleware
-            .iter()
+        self.stage_middleware_factories()
+            .into_iter()
             .map(|f| f.label().to_string())
             .collect()
     }
 
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &self.middleware
+    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
+        self.sink_policies
+            .iter()
+            .map(Box::as_ref)
+            .chain(self.observers.iter().map(Box::as_ref))
+            .collect()
+    }
+
+    fn positioned_stage_middleware_factories(
+        &self,
+    ) -> Vec<(MiddlewareDeclarationPosition, &dyn MiddlewareFactory)> {
+        self.sink_policies
+            .iter()
+            .map(|factory| (MiddlewareDeclarationPosition::SinkWith, factory.as_ref()))
+            .chain(
+                self.observers
+                    .iter()
+                    .map(|factory| (MiddlewareDeclarationPosition::Observers, factory.as_ref())),
+            )
+            .collect()
     }
 
     async fn create_handle(
@@ -1765,7 +1849,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
         // Validate middleware safety
-        for factory in &self.middleware {
+        for factory in self.sink_policies.iter().chain(self.observers.iter()) {
             // Validate safety
             let validation_result =
                 validate_middleware_safety(factory.as_ref(), StageType::Sink, &self.name);
@@ -1778,8 +1862,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             }
         }
 
-        // Take ownership of the declared stage middleware.
-        let middleware = self.middleware;
+        let sink_policy_factories = self.sink_policies;
+        let observer_factories = self.observers;
         let control_strategy = create_default_signal_strategy();
 
         // Create instrumentation configuration
@@ -1788,64 +1872,33 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let expects_circuit_breaker = middleware
+        let expects_circuit_breaker = sink_policy_factories
             .iter()
             .any(|factory| factory_declares_circuit_breaker(factory.as_ref()));
-        let expects_rate_limiter = middleware.iter().any(|factory| {
+        let expects_rate_limiter = sink_policy_factories.iter().any(|factory| {
             factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
         });
 
         // FLOWIP-115b: hook-bound control middleware that attaches to the
         // sink-delivery surface is materialized into a sink policy composed at
-        // the delivery boundary; everything else stays on the handler shell.
+        // the delivery boundary. Observers arrive through their own lane.
         let mut sink_policies: Vec<Arc<dyn SinkPolicy>> = Vec::new();
-        let mut observers = StageObserverSet::default();
-        for (middleware_index, factory) in middleware.into_iter().enumerate() {
-            let declaration = factory.declaration();
-            if declaration.is_observer() {
-                let mut placed = false;
-                for surface in observer_surfaces_for_stage(StageType::Sink) {
-                    if !declaration.supports(*surface) {
-                        continue;
-                    }
-                    let attachment = crate::dsl::binder::materialize_observer(
-                        factory.as_ref(),
-                        &config,
-                        StageType::Sink,
-                        &control_middleware,
-                        *surface,
-                        MiddlewareDeclarationIndex::stage(middleware_index),
-                    )?;
-                    push_observer_attachment(&mut observers, attachment)?;
-                    placed = true;
-                }
-                if !placed {
-                    return Err(format!(
-                        "observer middleware '{}' declares surfaces {:?}, but sink stage '{}' has no compatible observer surface",
-                        declaration.label,
-                        declaration.surfaces,
-                        config.name
-                    )
-                    .into());
-                }
-            } else if declaration.is_control()
-                && declaration.supports(MiddlewareSurfaceKind::SinkDelivery)
-            {
-                let policy = crate::dsl::binder::materialize_sink_delivery(
-                    factory.as_ref(),
-                    &config,
-                    StageType::Sink,
-                    &control_middleware,
-                    MiddlewareDeclarationIndex::stage(middleware_index),
-                )?;
-                sink_policies.push(policy);
-            } else {
-                return Err(format!(
-                    "middleware '{}' declares capability {:?} and surfaces {:?}, but sink stage '{}' has no matching typed binding",
-                    declaration.label, declaration.capability, declaration.surfaces, config.name
-                )
-                .into());
-            }
+        let observer_placement = plan_stage_observers(
+            &config,
+            StageType::Sink,
+            observer_factories,
+            &control_middleware,
+        )?;
+        let observers = observer_placement.observers;
+        for (sink_policy_index, factory) in sink_policy_factories.into_iter().enumerate() {
+            let policy = crate::dsl::binder::materialize_sink_delivery(
+                factory.as_ref(),
+                &config,
+                StageType::Sink,
+                &control_middleware,
+                MiddlewareDeclarationIndex::sink_with(sink_policy_index),
+            )?;
+            sink_policies.push(policy);
         }
         let sink_delivery_boundary: Option<Arc<dyn SinkDeliveryBoundary>> =
             if sink_policies.is_empty() {
@@ -2028,7 +2081,7 @@ pub struct StatefulDescriptor<H: StatefulHandler + 'static> {
     pub name: String,
     pub handler: H,
     pub emit_interval: Option<Duration>,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub observers: Vec<Box<dyn MiddlewareFactory>>,
     pub backpressure: Option<BackpressureClause>,
 }
 
@@ -2039,7 +2092,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
             name: name.into(),
             handler,
             emit_interval: None,
-            middleware: Vec::new(),
+            observers: Vec::new(),
             backpressure: None,
         }
     }
@@ -2050,9 +2103,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
         self
     }
 
-    /// Add middleware to the chain.
-    pub fn with_middleware<M: MiddlewareFactory + 'static>(mut self, mw: M) -> Self {
-        self.middleware.push(Box::new(mw));
+    pub fn with_observer<M: MiddlewareFactory + 'static>(mut self, observer: M) -> Self {
+        self.observers.push(Box::new(observer));
         self
     }
 
@@ -2083,14 +2135,14 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
-        self.middleware
+        self.observers
             .iter()
             .map(|f| f.label().to_string())
             .collect()
     }
 
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &self.middleware
+    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
+        self.observers.iter().map(Box::as_ref).collect()
     }
 
     async fn create_handle(
@@ -2100,7 +2152,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
         // Validate middleware safety
-        for factory in &self.middleware {
+        for factory in &self.observers {
             let validation_result =
                 validate_middleware_safety(factory.as_ref(), StageType::Stateful, &self.name);
 
@@ -2111,9 +2163,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             }
         }
 
-        // Create control strategy before moving middleware
-        // Take ownership of the declared stage middleware.
-        let middleware = self.middleware;
+        let observers = self.observers;
         let control_strategy = create_default_signal_strategy();
 
         // Create instrumentation configuration
@@ -2122,12 +2172,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let placement = plan_stage_middleware(
-            &config,
-            StageType::Stateful,
-            middleware,
-            &control_middleware,
-        )?;
+        let placement =
+            plan_stage_observers(&config, StageType::Stateful, observers, &control_middleware)?;
 
         instrumentation
             .bind_control_plane(
@@ -2179,7 +2225,7 @@ pub struct EffectfulStatefulDescriptor<H: EffectfulStatefulHandler + 'static> {
     pub name: String,
     pub handler: H,
     pub effects: Vec<EffectDeclaration>,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub observers: Vec<Box<dyn MiddlewareFactory>>,
     pub backpressure: Option<BackpressureClause>,
 }
 
@@ -2191,13 +2237,13 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             name: name.into(),
             handler,
             effects: Vec::new(),
-            middleware: Vec::new(),
+            observers: Vec::new(),
             backpressure: None,
         }
     }
 
-    pub fn with_middleware<M: MiddlewareFactory + 'static>(mut self, mw: M) -> Self {
-        self.middleware.push(Box::new(mw));
+    pub fn with_observer<M: MiddlewareFactory + 'static>(mut self, observer: M) -> Self {
+        self.observers.push(Box::new(observer));
         self
     }
 
@@ -2248,14 +2294,14 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
-        self.middleware
+        self.observers
             .iter()
             .map(|f| f.label().to_string())
             .collect()
     }
 
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &self.middleware
+    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
+        self.observers.iter().map(Box::as_ref).collect()
     }
 
     async fn create_handle(
@@ -2275,7 +2321,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         )?;
         resources.effect_declarations = effect_declarations.clone();
 
-        for factory in &self.middleware {
+        for factory in &self.observers {
             let validation_result =
                 validate_middleware_safety(factory.as_ref(), StageType::Stateful, &self.name);
 
@@ -2286,7 +2332,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             }
         }
 
-        let middleware = self.middleware;
+        let observer_factories = self.observers;
         let control_strategy = create_default_signal_strategy();
 
         let instrumentation_config = InstrumentationConfig::default();
@@ -2296,9 +2342,10 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 
         let mut shell_specs = Vec::new();
         let mut effect_observers = StageObserverSet::default();
-        for (middleware_index, factory) in middleware.into_iter().enumerate() {
+        for (observer_index, factory) in observer_factories.into_iter().enumerate() {
             let declaration = factory.declaration();
-            if declaration.is_observer() && declaration.supports(MiddlewareSurfaceKind::Effect) {
+            reject_control_in_observers(factory.as_ref())?;
+            if declaration.supports(MiddlewareSurfaceKind::Effect) {
                 materialize_effect_observers_for_declarations(
                     &mut effect_observers,
                     factory.as_ref(),
@@ -2306,19 +2353,19 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                         config: &config,
                         stage_type: StageType::Stateful,
                         control_middleware: &control_middleware,
-                        declaration_index: MiddlewareDeclarationIndex::stage(middleware_index),
+                        declaration_index: MiddlewareDeclarationIndex::observers(observer_index),
                         effect_declarations: &effect_declarations,
                     },
                 )?;
                 if declaration_has_stage_observer_surface(&declaration, StageType::Stateful) {
-                    shell_specs.push(factory);
+                    shell_specs.push((observer_index, factory));
                 }
             } else {
-                shell_specs.push(factory);
+                shell_specs.push((observer_index, factory));
             }
         }
 
-        let placement = plan_stage_middleware(
+        let placement = plan_positioned_stage_observers(
             &config,
             StageType::Stateful,
             shell_specs,
@@ -2405,7 +2452,7 @@ pub struct JoinDescriptor<H: JoinHandler + 'static> {
     pub reference_stage_id: StageId,
     pub reference_stage_var: Option<&'static str>, // For DSL resolution - stage variable name
     pub handler: H,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub observers: Vec<Box<dyn MiddlewareFactory>>,
 }
 
 #[async_trait]
@@ -2425,14 +2472,14 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
-        self.middleware
+        self.observers
             .iter()
             .map(|f| f.label().to_string())
             .collect()
     }
 
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &self.middleware
+    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
+        self.observers.iter().map(Box::as_ref).collect()
     }
 
     fn reference_stage_id(&self) -> Option<StageId> {
@@ -2464,7 +2511,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
         // Validate middleware safety
-        for factory in &self.middleware {
+        for factory in &self.observers {
             let validation_result =
                 validate_middleware_safety(factory.as_ref(), StageType::Join, &self.name);
 
@@ -2475,9 +2522,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             }
         }
 
-        // Create control strategy before moving middleware
-        // Take ownership of the declared stage middleware.
-        let middleware = self.middleware;
+        let observers = self.observers;
         let control_strategy = create_default_signal_strategy();
 
         // Create instrumentation configuration
@@ -2487,7 +2532,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             control_middleware.clone();
 
         let placement =
-            plan_stage_middleware(&config, StageType::Join, middleware, &control_middleware)?;
+            plan_stage_observers(&config, StageType::Join, observers, &control_middleware)?;
 
         instrumentation
             .bind_control_plane(
@@ -2742,7 +2787,7 @@ mod tests {
     fn effect_policy_attachment_validation_rejects_undeclared_effect() {
         let attachment = EffectPolicyAttachment {
             effect_type: "test.undeclared",
-            factories: Vec::new(),
+            factory: Box::new(obzenflow_adapters::middleware::LoggingMiddlewareFactory::new()),
         };
 
         let error = validate_effect_policy_attachments("effectful", &[], &[attachment])
@@ -3046,12 +3091,15 @@ mod tests {
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let slot = HostedIngressBindingSlot::new("bank.accounts");
 
-        // A hosted ingress source with a rate limiter as its stage middleware.
+        // A hosted ingress source with a rate limiter in the explicit ingress
+        // control position.
         build_source_middleware_and_register_policies(
             &config,
             StageType::InfiniteSource,
             WriterId::from(stage_id),
-            vec![limiter],
+            vec![],
+            Some(limiter),
+            vec![],
             Some(slot.clone()),
             &control,
         )
@@ -3086,6 +3134,79 @@ mod tests {
             boundary.on_ingress(&attempt),
             IngressAdmissionDecision::Reject { .. }
         ));
+    }
+
+    #[test]
+    fn ingress_position_requires_a_hosted_ingress_route() {
+        let stage_id = StageId::new();
+        let limiter = obzenflow_adapters::middleware::control::rate_limiter::rate_limit(1.0);
+        let config = StageConfig {
+            stage_id,
+            name: "pull_source".to_string(),
+            flow_name: "test_flow".to_string(),
+            cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            effective_config: effective_config_for_stage("pull_source", &[limiter.as_ref()]),
+        };
+
+        let error = match build_source_middleware_and_register_policies(
+            &config,
+            StageType::InfiniteSource,
+            WriterId::from(stage_id),
+            vec![],
+            Some(limiter),
+            vec![],
+            None,
+            &Arc::new(ControlMiddlewareAggregator::new()),
+        ) {
+            Ok(_) => panic!("an ingress position without a hosted route must fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "'ingress with <policy>' requires a hosted ingress route on stage 'pull_source' (FLOWIP-115s)"
+        );
+    }
+
+    #[test]
+    fn hosted_ingress_rejects_a_source_poll_rate_limiter_without_an_ingress_policy() {
+        use obzenflow_core::ingress::HostedIngressBindingSlot;
+
+        let stage_id = StageId::new();
+        let limiter = obzenflow_adapters::middleware::control::rate_limiter::rate_limit(1.0);
+        let config = StageConfig {
+            stage_id,
+            name: "accounts".to_string(),
+            flow_name: "test_flow".to_string(),
+            cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            effective_config: effective_config_for_stage("accounts", &[limiter.as_ref()]),
+        };
+        let slot = HostedIngressBindingSlot::new("bank.accounts");
+
+        let error = match build_source_middleware_and_register_policies(
+            &config,
+            StageType::InfiniteSource,
+            WriterId::from(stage_id),
+            vec![limiter],
+            None,
+            vec![],
+            Some(slot.clone()),
+            &Arc::new(ControlMiddlewareAggregator::new()),
+        ) {
+            Ok(_) => panic!("a hosted drain must not acquire a source-poll limiter"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "stage 'accounts' hosts an ingress route; attach its rate limiter as 'ingress with <policy>', not to the post-admission drain in 'with [...]' (FLOWIP-115s)"
+        );
+        assert!(
+            !slot.is_filled(),
+            "a rejected placement must not fill the slot"
+        );
     }
 
     /// FLOWIP-115d AC55: a third-party (non-framework) control middleware that
@@ -3203,14 +3324,16 @@ mod tests {
             &config,
             StageType::InfiniteSource,
             WriterId::from(stage_id),
-            vec![Box::new(AllowOnceIngressFactory)],
+            vec![],
+            Some(Box::new(AllowOnceIngressFactory)),
+            vec![],
             Some(slot.clone()),
             &control,
         )
         .expect("source middleware build");
 
-        // The carrier routed the third-party Ingress-declaring factory to Ingress
-        // and filled the slot with its own boundary; no source-poll policy and no
+        // The ingress position bound the third-party factory to Ingress and
+        // filled the slot with its own boundary; no source-poll policy and no
         // framework-specific branch was needed.
         let filled = slot.filled().expect("slot filled");
         let boundary = filled.boundary.as_ref().expect("third-party boundary");
@@ -3412,7 +3535,9 @@ mod tests {
         let descriptor = FiniteSourceDescriptor {
             name: "cb_source".to_string(),
             handler: DummyFiniteSource,
-            middleware: vec![Box::new(breaker)],
+            source_policies: vec![Box::new(breaker)],
+            ingress_policy: None,
+            observers: vec![],
             backpressure: None,
         };
 
@@ -3448,11 +3573,14 @@ mod observer_placement_negative_tests {
         validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
         MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
         MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurfaceAttachment,
-        MiddlewareSurfaceKind,
+        MiddlewareSurfaceKind, SourceAdmission, SourcePolicy, SourcePolicyCtx,
+        SourcePollAttachment, SourcePollOutcome,
     };
     use obzenflow_runtime::stages::observer::{
-        HandlerObserver, JoinObserver, SinkDeliveryObserver, SourcePollObserver, StatefulObserver,
+        HandlerObserver, JoinObserver, SinkDeliveryObserver, SourcePollObserver,
+        StageLifecycleObserver, StatefulObserver,
     };
+    use std::sync::Mutex;
 
     /// A no-op observer that supports every observer surface this factory may be
     /// placed on. All hooks use the trait defaults (record nothing).
@@ -3482,10 +3610,159 @@ mod observer_placement_negative_tests {
             "loud-observer"
         }
     }
+    impl StageLifecycleObserver for NoopObserver {
+        fn label(&self) -> &'static str {
+            "loud-observer"
+        }
+    }
 
     /// An observer factory used to prove the planner reaches typed materialization.
     struct LoudObserverFactory;
     struct LoudObserverFamily;
+
+    type MaterializationCall = (
+        &'static str,
+        MiddlewareSurfaceKind,
+        MiddlewareDeclarationPosition,
+        u64,
+    );
+
+    struct RecordingObserverFactory {
+        label: &'static str,
+        calls: Arc<Mutex<Vec<MaterializationCall>>>,
+    }
+    struct RecordingObserverFamily;
+
+    struct RecordingSourceControlFactory<Family> {
+        label: &'static str,
+        calls: Arc<Mutex<Vec<MaterializationCall>>>,
+        _family: std::marker::PhantomData<Family>,
+    }
+    struct FirstRecordingSourceFamily;
+    struct SecondRecordingSourceFamily;
+    struct NoopSourceControl;
+
+    #[async_trait::async_trait]
+    impl SourcePolicy for NoopSourceControl {
+        fn label(&self) -> &'static str {
+            "recording-source-control"
+        }
+
+        async fn admit(&self, _ctx: &mut SourcePolicyCtx) -> SourceAdmission {
+            SourceAdmission::Admit(None)
+        }
+
+        fn observe(&self, _outcome: &SourcePollOutcome<'_>, _ctx: &mut SourcePolicyCtx) {}
+    }
+
+    impl<Family: Send + Sync + 'static> MiddlewareFactory for RecordingSourceControlFactory<Family> {
+        fn label(&self) -> &'static str {
+            self.label
+        }
+
+        fn override_key(&self) -> MiddlewareOverrideKey {
+            MiddlewareOverrideKey::of::<Family>(self.label())
+        }
+
+        fn declaration(&self) -> MiddlewareDeclaration {
+            MiddlewareDeclaration::control_with_family(
+                self.label(),
+                self.override_key().family_label(),
+                vec![MiddlewareSurfaceKind::SourcePoll],
+            )
+        }
+
+        fn materialize(
+            &self,
+            request: MiddlewareAttachmentRequest<'_>,
+            context: &MiddlewareMaterializationContext<'_>,
+        ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+            validate_attachment_request(&self.declaration(), &request).map_err(|err| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    err,
+                )
+            })?;
+            self.calls
+                .lock()
+                .expect("recording source-control call lock poisoned")
+                .push((
+                    self.label,
+                    request.surface.kind(),
+                    request.declaration_index.position(),
+                    request.declaration_index.ordinal(),
+                ));
+            Ok(MiddlewareSurfaceAttachment::source_poll(
+                SourcePollAttachment {
+                    policy: Arc::new(NoopSourceControl),
+                    completion_gate: None,
+                },
+            ))
+        }
+    }
+
+    impl MiddlewareFactory for RecordingObserverFactory {
+        fn label(&self) -> &'static str {
+            self.label
+        }
+
+        fn override_key(&self) -> MiddlewareOverrideKey {
+            MiddlewareOverrideKey::of::<RecordingObserverFamily>(self.label())
+        }
+
+        fn declaration(&self) -> MiddlewareDeclaration {
+            MiddlewareDeclaration::observer_with_family(
+                self.label(),
+                self.override_key().family_label(),
+                vec![
+                    MiddlewareSurfaceKind::SourcePoll,
+                    MiddlewareSurfaceKind::StageLifecycle,
+                ],
+            )
+        }
+
+        fn materialize(
+            &self,
+            request: MiddlewareAttachmentRequest<'_>,
+            context: &MiddlewareMaterializationContext<'_>,
+        ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+            let declaration = self.declaration();
+            validate_attachment_request(&declaration, &request).map_err(|err| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    err,
+                )
+            })?;
+            self.calls
+                .lock()
+                .expect("recording observer call lock poisoned")
+                .push((
+                    self.label,
+                    request.surface.kind(),
+                    request.declaration_index.position(),
+                    request.declaration_index.ordinal(),
+                ));
+
+            let observer = Arc::new(NoopObserver);
+            match request.surface.kind() {
+                MiddlewareSurfaceKind::SourcePoll => {
+                    Ok(MiddlewareSurfaceAttachment::source_poll_observer(observer))
+                }
+                MiddlewareSurfaceKind::StageLifecycle => Ok(
+                    MiddlewareSurfaceAttachment::stage_lifecycle_observer(observer),
+                ),
+                other => Err(MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    obzenflow_runtime::stages::observer::ObserverCommitError::new(format!(
+                        "unsupported recording observer surface {other:?}"
+                    )),
+                )),
+            }
+        }
+    }
 
     impl MiddlewareFactory for LoudObserverFactory {
         fn label(&self) -> &'static str {
@@ -3651,7 +3928,7 @@ mod observer_placement_negative_tests {
                 ),
             };
             let control = Arc::new(ControlMiddlewareAggregator::new());
-            plan_stage_middleware(
+            plan_stage_observers(
                 &config,
                 stage_type,
                 vec![Box::new(LoudObserverFactory)],
@@ -3661,6 +3938,154 @@ mod observer_placement_negative_tests {
                 panic!("observer placement must succeed for {stage_type:?}: {err}")
             });
         }
+    }
+
+    #[test]
+    fn observer_fan_out_reuses_the_original_observers_lane_ordinal() {
+        let config = StageConfig {
+            stage_id: StageId::new(),
+            name: "observer_fan_out".to_string(),
+            flow_name: "observer_placement_negative".to_string(),
+            cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            effective_config: Arc::new(
+                obzenflow_runtime::runtime_config::FlowEffectiveConfig::default(),
+            ),
+        };
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+
+        plan_positioned_stage_observers(
+            &config,
+            StageType::FiniteSource,
+            vec![
+                (
+                    2,
+                    Box::new(RecordingObserverFactory {
+                        label: "first-recording-observer",
+                        calls: calls.clone(),
+                    }),
+                ),
+                (
+                    5,
+                    Box::new(RecordingObserverFactory {
+                        label: "second-recording-observer",
+                        calls: calls.clone(),
+                    }),
+                ),
+            ],
+            &control,
+        )
+        .expect("observer fan-out should materialize");
+
+        assert_eq!(
+            *calls.lock().expect("recording observer call lock poisoned"),
+            vec![
+                (
+                    "first-recording-observer",
+                    MiddlewareSurfaceKind::SourcePoll,
+                    MiddlewareDeclarationPosition::Observers,
+                    2,
+                ),
+                (
+                    "first-recording-observer",
+                    MiddlewareSurfaceKind::StageLifecycle,
+                    MiddlewareDeclarationPosition::Observers,
+                    2,
+                ),
+                (
+                    "second-recording-observer",
+                    MiddlewareSurfaceKind::SourcePoll,
+                    MiddlewareDeclarationPosition::Observers,
+                    5,
+                ),
+                (
+                    "second-recording-observer",
+                    MiddlewareSurfaceKind::StageLifecycle,
+                    MiddlewareDeclarationPosition::Observers,
+                    5,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_control_and_observer_lanes_number_independently() {
+        let stage_id = StageId::new();
+        let config = StageConfig {
+            stage_id,
+            name: "lane_local_source".to_string(),
+            flow_name: "observer_placement_negative".to_string(),
+            cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            effective_config: Arc::new(
+                obzenflow_runtime::runtime_config::FlowEffectiveConfig::default(),
+            ),
+        };
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+
+        build_source_middleware_and_register_policies(
+            &config,
+            StageType::FiniteSource,
+            WriterId::from(stage_id),
+            vec![
+                Box::new(
+                    RecordingSourceControlFactory::<FirstRecordingSourceFamily> {
+                        label: "first-source-control",
+                        calls: calls.clone(),
+                        _family: std::marker::PhantomData,
+                    },
+                ),
+                Box::new(
+                    RecordingSourceControlFactory::<SecondRecordingSourceFamily> {
+                        label: "second-source-control",
+                        calls: calls.clone(),
+                        _family: std::marker::PhantomData,
+                    },
+                ),
+            ],
+            None,
+            vec![Box::new(RecordingObserverFactory {
+                label: "source-observer",
+                calls: calls.clone(),
+            })],
+            None,
+            &control,
+        )
+        .expect("positioned source middleware should materialize");
+
+        assert_eq!(
+            *calls
+                .lock()
+                .expect("recording middleware call lock poisoned"),
+            vec![
+                (
+                    "source-observer",
+                    MiddlewareSurfaceKind::SourcePoll,
+                    MiddlewareDeclarationPosition::Observers,
+                    0,
+                ),
+                (
+                    "source-observer",
+                    MiddlewareSurfaceKind::StageLifecycle,
+                    MiddlewareDeclarationPosition::Observers,
+                    0,
+                ),
+                (
+                    "first-source-control",
+                    MiddlewareSurfaceKind::SourcePoll,
+                    MiddlewareDeclarationPosition::SourceWith,
+                    0,
+                ),
+                (
+                    "second-source-control",
+                    MiddlewareSurfaceKind::SourcePoll,
+                    MiddlewareDeclarationPosition::SourceWith,
+                    1,
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -3682,7 +4107,7 @@ mod observer_placement_negative_tests {
             StageType::InfiniteSource,
             &control,
             MiddlewareSurfaceKind::SourcePoll,
-            MiddlewareDeclarationIndex::stage(0),
+            MiddlewareDeclarationIndex::observers(0),
         ) {
             Ok(_) => panic!("a source observer cannot return a handler observer"),
             Err(error) => error,
@@ -3695,7 +4120,7 @@ mod observer_placement_negative_tests {
             StageType::InfiniteSource,
             &control,
             MiddlewareSurfaceKind::SourcePoll,
-            MiddlewareDeclarationIndex::stage(1),
+            MiddlewareDeclarationIndex::observers(1),
         ) {
             Ok(_) => panic!("an observer cannot return a control attachment"),
             Err(error) => error,

@@ -66,7 +66,7 @@ mod tests {
         let descriptor = TransformDescriptor {
             name: name.to_string(),
             handler: Noop,
-            middleware: vec![],
+            observers: vec![],
             backpressure: None,
         };
         let mut metadata = StageTypingMetadata::transform(input, output, false, None);
@@ -114,14 +114,14 @@ mod tests {
             self: Box<Self>,
             config: obzenflow_runtime::pipeline::config::StageConfig,
             resources: obzenflow_runtime::stages::StageResources,
-            control_middleware: std::sync::Arc<
+            control_observers: std::sync::Arc<
                 obzenflow_adapters::middleware::control::ControlMiddlewareAggregator,
             >,
         ) -> crate::dsl::StageCreationResult<
             obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle,
         > {
             Box::new(self.inner)
-                .create_handle(config, resources, control_middleware)
+                .create_handle(config, resources, control_observers)
                 .await
         }
     }
@@ -197,7 +197,7 @@ mod tests {
                         inner: TransformDescriptor {
                             name: "worker".to_string(),
                             handler: Noop,
-                            middleware: vec![],
+                            observers: vec![],
                             backpressure: None,
                         },
                     }));

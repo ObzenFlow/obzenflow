@@ -31,6 +31,9 @@ fn main() {
         "raw-chunker",
         (RawChunker, MapRole, FinaliseRole),
         (contract(), contract()),
-        (Vec::new(), Vec::new()),
+        (
+            obzenflow_adapters::middleware::control::ai_resilience(),
+            obzenflow_adapters::middleware::control::ai_resilience(),
+        ),
     );
 }

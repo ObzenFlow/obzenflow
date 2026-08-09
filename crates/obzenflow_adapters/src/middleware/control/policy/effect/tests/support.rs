@@ -125,7 +125,7 @@ pub(super) fn materialize_effect_attachment(
     factory: &dyn MiddlewareFactory,
     config: &StageConfig,
     control: &Arc<ControlMiddlewareAggregator>,
-    declaration_index: usize,
+    _declaration_index: usize,
     safety: EffectSafety,
 ) -> Result<EffectPolicyAttachment, String> {
     let surface = MiddlewareSurface::Effect(EffectSurface {
@@ -142,7 +142,7 @@ pub(super) fn materialize_effect_attachment(
     let request = MiddlewareAttachmentRequest {
         surface: &surface,
         protected_unit: &protected_unit,
-        declaration_index: MiddlewareDeclarationIndex::effect_policy(declaration_index),
+        declaration_index: MiddlewareDeclarationIndex::effect_with(),
     };
     materialize_factory_checked(factory, request, config, StageType::Transform, control)
         .map_err(|error| error.to_string())?

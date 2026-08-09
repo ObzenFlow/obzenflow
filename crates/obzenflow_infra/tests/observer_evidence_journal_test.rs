@@ -183,14 +183,14 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
 
             stages: {
                 orders = source!(Order => order_source);
-                process = transform!(Order -> Processed => process_orders, [
+                process = transform!(Order -> Processed => process_orders, observers: [
                     indicator()
                         .operation("checkout.process")
                         .kind(IndicatorKind::Latency)
                         .indicator("process.latency")
                         .tag("dependency", "ledger")
                 ]);
-                handoff = sink!(Processed => handoff, middleware: [
+                handoff = sink!(Processed => handoff, observers: [
                     log().prefix("handoff")
                 ]);
             },

@@ -381,6 +381,118 @@ mod tests {
         }
     }
 
+    /// Regression boundary for FLOWIP-115s A3. `AcceptedForEnqueue` means the
+    /// permit has already committed the submission, so the observer must be
+    /// able to receive every accepted event synchronously from the channel.
+    struct AssertEnqueuedBeforeAcceptedObservation {
+        receiver: std::sync::Mutex<mpsc::Receiver<EventSubmission>>,
+        observed_enqueued: Arc<AtomicUsize>,
+    }
+
+    impl IngressBoundaryMiddleware for AssertEnqueuedBeforeAcceptedObservation {
+        fn label(&self) -> &'static str {
+            "assert_enqueued_before_accepted_observation"
+        }
+
+        fn on_ingress(
+            &self,
+            _attempt: &obzenflow_core::ingress::IngressAttemptContext,
+        ) -> obzenflow_core::ingress::IngressAdmissionDecision {
+            obzenflow_core::ingress::IngressAdmissionDecision::Accept
+        }
+
+        fn observe(
+            &self,
+            attempt: &obzenflow_core::ingress::IngressAttemptContext,
+            outcome: obzenflow_core::ingress::IngressAdmissionOutcome,
+        ) {
+            if !matches!(
+                outcome,
+                obzenflow_core::ingress::IngressAdmissionOutcome::AcceptedForEnqueue
+            ) {
+                return;
+            }
+            let mut receiver = self
+                .receiver
+                .lock()
+                .expect("enqueue-observation receiver lock poisoned");
+            let mut enqueued = 0usize;
+            while receiver.try_recv().is_ok() {
+                enqueued += 1;
+            }
+            assert_eq!(
+                enqueued, attempt.event_count as usize,
+                "AcceptedForEnqueue must be observed only after every accepted event is sent"
+            );
+            self.observed_enqueued.store(enqueued, Ordering::Release);
+        }
+    }
+
+    fn state_with_enqueue_observation(base_path: &str) -> (IngestionState, Arc<AtomicUsize>) {
+        let (state, receiver) = IngestionState::new(IngestionConfig {
+            base_path: base_path.to_string(),
+            record_ingress_refusals: false,
+            validation: None,
+            ..Default::default()
+        });
+        let observed_enqueued = Arc::new(AtomicUsize::new(0));
+        state
+            .ingress_slot()
+            .fill(FilledHostedIngress {
+                stage_id: StageId::new(),
+                stage_key: "enqueue-observation".into(),
+                boundary: Some(Arc::new(AssertEnqueuedBeforeAcceptedObservation {
+                    receiver: std::sync::Mutex::new(receiver),
+                    observed_enqueued: Arc::clone(&observed_enqueued),
+                })),
+            })
+            .expect("slot fill succeeds once");
+        state.ready.store(true, Ordering::Release);
+        (state, observed_enqueued)
+    }
+
+    #[tokio::test]
+    async fn accepted_observation_follows_enqueue_on_handle_single_and_batch_paths() {
+        let submission = || EventSubmission {
+            event_type: "order.created".into(),
+            data: json!({ "value": 1 }),
+            metadata: None,
+            ingress_handoff: None,
+        };
+
+        let (handle_state, handle_observed) = state_with_enqueue_observation("/handle");
+        assert!(matches!(
+            handle_state.submit_one(submission()).await,
+            IngressSubmitOutcome::Accepted { event_count: 1, .. }
+        ));
+        assert_eq!(handle_observed.load(Ordering::Acquire), 1);
+
+        let (single_state, single_observed) = state_with_enqueue_observation("/single");
+        let single = SingleEventEndpoint::new(single_state);
+        let response = unwrap_unary(
+            single
+                .handle(json_request(single.path(), event_body("order.created")))
+                .await
+                .expect("single endpoint response"),
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(single_observed.load(Ordering::Acquire), 1);
+
+        let (batch_state, batch_observed) = state_with_enqueue_observation("/batch-proof");
+        let batch = BatchEventEndpoint::new(batch_state);
+        let response = unwrap_unary(
+            batch
+                .handle(json_request(
+                    batch.path(),
+                    json!({ "events": [event_body("order.created"), event_body("order.created")] }),
+                ))
+                .await
+                .expect("batch endpoint response"),
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(batch_observed.load(Ordering::Acquire), 2);
+    }
+
     /// FLOWIP-115d: the single-event endpoint runs ingress admission after
     /// reserving capacity, and maps a rate-limited rejection to `429` plus
     /// `Retry-After`, recording it as a rate-limited refusal.
@@ -756,6 +868,109 @@ mod tests {
                 DeliveryMethod::Custom("Collect".to_string()),
                 None,
             ))
+        }
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct PlacementPayload;
+
+    impl TypedPayload for PlacementPayload {
+        const EVENT_TYPE: &'static str = "flowip_115s.placement";
+    }
+
+    #[tokio::test]
+    async fn one_family_cannot_occupy_source_and_ingress_control_positions() {
+        use obzenflow_adapters::middleware::rate_limit;
+
+        let ingress = http_ingress::<PlacementPayload>(IngestionConfig {
+            base_path: "/api/placement-duplicate".to_string(),
+            record_ingress_refusals: false,
+            ..Default::default()
+        });
+        let hosted_source = ingress.source();
+        let built = FlowDefinition::materialize(move |_runtime_config| {
+            Ok(flow! {
+                name: "flowip_115s_duplicate_positions",
+                journals: crate::journal::memory_journals(),
+
+                stages: {
+                    source = async_infinite_source!(
+                        PlacementPayload => hosted_source with [rate_limit(10.0)],
+                        ingress with rate_limit(10.0)
+                    );
+                    sink = sink!(PlacementPayload => placeholder!());
+                },
+
+                topology: {
+                    source |> sink;
+                }
+            })
+        })
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await;
+
+        let failure = built
+            .err()
+            .expect("duplicate rate-limiter positions must fail");
+        assert!(
+            failure.run.is_none(),
+            "validation must precede substrate selection"
+        );
+        let rendered = format!("{:?}", failure.error);
+        assert!(
+            matches!(
+                failure.error,
+                obzenflow_dsl::dsl::FlowBuildError::DuplicateStageMiddlewareFamily {
+                    stage_name,
+                    family_label: "rate_limiter",
+                    first_position: "source with",
+                    second_position: "ingress with",
+                } if stage_name == "source"
+            ),
+            "unexpected duplicate-position failure: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_source_rejects_a_lone_drain_rate_limiter() {
+        use obzenflow_adapters::middleware::rate_limit;
+
+        let ingress = http_ingress::<PlacementPayload>(IngestionConfig {
+            base_path: "/api/placement-drain".to_string(),
+            record_ingress_refusals: false,
+            ..Default::default()
+        });
+        let hosted_source = ingress.source();
+        let built = FlowDefinition::materialize(move |_runtime_config| {
+            Ok(flow! {
+                name: "flowip_115s_hosted_drain",
+                journals: crate::journal::memory_journals(),
+
+                stages: {
+                    source = async_infinite_source!(
+                        PlacementPayload => hosted_source with [rate_limit(10.0)]
+                    );
+                    sink = sink!(PlacementPayload => placeholder!());
+                },
+
+                topology: {
+                    source |> sink;
+                }
+            })
+        })
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await;
+
+        let failure = built.err().expect("a hosted drain limiter must fail");
+        match failure.error {
+            obzenflow_dsl::dsl::FlowBuildError::StageCreationFailed { stage_name, source } => {
+                assert_eq!(stage_name, "source");
+                assert_eq!(
+                    source.to_string(),
+                    "stage 'source' hosts an ingress route; attach its rate limiter as 'ingress with <policy>', not to the post-admission drain in 'with [...]' (FLOWIP-115s)"
+                );
+            }
+            other => panic!("expected hosted-drain stage failure, got {other:?}"),
         }
     }
 
@@ -1622,9 +1837,10 @@ mod tests {
                     // Capacity 1 with a negligible refill: the first POST consumes the
                     // single burst token, the second is fail-fast rate-limited. The
                     // limiter routes to Ingress (AC42), not the internal source poll.
-                    source = async_infinite_source!(OrderPayload => source, [
-                        rate_limit_with_burst(0.001, 1.0)
-                    ]);
+                    source = async_infinite_source!(
+                        OrderPayload => source,
+                        ingress with rate_limit_with_burst(0.001, 1.0)
+                    );
                     sink = sink!(OrderPayload => sink);
                 },
 

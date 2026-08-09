@@ -20,6 +20,6 @@ fn main() {
     let _ = obzenflow_dsl::effectful_transform!(
         OtherInput -> First => FirstOnly,
         effects: [],
-        middleware: []
+        observers: []
     );
 }

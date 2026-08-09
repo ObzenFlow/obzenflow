@@ -83,8 +83,8 @@ fn main() {
         .unwrap();
     let _chat = effectful_transform!(
         Input -> ChatOutput => chat_handler,
-        effects: [at_least_once(ChatCompletion) with [ai_resilience()]],
-        middleware: [],
+        effects: [at_least_once(ChatCompletion) with ai_resilience()],
+        observers: [],
     );
 
     let (embedding, _embedding_registration) =
@@ -101,7 +101,7 @@ fn main() {
         .unwrap();
     let _embedding = effectful_transform!(
         ChatOutput -> EmbeddingOutput => embedding_handler,
-        effects: [at_least_once(EmbeddingGeneration) with [ai_resilience()]],
-        middleware: [],
+        effects: [at_least_once(EmbeddingGeneration) with ai_resilience()],
+        observers: [],
     );
 }

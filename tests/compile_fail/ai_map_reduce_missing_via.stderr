@@ -1,11 +1,11 @@
-error: ai_map_reduce!: expected `at_least_once(ChatCompletion) via <chat binding> with { <EffectResilience> }`
+error: ai_map_reduce!: expected `at_least_once(ChatCompletion) via <chat binding> with <EffectResilience>`
   --> tests/compile_fail/ai_map_reduce_missing_via.rs:16:13
    |
 16 |       let _ = ai_map_reduce!(
    |  _____________^
 17 | |         Seed -> Output => {
 18 | |             map: [Item] ->{
-19 | |                 at_least_once(ChatCompletion) with { policy }
+19 | |                 at_least_once(ChatCompletion) with policy
 ...  |
 32 | |     );
    | |_____^
@@ -19,7 +19,7 @@ error[E0282]: type annotations needed
    |  _____________^
 17 | |         Seed -> Output => {
 18 | |             map: [Item] ->{
-19 | |                 at_least_once(ChatCompletion) with { policy }
+19 | |                 at_least_once(ChatCompletion) with policy
 ...  |
 32 | |     );
    | |_____^ cannot infer type

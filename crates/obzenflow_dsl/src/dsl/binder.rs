@@ -107,54 +107,38 @@ pub(crate) fn bind_effect_policy(
     let factory = declared_factory.factory;
     let declaration = declared_factory.declaration;
     let effect_type = effect.effect_type;
-    if declaration.is_observer() {
-        return Err(format!(
-            "observer middleware '{}' cannot be materialized as an effect policy",
-            factory.label()
-        ));
-    }
-    if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::Effect) {
-        let surface = MiddlewareSurface::Effect(EffectSurface {
-            stage_id: config.stage_id,
+    let surface = MiddlewareSurface::Effect(EffectSurface {
+        stage_id: config.stage_id,
+        effect_type: EffectTypeKey::from(effect_type),
+        safety: effect.safety,
+    });
+    let protected_unit = ProtectedUnitId {
+        stage_id: config.stage_id,
+        unit: ProtectedUnit::Effect(EffectUnitId {
             effect_type: EffectTypeKey::from(effect_type),
-            safety: effect.safety,
-        });
-        let protected_unit = ProtectedUnitId {
-            stage_id: config.stage_id,
-            unit: ProtectedUnit::Effect(EffectUnitId {
-                effect_type: EffectTypeKey::from(effect_type),
-            }),
-        };
-        let request = MiddlewareAttachmentRequest {
-            surface: &surface,
-            protected_unit: &protected_unit,
-            declaration_index,
-        };
-        match materialize_factory_checked_with_declaration(
-            factory,
-            declaration,
-            request,
-            config,
-            stage_type,
-            control_middleware,
-        )
-        .map_err(|error| error.to_string())?
-        .into_effect()
-        {
-            Some(policy) => Ok(policy),
-            None => Err(format!(
-                "binder expected an Effect attachment from middleware '{}'",
-                factory.label()
-            )),
-        }
-    } else {
-        Err(format!(
-            "middleware '{}' cannot bind to effect '{}': declaration capability {:?} and surfaces {:?} do not name the typed Effect control surface",
-            factory.label(),
-            effect_type,
-            declaration.capability,
-            declaration.surfaces
-        ))
+        }),
+    };
+    let request = MiddlewareAttachmentRequest {
+        surface: &surface,
+        protected_unit: &protected_unit,
+        declaration_index,
+    };
+    match materialize_factory_checked_with_declaration(
+        factory,
+        declaration,
+        request,
+        config,
+        stage_type,
+        control_middleware,
+    )
+    .map_err(|error| error.to_string())?
+    .into_effect()
+    {
+        Some(policy) => Ok(policy),
+        None => Err(format!(
+            "binder expected an Effect attachment from middleware '{}'",
+            factory.label()
+        )),
     }
 }
 

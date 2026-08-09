@@ -25,10 +25,9 @@ fn build_flow() -> FlowDefinition {
         Ok(flow! {
             name: "my_flow",
             journals: disk_journals("target/logs".into()),
-            middleware: [rate_limit(100.0)],
 
             stages: {
-                input = source!(InputEvent => my_source);
+                input = source!(InputEvent => my_source with [rate_limit(100.0)]);
                 enrich = transform!(InputEvent -> OutputEvent => my_transform);
                 output = sink!(OutputEvent => my_sink);
             },

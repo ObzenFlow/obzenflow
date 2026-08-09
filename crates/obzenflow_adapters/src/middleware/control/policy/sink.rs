@@ -287,7 +287,7 @@ mod tests {
         let request = MiddlewareAttachmentRequest {
             surface: &surface,
             protected_unit: &unit,
-            declaration_index: crate::middleware::MiddlewareDeclarationIndex::stage(0),
+            declaration_index: crate::middleware::MiddlewareDeclarationIndex::sink_with(0),
         };
         let policy = crate::middleware::materialize_factory_checked(
             &factory,

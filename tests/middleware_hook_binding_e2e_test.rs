@@ -482,17 +482,15 @@ fn build_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                input = source!(HookInput => hook_source, [
+                input = source!(HookInput => hook_source with [
                     HookProofFactory::new(counters.clone(), 1)
                 ]);
                 transform = effectful_transform!(
                     HookInput -> { HookOutput, HookEffectValue } => hook_transform,
-                    effects: [HookEffect],
-                    middleware: [
-                        HookProofFactory::new(counters.clone(), 1)
-                    ]
+                    effects: [HookEffect with Box::new(HookProofFactory::new(counters.clone(), 1))],
+                    observers: []
                 );
-                output = sink!(HookOutput => output_sink, middleware: [
+                output = sink!(HookOutput => output_sink with [
                     HookProofFactory::new(counters.clone(), 1)
                 ]);
             },
@@ -524,8 +522,8 @@ fn build_failure_cause_flow(
                 input = source!(HookInput => hook_source);
                 transform = effectful_transform!(
                     HookInput -> { HookOutput, HookEffectValue } => hook_transform,
-                    effects: [HookEffect with [Box::new(BreakerCauseProofFactory)]],
-                    middleware: []);
+                    effects: [HookEffect with Box::new(BreakerCauseProofFactory)],
+                    observers: []);
                 output = sink!(HookOutput => output_sink);
             },
 
@@ -837,7 +835,7 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
     let request = MiddlewareAttachmentRequest {
         surface: &surface,
         protected_unit: &mismatched_unit,
-        declaration_index: MiddlewareDeclarationIndex::stage(0),
+        declaration_index: MiddlewareDeclarationIndex::effect_with(),
     };
 
     assert!(validate_attachment_request(&factory.declaration(), &request).is_err());
@@ -855,7 +853,7 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
     let sink_request = MiddlewareAttachmentRequest {
         surface: &sink_surface,
         protected_unit: &sink_unit,
-        declaration_index: MiddlewareDeclarationIndex::stage(0),
+        declaration_index: MiddlewareDeclarationIndex::sink_with(0),
     };
     assert!(validate_attachment_request(&factory.declaration(), &sink_request).is_ok());
 
@@ -869,7 +867,7 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
     let source_request = MiddlewareAttachmentRequest {
         surface: &source_surface,
         protected_unit: &source_unit,
-        declaration_index: MiddlewareDeclarationIndex::stage(0),
+        declaration_index: MiddlewareDeclarationIndex::source_with(0),
     };
     assert!(validate_attachment_request(&factory.declaration(), &source_request).is_ok());
 }

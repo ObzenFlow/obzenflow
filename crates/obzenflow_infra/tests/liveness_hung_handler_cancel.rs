@@ -172,7 +172,7 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
                 hung = effectful_transform!(
                     ProbeEvent -> ProbeEvent => hung_transform,
                     effects: [],
-                    middleware: [],
+                    observers: [],
                 );
                 snk = sink!(ProbeEvent => noop_sink);
             },

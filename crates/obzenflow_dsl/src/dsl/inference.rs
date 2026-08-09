@@ -124,7 +124,7 @@ where
         vec![EffectDeclaration::at_least_once::<ChatCompletion>()],
         vec![EffectPolicyAttachment {
             effect_type: ChatCompletion::EFFECT_TYPE,
-            factories: vec![policy],
+            factory: policy,
         }],
         direct_bound,
     );

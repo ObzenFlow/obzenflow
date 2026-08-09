@@ -439,7 +439,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 // Source-boundary policies (FLOWIP-115a): the breaker protects
                 // the external HN HTTP dependency; the limiter paces API reads.
                 // Replay reconstructs archived stories and suppresses both.
-                hn_stories = async_source!(HnStory => hn_source, [
+                hn_stories = async_source!(HnStory => hn_source with [
                     source_breaker,
                     source_limiter
                 ]);
@@ -456,13 +456,13 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                         map: [FormattedStory] -> {
                             at_least_once(ChatCompletion)
                                 via chat
-                                with { ai_resilience() }
+                                with ai_resilience()
                         } HnDigestGroupSummary => map_role,
 
                         reduce: (HnTopStories, [HnDigestGroupSummary]) -> {
                             at_least_once(ChatCompletion)
                                 via chat
-                                with { ai_resilience() }
+                                with ai_resilience()
                         } HnDigestSummary => finalise_role,
                     },
                     chunking: by_budget {

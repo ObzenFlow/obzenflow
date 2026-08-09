@@ -5,7 +5,7 @@ error[E0277]: `RawStateful` does not satisfy `EffectfulStatefulHandler` for this
    |  _____________^
 49 | |         Input -> First => RawStateful,
 50 | |         effects: [],
-51 | |         middleware: []
+51 | |         observers: []
 52 | |     );
    | |_____^ this handler does not match the effectful stateful contract
    |
@@ -22,7 +22,7 @@ note: required by a bound in `__obzenflow_assert_effectful_stateful_contract`
    |  _____________^
 49 | |         Input -> First => RawStateful,
 50 | |         effects: [],
-51 | |         middleware: []
+51 | |         observers: []
 52 | |     );
    | |     ^
    | |     |
@@ -37,7 +37,7 @@ error[E0277]: `RawStateful` does not satisfy `EffectfulStatefulHandler` for this
    |  _____________^
 49 | |         Input -> First => RawStateful,
 50 | |         effects: [],
-51 | |         middleware: []
+51 | |         observers: []
 52 | |     );
    | |     ^
    | |     |
@@ -70,7 +70,7 @@ error[E0599]: the method `with_effect_declarations` exists for struct `Effectful
    |  _____________^
 49 | |         Input -> First => RawStateful,
 50 | |         effects: [],
-51 | |         middleware: []
+51 | |         observers: []
 52 | |     );
    | |     ^
    | |_____|
@@ -92,7 +92,7 @@ error[E0277]: `RawStateful` does not satisfy `EffectfulStatefulHandler` for this
    |  _____________^
 49 | |         Input -> First => RawStateful,
 50 | |         effects: [],
-51 | |         middleware: []
+51 | |         observers: []
 52 | |     );
    | |_____^ this handler does not match the effectful stateful contract
    |

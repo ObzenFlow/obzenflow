@@ -257,7 +257,7 @@ fn main() -> Result<()> {
 
                 stages: {
                     // Source intake is the live I/O boundary where rate limiting belongs.
-                    high_volume_source = source!(DataRequest => high_volume_source_handler, [
+                    high_volume_source = source!(DataRequest => high_volume_source_handler with [
                         RateLimiterBuilder::new(1000.0).build()
                     ]);
                     error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);

@@ -495,7 +495,7 @@ mod tests {
             name: "effectful_transform",
             OutputEvent -> OutputEvent, outputs: [OutputEvent, AlternateEvent] => EffectfulMultiOutputTransform,
             effects: [],
-            middleware: []
+            observers: []
         );
         let effectful_transform_meta = effectful_transform.typing_metadata().unwrap();
         assert_eq!(effectful_transform_meta.output_type, exact::<OutputEvent>());
@@ -511,7 +511,7 @@ mod tests {
             name: "effectful_multi_output_transform",
             OutputEvent -> { OutputEvent, AlternateEvent } => EffectfulMultiOutputTransform,
             effects: [],
-            middleware: []
+            observers: []
         );
         let metadata = effectful_transform.typing_metadata().unwrap();
 
@@ -601,7 +601,7 @@ mod tests {
             name: "multi_output_effectful_stateful",
             InputEvent -> { OutputEvent, AlternateEvent } => EffectfulProductStateful,
             effects: [],
-            middleware: []
+            observers: []
         );
         let effectful_stateful_meta = effectful_stateful.typing_metadata().unwrap();
         assert_eq!(effectful_stateful_meta.output_type, exact::<OutputEvent>());
@@ -629,7 +629,7 @@ mod tests {
             name: "effectful_stateful",
             InputEvent -> OutputEvent => EffectfulExactStateful,
             effects: [],
-            middleware: []
+            observers: []
         );
         let metadata = effectful_stateful.typing_metadata().unwrap();
 
@@ -822,7 +822,7 @@ mod tests {
         let transform_inner: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
             name: "transform".to_string(),
             handler: ExactTransform,
-            middleware: vec![],
+            observers: vec![],
             backpressure: None,
         });
         let transform_metadata = StageTypingMetadata::transform(
@@ -1008,7 +1008,7 @@ mod tests {
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
                 effects: [],
-                middleware: []
+                observers: []
             ),
         );
 
@@ -1096,7 +1096,7 @@ mod tests {
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
                 effects: [],
-                middleware: []
+                observers: []
             ),
         );
 
@@ -1183,7 +1183,7 @@ mod tests {
             reference_stage_id: StageId::new(),
             reference_stage_var: None,
             handler: ExactJoin,
-            middleware: vec![],
+            observers: vec![],
         };
         assert!(descriptor.is_deterministic_input_orderer());
     }
@@ -1231,7 +1231,7 @@ mod tests {
             reference_stage_id: StageId::new(),
             reference_stage_var: None,
             handler: LiveModeJoin,
-            middleware: vec![],
+            observers: vec![],
         };
         assert!(!descriptor.is_deterministic_input_orderer());
     }
@@ -1510,7 +1510,7 @@ mod tests {
                 reference_stage_id: ref_id,
                 reference_stage_var: None,
                 handler: ObserverLiveJoin,
-                middleware: vec![],
+                observers: vec![],
             }),
         );
 
@@ -1591,7 +1591,7 @@ mod tests {
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
                 effects: [],
-                middleware: []
+                observers: []
             ),
         );
 
@@ -1713,7 +1713,7 @@ mod tests {
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
                 effects: [],
-                middleware: []
+                observers: []
             ),
         );
 
@@ -1832,7 +1832,7 @@ mod tests {
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
                 effects: [],
-                middleware: []
+                observers: []
             ),
         );
 
@@ -1932,7 +1932,7 @@ mod tests {
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
                 effects: [],
-                middleware: []
+                observers: []
             ),
         );
 
@@ -2015,7 +2015,7 @@ mod tests {
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
                 effects: [],
-                middleware: []
+                observers: []
             ),
         );
 
@@ -2133,7 +2133,7 @@ mod tests {
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
                 effects: [],
-                middleware: []
+                observers: []
             ),
         );
         // A fan-in with only a sink below it: never marked.
@@ -2269,7 +2269,7 @@ mod tests {
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
                 effects: [],
-                middleware: []
+                observers: []
             ),
         );
 
@@ -2348,7 +2348,7 @@ mod tests {
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
                 effects: [],
-                middleware: []
+                observers: []
             ),
         );
 
@@ -2412,7 +2412,7 @@ mod tests {
         let descriptor: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
             name: "untyped_transform".to_string(),
             handler: ExactTransform,
-            middleware: vec![],
+            observers: vec![],
             backpressure: None,
         });
         // Sanity: the bare TransformDescriptor returns None.
@@ -2443,7 +2443,7 @@ mod tests {
         let inner: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
             name: "synthetic".to_string(),
             handler: ExactTransform,
-            middleware: vec![],
+            observers: vec![],
             backpressure: None,
         });
         let bad_metadata = StageTypingMetadata::transform(
@@ -2476,7 +2476,7 @@ mod tests {
         let inner: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
             name: "synthetic".to_string(),
             handler: ExactTransform,
-            middleware: vec![],
+            observers: vec![],
             backpressure: None,
         });
         let bad_metadata = StageTypingMetadata::transform(

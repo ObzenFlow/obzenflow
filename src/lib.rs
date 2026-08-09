@@ -60,7 +60,7 @@
 //!
 //! ## 3. The `flow!` block
 //!
-//! The [`obzenflow_dsl::flow!`] macro takes five sections:
+//! The [`obzenflow_dsl::flow!`] macro takes four sections:
 //!
 //! ### `name:`
 //! A string identifier for the flow. Used for journal directory naming and
@@ -71,12 +71,6 @@
 //! - `disk_journals(path)` produces durable, file-backed journals (production).
 //! - `memory_journals()` produces in-memory journals (tests and benchmarks).
 //!
-//! ### `middleware:`
-//! Flow-level middleware factories applied to every stage by default.
-//! Individual stages can override by supplying the same middleware type at the
-//! stage level.
-//! - `rate_limit(events_per_sec)` applies token-bucket rate limiting.
-//!
 //! ### `stages:`
 //! Let-bindings that produce stage descriptors via macros:
 //! - `source!(Out => handler)` for a finite source.
@@ -84,15 +78,16 @@
 //! - `infinite_source!(Out => handler)` for an infinite source.
 //! - `async_infinite_source!(Out => handler)` for an async infinite source.
 //! - `transform!(In -> Out => handler)` for a synchronous transform.
-//! - `effectful_transform!(In -> Out => handler, effects: [...], middleware: [])`
+//! - `effectful_transform!(In -> Out => handler, effects: [...], observers: [])`
 //!   for a transform that performs declared external work.
 //! - `sink!(In => handler)` for a sink.
 //! - `stateful!(In -> Out => handler)` for stateful aggregation.
 //! - `join!(catalog ref_stage: Ref, Stream -> Out => handler)` for joining with
 //!   reference data.
 //!
-//! All stage macros accept an optional middleware array:
-//! `source!(Out => handler, [rate_limit(10.0)])`.
+//! Control middleware attaches with the live I/O unit it protects, for example
+//! `source!(Out => handler with [rate_limit(10.0)])`. Passive middleware uses
+//! the named `observers: [...]` lane on every stage macro.
 //!
 //! ### `topology:`
 //! Edges connecting stages:
@@ -178,7 +173,6 @@
 //!         Ok(flow! {
 //!             name: "temp_alerts",
 //!             journals: disk_journals("target/temp-alerts-logs".into()),
-//!             middleware: [],
 //!
 //!             stages: {
 //!                 src = source!(Measurement => readings_source);

@@ -21,8 +21,8 @@
 //!
 //! let stage = effectful_transform!(
 //!     TicketRaised -> TicketSummarised => chat_handler,
-//!     effects: [at_least_once(ChatCompletion) with [ai_resilience()]],
-//!     middleware: [],
+//!     effects: [at_least_once(ChatCompletion) with ai_resilience()],
+//!     observers: [],
 //! );
 //! ```
 //!

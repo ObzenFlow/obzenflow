@@ -934,7 +934,7 @@ mod tests {
         Box::new(TransformDescriptor {
             name: name.to_string(),
             handler: Noop,
-            middleware: vec![],
+            observers: vec![],
             backpressure: None,
         })
     }

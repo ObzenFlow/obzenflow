@@ -134,14 +134,15 @@ pub enum FlowBuildError {
     },
 
     #[error(
-        "Duplicate middleware family '{family_label}' in stage '{stage_name}': \
-         '{first_label}' and '{second_label}'"
+        "stage '{stage_name}' attaches middleware family '{family_label}' at both \
+         '{first_position}' and '{second_position}'; one family may occupy only one \
+         control position per stage (FLOWIP-115s)"
     )]
     DuplicateStageMiddlewareFamily {
         stage_name: String,
         family_label: &'static str,
-        first_label: &'static str,
-        second_label: &'static str,
+        first_position: &'static str,
+        second_position: &'static str,
     },
 
     #[error(

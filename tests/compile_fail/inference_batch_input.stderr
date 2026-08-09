@@ -4,7 +4,7 @@ error: inference!: batch input `[T]` is not supported; use `ai_map!` or `ai_map_
  8 |       let _ = inference!(
    |  _____________^
  9 | |         [Input] ->{
-10 | |             at_least_once(ChatCompletion) via chat with { policy }
+10 | |             at_least_once(ChatCompletion) via chat with policy
 11 | |         } Output => role
 12 | |     );
    | |_____^

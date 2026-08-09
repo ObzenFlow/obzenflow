@@ -7,7 +7,9 @@
 use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
 use crate::dsl::StageCreationResult;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, MiddlewareFactory};
+use obzenflow_adapters::middleware::{
+    control::ControlMiddlewareAggregator, MiddlewareDeclarationPosition, MiddlewareFactory,
+};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{ChainEvent, StageId, WriterId};
@@ -566,7 +568,7 @@ pub fn typed_transform_descriptor<
 >(
     name: impl Into<String>,
     handler: H,
-    middleware: Vec<Box<dyn MiddlewareFactory>>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
     backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
@@ -585,7 +587,7 @@ where
     let descriptor: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
         name: name.into(),
         handler: TypedTransformHandlerAdapter::new(handler),
-        middleware,
+        observers,
         backpressure,
     });
     wrap_typed_descriptor(descriptor, metadata)
@@ -601,7 +603,7 @@ pub fn placeholder_transform_descriptor<
 >(
     name: impl Into<String>,
     message: Option<&'static str>,
-    middleware: Vec<Box<dyn MiddlewareFactory>>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
     backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
@@ -617,7 +619,7 @@ where
     let descriptor: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
         name: name.into(),
         handler: PlaceholderTransform::<ArrowInput, PrimaryOutput>::new(message),
-        middleware,
+        observers,
         backpressure,
     });
     wrap_typed_descriptor(descriptor, metadata)
@@ -1115,8 +1117,14 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.stage_middleware_names()
     }
 
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
         self.inner.stage_middleware_factories()
+    }
+
+    fn positioned_stage_middleware_factories(
+        &self,
+    ) -> Vec<(MiddlewareDeclarationPosition, &dyn MiddlewareFactory)> {
+        self.inner.positioned_stage_middleware_factories()
     }
 
     fn effect_policy_attachments(&self) -> &[crate::dsl::stage_descriptor::EffectPolicyAttachment] {
@@ -2218,8 +2226,14 @@ impl StageDescriptor for DeterministicOrdererOverride {
         self.inner.stage_middleware_names()
     }
 
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+    fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
         self.inner.stage_middleware_factories()
+    }
+
+    fn positioned_stage_middleware_factories(
+        &self,
+    ) -> Vec<(MiddlewareDeclarationPosition, &dyn MiddlewareFactory)> {
+        self.inner.positioned_stage_middleware_factories()
     }
 
     fn effect_policy_attachments(&self) -> &[crate::dsl::stage_descriptor::EffectPolicyAttachment] {

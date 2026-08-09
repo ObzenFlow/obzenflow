@@ -9,8 +9,8 @@ error: cannot construct `EffectfulTransformDescriptor<_>` with struct literal sy
    |         ------------------ private field
 16 |         effects: Vec::new(),
    |         ------------------- private field
-17 |         middleware: Vec::new(),
-   |         ---------------------- private field
+17 |         observers: Vec::new(),
+   |         --------------------- private field
 18 |         effect_policies: Vec::new(),
    |         --------------------------- private field
 19 |         direct_fact_plan: DirectFactPlan::default(),
@@ -27,7 +27,7 @@ help: you might have meant to use an associated function to build this type
 14 -         name: "counterfeit-generated-stage".to_string(),
 15 -         handler: FirstOnly,
 16 -         effects: Vec::new(),
-17 -         middleware: Vec::new(),
+17 -         observers: Vec::new(),
 18 -         effect_policies: Vec::new(),
 19 -         direct_fact_plan: DirectFactPlan::default(),
 20 -         pass_through_event_type: None,
@@ -39,7 +39,7 @@ help: you might have meant to use an associated function to build this type
 14 -         name: "counterfeit-generated-stage".to_string(),
 15 -         handler: FirstOnly,
 16 -         effects: Vec::new(),
-17 -         middleware: Vec::new(),
+17 -         observers: Vec::new(),
 18 -         effect_policies: Vec::new(),
 19 -         direct_fact_plan: DirectFactPlan::default(),
 20 -         pass_through_event_type: None,
@@ -51,7 +51,7 @@ help: you might have meant to use an associated function to build this type
 14 -         name: "counterfeit-generated-stage".to_string(),
 15 -         handler: FirstOnly,
 16 -         effects: Vec::new(),
-17 -         middleware: Vec::new(),
+17 -         observers: Vec::new(),
 18 -         effect_policies: Vec::new(),
 19 -         direct_fact_plan: DirectFactPlan::default(),
 20 -         pass_through_event_type: None,
@@ -63,7 +63,7 @@ help: you might have meant to use an associated function to build this type
 14 -         name: "counterfeit-generated-stage".to_string(),
 15 -         handler: FirstOnly,
 16 -         effects: Vec::new(),
-17 -         middleware: Vec::new(),
+17 -         observers: Vec::new(),
 18 -         effect_policies: Vec::new(),
 19 -         direct_fact_plan: DirectFactPlan::default(),
 20 -         pass_through_event_type: None,

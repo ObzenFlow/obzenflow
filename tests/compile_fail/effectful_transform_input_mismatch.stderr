@@ -5,7 +5,7 @@ error[E0277]: the effectful transform handler's `Input` does not match the stage
    |  _____________^
 21 | |         OtherInput -> First => FirstOnly,
 22 | |         effects: [],
-23 | |         middleware: []
+23 | |         observers: []
 24 | |     );
    | |     ^
    | |     |
@@ -25,7 +25,7 @@ note: required by a bound in `__obzenflow_assert_effectful_transform_contract`
    |  _____________^
 21 | |         OtherInput -> First => FirstOnly,
 22 | |         effects: [],
-23 | |         middleware: []
+23 | |         observers: []
 24 | |     );
    | |     ^
    | |     |

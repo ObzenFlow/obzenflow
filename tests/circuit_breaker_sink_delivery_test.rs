@@ -122,7 +122,7 @@ async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
 
             stages: {
                 cb_source = source!(SinkBreakerEvent => source);
-                cb_sink = sink!(SinkBreakerEvent => sink_handler, middleware: [
+                cb_sink = sink!(SinkBreakerEvent => sink_handler with [
                     breaker(THRESHOLD)
                 ]);
             },

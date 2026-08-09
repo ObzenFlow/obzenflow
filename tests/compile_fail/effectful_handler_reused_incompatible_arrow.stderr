@@ -5,7 +5,7 @@ error[E0277]: the stage arrow declares an output fact missing from the handler's
    |  _____________^
 18 | |         Input -> { First, Second } => handler,
 19 | |         effects: [],
-20 | |         middleware: []
+20 | |         observers: []
 21 | |     );
    | |_____^ this arrow output contract is not contained in the handler's `Output` set
    |
@@ -18,7 +18,7 @@ note: required by a bound in `main::__obzenflow_assert_effectful_transform_contr
    |  _____________^
 18 | |         Input -> { First, Second } => handler,
 19 | |         effects: [],
-20 | |         middleware: []
+20 | |         observers: []
 21 | |     );
    | |     ^
    | |     |

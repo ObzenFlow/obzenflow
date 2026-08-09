@@ -274,7 +274,7 @@ fn build_flow(
                 effectful = effectful_transform!(
                     Merged -> { FanInOutput, EffectValue } => effectful_handler,
                     effects: [CountingEffect],
-                    middleware: []
+                    observers: []
                 );
                 collect = sink!(FanInOutput => collect_handler);
             },

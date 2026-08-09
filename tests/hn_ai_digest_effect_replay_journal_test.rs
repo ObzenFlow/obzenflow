@@ -610,12 +610,12 @@ fn build_flow_with_chunk_plan(
                         map: [DigestItem] ->{
                             at_least_once(ChatCompletion)
                                 via chat
-                                with { ai_resilience() }
+                                with ai_resilience()
                         } DigestPartial => map_role,
                         reduce: (DigestSeed, [DigestPartial]) ->{
                             at_least_once(ChatCompletion)
                                 via chat
-                                with { ai_resilience() }
+                                with ai_resilience()
                         } DigestOut => finalise_role,
                     },
                     chunking: by_budget {
@@ -673,12 +673,12 @@ fn build_recovery_flow(
                         map: [DigestItem] ->{
                             at_least_once(ChatCompletion)
                                 via chat
-                                with { map_policy }
+                                with map_policy
                         } DigestPartial => map_role,
                         reduce: (DigestSeed, [DigestPartial]) ->{
                             at_least_once(ChatCompletion)
                                 via chat
-                                with { ai_resilience() }
+                                with ai_resilience()
                         } DigestOut => finalise_role,
                     },
                     chunking: by_budget {
@@ -736,12 +736,12 @@ fn build_credit_flow(
                         map: [DigestItem] ->{
                             at_least_once(ChatCompletion)
                                 via chat
-                                with { ai_resilience() }
+                                with ai_resilience()
                         } DigestPartial => map_role,
                         reduce: (DigestSeed, [DigestPartial]) ->{
                             at_least_once(ChatCompletion)
                                 via chat
-                                with { ai_resilience() }
+                                with ai_resilience()
                         } DigestOut => finalise_role,
                     },
                     chunking: by_budget {
@@ -798,12 +798,12 @@ fn build_chunk_interruption_flow(
                         map: [DigestItem] ->{
                             at_least_once(ChatCompletion)
                                 via chat
-                                with { ai_resilience() }
+                                with ai_resilience()
                         } DigestPartial => map_role,
                         reduce: (DigestSeed, [DigestPartial]) ->{
                             at_least_once(ChatCompletion)
                                 via chat
-                                with { ai_resilience() }
+                                with ai_resilience()
                         } DigestOut => finalise_role,
                     },
                     chunking: by_budget {
@@ -1305,7 +1305,7 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "map: [FormattedStory] -> {",
         "reduce: (HnTopStories, [HnDigestGroupSummary]) -> {",
         "via chat",
-        "with { ai_resilience() }",
+        "with ai_resilience()",
     ] {
         assert!(
             flow_source.contains(required),

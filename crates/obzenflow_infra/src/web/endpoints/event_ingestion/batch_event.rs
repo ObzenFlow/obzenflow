@@ -257,11 +257,9 @@ impl HttpEndpoint for BatchEventEndpoint {
         // reserved one permit per accepted event (buffer-full/503 had
         // precedence); on refusal, drop all permits and refuse the subset
         // atomically with `accepted: 0`.
-        if let Some(boundary) = self.state.ingress_boundary() {
+        let accepted_boundary = if let Some(boundary) = self.state.ingress_boundary() {
             match boundary.on_ingress(&subset) {
-                IngressAdmissionDecision::Accept => {
-                    boundary.observe(&subset, IngressAdmissionOutcome::AcceptedForEnqueue);
-                }
+                IngressAdmissionDecision::Accept => Some(boundary),
                 IngressAdmissionDecision::Reject { retry_after } => {
                     boundary.observe(&subset, IngressAdmissionOutcome::RejectedBy);
                     drop(permits);
@@ -327,7 +325,9 @@ impl HttpEndpoint for BatchEventEndpoint {
                     return Ok(response.into());
                 }
             }
-        }
+        } else {
+            None
+        };
 
         let accepted_at_ns = unix_now_nanos();
         let ingress_key = self.state.ingress_key().clone();
@@ -339,6 +339,9 @@ impl HttpEndpoint for BatchEventEndpoint {
                 attempt_seq,
             });
             permit.send(event);
+        }
+        if let Some(boundary) = accepted_boundary {
+            boundary.observe(&subset, IngressAdmissionOutcome::AcceptedForEnqueue);
         }
 
         let response = Response::ok()

@@ -100,7 +100,7 @@ async fn topology_config_slot_collisions_are_configuration_errors() {
             journals: obzenflow_infra::journal::memory_journals(),
 
             stages: {
-                src = source!(TestEvent => placeholder!(), [
+                src = source!(TestEvent => placeholder!() with [
                     SlotFactory {
                         label: "slot.a",
                         key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
@@ -141,7 +141,7 @@ async fn duplicate_stage_middleware_families_are_rejected_before_materialisation
             journals: obzenflow_infra::journal::memory_journals(),
 
             stages: {
-                src = source!(TestEvent => placeholder!(), [
+                src = source!(TestEvent => placeholder!() with [
                     SlotFactory {
                         label: "family.first",
                         key: MiddlewareOverrideKey::of::<FamilyA>("family.a"),
@@ -174,8 +174,8 @@ async fn duplicate_stage_middleware_families_are_rejected_before_materialisation
         obzenflow_dsl::dsl::FlowBuildError::DuplicateStageMiddlewareFamily {
             stage_name,
             family_label: "family.a",
-            first_label: "family.first",
-            second_label: "family.second",
+            first_position: "source with",
+            second_position: "source with",
         } if stage_name == "src"
     ));
 }

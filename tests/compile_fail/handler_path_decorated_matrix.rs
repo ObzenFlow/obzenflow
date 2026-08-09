@@ -11,7 +11,7 @@ struct Handler;
 
 fn main() {
     // Each call uses the family's maximally decorated live form. These cases
-    // pin the teaching fallback after contract, explicit-name, middleware,
+    // pin the teaching fallback after contract, explicit-name, attachment,
     // backpressure, effects, emit-interval, delivery, and catalog parsing.
     let _ = obzenflow_dsl::source!(
         name: "source",
@@ -40,41 +40,41 @@ fn main() {
     let _ = obzenflow_dsl::transform!(
         name: "transform",
         Input -> { Output, Alternate } => Handler::new(),
-        [middleware],
+        observers: [middleware],
         backpressure: backpressure
     );
     let _ = obzenflow_dsl::effectful_transform!(
         name: "effectful_transform",
         Input -> { Output, Alternate } => Handler::new(),
         effects: [Effect],
-        middleware: [middleware],
+        observers: [middleware],
         backpressure: backpressure
     );
     let _ = obzenflow_dsl::stateful!(
         name: "stateful",
         Input -> { Output, Alternate } => Handler::new(),
         emit_interval = interval,
-        [middleware],
+        observers: [middleware],
         backpressure: backpressure
     );
     let _ = obzenflow_dsl::effectful_stateful!(
         name: "effectful_stateful",
         Input -> { Output, Alternate } => Handler::new(),
         effects: [Effect],
-        middleware: [middleware],
+        observers: [middleware],
         backpressure: backpressure
     );
     let _ = obzenflow_dsl::join!(
         name: "join",
         catalog reference: Reference,
         Input -> { Output, Alternate } => Handler::new(),
-        [middleware]
+        observers: [middleware]
     );
     let _ = obzenflow_dsl::sink!(
         name: "sink",
         Input => Handler::new(),
         delivery: idempotent,
-        middleware: [middleware]
+        observers: [middleware]
     );
     let _ = obzenflow_dsl::sink!(Input => sinks::json());
 }

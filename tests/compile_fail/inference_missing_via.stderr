@@ -1,10 +1,10 @@
-error: inference!: expected `at_least_once(ChatCompletion) via <chat binding> with { <EffectResilience> }`
+error: inference!: expected `at_least_once(ChatCompletion) via <chat binding> with <EffectResilience>`
   --> tests/compile_fail/inference_missing_via.rs:14:13
    |
 14 |       let _ = inference!(
    |  _____________^
 15 | |         Input ->{
-16 | |             at_least_once(ChatCompletion) with { policy }
+16 | |             at_least_once(ChatCompletion) with policy
 17 | |         } Output => role
 18 | |     );
    | |_____^

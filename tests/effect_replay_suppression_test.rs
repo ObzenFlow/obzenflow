@@ -913,7 +913,7 @@ fn build_flow(
                 effectful = effectful_transform!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
                     effects: [CountingEffect],
-                    middleware: []
+                    observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -941,13 +941,13 @@ fn build_source_limiter_flow(
             journals: disk_journals(journal_base),
 
             stages: {
-                inputs = source!(ReplayInput => inputs_handler, [
+                inputs = source!(ReplayInput => inputs_handler with [
                     RateLimiterBuilder::new(1.0).build()
                 ]);
                 effectful = effectful_transform!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
                     effects: [CountingEffect],
-                    middleware: []
+                    observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -983,10 +983,8 @@ fn build_fast_limiter_flow(
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [CountingEffect with [
-                        RateLimiterBuilder::new(1000.0).build()
-                    ]],
-                    middleware: []
+                    effects: [CountingEffect with RateLimiterBuilder::new(1000.0).build()],
+                    observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -1034,8 +1032,8 @@ fn build_blocking_flow(
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [BlockingEffect with [resilience]],
-                    middleware: []
+                    effects: [BlockingEffect with resilience],
+                    observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -1080,8 +1078,8 @@ fn build_post_perform_blocking_flow(
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [CountingEffect with [resilience]],
-                    middleware: []
+                    effects: [CountingEffect with resilience],
+                    observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -1122,8 +1120,8 @@ fn build_fan_out_flow(
                 fan_out = transform!(ReplayInput -> ReplayInput => fan_out_handler);
                 effectful = effectful_transform!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [CountingEffect with [resilience]],
-                    middleware: []
+                    effects: [CountingEffect with resilience],
+                    observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -1156,7 +1154,7 @@ fn build_stateful_flow(
                 effectful = effectful_stateful!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
                     effects: [CountingEffect],
-                    middleware: []
+                    observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -1197,7 +1195,7 @@ fn build_dishonest_one_fact_stateful_flow(
                 effectful = effectful_stateful!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
                     effects: [CountingEffect],
-                    middleware: []
+                    observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -1235,7 +1233,7 @@ fn build_error_after_commit_stateful_flow(
                 effectful = effectful_stateful!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
                     effects: [CountingEffect],
-                    middleware: []
+                    observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -1275,7 +1273,7 @@ fn build_apply_rejection_stateful_flow(
                 effectful = effectful_stateful!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
                     effects: [CountingEffect],
-                    middleware: []
+                    observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -1308,7 +1306,7 @@ fn build_product_stateful_flow(
                 effectful = effectful_stateful!(
                     ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } => effectful_handler,
                     effects: [ProductEffect],
-                    middleware: []
+                    observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -3478,7 +3476,7 @@ fn build_ported_flow(
                 ported = effectful_transform!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => ported_handler,
                     effects: [PortedEffect],
-                    middleware: []
+                    observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -3688,8 +3686,8 @@ fn build_transactional_flow(
                 inputs = source!(ReplayInput => inputs_handler);
                 ledger = effectful_transform!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => ledger_handler,
-                    effects: [transactional(LedgerEffect, "ledger_tx") with [resilience]],
-                    middleware: []
+                    effects: [transactional(LedgerEffect, "ledger_tx") with resilience],
+                    observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -3989,8 +3987,8 @@ fn build_fail_fast_rejection_flow(
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [AlwaysFailingEffect with [resilience]],
-                    middleware: []);
+                    effects: [AlwaysFailingEffect with resilience],
+                    observers: []);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -4028,8 +4026,8 @@ fn build_multi_effect_per_effect_breaker_flow(
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
                     ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [AlwaysFailingEffect with [resilience], CountingEffect],
-                    middleware: []);
+                    effects: [AlwaysFailingEffect with resilience, CountingEffect],
+                    observers: []);
                 collector = sink!(ReplayOutput => collector_handler);
             },
 
@@ -4124,7 +4122,7 @@ async fn fail_fast_rejection_completes_inputs_and_replays_without_execution() {
 }
 
 /// FLOWIP-120c H7 lifted the single-effect restriction: a breaker policy
-/// attaches inline to the effect it guards (`Effect with [...]`), so a
+/// attaches inline to the effect it guards (`Effect with policy`), so a
 /// multi-effect stage builds and the breaker guards only its own effect.
 #[tokio::test]
 async fn per_effect_breaker_builds_on_multi_effect_stages() {

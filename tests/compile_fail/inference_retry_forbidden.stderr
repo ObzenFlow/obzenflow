@@ -4,7 +4,7 @@ error: inference!: ChatCompletion is NonIdempotentAtLeastOnce; retry is forbidde
 14 |       let _ = inference!(
    |  _____________^
 15 | |         Input ->{
-16 | |             at_least_once(ChatCompletion) via chat with { retry(3) }
+16 | |             at_least_once(ChatCompletion) via chat with retry(3)
 17 | |         } Output => role
 18 | |     );
    | |_____^

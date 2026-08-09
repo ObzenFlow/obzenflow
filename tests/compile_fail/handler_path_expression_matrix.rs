@@ -25,13 +25,13 @@ macro_rules! reject_in_every_slot {
         let _ = obzenflow_dsl::effectful_transform!(
             Input -> Output => $($bad)+,
             effects: [],
-            middleware: []
+            observers: []
         );
         let _ = obzenflow_dsl::stateful!(Input -> Output => $($bad)+);
         let _ = obzenflow_dsl::effectful_stateful!(
             Input -> Output => $($bad)+,
             effects: [],
-            middleware: []
+            observers: []
         );
         let _ = obzenflow_dsl::join!(
             catalog reference: Reference,
@@ -40,16 +40,16 @@ macro_rules! reject_in_every_slot {
         let _ = obzenflow_dsl::sink!(Input => $($bad)+);
         let _ = obzenflow_dsl::inference!(
             Input -> {
-                at_least_once(ChatCompletion) via chat with { policy }
+                at_least_once(ChatCompletion) via chat with policy
             } Output => $($bad)+
         );
         let _ = obzenflow_dsl::ai_map_reduce!(
             Seed -> Output => {
                 map: [Item] -> {
-                    at_least_once(ChatCompletion) via chat with { policy }
+                    at_least_once(ChatCompletion) via chat with policy
                 } Partial => $($bad)+,
                 reduce: (Seed, [Partial]) -> {
-                    at_least_once(ChatCompletion) via chat with { policy }
+                    at_least_once(ChatCompletion) via chat with policy
                 } Output => finalise_role,
             },
             chunking: by_budget { fixture }
@@ -57,10 +57,10 @@ macro_rules! reject_in_every_slot {
         let _ = obzenflow_dsl::ai_map_reduce!(
             Seed -> Output => {
                 map: [Item] -> {
-                    at_least_once(ChatCompletion) via chat with { policy }
+                    at_least_once(ChatCompletion) via chat with policy
                 } Partial => map_role,
                 reduce: (Seed, [Partial]) -> {
-                    at_least_once(ChatCompletion) via chat with { policy }
+                    at_least_once(ChatCompletion) via chat with policy
                 } Output => $($bad)+,
             },
             chunking: by_budget { fixture }

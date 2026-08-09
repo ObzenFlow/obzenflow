@@ -178,7 +178,7 @@ mod tests {
         Box::new(TransformDescriptor {
             name: name.to_string(),
             handler: NoopTransform,
-            middleware: vec![],
+            observers: vec![],
             backpressure: None,
         })
     }
@@ -190,12 +190,12 @@ mod tests {
                 map: [TestItem] ->{
                     at_least_once(ChatCompletion)
                         via chat
-                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                        with obzenflow_adapters::middleware::control::ai_resilience()
                 } TestPartial => TestMapRole,
                 reduce: (TestSeed, [TestPartial]) ->{
                     at_least_once(ChatCompletion)
                         via chat
-                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                        with obzenflow_adapters::middleware::control::ai_resilience()
                 } TestOut => TestFinaliseRole,
             },
             chunking: by_budget {
@@ -215,7 +215,7 @@ mod tests {
             TestSeed ->{
                 at_least_once(ChatCompletion)
                     via chat
-                    with { obzenflow_adapters::middleware::control::ai_resilience() }
+                    with obzenflow_adapters::middleware::control::ai_resilience()
             } TestOut => TestInferenceRole
         );
         inference.set_name("brief".to_string());
@@ -234,7 +234,7 @@ mod tests {
         let policies = inference.effect_policy_attachments();
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0].effect_type, "obzenflow.ai.chat_completion");
-        assert_eq!(policies[0].factories.len(), 1);
+        assert_eq!(policies[0].factory.label(), "effect_resilience");
 
         let direct_plan = inference
             .direct_fact_plan()
@@ -359,12 +359,12 @@ mod tests {
                 map: [TestItem] ->{
                     at_least_once(ChatCompletion)
                         via chat
-                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                        with obzenflow_adapters::middleware::control::ai_resilience()
                 } TestPartial => TestMapRole,
                 reduce: (TestSeed, [TestPartial]) ->{
                     at_least_once(ChatCompletion)
                         via chat
-                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                        with obzenflow_adapters::middleware::control::ai_resilience()
                 } TestOut => TestFinaliseRole,
             },
             chunking: by_budget {
@@ -403,20 +403,16 @@ mod tests {
                 map: [TestItem] ->{
                     at_least_once(ChatCompletion)
                         via chat
-                        with {
-                            Box::new(
-                                obzenflow_adapters::middleware::LoggingMiddlewareFactory::new()
-                            )
-                        }
+                        with Box::new(
+                            obzenflow_adapters::middleware::LoggingMiddlewareFactory::new()
+                        )
                 } TestPartial => TestMapRole,
                 reduce: (TestSeed, [TestPartial]) ->{
                     at_least_once(ChatCompletion)
                         via chat
-                        with {
-                            Box::new(
-                                obzenflow_adapters::middleware::LoggingMiddlewareFactory::new()
-                            )
-                        }
+                        with Box::new(
+                            obzenflow_adapters::middleware::LoggingMiddlewareFactory::new()
+                        )
                 } TestOut => TestFinaliseRole,
             },
             chunking: by_budget {
@@ -474,12 +470,12 @@ mod tests {
                 map: [TestItem] ->{
                     at_least_once(ChatCompletion)
                         via map_chat
-                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                        with obzenflow_adapters::middleware::control::ai_resilience()
                 } TestPartial => TestMapRole,
                 reduce: (TestSeed, [TestPartial]) ->{
                     at_least_once(ChatCompletion)
                         via finalise_chat
-                        with { obzenflow_adapters::middleware::control::ai_resilience() }
+                        with obzenflow_adapters::middleware::control::ai_resilience()
                 } TestOut => TestFinaliseRole,
             },
             chunking: by_budget {
@@ -837,7 +833,7 @@ mod tests {
         let existing: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
             name: "digest__chunk".to_string(),
             handler: NoopTransform,
-            middleware: vec![],
+            observers: vec![],
             backpressure: None,
         });
         members.insert("digest__chunk".to_string(), existing.into_flow_member());

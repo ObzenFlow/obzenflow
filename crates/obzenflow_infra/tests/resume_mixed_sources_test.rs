@@ -310,7 +310,7 @@ fn build_flow(
                 effectful = effectful_transform!(
                     Merged -> { MixedOutput, EffectValue } => effectful_handler,
                     effects: [CountingEffect],
-                    middleware: []
+                    observers: []
                 );
                 collect = sink!(MixedOutput => collect_handler);
             },

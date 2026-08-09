@@ -188,7 +188,7 @@ fn main() -> Result<()> {
 
                 stages: {
                     // Source intake is a live I/O unit, so rate limiting belongs here.
-                    fast_source = source!(CounterEvent => fast_source_handler, [
+                    fast_source = source!(CounterEvent => fast_source_handler with [
                         RateLimiterBuilder::new(10.0).build()
                     ]);
 
