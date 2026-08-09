@@ -67,7 +67,7 @@ pub fn build_flow(
                 note: entry.note,
             },
         );
-        let checkbook_handler = Checkbook::new();
+        let checkbook_handler = Checkbook;
         let accounts_route_limiter = RateLimiterBuilder::new(10.0).with_burst(1.0).build();
         let printer_sink = sinks::console::<CheckbookSnapshot, _>(
             SnapshotTableFormatter::new(

@@ -23,12 +23,6 @@ use obzenflow_runtime::stages::sink::DeliveryContext;
 #[derive(Clone, Debug, Default)]
 pub struct ShippingHandoff;
 
-impl ShippingHandoff {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 #[async_trait]
 impl Delivery for ShippingHandoff {
     type Input = PaymentAuthorized;

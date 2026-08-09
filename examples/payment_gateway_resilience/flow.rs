@@ -167,7 +167,7 @@ pub fn assemble_flow(
             order
         });
         let validate_order = validation::ValidateOrder;
-        let shipping_handoff = ShippingHandoff::new();
+        let shipping_handoff = ShippingHandoff;
         let record_cancelled =
             SinkTyped::with_delivery(|cancelled: OrderCancelled, delivery| async move {
                 console::record_cancelled_order(cancelled, delivery.provenance());

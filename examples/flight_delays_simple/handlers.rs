@@ -16,12 +16,6 @@ use std::collections::HashMap;
 #[derive(Clone, Debug)]
 pub struct FlightValidator;
 
-impl FlightValidator {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 impl TypedTransformHandler for FlightValidator {
     type Input = FlightRecord;
     type Output = FlightRecord;
@@ -38,12 +32,6 @@ impl TypedTransformHandler for FlightValidator {
 
 #[derive(Clone, Debug)]
 pub struct DelayCalculator;
-
-impl DelayCalculator {
-    pub fn new() -> Self {
-        Self
-    }
-}
 
 impl TypedTransformHandler for DelayCalculator {
     type Input = FlightRecord;
@@ -74,12 +62,6 @@ pub struct CarrierStats {
 
 #[derive(Debug, Clone)]
 pub struct CarrierAggregator;
-
-impl CarrierAggregator {
-    pub fn new() -> Self {
-        Self
-    }
-}
 
 impl TypedStatefulHandler for CarrierAggregator {
     type State = CarrierStats;

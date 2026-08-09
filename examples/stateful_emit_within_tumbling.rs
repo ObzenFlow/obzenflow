@@ -11,12 +11,17 @@
 //! - a final partial window flushed during drain
 //!
 //! Run with: `cargo run -p obzenflow --example stateful_emit_within_tumbling`
+//!
+//! This is intentionally a live processing-time proof. Timer boundaries are
+//! not replay inputs, so replay and resume CLI modes are rejected explicitly.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use obzenflow::typed::{sources, stateful as typed_stateful};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::application::{
+    Banner, FlowApplication, Footer, Presentation, RunPresentationOutcome,
+};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::sink::SinkTyped;
 use serde::{Deserialize, Serialize};
@@ -54,13 +59,80 @@ impl TypedPayload for UserCountUpdate {
     const EVENT_TYPE: &'static str = "demo.user_count_update";
 }
 
+fn require_live_mode() -> Result<()> {
+    let requested_recorded_mode = std::env::args_os().skip(1).any(|arg| {
+        let arg = arg.to_string_lossy();
+        matches!(arg.as_ref(), "--replay-from" | "--resume-from")
+            || arg.starts_with("--replay-from=")
+            || arg.starts_with("--resume-from=")
+    });
+
+    if requested_recorded_mode {
+        bail!(
+            "stateful_emit_within_tumbling is a live processing-time proof: timer boundaries \
+             are not replay inputs; use an input-determined example for replay verification"
+        );
+    }
+    Ok(())
+}
+
+fn live_only_footer(outcome: RunPresentationOutcome) -> Footer {
+    let footer =
+        match outcome {
+            RunPresentationOutcome::Completed {
+                flow_name,
+                location,
+                ..
+            } => match location {
+                Some(location) => Footer::new()
+                    .paragraph(format!("{flow_name} completed. Live journal: {location}")),
+                None => Footer::new().paragraph(format!("{flow_name} completed.")),
+            },
+            RunPresentationOutcome::Stopped {
+                flow_name,
+                location,
+                ..
+            } => match location {
+                Some(location) => Footer::new()
+                    .paragraph(format!("{flow_name} stopped. Live journal: {location}")),
+                None => Footer::new().paragraph(format!("{flow_name} stopped.")),
+            },
+            RunPresentationOutcome::Failed {
+                flow_name,
+                error,
+                location,
+                ..
+            } => {
+                let flow_name = flow_name.unwrap_or_else(|| "flow".to_string());
+                match location {
+                    Some(location) => Footer::new().paragraph(format!(
+                        "{flow_name} failed: {error}. Live journal: {location}"
+                    )),
+                    None => Footer::new().paragraph(format!("{flow_name} failed: {error}")),
+                }
+            }
+        };
+
+    footer.paragraph(
+        "This example deliberately proves live processing-time boundaries only; \
+         use stateful_accumulator_catalog for certified replay coverage.",
+    )
+}
+
 fn main() -> Result<()> {
+    require_live_mode()?;
+
     let window = Duration::from_millis(200);
     let per_event_delay = Duration::from_millis(100);
     let total = 5usize;
+    let presentation = Presentation::new(
+        Banner::new("Stateful emit-within tumbling window")
+            .description("Live processing-time proof; timer boundaries are not replay inputs."),
+    )
+    .with_footer(live_only_footer);
 
     FlowApplication::builder()
-        .with_cli_args(["obzenflow"])
+        .with_presentation(presentation)
         .run_blocking(FlowDefinition::materialize(move |_runtime_config| {
             let clicks_handler = sources::finite_from_fn(move |index| {
                 if index >= total {

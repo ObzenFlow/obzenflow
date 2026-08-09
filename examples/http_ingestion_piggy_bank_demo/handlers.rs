@@ -25,12 +25,6 @@ struct AccountLedger {
 #[derive(Clone, Debug)]
 pub struct Checkbook;
 
-impl Checkbook {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 impl TypedStatefulHandler for Checkbook {
     type State = CheckbookState;
     type Input = PostedEntry;
