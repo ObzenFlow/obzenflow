@@ -43,8 +43,7 @@ impl TypedPayload for UserCount {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// GroupByTyped emits payloads shaped as `{ key, result }` but uses the state
-/// type's event type. The wrapper output type mirrors that payload.
+/// Honest named output projected from each per-user bucket.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct UserCountUpdate {
     key: String,
@@ -52,8 +51,7 @@ struct UserCountUpdate {
 }
 
 impl TypedPayload for UserCountUpdate {
-    const EVENT_TYPE: &'static str = UserCount::EVENT_TYPE;
-    const SCHEMA_VERSION: u32 = UserCount::SCHEMA_VERSION;
+    const EVENT_TYPE: &'static str = "demo.user_count_update";
 }
 
 fn main() -> Result<()> {
@@ -82,6 +80,10 @@ fn main() -> Result<()> {
                 |e: &ClickEvent| e.user_id.clone(),
                 |state: &mut UserCount, _e: &ClickEvent| {
                     state.count += 1;
+                },
+                |key: &String, result: &UserCount| UserCountUpdate {
+                    key: key.clone(),
+                    result: result.clone(),
                 },
             )
             .emit_within(window);

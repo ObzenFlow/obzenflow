@@ -3,11 +3,10 @@
 // https://obzenflow.dev
 
 use super::domain::*;
-use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::{id::StageId, TypedPayload, WriterId};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{StatefulHandler, TypedTransformHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    StatefulEmission, TypedStatefulHandler, TypedTransformHandler,
+};
 use std::collections::HashMap;
 
 // ============================================================================
@@ -74,47 +73,34 @@ pub struct CarrierStats {
 }
 
 #[derive(Debug, Clone)]
-pub struct CarrierAggregator {
-    writer_id: WriterId,
-}
+pub struct CarrierAggregator;
 
 impl CarrierAggregator {
     pub fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl StatefulHandler for CarrierAggregator {
+impl TypedStatefulHandler for CarrierAggregator {
     type State = CarrierStats;
+    type Input = EnrichedFlight;
+    type Output = CarrierStatistics;
 
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        if EnrichedFlight::event_type_matches(&event.event_type()) {
-            if let (Some(carrier_name), Some(delay)) = (
-                event.payload().get("carrier_name").and_then(|v| v.as_str()),
-                event
-                    .payload()
-                    .get("delay_minutes")
-                    .and_then(|v| v.as_u64()),
-            ) {
-                let entry = state
-                    .stats
-                    .entry(carrier_name.to_string())
-                    .or_insert((0, 0));
-                entry.0 += delay;
-                entry.1 += 1;
-            }
-        }
+    fn accumulate(&self, state: &mut Self::State, flight: EnrichedFlight) {
+        let entry = state.stats.entry(flight.carrier_name).or_insert((0, 0));
+        entry.0 += u64::from(flight.delay_minutes);
+        entry.1 += 1;
     }
 
     fn initial_state(&self) -> Self::State {
         CarrierStats::default()
     }
 
-    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-        let events = state
+    fn emit(
+        &self,
+        state: &Self::State,
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        let mut outputs: Vec<_> = state
             .stats
             .iter()
             .map(|(carrier, (total_delay, flight_count))| {
@@ -124,22 +110,18 @@ impl StatefulHandler for CarrierAggregator {
                     0.0
                 };
 
-                let stats = CarrierStatistics {
+                CarrierStatistics {
                     carrier: carrier.clone(),
                     total_delay: *total_delay,
                     flight_count: *flight_count,
                     average_delay: avg_delay,
-                };
-
-                ChainEventFactory::data_event(
-                    self.writer_id,
-                    CarrierStatistics::versioned_event_type(),
-                    serde_json::to_value(&stats)
-                        .expect("CarrierStatistics should always serialize"),
-                )
+                }
             })
             .collect();
-
-        Ok(events)
+        outputs.sort_by(|left, right| left.carrier.cmp(&right.carrier));
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: state.clone(),
+            outputs,
+        })
     }
 }

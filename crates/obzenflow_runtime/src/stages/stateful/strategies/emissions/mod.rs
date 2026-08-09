@@ -9,7 +9,7 @@
 // define the "what" to create flexible stateful processing patterns.
 
 use std::fmt::Debug;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 // Re-export concrete strategies
 mod emit_always;
@@ -32,10 +32,8 @@ pub use time_window::TimeWindow;
 /// ```ignore
 /// use obzenflow_runtime::stages::stateful::strategies::emissions::{EmissionStrategy, OnEOF};
 ///
-/// let mut strategy = OnEOF::new();
-/// assert!(!strategy.should_emit(100, None));  // Not at EOF yet
-/// strategy.set_eof();
-/// assert!(strategy.should_emit(100, None));   // Now at EOF
+/// let strategy = OnEOF::new();
+/// assert!(!strategy.should_emit(100, None));
 /// ```
 pub trait EmissionStrategy: Send + Sync + Debug {
     /// Check if should emit based on current state.
@@ -43,18 +41,13 @@ pub trait EmissionStrategy: Send + Sync + Debug {
     /// # Arguments
     ///
     /// * `events_seen` - Total number of events processed so far
-    /// * `last_emit` - Time of last emission (if any)
+    /// * `period_elapsed` - Elapsed processing time since the first input in
+    ///   the current period, supplied by wrapper state
     ///
     /// # Returns
     ///
     /// `true` if results should be emitted now, `false` otherwise
-    fn should_emit(&mut self, events_seen: u64, last_emit: Option<Instant>) -> bool;
-
-    /// Called after emission to reset tracking.
-    ///
-    /// This allows strategies to reset counters or state after emitting results.
-    /// For example, EveryN resets its counter after emission.
-    fn reset(&mut self);
+    fn should_emit(&self, events_seen: u64, period_elapsed: Option<Duration>) -> bool;
 
     /// Whether this strategy represents a tumbling boundary that should reset the accumulator.
     ///
@@ -69,13 +62,5 @@ pub trait EmissionStrategy: Send + Sync + Debug {
     /// input events arrive, enabling time-based emission.
     fn emit_interval_hint(&self) -> Option<Duration> {
         None
-    }
-
-    /// Check if this strategy requires EOF notification.
-    ///
-    /// Used by OnEOF strategy to know when the stream has completed.
-    fn notify_eof(&mut self) {
-        // Default implementation does nothing
-        // Override in strategies that care about EOF
     }
 }

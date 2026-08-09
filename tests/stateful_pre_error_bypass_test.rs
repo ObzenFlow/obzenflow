@@ -8,7 +8,6 @@
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -16,7 +15,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulHandler, TypedTransformHandler,
+    FiniteSourceHandler, SinkHandler, StatefulEmission, TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -101,19 +100,15 @@ impl TypedTransformHandler for RejectTwo {
 #[derive(Clone, Debug)]
 struct GuardedAccumulator {
     calls: Arc<AtomicUsize>,
-    unexpected_error_calls: Arc<AtomicUsize>,
-    writer_id: WriterId,
 }
 
-#[async_trait]
-impl StatefulHandler for GuardedAccumulator {
+impl TypedStatefulHandler for GuardedAccumulator {
     type State = usize;
+    type Input = Input;
+    type Output = Aggregate;
 
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
+    fn accumulate(&self, state: &mut Self::State, _input: Input) {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
-            self.unexpected_error_calls.fetch_add(1, Ordering::SeqCst);
-        }
         *state += 1;
     }
 
@@ -121,12 +116,14 @@ impl StatefulHandler for GuardedAccumulator {
         0
     }
 
-    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            Aggregate::EVENT_TYPE,
-            json!(Aggregate { count: *state }),
-        )])
+    fn emit(
+        &self,
+        state: &Self::State,
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: *state,
+            outputs: vec![Aggregate { count: *state }],
+        })
     }
 }
 
@@ -150,17 +147,12 @@ impl SinkHandler for CollectSink {
 fn build_flow(
     journal_base: PathBuf,
     calls: Arc<AtomicUsize>,
-    unexpected_error_calls: Arc<AtomicUsize>,
     collected: Arc<Mutex<Vec<ChainEvent>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let input_handler = ThreeRows::new();
         let validate_handler = RejectTwo::new();
-        let aggregate_handler = GuardedAccumulator {
-            calls,
-            unexpected_error_calls,
-            writer_id: WriterId::from(StageId::new()),
-        };
+        let aggregate_handler = GuardedAccumulator { calls };
         let output_handler = CollectSink { events: collected };
 
         Ok(flow! {
@@ -187,7 +179,6 @@ fn build_flow(
 async fn stateful_handler_never_receives_an_upstream_pre_error_row() {
     let temp = tempfile::tempdir().expect("tempdir");
     let calls = Arc::new(AtomicUsize::new(0));
-    let unexpected_error_calls = Arc::new(AtomicUsize::new(0));
     let collected = Arc::new(Mutex::new(Vec::new()));
 
     FlowApplication::builder()
@@ -195,7 +186,6 @@ async fn stateful_handler_never_receives_an_upstream_pre_error_row() {
         .run_async(build_flow(
             temp.path().join("journals"),
             calls.clone(),
-            unexpected_error_calls.clone(),
             collected.clone(),
         ))
         .await
@@ -206,12 +196,6 @@ async fn stateful_handler_never_receives_an_upstream_pre_error_row() {
         2,
         "only the two successful rows reach stateful accumulation"
     );
-    assert_eq!(
-        unexpected_error_calls.load(Ordering::SeqCst),
-        0,
-        "the stateful supervisor must bypass the pre-error row"
-    );
-
     let aggregates: Vec<_> = collected
         .lock()
         .expect("collector lock")

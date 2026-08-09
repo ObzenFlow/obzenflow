@@ -19,6 +19,12 @@ fn synchronous_transform_witness_boundary_fails_closed() {
 }
 
 #[test]
+fn plain_stateful_witness_boundary_fails_closed() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/compile_fail/plain_stateful_witness/*.rs");
+}
+
+#[test]
 fn effectful_handlers_require_complete_exact_contract_witnesses() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile_fail/effectful_transform_missing_contract_types.rs");

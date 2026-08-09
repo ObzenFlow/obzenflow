@@ -27,8 +27,8 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, StatefulHandler,
-    TypedTransformHandler,
+    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, StatefulEmission,
+    TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -310,40 +310,37 @@ impl TypedPayload for OrderedList {
 /// commutative fold (e.g. a running sum) would emit the same output regardless
 /// of order and so could not witness this.
 #[derive(Clone, Debug)]
-struct OrderedListStateful {
-    writer_id: WriterId,
-}
+struct OrderedListStateful;
 
 impl OrderedListStateful {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl StatefulHandler for OrderedListStateful {
+impl TypedStatefulHandler for OrderedListStateful {
     type State = Vec<String>;
+    type Input = MergedRecord;
+    type Output = OrderedList;
 
-    fn accumulate(&mut self, state: &mut Vec<String>, event: ChainEvent) {
-        if let Some(record) = MergedRecord::from_event(&event) {
-            state.push(format!("{}:{}", record.channel, record.value));
-        }
+    fn accumulate(&self, state: &mut Vec<String>, record: MergedRecord) {
+        state.push(format!("{}:{}", record.channel, record.value));
     }
 
     fn initial_state(&self) -> Vec<String> {
         Vec::new()
     }
 
-    fn create_events(&self, state: &Vec<String>) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            OrderedList::EVENT_TYPE,
-            json!(OrderedList {
-                items: state.clone()
-            }),
-        )])
+    fn emit(
+        &self,
+        state: &Vec<String>,
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: state.clone(),
+            outputs: vec![OrderedList {
+                items: state.clone(),
+            }],
+        })
     }
 }
 

@@ -1410,6 +1410,14 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
         )
         .await
         .unwrap();
+    upstream_journal
+        .append(
+            // One semantic selected feed may span compatible physical keys.
+            ChainEventFactory::data_event(writer_id, "test.selected", json!({"n": 3})),
+            None,
+        )
+        .await
+        .unwrap();
 
     let mut eof_event = ChainEventFactory::eof_event(writer_id, true);
     if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
@@ -1418,9 +1426,10 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
         ..
     }) = &mut eof_event.content
     {
-        *writer_seq = Some(SeqNo(2));
+        *writer_seq = Some(SeqNo(3));
         writer_seq_by_event_type.insert("test.ignored.v1".into(), SeqNo(1));
         writer_seq_by_event_type.insert("test.selected.v1".into(), SeqNo(1));
+        writer_seq_by_event_type.insert("test.selected".into(), SeqNo(1));
     }
     upstream_journal.append(eof_event, None).await.unwrap();
 
@@ -1504,8 +1513,8 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
 
     drive_subscription_to_eof(&mut subscription, &mut reader_progress).await;
 
-    assert_eq!(reader_progress[0].reader_seq, SeqNo(1));
-    assert_eq!(reader_progress[0].advertised_writer_seq, Some(SeqNo(1)));
+    assert_eq!(reader_progress[0].reader_seq, SeqNo(2));
+    assert_eq!(reader_progress[0].advertised_writer_seq, Some(SeqNo(2)));
 
     let status = subscription.check_contracts(&mut reader_progress).await;
     assert!(
@@ -1530,8 +1539,8 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
             }) => {
                 final_found = true;
                 assert!(*pass);
-                assert_eq!(*reader_seq, SeqNo(1));
-                assert_eq!(*advertised_writer_seq, Some(SeqNo(1)));
+                assert_eq!(*reader_seq, SeqNo(2));
+                assert_eq!(*advertised_writer_seq, Some(SeqNo(2)));
                 assert!(failure_reason.is_none());
             }
             ChainEventContent::FlowControl(
@@ -1561,8 +1570,8 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
                 == Some("test.selected.v1")
             && feed_role.as_ref().map(|role| role.as_str()) == Some("input")
             && *pass
-            && *reader_seq == Some(SeqNo(1))
-            && *advertised_writer_seq == Some(SeqNo(1))
+            && *reader_seq == Some(SeqNo(2))
+            && *advertised_writer_seq == Some(SeqNo(2))
             && reason.is_none()
     )));
 }

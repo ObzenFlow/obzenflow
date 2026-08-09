@@ -114,6 +114,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         // build-resolved lineage policy before the handler is shared.
         let mut handler = self.handler;
         handler.install_lineage_policy(self.resources.lineage_policy);
+        handler.install_writer_id(obzenflow_core::WriterId::from(self.config.stage_id));
         let emit_interval = self
             .config
             .emit_interval

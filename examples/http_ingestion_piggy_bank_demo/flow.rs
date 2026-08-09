@@ -46,8 +46,6 @@ use obzenflow_adapters::sinks::SnapshotTableFormatter;
 use obzenflow_adapters::sources::http::HttpSourceTyped;
 use obzenflow_dsl::{async_infinite_source, flow, join, sink, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handlers::StatefulHandlerExt;
-use obzenflow_runtime::stages::stateful::strategies::emissions::EmitAlways;
 use std::path::PathBuf;
 
 pub fn build_flow(
@@ -69,7 +67,7 @@ pub fn build_flow(
                 note: entry.note,
             },
         );
-        let checkbook_handler = Checkbook::new().with_emission(EmitAlways);
+        let checkbook_handler = Checkbook::new();
         let accounts_route_limiter = RateLimiterBuilder::new(10.0).with_burst(1.0).build();
         let printer_sink = sinks::console::<CheckbookSnapshot, _>(
             SnapshotTableFormatter::new(

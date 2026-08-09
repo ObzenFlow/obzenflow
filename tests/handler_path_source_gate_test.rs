@@ -22,6 +22,8 @@ const LOWERING_CONTRACT_TESTS: &str =
 // that downstream code can no longer resolve it (FLOWIP-134b).
 const RETIRED_HELPER_COMPILE_FAIL_FIXTURE: &str =
     "tests/compile_fail/synchronous_transform_witness/raw_helper_removed.rs";
+const RETIRED_STATEFUL_HELPER_COMPILE_FAIL_FIXTURE: &str =
+    "tests/compile_fail/plain_stateful_witness/raw_helper_removed.rs";
 
 fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory)
@@ -110,7 +112,11 @@ fn first_party_declarations_do_not_call_exported_lowering_helpers_directly() {
     let allowed: Vec<&str> = LOWERING_IMPLEMENTATIONS
         .iter()
         .copied()
-        .chain([LOWERING_CONTRACT_TESTS, RETIRED_HELPER_COMPILE_FAIL_FIXTURE])
+        .chain([
+            LOWERING_CONTRACT_TESTS,
+            RETIRED_HELPER_COMPILE_FAIL_FIXTURE,
+            RETIRED_STATEFUL_HELPER_COMPILE_FAIL_FIXTURE,
+        ])
         .collect();
     let mut violations = Vec::new();
 

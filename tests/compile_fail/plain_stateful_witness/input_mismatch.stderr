@@ -1,0 +1,24 @@
+error[E0277]: this stateful handler does not witness its arrow contract
+  --> tests/compile_fail/plain_stateful_witness/input_mismatch.rs:10:13
+   |
+10 |     let _ = obzenflow_dsl::stateful!(Input -> First => WrongInputHandler);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |             |
+   |             the handler's `Input` does not match the fact type declared before `->`
+   |             required by a bound introduced by this call
+   |
+help: the trait `StatefulInputMatchesArrow<support::Input>` is not implemented for `OtherInput`
+  --> tests/compile_fail/plain_stateful_witness/../support/plain_stateful.rs
+   |
+   | pub struct OtherInput;
+   | ^^^^^^^^^^^^^^^^^^^^^
+   = note: implement TypedStatefulHandler with Input and Output matching the stateful! arrow (FLOWIP-134e)
+note: required by a bound in `typed_stateful_descriptor`
+  --> crates/obzenflow_dsl/src/dsl/typing.rs
+   |
+   | pub fn typed_stateful_descriptor<
+   |        ------------------------- required by a bound in this function
+...
+   |     H::Input: StatefulInputMatchesArrow<ArrowInput>,
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `typed_stateful_descriptor`
+   = note: this error originates in the macro `$crate::__obzenflow_stateful_typed` which comes from the expansion of the macro `obzenflow_dsl::stateful` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -18,8 +18,9 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
-use obzenflow_runtime::stages::stateful::strategies::accumulators::{GroupByTyped, ReduceTyped};
-use obzenflow_runtime::stages::stateful::Conflate;
+use obzenflow_runtime::stages::stateful::strategies::accumulators::{
+    ConflateTyped, GroupByTyped, ReduceTyped,
+};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -47,6 +48,16 @@ struct ProductStats {
 
 impl TypedPayload for ProductStats {
     const EVENT_TYPE: &'static str = "stateful_primitives.product_stats";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProductStatsUpdate {
+    key: String,
+    result: ProductStats,
+}
+
+impl TypedPayload for ProductStatsUpdate {
+    const EVENT_TYPE: &'static str = "stateful_primitives.product_stats_update";
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +137,10 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
                 stats.revenue += event.revenue;
                 stats.transaction_count += 1;
             },
+            |key: &String, result: &ProductStats| ProductStatsUpdate {
+                key: key.clone(),
+                result: result.clone(),
+            },
         )
         .emit_on_eof();
         let collecting_sink = CollectingSink {
@@ -138,8 +153,8 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
 
             stages: {
                 src = source!(TransactionEvent => transaction_source);
-                sales_by_product = stateful!(TransactionEvent -> ProductStats => sales_by_product);
-                sink = sink!(ProductStats => collecting_sink);
+                sales_by_product = stateful!(TransactionEvent -> ProductStatsUpdate => sales_by_product);
+                sink = sink!(ProductStatsUpdate => collecting_sink);
             },
 
             topology: {
@@ -158,7 +173,7 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
     let results = events.lock().unwrap();
     let aggregates: Vec<_> = results
         .iter()
-        .filter(|e| e.event_type() == ProductStats::versioned_event_type())
+        .filter(|e| e.event_type() == ProductStatsUpdate::versioned_event_type())
         .collect();
     // Two product ids -> one aggregate per key.
     assert_eq!(aggregates.len(), 2);
@@ -235,7 +250,9 @@ async fn conflate_emits_latest_value_per_key() {
     let events_for_flow = events.clone();
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
         let transaction_source = TransactionSource::new(8);
-        let latest_by_product = Conflate::new("product_id").emit_within(Duration::from_millis(1));
+        let latest_by_product =
+            ConflateTyped::new(|event: &TransactionEvent| event.product_id.clone())
+                .emit_within(Duration::from_millis(1));
         let collecting_sink = CollectingSink {
             events: events_for_flow,
         };

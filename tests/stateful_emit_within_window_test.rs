@@ -69,6 +69,16 @@ impl TypedPayload for GroupAgg {
     const EVENT_TYPE: &'static str = "stateful.emit_within.group_by.aggregate";
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct GroupAggOutput {
+    key: String,
+    result: GroupAgg,
+}
+
+impl TypedPayload for GroupAggOutput {
+    const EVENT_TYPE: &'static str = "stateful.emit_within.group_by.output";
+}
+
 #[derive(Clone, Debug)]
 struct SequenceSource {
     writer_id: WriterId,
@@ -695,6 +705,10 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
     let grouped = typed_stateful::group_by(
         |input: &GroupInput| input.group.clone(),
         |acc: &mut GroupAgg, _input: &GroupInput| acc.event_count += 1,
+        |key: &String, result: &GroupAgg| GroupAggOutput {
+            key: key.clone(),
+            result: result.clone(),
+        },
     )
     .emit_within(Duration::from_secs(60));
     let sink = AckSink;
@@ -704,8 +718,8 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
 
         stages: {
             src = source!(GroupInput => source);
-            grp = stateful!(GroupInput -> GroupAgg => grouped);
-            snk = sink!(GroupAgg => sink);
+            grp = stateful!(GroupInput -> GroupAggOutput => grouped);
+            snk = sink!(GroupAggOutput => sink);
         },
 
         topology: {
@@ -764,20 +778,13 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
         else {
             continue;
         };
-        // FLOWIP-120b stamps emissions with the versioned event type, so row
-        // matching must use the runtime's own tolerance, never strict
-        // equality. (`from_event` is not suitable here: group_by emits a
-        // `{"key", "result"}` envelope payload, not a bare `GroupAgg`.)
-        if !GroupAgg::event_type_matches(event_type) {
+        if !GroupAggOutput::event_type_matches(event_type) {
             continue;
         }
-        let key = payload
-            .get("key")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("expected key field on group_by payload"))?
-            .to_string();
+        let output: GroupAggOutput = serde_json::from_value(payload.clone())
+            .map_err(|error| anyhow!("expected named group_by output: {error}"))?;
 
-        seen.insert(key, env.event.causality.parent_ids.clone());
+        seen.insert(output.key, env.event.causality.parent_ids.clone());
     }
 
     assert_eq!(

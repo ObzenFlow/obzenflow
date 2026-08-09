@@ -8,11 +8,12 @@ use crate::dsl::typing::{
 };
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
 use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
+    InfiniteSourceHandler, JoinHandler, SinkHandler, TransformHandler, TypedStatefulHandler,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 #[test]
@@ -64,22 +65,35 @@ async fn placeholder_async_source_is_safe_in_both_modes() {
     assert!(infinite.is_empty());
 }
 
-#[tokio::test]
-async fn placeholder_stateful_emits_nothing_and_drains() {
-    let mut handler = PlaceholderStateful::<u8, u16>::new(None);
-    let event = ChainEventFactory::data_event(
-        WriterId::from(StageId::new()),
-        "test.event",
-        json!({"hello": "world"}),
-    );
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PlaceholderInput;
 
-    StatefulHandler::accumulate(&mut handler, &mut (), event);
-    let outputs = StatefulHandler::create_events(&handler, &()).expect("stateful create_events");
+impl TypedPayload for PlaceholderInput {
+    const EVENT_TYPE: &'static str = "test.placeholder.input";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PlaceholderOutput;
+
+impl TypedPayload for PlaceholderOutput {
+    const EVENT_TYPE: &'static str = "test.placeholder.output";
+}
+
+#[test]
+fn placeholder_stateful_emits_nothing_and_drains() {
+    let handler = PlaceholderStateful::<PlaceholderInput, PlaceholderOutput>::new(None);
+
+    TypedStatefulHandler::accumulate(&handler, &mut (), PlaceholderInput);
+    let emission = TypedStatefulHandler::emit(&handler, &()).expect("stateful emit");
+    let outputs = match emission {
+        obzenflow_runtime::stages::stateful::StatefulEmission::RetainEpoch { outputs, .. }
+        | obzenflow_runtime::stages::stateful::StatefulEmission::ResetEpoch { outputs, .. } => {
+            outputs
+        }
+    };
     assert!(outputs.is_empty());
 
-    let drained = StatefulHandler::drain(&handler, &())
-        .await
-        .expect("stateful drain");
+    let drained = TypedStatefulHandler::drain(&handler, &()).expect("stateful drain");
     assert!(drained.is_empty());
 }
 

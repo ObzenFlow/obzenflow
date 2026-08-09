@@ -55,8 +55,7 @@ struct TopProductsUpdate {
 }
 
 impl TypedPayload for TopProductsUpdate {
-    const EVENT_TYPE: &'static str = OrderEvent::EVENT_TYPE;
-    const SCHEMA_VERSION: u32 = OrderEvent::SCHEMA_VERSION;
+    const EVENT_TYPE: &'static str = "ecommerce.top_products_update";
 }
 
 fn main() -> Result<()> {
@@ -260,6 +259,22 @@ fn main() -> Result<()> {
                 5,
                 |order: &OrderEvent| order.product_id.clone(),
                 |order: &OrderEvent| order.total_value,
+                |snapshot| TopProductsUpdate {
+                    top_n: snapshot
+                        .top_n
+                        .into_iter()
+                        .map(|entry| TopProductsEntry {
+                            rank: entry.rank,
+                            key: entry.key,
+                            total_score: entry.total_score,
+                            count: entry.count,
+                            avg_score: entry.avg_score,
+                            metadata: entry.metadata,
+                        })
+                        .collect(),
+                    total_items: snapshot.total_items,
+                    capacity: snapshot.capacity,
+                },
             )
             .emit_every_n(5);
             let dashboard_handler = SinkTyped::new(|update: TopProductsUpdate| async move {

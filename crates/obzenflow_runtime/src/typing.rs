@@ -23,12 +23,6 @@ pub trait TransformTyping {
     type Output;
 }
 
-/// Stateful stage typing contract.
-pub trait StatefulTyping {
-    type Input;
-    type Output;
-}
-
 /// Sink stage typing contract.
 pub trait SinkTyping {
     type Input;
@@ -60,7 +54,7 @@ where
 // `assert_stateful_contract`, `assert_sink_input`, `assert_join_contract`,
 // `assert_join_output`, `assert_join_reference_output`,
 // `assert_join_stream_output`) are removed. The DSL no longer has authoring
-// surfaces that need to bypass `TransformTyping`/`SinkTyping`/`StatefulTyping`/
-// `JoinTyping`. The remaining typed contract is established at the macro
+// surfaces that need to bypass `TransformTyping`/`SinkTyping`/`JoinTyping`.
+// The remaining typed contract is established at the macro
 // expansion site by emitting `TypeHint::exact::<T>()` metadata; runtime
 // fingerprinting is type-erased through `ChainEvent`.

@@ -19,7 +19,7 @@ mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
@@ -30,14 +30,12 @@ use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, StatefulHandlerExt,
+    InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulEmission, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::join::JoinReferenceMode;
-use obzenflow_runtime::stages::stateful::strategies::emissions::EmitAlways;
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -192,15 +190,11 @@ impl JoinHandler for SeqWitnessJoin {
 /// Running-total fold; with `EmitAlways` it snapshots per input, so the sink
 /// count gates the run.
 #[derive(Clone, Debug)]
-struct LedgerFold {
-    writer_id: WriterId,
-}
+struct LedgerFold;
 
 impl LedgerFold {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
@@ -210,30 +204,35 @@ struct LedgerState {
     sum: u64,
 }
 
-#[async_trait]
-impl StatefulHandler for LedgerFold {
+impl TypedStatefulHandler for LedgerFold {
     type State = LedgerState;
+    type Input = PostedRow;
+    type Output = LedgerSnapshot;
 
     fn initial_state(&self) -> Self::State {
         LedgerState::default()
     }
 
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        if let Some(posted) = PostedRow::from_event(&event) {
-            state.count += 1;
-            state.sum += posted.value;
-        }
+    fn accumulate(&self, state: &mut Self::State, posted: PostedRow) {
+        state.count += 1;
+        state.sum += posted.value;
     }
 
-    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            LedgerSnapshot::versioned_event_type(),
-            json!(LedgerSnapshot {
+    fn should_emit(&self, state: &Self::State) -> bool {
+        state.count > 0
+    }
+
+    fn emit(
+        &self,
+        state: &Self::State,
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: state.clone(),
+            outputs: vec![LedgerSnapshot {
                 count: state.count,
                 sum: state.sum,
-            }),
-        )])
+            }],
+        })
     }
 }
 
@@ -267,7 +266,7 @@ fn build_flow(
         let accounts_handler = AccountSource::new(account_count);
         let tx_handler = TxSource::new(tx_first, tx_count);
         let posted_handler = SeqWitnessJoin;
-        let ledger_handler = LedgerFold::new().with_emission(EmitAlways);
+        let ledger_handler = LedgerFold::new();
         let collect_handler = CountingSink { delivered };
 
         Ok(flow! {

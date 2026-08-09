@@ -1,0 +1,11 @@
+error[E0603]: struct `StatefulDescriptor` is private
+ --> tests/compile_fail/plain_stateful_witness/raw_descriptor_private.rs:5:43
+  |
+5 | use obzenflow_dsl::dsl::stage_descriptor::StatefulDescriptor;
+  |                                           ^^^^^^^^^^^^^^^^^^ private struct
+  |
+note: the struct `StatefulDescriptor` is defined here
+ --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
+  |
+  | pub(crate) struct StatefulDescriptor<H: UnifiedStatefulHandler + 'static> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

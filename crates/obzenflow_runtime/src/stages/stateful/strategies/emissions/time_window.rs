@@ -9,7 +9,7 @@
 // This is a processing-time trigger, not an event-time/watermark window model.
 
 use super::EmissionStrategy;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Emit every duration.
 ///
@@ -27,13 +27,12 @@ use std::time::{Duration, Instant};
 /// use obzenflow_runtime::stages::stateful::strategies::emissions::TimeWindow;
 /// use std::time::Duration;
 ///
-/// let mut strategy = TimeWindow::new(Duration::from_secs(5));
+/// let strategy = TimeWindow::new(Duration::from_secs(5));
 /// // Will emit every 5 seconds
 /// ```
 #[derive(Debug, Clone)]
 pub struct TimeWindow {
     duration: Duration,
-    window_start: Option<Instant>,
 }
 
 impl TimeWindow {
@@ -43,35 +42,13 @@ impl TimeWindow {
     ///
     /// * `duration` - Duration of each time window
     pub fn new(duration: Duration) -> Self {
-        Self {
-            duration,
-            window_start: None,
-        }
+        Self { duration }
     }
 }
 
 impl EmissionStrategy for TimeWindow {
-    fn should_emit(&mut self, _events_seen: u64, last_emit: Option<Instant>) -> bool {
-        let now = Instant::now();
-
-        // Initialize window start on first call
-        if self.window_start.is_none() {
-            self.window_start = Some(last_emit.unwrap_or(now));
-        }
-
-        let window_start = self.window_start.unwrap();
-
-        // Check if duration has elapsed since window start
-        if now.duration_since(window_start) >= self.duration {
-            return true;
-        }
-
-        false
-    }
-
-    fn reset(&mut self) {
-        // Start new window from now
-        self.window_start = Some(Instant::now());
+    fn should_emit(&self, events_seen: u64, period_elapsed: Option<Duration>) -> bool {
+        events_seen > 0 && period_elapsed.is_some_and(|elapsed| elapsed >= self.duration)
     }
 
     fn resets_accumulator_on_emit(&self) -> bool {
@@ -86,11 +63,10 @@ impl EmissionStrategy for TimeWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
 
     #[test]
     fn test_time_window_first_emission() {
-        let mut strategy = TimeWindow::new(Duration::from_millis(100));
+        let strategy = TimeWindow::new(Duration::from_millis(100));
 
         // First call should not emit immediately (unless duration is 0)
         assert!(!strategy.should_emit(0, None));
@@ -98,49 +74,14 @@ mod tests {
 
     #[test]
     fn test_time_window_emits_after_duration() {
-        let mut strategy = TimeWindow::new(Duration::from_millis(10));
-
-        let start = Instant::now();
-        assert!(!strategy.should_emit(0, Some(start)));
-
-        // Wait for duration to elapse
-        thread::sleep(Duration::from_millis(15));
-
-        assert!(strategy.should_emit(0, Some(start)));
+        let strategy = TimeWindow::new(Duration::from_millis(10));
+        assert!(!strategy.should_emit(1, Some(Duration::from_millis(9))));
+        assert!(strategy.should_emit(1, Some(Duration::from_millis(10))));
     }
 
     #[test]
-    fn test_time_window_reset() {
-        let mut strategy = TimeWindow::new(Duration::from_millis(10));
-
-        let start = Instant::now();
-        strategy.window_start = Some(start);
-
-        thread::sleep(Duration::from_millis(15));
-        assert!(strategy.should_emit(0, Some(start)));
-
-        strategy.reset();
-
-        // After reset, should not emit immediately
-        assert!(!strategy.should_emit(0, Some(Instant::now())));
-    }
-
-    #[test]
-    fn test_time_window_multiple_windows() {
-        let mut strategy = TimeWindow::new(Duration::from_millis(5));
-
-        let start = Instant::now();
-
-        // First window
-        assert!(!strategy.should_emit(0, Some(start)));
-        thread::sleep(Duration::from_millis(10));
-        assert!(strategy.should_emit(0, Some(start)));
-
-        strategy.reset();
-
-        // Second window
-        assert!(!strategy.should_emit(0, Some(Instant::now())));
-        thread::sleep(Duration::from_millis(10));
-        assert!(strategy.should_emit(0, Some(Instant::now())));
+    fn test_time_window_requires_contributions() {
+        let strategy = TimeWindow::new(Duration::from_millis(10));
+        assert!(!strategy.should_emit(0, Some(Duration::from_secs(1))));
     }
 }
