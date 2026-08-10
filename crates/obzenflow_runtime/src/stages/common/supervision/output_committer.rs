@@ -78,24 +78,25 @@ fn output_contract_summary(output_contract: &StageOutputContract) -> String {
 fn event_is_authored_by_stage(
     event: &ChainEvent,
     flow_context: &FlowContext,
-    scope: MiddlewareExecutionScope,
+    _scope: MiddlewareExecutionScope,
 ) -> bool {
+    // Sources have no upstream data journal from which they can forward a
+    // foreign Data row. Until the source witness pass installs the runtime
+    // writer before handler dispatch, raw source handlers may still construct
+    // their output with a handler-owned WriterId. The source commit boundary
+    // is therefore the structural authorship proof in both live and replay.
+    if matches!(
+        flow_context.stage_type,
+        StageType::FiniteSource | StageType::InfiniteSource
+    ) {
+        return true;
+    }
+
     if event.writer_id == WriterId::from(flow_context.stage_id) {
         return true;
     }
 
-    // Replay sources re-admit archived facts without rewriting their durable
-    // writer. ReplayDriver resolved original_stage_id from this source's stable
-    // topology key. Derived stages never get this exception: a replayed
-    // pre-error row crossing them remains foreign evidence.
-    scope.is_deterministic_replay()
-        && matches!(
-            flow_context.stage_type,
-            StageType::FiniteSource | StageType::InfiniteSource
-        )
-        && event.replay_context.as_ref().is_some_and(|replay_context| {
-            event.writer_id == WriterId::from(replay_context.original_stage_id)
-        })
+    false
 }
 
 /// A boxed, thread-safe error from a commit attempt. Each caller maps this onto
@@ -508,6 +509,22 @@ impl OutputCommitter<'_> {
         }
 
         if let Some(flow_context) = self.flow_context {
+            // A live source has no upstream author to preserve: every Data row
+            // crossing this commit boundary is authored by the source stage.
+            // Raw source handlers predate runtime-installed writers and may
+            // construct envelopes with an arbitrary WriterId, so seal that
+            // identity here. Strict replay preserves the archived writer and
+            // resolves it through the topology-keyed replay alias instead.
+            if intent == StageAppendIntent::NormalStageData
+                && event.is_data()
+                && !self.observer_scope.is_deterministic_replay()
+                && matches!(
+                    flow_context.stage_type,
+                    StageType::FiniteSource | StageType::InfiniteSource
+                )
+            {
+                event.writer_id = WriterId::from(flow_context.stage_id);
+            }
             event = event.with_flow_context(flow_context.clone());
             if intent.runs_output_commit_hooks() && !self.observer_scope.is_deterministic_replay() {
                 apply_runtime_journey_identity(&mut event, flow_context);
@@ -864,7 +881,7 @@ mod observer_diagnostic_tests {
     }
 
     #[test]
-    fn replay_source_alias_is_local_only_at_the_source_commit_boundary() {
+    fn source_commit_boundary_is_structural_authorship_proof() {
         let current = StageId::new();
         let archived = StageId::new();
         let mut event = ChainEventFactory::data_event(
@@ -892,7 +909,7 @@ mod observer_diagnostic_tests {
             &source_context,
             MiddlewareExecutionScope::StrictReplayHandler,
         ));
-        assert!(!event_is_authored_by_stage(
+        assert!(event_is_authored_by_stage(
             &event,
             &source_context,
             MiddlewareExecutionScope::LiveHandler,

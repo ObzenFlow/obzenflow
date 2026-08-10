@@ -140,9 +140,10 @@ where
     readers: Vec<ReaderSlot<T>>,
 
     /// Replay identity alias for each current upstream stage. Re-admitted
-    /// source facts preserve their archived writer, so contract authorship
-    /// resolves through this topology-keyed map instead of comparing two
-    /// unrelated per-run StageIds.
+    /// source facts preserve their first-generation writer, so contract
+    /// authorship couples this topology-keyed immediate-archive map with the
+    /// runtime-stamped replay context instead of comparing unrelated per-run
+    /// StageIds. That remains valid across replay-of-replay generations.
     archived_stage_ids_by_current: HashMap<StageId, StageId>,
 
     /// Selected Data event types by upstream reader stage.

@@ -171,6 +171,29 @@ where
                 || self.archived_stage_ids_by_current.get(&stage_id) == Some(&author))
     }
 
+    /// Resolve a re-admitted source row through the immediately archived
+    /// journal owner. Source facts retain their first-generation writer across
+    /// replay generations, while `ReplayDriver` stamps `original_stage_id`
+    /// from the archive currently being replayed. Coupling that runtime-owned
+    /// context to the topology-keyed alias makes the proof transitive without
+    /// admitting a forwarded row from another archived stage.
+    fn replayed_source_data_matches_upstream(
+        &self,
+        chain_event: &ChainEvent,
+        stage_id: StageId,
+    ) -> bool {
+        if !chain_event.is_data() {
+            return false;
+        }
+        let Some(archived_stage_id) = self.archived_stage_ids_by_current.get(&stage_id) else {
+            return false;
+        };
+        chain_event
+            .replay_context
+            .as_ref()
+            .is_some_and(|context| context.original_stage_id == *archived_stage_id)
+    }
+
     fn eof_authored_by_upstream(&self, chain_event: &ChainEvent, stage_id: StageId) -> bool {
         let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id, .. }) =
             &chain_event.content
@@ -194,6 +217,7 @@ where
             return self.eof_authored_by_upstream(chain_event, stage_id);
         }
         self.writer_matches_upstream(chain_event.writer_id, stage_id)
+            || self.replayed_source_data_matches_upstream(chain_event, stage_id)
     }
 
     /// Detect terminal EOF and drain signals for one upstream reader.
@@ -687,13 +711,16 @@ where
             .and_then(|slot| slot.as_mut())
         {
             let reader_seq = reader_seq_for_contracts.unwrap_or(SeqNo(0));
-            if authored_by_upstream {
-                // The reader slot chooses the edge. The row's resolved author
-                // chooses whether it belongs to that edge owner's contract
-                // population on both sides.
-                chain.on_read(chain_event, reader_stage, reader_seq, stage_id);
-                chain.on_write(chain_event, stage_id, SeqNo(0));
-            }
+            // The reader slot chooses the edge. Each contract declares whether
+            // its evidence population is the upstream-authored prefix or every
+            // physical delivery on that edge.
+            chain.on_edge_delivery(
+                chain_event,
+                reader_stage,
+                reader_seq,
+                stage_id,
+                authored_by_upstream,
+            );
         }
 
         self.feed_selected_contract_chains_on_event(

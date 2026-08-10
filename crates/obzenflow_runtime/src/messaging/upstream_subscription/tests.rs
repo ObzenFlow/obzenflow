@@ -1578,11 +1578,13 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
 
 #[tokio::test]
 async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symmetrically() {
+    use obzenflow_core::event::context::replay_context::ReplayContext;
     use obzenflow_core::event::payloads::flow_control_payload::EofKind;
     use obzenflow_core::event::status::processing_status::ProcessingStatus;
 
     let upstream_stage = StageId::new();
     let archived_upstream_stage = StageId::new();
+    let lineage_root_stage = StageId::new();
     let foreign_author = StageId::new();
     let reader_stage = StageId::new();
     let upstream_journal: Arc<dyn Journal<ChainEvent>> =
@@ -1591,17 +1593,19 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
         Arc::new(TestJournal::new(JournalOwner::stage(reader_stage)));
 
     for n in 0..2 {
-        upstream_journal
-            .append(
-                ChainEventFactory::data_event(
-                    WriterId::Stage(archived_upstream_stage),
-                    "test.joined.v1",
-                    json!({"n": n}),
-                ),
-                None,
-            )
-            .await
-            .unwrap();
+        let mut replayed = ChainEventFactory::data_event(
+            WriterId::Stage(lineage_root_stage),
+            "test.joined.v1",
+            json!({"n": n}),
+        );
+        replayed.replay_context = Some(ReplayContext {
+            original_event_id: replayed.id,
+            original_flow_id: "flow_parent".to_string(),
+            original_stage_id: archived_upstream_stage,
+            archive_path: std::path::PathBuf::from("/archive/parent"),
+            replayed_at: chrono::Utc::now(),
+        });
+        upstream_journal.append(replayed, None).await.unwrap();
     }
 
     let mut forwarded_error = ChainEventFactory::data_event(

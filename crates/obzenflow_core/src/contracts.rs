@@ -197,6 +197,19 @@ pub struct ContractContext<'a> {
     pub read_state: &'a ContractState,
 }
 
+/// Which delivered rows belong to a contract's evidence population.
+///
+/// Most contracts certify evidence authored by the journal-owning upstream.
+/// Physical-edge diagnostics instead observe every delivered row, including
+/// control signals forwarded through that journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractEventScope {
+    /// Only rows whose author resolves to the journal-owning upstream.
+    UpstreamAuthored,
+    /// Every row physically delivered across the edge.
+    PhysicalEdge,
+}
+
 /// Core abstraction for edge-scoped verification between stages.
 pub trait Contract: Send + Sync {
     /// Human-readable contract identifier for logs and evidence.
@@ -205,6 +218,11 @@ pub trait Contract: Send + Sync {
     /// Typed contract identifier for persisted evidence and metrics.
     fn contract_name(&self) -> ContractName {
         ContractName::from(self.name())
+    }
+
+    /// Declare the evidence population observed at an edge delivery.
+    fn event_scope(&self) -> ContractEventScope {
+        ContractEventScope::UpstreamAuthored
     }
 
     /// Called when the upstream side writes an event on the edge.
@@ -818,6 +836,10 @@ impl DivergenceContract {
 impl Contract for DivergenceContract {
     fn name(&self) -> &str {
         DivergenceContract::NAME
+    }
+
+    fn event_scope(&self) -> ContractEventScope {
+        ContractEventScope::PhysicalEdge
     }
 
     fn on_write(&self, _event: &ChainEvent, _ctx: &mut ContractWriteContext) {
