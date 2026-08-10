@@ -1,0 +1,24 @@
+error[E0277]: this join handler does not witness its arrow contract
+ --> tests/compile_fail/typed_join_witness/stream_mismatch.rs:8:13
+  |
+8 |     let _ = obzenflow_dsl::join!(catalog reference_stage: Reference, Stream -> First => BadStream);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |             |
+  |             the handler's `Stream` does not match the stream fact type
+  |             required by a bound introduced by this call
+  |
+help: the trait `JoinStreamMatchesArrow<support::Stream>` is not implemented for `OtherStream`
+ --> tests/compile_fail/typed_join_witness/../support/typed_join.rs
+  |
+  | pub struct OtherStream;
+  | ^^^^^^^^^^^^^^^^^^^^^^
+  = note: implement TypedJoinHandler with Reference, Stream, and Output matching the join! arrow (FLOWIP-134f)
+note: required by a bound in `typed_join_descriptor`
+ --> crates/obzenflow_dsl/src/dsl/typing.rs
+  |
+  | pub fn typed_join_descriptor<
+  |        --------------------- required by a bound in this function
+...
+  |     H::Stream: JoinStreamMatchesArrow<ArrowStream>,
+  |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `typed_join_descriptor`
+  = note: this error originates in the macro `$crate::__obzenflow_join_typed` which comes from the expansion of the macro `obzenflow_dsl::join` (in Nightly builds, run with -Z macro-backtrace for more info)

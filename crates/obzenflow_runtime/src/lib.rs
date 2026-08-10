@@ -36,6 +36,13 @@ pub mod metrics;
 pub mod pipeline;
 pub mod stages;
 
+/// Cross-crate runtime erasure used by the DSL and low-level supervisor tests.
+/// Authored joins use [`stages::TypedJoinHandler`] instead.
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::stages::common::handlers::join::{TypedJoinHandlerAdapter, UnifiedJoinHandler};
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
@@ -71,6 +78,7 @@ pub mod testing;
 /// [`TypedTransformHandler`](crate::stages::TypedTransformHandler),
 /// [`SinkHandler`](crate::stages::SinkHandler),
 /// [`TypedStatefulHandler`](crate::stages::TypedStatefulHandler),
+/// [`TypedJoinHandler`](crate::stages::TypedJoinHandler),
 /// [`ObserverHandler`](crate::stages::ObserverHandler), and the
 /// [`ResourceManaged`](crate::stages::ResourceManaged) trait for stages
 /// that own resources. Also includes
@@ -101,9 +109,9 @@ pub mod prelude {
     pub use crate::stages::{
         EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler,
         InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler, SourceError,
-        TypedStatefulHandler, TypedTransformHandler,
+        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
-    pub use crate::typing::{JoinTyping, SinkTyping, SourceTyping, TransformTyping};
+    pub use crate::typing::{SinkTyping, SourceTyping, TransformTyping};
 
     // Event flow
     pub use crate::effects::{

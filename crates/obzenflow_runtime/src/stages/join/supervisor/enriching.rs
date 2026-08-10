@@ -26,7 +26,9 @@ use std::time::Instant;
 
 use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
-use crate::stages::join::fsm::{JoinContext, JoinEvent, JoinState};
+use crate::stages::join::fsm::{
+    JoinContext, JoinEvent, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
+};
 
 pub(super) async fn dispatch_enriching<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -165,6 +167,12 @@ pub(super) async fn dispatch_enriching<
                             common::forward_control_event_and_mirror(ctx, &envelope).await?;
 
                             if envelope.event.is_eof() {
+                                if last_eof_outcome
+                                    .as_ref()
+                                    .is_some_and(|outcome| outcome.is_final)
+                                {
+                                    ctx.final_stream_eof = Some(envelope.clone());
+                                }
                                 if let Some(outcome) = subscription.take_last_eof_outcome() {
                                     tracing::info!(
                                         target: "flowip-080o",
@@ -293,7 +301,7 @@ pub(super) async fn dispatch_enriching<
                         )),
                         subscription.last_delivered_generation(),
                     );
-                    let result = ctx.handler.process_event(
+                    let result = ctx.handler.process_stream(
                         &mut ctx.handler_state,
                         event.clone(),
                         source_id,
@@ -342,6 +350,21 @@ pub(super) async fn dispatch_enriching<
                             .await?;
                         }
                         Err(err) => {
+                            if let Some(fatal) = err.as_fatal() {
+                                common::record_join_stage_fatal(
+                                    ctx,
+                                    fatal,
+                                    Some(&envelope),
+                                    subscription.last_delivered_stage_input_position(),
+                                )
+                                .await?;
+                                if let Some(reader) = ctx.backpressure_readers.get(&source_id) {
+                                    reader.ack_consumed(1);
+                                }
+                                return Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                                    fatal.detail.clone(),
+                                )));
+                            }
                             let reason = format!("Join handler error during enrichment: {err:?}");
                             let mut error_event =
                                 envelope.event.clone().mark_as_error(reason, err.kind());
@@ -525,7 +548,10 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
                 }
             }
             DrainOutcome::BackedOff => {
-                ctx.pending_ack_upstream = Some(source_id);
+                ctx.pending_subscription_ack = Some(PendingSubscriptionAck {
+                    side: JoinSubscriptionSide::Stream,
+                    upstream: source_id,
+                });
                 ctx.pending_outputs = outputs;
                 ctx.pending_parent = pending_parent.cloned();
                 return Ok(());

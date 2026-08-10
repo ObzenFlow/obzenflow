@@ -8,7 +8,8 @@
 mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-    use obzenflow_core::{ChainEvent, StageId, StageOutputFacts, TypedPayload, WriterId};
+    use obzenflow_core::{ChainEvent, StageId, StageOutputFacts, TypedPayload};
+    use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
     use obzenflow_runtime::effects::{Effects, StageCompletion};
     use obzenflow_runtime::feed_plan::{FactVisibility, FeedRole};
     use obzenflow_runtime::id_conversions::StageIdExt;
@@ -16,10 +17,11 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulTransformHandler,
-        FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulEmission,
-        TransformHandler, TypedStatefulHandler, TypedTransformHandler,
+        FiniteSourceHandler, InfiniteSourceHandler, JoinReferenceView, SinkHandler,
+        StatefulEmission, TransformHandler, TypedJoinHandler, TypedStatefulHandler,
+        TypedTransformHandler,
     };
-    use obzenflow_runtime::typing::{JoinTyping, SinkTyping, SourceTyping, TransformTyping};
+    use obzenflow_runtime::typing::{SinkTyping, SourceTyping, TransformTyping};
     use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder, TypeHintInfo};
     use serde::{Deserialize, Serialize};
     use std::any::type_name;
@@ -386,34 +388,63 @@ mod tests {
     #[derive(Clone, Debug)]
     struct ExactJoin;
 
-    impl JoinTyping for ExactJoin {
+    impl TypedJoinHandler for ExactJoin {
+        type State = ();
+        type ReferenceKey = ();
         type Reference = ReferenceEvent;
         type Stream = StreamEvent;
         type Output = JoinedEvent;
-    }
-
-    #[async_trait]
-    impl JoinHandler for ExactJoin {
-        type State = ();
 
         fn initial_state(&self) -> Self::State {}
 
-        fn process_event(
+        fn admit_reference(
             &self,
-            _state: &mut Self::State,
-            _event: ChainEvent,
-            _source_id: StageId,
-            _writer_id: WriterId,
-        ) -> Result<Vec<ChainEvent>, HandlerError> {
-            Ok(vec![])
+            _reference: &Self::Reference,
+        ) -> Result<Self::ReferenceKey, HandlerError> {
+            Ok(())
         }
 
-        fn on_source_eof(
+        fn process_stream(
             &self,
             _state: &mut Self::State,
-            _source_id: StageId,
-            _writer_id: WriterId,
-        ) -> Result<Vec<ChainEvent>, HandlerError> {
+            _references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
+            _stream: Self::Stream,
+        ) -> Result<Vec<Self::Output>, HandlerError> {
+            Ok(vec![])
+        }
+    }
+
+    #[derive(Clone, Debug, StageOutputFacts)]
+    enum ExactJoinOutput {
+        Joined(JoinedEvent),
+        Alternate(AlternateEvent),
+    }
+
+    #[derive(Clone, Debug)]
+    struct MultiOutputJoin;
+
+    impl TypedJoinHandler for MultiOutputJoin {
+        type State = ();
+        type ReferenceKey = ();
+        type Reference = ReferenceEvent;
+        type Stream = StreamEvent;
+        type Output = ExactJoinOutput;
+
+        fn initial_state(&self) -> Self::State {}
+
+        fn admit_reference(
+            &self,
+            _reference: &Self::Reference,
+        ) -> Result<Self::ReferenceKey, HandlerError> {
+            Ok(())
+        }
+
+        fn process_stream(
+            &self,
+            _state: &mut Self::State,
+            _references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
+            _stream: Self::Stream,
+        ) -> Result<Vec<Self::Output>, HandlerError> {
             Ok(vec![])
         }
     }
@@ -636,7 +667,7 @@ mod tests {
         let join = crate::join!(
             name: "multi_output_join",
             catalog reference: ReferenceEvent,
-            StreamEvent -> { JoinedEvent, AlternateEvent } => ExactJoin
+            StreamEvent -> { JoinedEvent, AlternateEvent } => MultiOutputJoin
         );
         let join_meta = join.typing_metadata().unwrap();
         assert_eq!(join_meta.output_type, exact::<JoinedEvent>());
@@ -1205,7 +1236,7 @@ mod tests {
             name: "join".to_string(),
             reference_stage_id: StageId::new(),
             reference_stage_var: None,
-            handler: ExactJoin,
+            handler: TypedJoinHandlerAdapter::new(ExactJoin),
             observers: vec![],
         };
         assert!(descriptor.is_deterministic_input_orderer());
@@ -1219,9 +1250,12 @@ mod tests {
         #[derive(Clone, Debug)]
         struct LiveModeJoin;
 
-        #[async_trait]
-        impl JoinHandler for LiveModeJoin {
+        impl TypedJoinHandler for LiveModeJoin {
             type State = ();
+            type ReferenceKey = ();
+            type Reference = ReferenceEvent;
+            type Stream = StreamEvent;
+            type Output = JoinedEvent;
 
             fn initial_state(&self) -> Self::State {}
 
@@ -1229,22 +1263,19 @@ mod tests {
                 obzenflow_runtime::stages::join::JoinReferenceMode::Live
             }
 
-            fn process_event(
+            fn admit_reference(
                 &self,
-                _state: &mut Self::State,
-                _event: ChainEvent,
-                _source_id: StageId,
-                _writer_id: WriterId,
-            ) -> Result<Vec<ChainEvent>, HandlerError> {
-                Ok(vec![])
+                _reference: &Self::Reference,
+            ) -> Result<Self::ReferenceKey, HandlerError> {
+                Ok(())
             }
 
-            fn on_source_eof(
+            fn process_stream(
                 &self,
                 _state: &mut Self::State,
-                _source_id: StageId,
-                _writer_id: WriterId,
-            ) -> Result<Vec<ChainEvent>, HandlerError> {
+                _references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
+                _stream: Self::Stream,
+            ) -> Result<Vec<Self::Output>, HandlerError> {
                 Ok(vec![])
             }
         }
@@ -1253,7 +1284,7 @@ mod tests {
             name: "join".to_string(),
             reference_stage_id: StageId::new(),
             reference_stage_var: None,
-            handler: LiveModeJoin,
+            handler: TypedJoinHandlerAdapter::new(LiveModeJoin),
             observers: vec![],
         };
         assert!(!descriptor.is_deterministic_input_orderer());
@@ -1483,9 +1514,12 @@ mod tests {
         #[derive(Clone, Debug)]
         struct ObserverLiveJoin;
 
-        #[async_trait]
-        impl JoinHandler for ObserverLiveJoin {
+        impl TypedJoinHandler for ObserverLiveJoin {
             type State = ();
+            type ReferenceKey = ();
+            type Reference = ReferenceEvent;
+            type Stream = StreamEvent;
+            type Output = JoinedEvent;
 
             fn initial_state(&self) -> Self::State {}
 
@@ -1493,22 +1527,19 @@ mod tests {
                 obzenflow_runtime::stages::join::JoinReferenceMode::Live
             }
 
-            fn process_event(
+            fn admit_reference(
                 &self,
-                _state: &mut Self::State,
-                _event: ChainEvent,
-                _source_id: StageId,
-                _writer_id: WriterId,
-            ) -> Result<Vec<ChainEvent>, HandlerError> {
-                Ok(vec![])
+                _reference: &Self::Reference,
+            ) -> Result<Self::ReferenceKey, HandlerError> {
+                Ok(())
             }
 
-            fn on_source_eof(
+            fn process_stream(
                 &self,
                 _state: &mut Self::State,
-                _source_id: StageId,
-                _writer_id: WriterId,
-            ) -> Result<Vec<ChainEvent>, HandlerError> {
+                _references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
+                _stream: Self::Stream,
+            ) -> Result<Vec<Self::Output>, HandlerError> {
                 Ok(vec![])
             }
         }
@@ -1532,7 +1563,7 @@ mod tests {
                 name: "joined".to_string(),
                 reference_stage_id: ref_id,
                 reference_stage_var: None,
-                handler: ObserverLiveJoin,
+                handler: TypedJoinHandlerAdapter::new(ObserverLiveJoin),
                 observers: vec![],
             }),
         );

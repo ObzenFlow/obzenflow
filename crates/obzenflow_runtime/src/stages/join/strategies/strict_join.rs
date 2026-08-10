@@ -6,14 +6,12 @@
 //!
 //! Mission-critical systems where missing reference data indicates corruption
 
-use super::common::{JoinStrategy, JoinStrategyOutput, JoinWithStrategy};
+use super::common::{JoinStrategy, JoinStrategyValueOutput, JoinWithStrategy};
 use crate::stages::common::stage_handle::StageHandle;
-use crate::stages::join::config::{JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP};
+use crate::stages::join::config::JoinReferenceMode;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::StageId;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
-use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -39,9 +37,9 @@ impl<C, S, E> Default for StrictJoinBuilder<C, S, E> {
 
 impl<C, S, E> StrictJoinBuilder<C, S, E>
 where
-    C: TypedPayload + Clone + Send + Sync,
-    S: TypedPayload + Clone + Send + Sync,
-    E: TypedPayload + Clone + Send + Sync,
+    C: TypedPayload + Clone + Send + Sync + 'static,
+    S: TypedPayload + Clone + Send + Sync + 'static,
+    E: TypedPayload + Clone + Send + Sync + 'static,
 {
     pub fn new() -> Self {
         Self::default()
@@ -109,7 +107,6 @@ where
             catalog_key_fn: self.catalog_key_fn,
             stream_key_fn: key_fn,
             reference_mode: JoinReferenceMode::FiniteEof,
-            reference_batch_cap: Some(DEFAULT_REFERENCE_BATCH_CAP),
             _phantom: PhantomData,
         }
     }
@@ -120,7 +117,6 @@ pub struct StrictJoinBuilderDslWithKeys<C, S, E, K, CatalogKeyFn, StreamKeyFn> {
     catalog_key_fn: CatalogKeyFn,
     stream_key_fn: StreamKeyFn,
     reference_mode: JoinReferenceMode,
-    reference_batch_cap: Option<usize>,
     _phantom: PhantomData<(C, S, E, K)>,
 }
 
@@ -140,11 +136,6 @@ where
         self
     }
 
-    pub fn reference_batch_cap(mut self, cap: Option<usize>) -> Self {
-        self.reference_batch_cap = cap;
-        self
-    }
-
     pub fn build<J>(self, join_fn: J) -> StrictJoin<C, S, E, K, CatalogKeyFn, StreamKeyFn, J>
     where
         J: Fn(C, S) -> E + Send + Sync + Clone,
@@ -157,8 +148,6 @@ where
             catalog_key_fn: self.catalog_key_fn,
             stream_key_fn: self.stream_key_fn,
             reference_mode: self.reference_mode,
-            reference_batch_cap: self.reference_batch_cap,
-            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: PhantomData,
         }
     }
@@ -215,7 +204,6 @@ where
             catalog_key_fn: self.catalog_key_fn,
             stream_key_fn: key_fn,
             reference_mode: JoinReferenceMode::FiniteEof,
-            reference_batch_cap: Some(DEFAULT_REFERENCE_BATCH_CAP),
             _phantom: PhantomData,
         }
     }
@@ -227,7 +215,6 @@ pub struct StrictJoinBuilderWithKeys<C, S, E, K, CatalogKeyFn, StreamKeyFn> {
     catalog_key_fn: CatalogKeyFn,
     stream_key_fn: StreamKeyFn,
     reference_mode: JoinReferenceMode,
-    reference_batch_cap: Option<usize>,
     _phantom: PhantomData<(C, S, E, K)>,
 }
 
@@ -244,11 +231,6 @@ where
     /// Set the join function and build the handler
     pub fn live(mut self) -> Self {
         self.reference_mode = JoinReferenceMode::Live;
-        self
-    }
-
-    pub fn reference_batch_cap(mut self, cap: Option<usize>) -> Self {
-        self.reference_batch_cap = cap;
         self
     }
 
@@ -269,8 +251,6 @@ where
                 catalog_key_fn: self.catalog_key_fn,
                 stream_key_fn: self.stream_key_fn,
                 reference_mode: self.reference_mode,
-                reference_batch_cap: self.reference_batch_cap,
-                lineage: obzenflow_core::config::LineagePolicy::default(),
                 _phantom: PhantomData,
             },
         )
@@ -296,18 +276,17 @@ where
     type EnrichedType = E;
     type Key = K;
 
-    fn match_stream_event(
+    fn match_reference(
         &self,
-        catalog: &HashMap<Self::Key, Self::CatalogType>,
+        reference: Option<Self::CatalogType>,
         stream_data: Self::StreamType,
         stream_key: Self::Key,
-        writer_id: WriterId,
-    ) -> JoinStrategyOutput<Self::Key> {
-        match catalog.get(&stream_key) {
+    ) -> JoinStrategyValueOutput<Self::EnrichedType> {
+        match reference {
             Some(catalog_data) => {
                 tracing::debug!("StrictJoin: Found match for key: {:?}", stream_key);
-                let output = (self.join_fn)(catalog_data.clone(), stream_data);
-                JoinStrategyOutput::new(vec![output.to_event(writer_id)], vec![stream_key])
+                let output = (self.join_fn)(catalog_data, stream_data);
+                JoinStrategyValueOutput::facts(vec![output])
             }
             None => {
                 tracing::error!(
@@ -315,11 +294,8 @@ where
                     stream_key
                 );
 
-                let poison_eof = ChainEventFactory::eof_event_with_kind(writer_id, EofKind::Poison);
-
                 tracing::error!("StrictJoin: emitting poison EOF for unmatched stream event");
-
-                JoinStrategyOutput::without_reference(vec![poison_eof])
+                JoinStrategyValueOutput::framework_eof(EofKind::Poison)
             }
         }
     }
@@ -328,76 +304,3 @@ where
 /// Type alias for wrapped StrictJoin strategy
 pub type StrictJoin<C, S, E, K, CatalogKeyFn, StreamKeyFn, J> =
     JoinWithStrategy<StrictJoinStrategy<C, S, E, K, J>, CatalogKeyFn, StreamKeyFn>;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::stages::JoinHandler;
-    use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-    use obzenflow_core::event::ChainEventContent;
-    use obzenflow_core::TypedPayload;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-    struct CatalogRow {
-        key: String,
-        value: String,
-    }
-    impl TypedPayload for CatalogRow {
-        const EVENT_TYPE: &'static str = "test.catalog";
-    }
-
-    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-    struct StreamRow {
-        key: String,
-    }
-    impl TypedPayload for StreamRow {
-        const EVENT_TYPE: &'static str = "test.stream";
-    }
-
-    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-    struct OutputRow {
-        stream_key: String,
-        catalog_value: String,
-    }
-    impl TypedPayload for OutputRow {
-        const EVENT_TYPE: &'static str = "test.output";
-    }
-
-    #[test]
-    fn strict_join_poison_eof_on_miss() {
-        let (_ref_id, handler) = StrictJoinBuilder::<CatalogRow, StreamRow, OutputRow>::new()
-            .with_reference_id(StageId::new())
-            .catalog_key(|c| c.key.clone())
-            .stream_key(|s| s.key.clone())
-            .join(|catalog, stream| OutputRow {
-                stream_key: stream.key,
-                catalog_value: catalog.value,
-            });
-
-        let mut state = handler.initial_state();
-        let w = WriterId::from(StageId::new());
-
-        let out = handler
-            .process_event(
-                &mut state,
-                StreamRow {
-                    key: "missing".into(),
-                }
-                .to_event(w),
-                StageId::new(),
-                w,
-            )
-            .expect("process_event should succeed for strict join miss case");
-        assert_eq!(out.len(), 1);
-        match &out[0].content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. }) => {
-                assert!(
-                    kind.is_poison(),
-                    "strict join emits unnatural EOF on integrity violations"
-                );
-            }
-            other => panic!("expected poison EOF, got {other:?}"),
-        }
-    }
-}

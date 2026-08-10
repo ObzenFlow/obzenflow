@@ -17,7 +17,8 @@ use obzenflow_dsl::{join, sink, source, stateful, test_flow};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, JoinHandler, SinkHandler, StatefulEmission, TypedStatefulHandler,
+    FiniteSourceHandler, JoinReferenceView, SinkHandler, StatefulEmission, TypedJoinHandler,
+    TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
@@ -205,30 +206,27 @@ impl SinkHandler for CollectingSink {
 #[derive(Clone, Debug, Default)]
 struct NoopJoin;
 
-#[async_trait]
-impl JoinHandler for NoopJoin {
+impl TypedJoinHandler for NoopJoin {
     type State = ();
+    type ReferenceKey = u64;
+    type Reference = RefMetricEvent;
+    type Stream = StreamMetricEvent;
+    type Output = JoinedMetricEvent;
 
     fn initial_state(&self) -> Self::State {
         {}
     }
 
-    fn process_event(
-        &self,
-        _state: &mut Self::State,
-        _event: ChainEvent,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![])
+    fn admit_reference(&self, reference: &Self::Reference) -> Result<u64, HandlerError> {
+        Ok(reference.index)
     }
 
-    fn on_source_eof(
+    fn process_stream(
         &self,
         _state: &mut Self::State,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        _references: &mut JoinReferenceView<'_, u64, RefMetricEvent>,
+        _stream: StreamMetricEvent,
+    ) -> std::result::Result<Vec<JoinedMetricEvent>, HandlerError> {
         Ok(vec![])
     }
 }

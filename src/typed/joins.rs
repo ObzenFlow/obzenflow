@@ -5,20 +5,19 @@
 //! Typed join helper facades.
 
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::stages::common::handlers::JoinHandler;
 use obzenflow_runtime::stages::join::{InnerJoinBuilder, LeftJoinBuilder, StrictJoinBuilder};
-use obzenflow_runtime::typing::JoinTyping;
+use obzenflow_runtime::stages::TypedJoinHandler;
 use std::hash::Hash;
 
 pub fn inner<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
     stream_key: StreamKeyFn,
     join_fn: JoinFn,
-) -> impl JoinHandler + JoinTyping<Reference = C, Stream = S, Output = E> + std::fmt::Debug
+) -> impl TypedJoinHandler<Reference = C, Stream = S, Output = E> + Clone + std::fmt::Debug
 where
-    C: TypedPayload + Clone + Send + Sync,
-    S: TypedPayload + Clone + Send + Sync,
-    E: TypedPayload + Clone + Send + Sync,
+    C: TypedPayload + Clone + Send + Sync + 'static,
+    S: TypedPayload + Clone + Send + Sync + 'static,
+    E: TypedPayload + Clone + Send + Sync + 'static,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,
     StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone + 'static,
@@ -38,11 +37,11 @@ pub fn inner_live<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
     stream_key: StreamKeyFn,
     join_fn: JoinFn,
-) -> impl JoinHandler + JoinTyping<Reference = C, Stream = S, Output = E> + std::fmt::Debug
+) -> impl TypedJoinHandler<Reference = C, Stream = S, Output = E> + Clone + std::fmt::Debug
 where
-    C: TypedPayload + Clone + Send + Sync,
-    S: TypedPayload + Clone + Send + Sync,
-    E: TypedPayload + Clone + Send + Sync,
+    C: TypedPayload + Clone + Send + Sync + 'static,
+    S: TypedPayload + Clone + Send + Sync + 'static,
+    E: TypedPayload + Clone + Send + Sync + 'static,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,
     StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone + 'static,
@@ -59,11 +58,11 @@ pub fn left<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
     stream_key: StreamKeyFn,
     join_fn: JoinFn,
-) -> impl JoinHandler + JoinTyping<Reference = C, Stream = S, Output = E> + std::fmt::Debug
+) -> impl TypedJoinHandler<Reference = C, Stream = S, Output = E> + Clone + std::fmt::Debug
 where
-    C: TypedPayload + Clone + Send + Sync,
-    S: TypedPayload + Clone + Send + Sync,
-    E: TypedPayload + Clone + Send + Sync,
+    C: TypedPayload + Clone + Send + Sync + 'static,
+    S: TypedPayload + Clone + Send + Sync + 'static,
+    E: TypedPayload + Clone + Send + Sync + 'static,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,
     StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone + 'static,
@@ -80,11 +79,11 @@ pub fn left_live<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
     stream_key: StreamKeyFn,
     join_fn: JoinFn,
-) -> impl JoinHandler + JoinTyping<Reference = C, Stream = S, Output = E> + std::fmt::Debug
+) -> impl TypedJoinHandler<Reference = C, Stream = S, Output = E> + Clone + std::fmt::Debug
 where
-    C: TypedPayload + Clone + Send + Sync,
-    S: TypedPayload + Clone + Send + Sync,
-    E: TypedPayload + Clone + Send + Sync,
+    C: TypedPayload + Clone + Send + Sync + 'static,
+    S: TypedPayload + Clone + Send + Sync + 'static,
+    E: TypedPayload + Clone + Send + Sync + 'static,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,
     StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone + 'static,
@@ -101,11 +100,11 @@ pub fn strict<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
     stream_key: StreamKeyFn,
     join_fn: JoinFn,
-) -> impl JoinHandler + JoinTyping<Reference = C, Stream = S, Output = E> + std::fmt::Debug
+) -> impl TypedJoinHandler<Reference = C, Stream = S, Output = E> + Clone + std::fmt::Debug
 where
-    C: TypedPayload + Clone + Send + Sync,
-    S: TypedPayload + Clone + Send + Sync,
-    E: TypedPayload + Clone + Send + Sync,
+    C: TypedPayload + Clone + Send + Sync + 'static,
+    S: TypedPayload + Clone + Send + Sync + 'static,
+    E: TypedPayload + Clone + Send + Sync + 'static,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,
     StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone + 'static,
@@ -122,11 +121,11 @@ pub fn strict_live<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
     stream_key: StreamKeyFn,
     join_fn: JoinFn,
-) -> impl JoinHandler + JoinTyping<Reference = C, Stream = S, Output = E> + std::fmt::Debug
+) -> impl TypedJoinHandler<Reference = C, Stream = S, Output = E> + Clone + std::fmt::Debug
 where
-    C: TypedPayload + Clone + Send + Sync,
-    S: TypedPayload + Clone + Send + Sync,
-    E: TypedPayload + Clone + Send + Sync,
+    C: TypedPayload + Clone + Send + Sync + 'static,
+    S: TypedPayload + Clone + Send + Sync + 'static,
+    E: TypedPayload + Clone + Send + Sync + 'static,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
     CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,
     StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone + 'static,

@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use obzenflow_core::event::chain_event::ChainEventFactory;
@@ -15,13 +14,14 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{FlowId, StageId, SystemId, TypedPayload, WriterId};
 use obzenflow_infra::journal::DiskJournal;
+use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::control_strategies::JonestownSignalStrategy;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{JoinReferenceView, TypedJoinHandler};
 use obzenflow_runtime::stages::join::handle::JoinHandleExt;
 use obzenflow_runtime::stages::join::{JoinBuilder, JoinConfig};
 use obzenflow_runtime::stages::resources_builder::StageResourcesBuilder;
-use obzenflow_runtime::stages::JoinHandler;
 use obzenflow_runtime::supervised_base::SupervisorBuilder;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
@@ -88,83 +88,70 @@ impl TypedPayload for FanOutOutput {
 }
 
 #[derive(Clone, Debug)]
-struct DrainOnlyJoin {
-    writer_id: WriterId,
-}
+struct DrainOnlyJoin;
 
-#[async_trait::async_trait]
-impl JoinHandler for DrainOnlyJoin {
+impl TypedJoinHandler for DrainOnlyJoin {
     type State = ();
+    type ReferenceKey = String;
+    type Reference = RefRow;
+    type Stream = StreamRow;
+    type Output = DrainOnlyOutput;
 
     fn initial_state(&self) -> Self::State {}
 
-    fn process_event(
+    fn admit_reference(&self, reference: &Self::Reference) -> Result<String, HandlerError> {
+        Ok(reference.key.clone())
+    }
+
+    fn process_stream(
         &self,
         _state: &mut Self::State,
-        _event: ChainEvent,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        _references: &mut JoinReferenceView<'_, String, RefRow>,
+        _stream: StreamRow,
+    ) -> Result<Vec<DrainOnlyOutput>, HandlerError> {
         // Intentionally emit no outputs during normal processing so that the only
         // output is produced during drain-time (FLOWIP-071h zero-output edge case).
         Ok(Vec::new())
     }
 
-    fn on_source_eof(
+    fn drain(
         &self,
-        _state: &mut Self::State,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
-    }
-
-    async fn drain(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+        _state: &Self::State,
+        references: &mut JoinReferenceView<'_, String, RefRow>,
+    ) -> Result<Vec<DrainOnlyOutput>, HandlerError> {
+        let _selected = references.select(&"k1".to_string());
         Ok(vec![DrainOnlyOutput {
             note: "drain".to_string(),
-        }
-        .to_event(self.writer_id)])
+        }])
     }
 }
 
 #[derive(Clone, Debug)]
 struct KeyMatchJoin;
 
-#[async_trait::async_trait]
-impl JoinHandler for KeyMatchJoin {
-    type State = HashSet<String>;
+impl TypedJoinHandler for KeyMatchJoin {
+    type State = ();
+    type ReferenceKey = String;
+    type Reference = RefRow;
+    type Stream = StreamRow;
+    type Output = MatchOutput;
 
-    fn initial_state(&self) -> Self::State {
-        HashSet::new()
+    fn initial_state(&self) -> Self::State {}
+
+    fn admit_reference(&self, reference: &Self::Reference) -> Result<String, HandlerError> {
+        Ok(reference.key.clone())
     }
 
-    fn process_event(
-        &self,
-        state: &mut Self::State,
-        event: ChainEvent,
-        _source_id: StageId,
-        writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        if let Some(reference) = RefRow::from_event(&event) {
-            state.insert(reference.key);
-            return Ok(Vec::new());
-        }
-
-        if let Some(stream) = StreamRow::from_event(&event) {
-            if state.contains(&stream.key) {
-                return Ok(vec![MatchOutput { key: stream.key }.to_event(writer_id)]);
-            }
-        }
-
-        Ok(Vec::new())
-    }
-
-    fn on_source_eof(
+    fn process_stream(
         &self,
         _state: &mut Self::State,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        references: &mut JoinReferenceView<'_, String, RefRow>,
+        stream: StreamRow,
+    ) -> Result<Vec<MatchOutput>, HandlerError> {
+        if references.select(&stream.key).is_some() {
+            return Ok(vec![MatchOutput { key: stream.key }]);
+        }
+
         Ok(Vec::new())
     }
 }
@@ -174,43 +161,29 @@ struct FanOutJoin {
     count: u8,
 }
 
-#[async_trait::async_trait]
-impl JoinHandler for FanOutJoin {
-    type State = HashSet<String>;
+impl TypedJoinHandler for FanOutJoin {
+    type State = ();
+    type ReferenceKey = String;
+    type Reference = RefRow;
+    type Stream = StreamRow;
+    type Output = FanOutOutput;
 
-    fn initial_state(&self) -> Self::State {
-        HashSet::new()
+    fn initial_state(&self) -> Self::State {}
+
+    fn admit_reference(&self, reference: &Self::Reference) -> Result<String, HandlerError> {
+        Ok(reference.key.clone())
     }
 
-    fn process_event(
-        &self,
-        state: &mut Self::State,
-        event: ChainEvent,
-        _source_id: StageId,
-        writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        if let Some(reference) = RefRow::from_event(&event) {
-            state.insert(reference.key);
-            return Ok(Vec::new());
-        }
-
-        if let Some(stream) = StreamRow::from_event(&event) {
-            if state.contains(&stream.key) {
-                return Ok((0..self.count)
-                    .map(|idx| FanOutOutput { idx }.to_event(writer_id))
-                    .collect());
-            }
-        }
-
-        Ok(Vec::new())
-    }
-
-    fn on_source_eof(
+    fn process_stream(
         &self,
         _state: &mut Self::State,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        references: &mut JoinReferenceView<'_, String, RefRow>,
+        stream: StreamRow,
+    ) -> Result<Vec<FanOutOutput>, HandlerError> {
+        if references.select(&stream.key).is_some() {
+            return Ok((0..self.count).map(|idx| FanOutOutput { idx }).collect());
+        }
+
         Ok(Vec::new())
     }
 }
@@ -218,32 +191,26 @@ impl JoinHandler for FanOutJoin {
 #[derive(Clone, Debug)]
 struct ErrorOnStreamJoin;
 
-#[async_trait::async_trait]
-impl JoinHandler for ErrorOnStreamJoin {
+impl TypedJoinHandler for ErrorOnStreamJoin {
     type State = ();
+    type ReferenceKey = String;
+    type Reference = RefRow;
+    type Stream = StreamRow;
+    type Output = MatchOutput;
 
     fn initial_state(&self) -> Self::State {}
 
-    fn process_event(
-        &self,
-        _state: &mut Self::State,
-        event: ChainEvent,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        if StreamRow::from_event(&event).is_some() {
-            return Err(HandlerError::other("boom"));
-        }
-        Ok(Vec::new())
+    fn admit_reference(&self, reference: &Self::Reference) -> Result<String, HandlerError> {
+        Ok(reference.key.clone())
     }
 
-    fn on_source_eof(
+    fn process_stream(
         &self,
         _state: &mut Self::State,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
+        _references: &mut JoinReferenceView<'_, String, RefRow>,
+        _stream: StreamRow,
+    ) -> Result<Vec<MatchOutput>, HandlerError> {
+        Err(HandlerError::other("boom"))
     }
 }
 
@@ -385,9 +352,7 @@ async fn drain_only_output_inherits_reference_and_stream_ancestry_even_if_no_out
     join_config.control_strategy = Some(control.clone());
 
     let handle = JoinBuilder::new(
-        DrainOnlyJoin {
-            writer_id: WriterId::from(join_stage),
-        },
+        TypedJoinHandlerAdapter::new(DrainOnlyJoin),
         join_config,
         join_resources,
         reference_journal.clone() as Arc<dyn Journal<ChainEvent>>,
@@ -581,7 +546,7 @@ async fn conservative_reference_ancestry_overclaims_distinct_reference_writers()
     join_config.control_strategy = Some(control.clone());
 
     let handle = JoinBuilder::new(
-        KeyMatchJoin,
+        TypedJoinHandlerAdapter::new(KeyMatchJoin),
         join_config,
         join_resources,
         reference_journal.clone() as Arc<dyn Journal<ChainEvent>>,
@@ -769,7 +734,7 @@ async fn fan_out_outputs_all_carry_merged_ancestry_from_both_sides() {
     join_config.control_strategy = Some(control.clone());
 
     let handle = JoinBuilder::new(
-        FanOutJoin { count: 3 },
+        TypedJoinHandlerAdapter::new(FanOutJoin { count: 3 }),
         join_config,
         join_resources,
         reference_journal.clone() as Arc<dyn Journal<ChainEvent>>,
@@ -976,7 +941,7 @@ async fn error_journal_entries_carry_merged_parent_ancestry() {
     join_config.control_strategy = Some(control.clone());
 
     let handle = JoinBuilder::new(
-        ErrorOnStreamJoin,
+        TypedJoinHandlerAdapter::new(ErrorOnStreamJoin),
         join_config,
         join_resources,
         reference_journal.clone() as Arc<dyn Journal<ChainEvent>>,

@@ -30,7 +30,8 @@ use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulEmission, TypedStatefulHandler,
+    InfiniteSourceHandler, JoinReferenceView, SinkHandler, StatefulEmission, TypedJoinHandler,
+    TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::join::JoinReferenceMode;
 use obzenflow_runtime::stages::SourceError;
@@ -144,46 +145,35 @@ impl InfiniteSourceHandler for TxSource {
 #[derive(Clone, Debug)]
 struct SeqWitnessJoin;
 
-#[async_trait]
-impl JoinHandler for SeqWitnessJoin {
-    type State = u64;
+impl TypedJoinHandler for SeqWitnessJoin {
+    type State = ();
+    type ReferenceKey = String;
+    type Reference = AccountRow;
+    type Stream = TxRow;
+    type Output = PostedRow;
 
-    fn initial_state(&self) -> Self::State {
-        0
-    }
+    fn initial_state(&self) -> Self::State {}
 
     fn reference_mode(&self) -> JoinReferenceMode {
         JoinReferenceMode::Live
     }
 
-    fn process_event(
-        &self,
-        state: &mut Self::State,
-        event: ChainEvent,
-        _source_id: StageId,
-        writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        if AccountRow::from_event(&event).is_some() {
-            *state += 1;
-            return Ok(Vec::new());
-        }
-        if let Some(tx) = TxRow::from_event(&event) {
-            return Ok(vec![PostedRow {
-                value: tx.value,
-                refs_seen: *state,
-            }
-            .to_event(writer_id)]);
-        }
-        Ok(Vec::new())
+    fn admit_reference(&self, reference: &Self::Reference) -> Result<String, HandlerError> {
+        Ok(reference.account_id.clone())
     }
 
-    fn on_source_eof(
+    fn process_stream(
         &self,
         _state: &mut Self::State,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
+        references: &mut JoinReferenceView<'_, String, AccountRow>,
+        tx: TxRow,
+    ) -> Result<Vec<PostedRow>, HandlerError> {
+        let account_id = "acct-1".to_string();
+        let refs_seen = u64::from(references.select(&account_id).is_some());
+        Ok(vec![PostedRow {
+            value: tx.value,
+            refs_seen,
+        }])
     }
 }
 

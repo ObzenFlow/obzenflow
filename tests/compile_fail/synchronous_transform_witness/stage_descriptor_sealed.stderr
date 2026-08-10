@@ -27,8 +27,8 @@ help: the trait `stage_descriptor::sealed::Sealed` is not implemented for `Count
             EffectfulTransformDescriptor<H>
             FiniteSourceDescriptor<H>
             InfiniteSourceDescriptor<H>
-            JoinDescriptor<H>
-          and $N others
+            SinkDescriptor<H>
+            TypedStageDescriptor
 note: required by a bound in `StageDescriptor`
  --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
   |

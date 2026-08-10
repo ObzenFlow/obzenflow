@@ -32,12 +32,11 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, JoinHandler, SinkHandler, TypedTransformHandler,
+    FiniteSourceHandler, JoinReferenceView, SinkHandler, TypedJoinHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -214,81 +213,51 @@ impl SinkHandler for DropSink {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct GuardedJoinState {
-    references: HashMap<String, RefItem>,
-}
-
 #[derive(Clone, Debug)]
 struct GuardedInnerJoin {
-    unexpected_error_calls: Arc<AtomicUsize>,
+    typed_handler_calls: Arc<AtomicUsize>,
 }
 
-#[async_trait]
-impl JoinHandler for GuardedInnerJoin {
-    type State = GuardedJoinState;
+impl TypedJoinHandler for GuardedInnerJoin {
+    type State = ();
+    type ReferenceKey = String;
+    type Reference = RefItem;
+    type Stream = StreamItem;
+    type Output = JoinedItem;
 
-    fn initial_state(&self) -> Self::State {
-        GuardedJoinState::default()
+    fn initial_state(&self) -> Self::State {}
+
+    fn admit_reference(&self, reference: &Self::Reference) -> Result<String, HandlerError> {
+        self.typed_handler_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(reference.key.clone())
     }
 
-    fn process_event(
-        &self,
-        state: &mut Self::State,
-        event: ChainEvent,
-        _source_id: StageId,
-        writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
-            self.unexpected_error_calls.fetch_add(1, Ordering::SeqCst);
-            return Err(HandlerError::Other(
-                "join handler received a pre-error row".to_string(),
-            ));
-        }
-
-        if let Some(reference) = RefItem::from_event(&event) {
-            state.references.insert(reference.key.clone(), reference);
-            return Ok(Vec::new());
-        }
-
-        let Some(stream) = StreamItem::from_event(&event) else {
-            return Ok(Vec::new());
-        };
-        let Some(reference) = state.references.get(&stream.key) else {
-            return Ok(Vec::new());
-        };
-        let joined = JoinedItem {
-            key: stream.key,
-            label: reference.label.clone(),
-            value: stream.value,
-        };
-        Ok(vec![ChainEventFactory::derived_data_event(
-            writer_id,
-            &event,
-            JoinedItem::EVENT_TYPE,
-            json!(joined),
-            obzenflow_core::config::LineagePolicy::default(),
-        )])
-    }
-
-    fn on_source_eof(
+    fn process_stream(
         &self,
         _state: &mut Self::State,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
+        references: &mut JoinReferenceView<'_, String, RefItem>,
+        stream: StreamItem,
+    ) -> Result<Vec<JoinedItem>, HandlerError> {
+        self.typed_handler_calls.fetch_add(1, Ordering::SeqCst);
+        let Some(reference) = references.select(&stream.key) else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![JoinedItem {
+            key: stream.key,
+            label: reference.label,
+            value: stream.value,
+        }])
     }
 }
 
-fn build_flow(journal_base: PathBuf, unexpected_error_calls: Arc<AtomicUsize>) -> FlowDefinition {
+fn build_flow(journal_base: PathBuf, typed_handler_calls: Arc<AtomicUsize>) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let reference_source = RefSource::new();
         let reference_validator = RefValidator::new();
         let stream_source = StreamSource::new();
         let stream_validator = Validator::new();
         let joined = GuardedInnerJoin {
-            unexpected_error_calls,
+            typed_handler_calls,
         };
         let collector = DropSink;
 
@@ -326,21 +295,21 @@ fn is_error_row(envelope: &obzenflow_core::event::EventEnvelope<ChainEvent>) -> 
 async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
-    let unexpected_error_calls = Arc::new(AtomicUsize::new(0));
+    let typed_handler_calls = Arc::new(AtomicUsize::new(0));
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
-            unexpected_error_calls.clone(),
+            typed_handler_calls.clone(),
         ))
         .await
         .expect("flow with an in-band business error must complete");
 
     assert_eq!(
-        unexpected_error_calls.load(Ordering::SeqCst),
-        0,
-        "pre-error rows from both join sides must bypass the join handler"
+        typed_handler_calls.load(Ordering::SeqCst),
+        7,
+        "only three valid reference rows and four valid stream rows may reach the typed handler"
     );
 
     let run_dir = replay_testkit::latest_run_dir(&journal_base);

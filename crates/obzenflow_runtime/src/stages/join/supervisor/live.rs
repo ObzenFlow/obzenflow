@@ -25,7 +25,9 @@ use std::time::Instant;
 
 use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
-use crate::stages::join::fsm::{JoinContext, JoinEvent};
+use crate::stages::join::fsm::{
+    JoinContext, JoinEvent, JoinSubscriptionSide, PendingSubscriptionAck,
+};
 
 pub(super) async fn dispatch_live<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -314,6 +316,7 @@ async fn handle_reference_envelope<
                 write_stage_outputs_and_ack(
                     subscription,
                     ctx,
+                    JoinSubscriptionSide::Reference,
                     source_id,
                     outputs.into(),
                     Some(&envelope),
@@ -346,7 +349,7 @@ async fn handle_reference_envelope<
                 )),
                 subscription.last_delivered_generation(),
             );
-            let result = ctx.handler.process_event(
+            let result = ctx.handler.process_reference(
                 &mut ctx.handler_state,
                 event.clone(),
                 source_id,
@@ -388,6 +391,7 @@ async fn handle_reference_envelope<
                     write_stage_outputs_and_ack(
                         subscription,
                         ctx,
+                        JoinSubscriptionSide::Reference,
                         source_id,
                         events.into(),
                         Some(&envelope),
@@ -395,6 +399,21 @@ async fn handle_reference_envelope<
                     .await?;
                 }
                 Err(err) => {
+                    if let Some(fatal) = err.as_fatal() {
+                        common::record_join_stage_fatal(
+                            ctx,
+                            fatal,
+                            Some(&envelope),
+                            subscription.last_delivered_stage_input_position(),
+                        )
+                        .await?;
+                        if let Some(reader) = ctx.backpressure_readers.get(&source_id) {
+                            reader.ack_consumed(1);
+                        }
+                        return Ok(Some(EventLoopDirective::Transition(JoinEvent::Error(
+                            fatal.detail.clone(),
+                        ))));
+                    }
                     let reason = format!("Join handler error during live reference: {err:?}");
                     let mut error_event = envelope.event.clone().mark_as_error(reason, err.kind());
                     ctx.instrumentation.record_error(err.kind());
@@ -420,6 +439,7 @@ async fn handle_reference_envelope<
                         write_stage_outputs_and_ack(
                             subscription,
                             ctx,
+                            JoinSubscriptionSide::Reference,
                             source_id,
                             VecDeque::from([error_event]),
                             Some(&envelope),
@@ -601,6 +621,12 @@ async fn handle_stream_envelope<
                 ControlAction::ForwardAndDrain => {
                     common::forward_control_event_and_mirror(ctx, &envelope).await?;
                     if envelope.event.is_eof() {
+                        if last_eof_outcome
+                            .as_ref()
+                            .is_some_and(|outcome| outcome.is_final)
+                        {
+                            ctx.final_stream_eof = Some(envelope.clone());
+                        }
                         let _ = subscription.take_last_eof_outcome();
                     }
                     Some(EventLoopDirective::Transition(JoinEvent::ReceivedEOF))
@@ -674,6 +700,7 @@ async fn handle_stream_envelope<
                 write_stage_outputs_and_ack(
                     subscription,
                     ctx,
+                    JoinSubscriptionSide::Stream,
                     source_id,
                     outputs.into(),
                     Some(&envelope),
@@ -712,7 +739,7 @@ async fn handle_stream_envelope<
                 )),
                 subscription.last_delivered_generation(),
             );
-            let result = ctx.handler.process_event(
+            let result = ctx.handler.process_stream(
                 &mut ctx.handler_state,
                 event.clone(),
                 source_id,
@@ -754,6 +781,7 @@ async fn handle_stream_envelope<
                     write_stage_outputs_and_ack(
                         subscription,
                         ctx,
+                        JoinSubscriptionSide::Stream,
                         source_id,
                         events.into(),
                         Some(&merged_parent),
@@ -761,6 +789,21 @@ async fn handle_stream_envelope<
                     .await?;
                 }
                 Err(err) => {
+                    if let Some(fatal) = err.as_fatal() {
+                        common::record_join_stage_fatal(
+                            ctx,
+                            fatal,
+                            Some(&envelope),
+                            subscription.last_delivered_stage_input_position(),
+                        )
+                        .await?;
+                        if let Some(reader) = ctx.backpressure_readers.get(&source_id) {
+                            reader.ack_consumed(1);
+                        }
+                        return Ok(Some(EventLoopDirective::Transition(JoinEvent::Error(
+                            fatal.detail.clone(),
+                        ))));
+                    }
                     let reason = format!("Join handler error during live enrichment: {err:?}");
                     let mut error_event = envelope.event.clone().mark_as_error(reason, err.kind());
                     ctx.instrumentation.record_error(err.kind());
@@ -786,6 +829,7 @@ async fn handle_stream_envelope<
                         write_stage_outputs_and_ack(
                             subscription,
                             ctx,
+                            JoinSubscriptionSide::Stream,
                             source_id,
                             VecDeque::from([error_event]),
                             Some(&merged_parent),
@@ -1134,6 +1178,7 @@ async fn dispatch_live_canonical<
 async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     ctx: &mut JoinContext<H>,
+    side: JoinSubscriptionSide,
     source_id: obzenflow_core::StageId,
     outputs: VecDeque<ChainEvent>,
     pending_parent: Option<&EventEnvelope<ChainEvent>>,
@@ -1200,7 +1245,10 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
                 }
             }
             DrainOutcome::BackedOff => {
-                ctx.pending_ack_upstream = Some(source_id);
+                ctx.pending_subscription_ack = Some(PendingSubscriptionAck {
+                    side,
+                    upstream: source_id,
+                });
                 ctx.pending_outputs = outputs;
                 ctx.pending_parent = pending_parent.cloned();
                 return Ok(());

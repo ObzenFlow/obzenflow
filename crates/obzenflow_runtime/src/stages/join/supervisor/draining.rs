@@ -17,7 +17,10 @@ use std::time::Instant;
 use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
 use crate::stages::join::config::JoinReferenceMode;
-use crate::stages::join::fsm::{JoinContext, JoinEvent, JoinState, PendingTransition};
+use crate::stages::join::fsm::{
+    JoinContext, JoinEvent, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
+    PendingTransition,
+};
 
 pub(super) async fn dispatch_draining<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -98,7 +101,12 @@ pub(super) async fn dispatch_draining<
                                 scope,
                             },
                         );
-                        ctx.pending_ack_upstream = subscription.last_delivered_upstream_stage();
+                        ctx.pending_subscription_ack = subscription
+                            .last_delivered_upstream_stage()
+                            .map(|upstream| PendingSubscriptionAck {
+                                side: JoinSubscriptionSide::Reference,
+                                upstream,
+                            });
                         ctx.pending_parent = Some(envelope);
                         return Ok(EventLoopDirective::Continue);
                     }
@@ -123,7 +131,7 @@ pub(super) async fn dispatch_draining<
                         subscription.last_delivered_stage_input_position(),
                         None,
                     );
-                    let result = ctx.handler.process_event(
+                    let result = ctx.handler.process_reference(
                         &mut ctx.handler_state,
                         event,
                         reference_stage_id,
@@ -166,11 +174,24 @@ pub(super) async fn dispatch_draining<
                                 ctx.pending_outputs.extend(results.into_iter().map(|event| {
                                     crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
                                 }));
-                                ctx.pending_ack_upstream = upstream_stage;
+                                ctx.pending_subscription_ack =
+                                    upstream_stage.map(|upstream| PendingSubscriptionAck {
+                                        side: JoinSubscriptionSide::Reference,
+                                        upstream,
+                                    });
                                 ctx.pending_parent = Some(envelope.clone());
                             }
                         }
                         Err(err) => {
+                            if let Some(fatal) = err.as_fatal() {
+                                common::record_join_stage_fatal(
+                                    ctx,
+                                    fatal,
+                                    Some(&envelope),
+                                    subscription.last_delivered_stage_input_position(),
+                                )
+                                .await?;
+                            }
                             tracing::error!(
                                 stage_name = %ctx.stage_name,
                                 error = ?err,
@@ -281,7 +302,12 @@ pub(super) async fn dispatch_draining<
                                 scope,
                             },
                         );
-                        ctx.pending_ack_upstream = subscription.last_delivered_upstream_stage();
+                        ctx.pending_subscription_ack = subscription
+                            .last_delivered_upstream_stage()
+                            .map(|upstream| PendingSubscriptionAck {
+                                side: JoinSubscriptionSide::Stream,
+                                upstream,
+                            });
                         ctx.pending_parent = Some(envelope);
                         return Ok(EventLoopDirective::Continue);
                     }
@@ -308,7 +334,7 @@ pub(super) async fn dispatch_draining<
                         subscription.last_delivered_stage_input_position(),
                         None,
                     );
-                    let result = ctx.handler.process_event(
+                    let result = ctx.handler.process_stream(
                         &mut ctx.handler_state,
                         event,
                         source_id,
@@ -351,11 +377,33 @@ pub(super) async fn dispatch_draining<
                                 ctx.pending_outputs.extend(events.into_iter().map(|event| {
                                     crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
                                 }));
-                                ctx.pending_ack_upstream = upstream_stage;
+                                ctx.pending_subscription_ack =
+                                    upstream_stage.map(|upstream| PendingSubscriptionAck {
+                                        side: JoinSubscriptionSide::Stream,
+                                        upstream,
+                                    });
                                 ctx.pending_parent = Some(merged_parent);
                             }
                         }
                         Err(err) => {
+                            if let Some(fatal) = err.as_fatal() {
+                                common::record_join_stage_fatal(
+                                    ctx,
+                                    fatal,
+                                    Some(&envelope),
+                                    subscription.last_delivered_stage_input_position(),
+                                )
+                                .await?;
+                                if let Some(upstream) = subscription.last_delivered_upstream_stage()
+                                {
+                                    if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                                        reader.ack_consumed(1);
+                                    }
+                                }
+                                return Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                                    fatal.detail.clone(),
+                                )));
+                            }
                             let reason = format!("Join handler error during draining: {err:?}");
                             let error_event =
                                 envelope.event.clone().mark_as_error(reason, err.kind());
@@ -382,7 +430,11 @@ pub(super) async fn dispatch_draining<
                                         scope,
                                     },
                                 );
-                                ctx.pending_ack_upstream = upstream_stage;
+                                ctx.pending_subscription_ack =
+                                    upstream_stage.map(|upstream| PendingSubscriptionAck {
+                                        side: JoinSubscriptionSide::Stream,
+                                        upstream,
+                                    });
                                 ctx.pending_parent = Some(merged_parent);
                             }
                         }
@@ -435,11 +487,74 @@ pub(super) async fn dispatch_draining<
         EofKind::Natural | EofKind::Poison => {
             let handler = ctx.handler.clone();
             let empty_state = handler.initial_state();
-            let final_state = std::mem::replace(&mut ctx.handler_state, empty_state);
-            let events = handler
-                .drain(&final_state)
+            let mut final_state = std::mem::replace(&mut ctx.handler_state, empty_state);
+            let mut events = Vec::new();
+            if let Some(final_stream_eof) = ctx.final_stream_eof.take() {
+                let stream_source_id = ctx
+                    .stream_subscription_factory
+                    .upstream_stage_ids()
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        obzenflow_fsm::FsmError::HandlerError(
+                            "No stream subscription source available".to_string(),
+                        )
+                    })?;
+                let writer_id = ctx.writer_id.ok_or_else(|| {
+                    obzenflow_fsm::FsmError::HandlerError("No writer ID available".to_string())
+                })?;
+                match handler.on_stream_eof(
+                    &mut final_state,
+                    final_stream_eof.event.clone(),
+                    stream_source_id,
+                    writer_id,
+                ) {
+                    Ok(eof_events) => events.extend(eof_events),
+                    Err(err) => {
+                        ctx.handler_state = final_state;
+                        ctx.instrumentation.record_error(err.kind());
+                        let detail = if let Some(fatal) = err.as_fatal() {
+                            common::record_join_stage_fatal(
+                                ctx,
+                                fatal,
+                                Some(&final_stream_eof),
+                                None,
+                            )
+                            .await?;
+                            fatal.detail.clone()
+                        } else {
+                            err.to_string()
+                        };
+                        return Ok(EventLoopDirective::Transition(JoinEvent::Error(detail)));
+                    }
+                }
+            }
+            match handler
+                .drain(
+                    &final_state,
+                    ctx.drain_parent.as_ref().map(|parent| &parent.event),
+                )
                 .await
-                .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
+            {
+                Ok(drain_events) => events.extend(drain_events),
+                Err(err) => {
+                    ctx.handler_state = final_state;
+                    ctx.instrumentation.record_error(err.kind());
+                    let detail = if let Some(fatal) = err.as_fatal() {
+                        common::record_join_stage_fatal(
+                            ctx,
+                            fatal,
+                            ctx.drain_parent.as_ref(),
+                            None,
+                        )
+                        .await?;
+                        fatal.detail.clone()
+                    } else {
+                        err.to_string()
+                    };
+                    return Ok(EventLoopDirective::Transition(JoinEvent::Error(detail)));
+                }
+            }
             ctx.handler_state = final_state;
 
             let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
@@ -502,19 +617,48 @@ async fn dispatch_draining_live<
                 let empty_state = handler.initial_state();
                 let mut final_state = std::mem::replace(&mut ctx.handler_state, empty_state);
 
-                // Live-mode semantics: stream EOF is authoritative and drives completion.
-                if let Some(stream_source_id) = ctx
-                    .buffered_eof
-                    .as_ref()
-                    .and_then(|eof| eof.writer_id.as_stage().copied())
-                {
+                // The final stream-side subscription outcome, not an earlier
+                // EOF-shaped control record, authorizes the terminal hook.
+                if let Some(final_stream_eof) = ctx.final_stream_eof.take() {
+                    let stream_source_id = ctx
+                        .stream_subscription_factory
+                        .upstream_stage_ids()
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| {
+                            obzenflow_fsm::FsmError::HandlerError(
+                                "No stream subscription source available".to_string(),
+                            )
+                        })?;
                     let writer_id = ctx.writer_id.ok_or_else(|| {
                         obzenflow_fsm::FsmError::HandlerError("No writer ID available".to_string())
                     })?;
 
-                    let eof_events = handler
-                        .on_source_eof(&mut final_state, stream_source_id, writer_id)
-                        .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
+                    let eof_events = match handler.on_stream_eof(
+                        &mut final_state,
+                        final_stream_eof.event.clone(),
+                        stream_source_id,
+                        writer_id,
+                    ) {
+                        Ok(events) => events,
+                        Err(err) => {
+                            ctx.handler_state = final_state;
+                            ctx.instrumentation.record_error(err.kind());
+                            let detail = if let Some(fatal) = err.as_fatal() {
+                                common::record_join_stage_fatal(
+                                    ctx,
+                                    fatal,
+                                    Some(&final_stream_eof),
+                                    None,
+                                )
+                                .await?;
+                                fatal.detail.clone()
+                            } else {
+                                err.to_string()
+                            };
+                            return Ok(EventLoopDirective::Transition(JoinEvent::Error(detail)));
+                        }
+                    };
                     let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                     ctx.pending_outputs
                         .extend(eof_events.into_iter().map(|event| {
@@ -525,10 +669,32 @@ async fn dispatch_draining_live<
                         }));
                 }
 
-                let events = handler
-                    .drain(&final_state)
+                let events = match handler
+                    .drain(
+                        &final_state,
+                        ctx.drain_parent.as_ref().map(|parent| &parent.event),
+                    )
                     .await
-                    .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
+                {
+                    Ok(events) => events,
+                    Err(err) => {
+                        ctx.handler_state = final_state;
+                        ctx.instrumentation.record_error(err.kind());
+                        let detail = if let Some(fatal) = err.as_fatal() {
+                            common::record_join_stage_fatal(
+                                ctx,
+                                fatal,
+                                ctx.drain_parent.as_ref(),
+                                None,
+                            )
+                            .await?;
+                            fatal.detail.clone()
+                        } else {
+                            err.to_string()
+                        };
+                        return Ok(EventLoopDirective::Transition(JoinEvent::Error(detail)));
+                    }
+                };
                 ctx.handler_state = final_state;
 
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);

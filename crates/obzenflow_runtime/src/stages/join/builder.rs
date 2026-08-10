@@ -16,6 +16,7 @@ use crate::supervised_base::{
 };
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::journal::Journal;
+use obzenflow_core::WriterId;
 use obzenflow_core::{ChainEvent, StageId};
 
 use super::config::JoinConfig;
@@ -157,6 +158,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
         // build-resolved lineage policy before the handler is shared.
         let mut handler = self.handler;
         handler.install_lineage_policy(self.resources.lineage_policy);
+        handler.install_writer_id(WriterId::from(self.config.stage_id));
         let handler_state = handler.initial_state();
         let context = JoinContext {
             handler: Arc::new(handler),
@@ -173,6 +175,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             system_journal: self.resources.system_journal.clone(),
             bus: self.resources.message_bus.clone(),
             writer_id: None,
+            lineage_policy: self.resources.lineage_policy,
             reference_subscription: None,
             stream_subscription: None,
             reference_contract_state: Vec::new(),
@@ -180,6 +183,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             stream_contract_state: Vec::new(),
             stream_last_contract_check: None,
             buffered_eof: None,
+            final_stream_eof: None,
             terminal_eof_kind: None,
             drain_parent: None,
             reference_high_water_clock: VectorClock::new(),
@@ -200,7 +204,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             pending_outputs: std::collections::VecDeque::new(),
             pending_parent: None,
             pending_transition: None,
-            pending_ack_upstream: None,
+            pending_subscription_ack: None,
             backpressure_pulse:
                 crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
             backpressure_stall: None,

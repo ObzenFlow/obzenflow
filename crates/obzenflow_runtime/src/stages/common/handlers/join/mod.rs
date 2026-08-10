@@ -5,5 +5,9 @@
 //! Join handler trait
 
 mod traits;
+mod typed;
 
-pub use traits::{JoinHandler, UnifiedJoinHandler};
+pub use traits::UnifiedJoinHandler;
+pub use typed::TypedJoinHandlerAdapter;
+pub(crate) use typed::TypedJoinInvocation;
+pub use typed::{JoinReferenceView, TypedJoinHandler};

@@ -17,7 +17,9 @@ use std::time::Instant;
 
 use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
-use crate::stages::join::fsm::{JoinContext, JoinEvent, JoinState};
+use crate::stages::join::fsm::{
+    JoinContext, JoinEvent, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
+};
 
 pub(super) async fn dispatch_hydrating<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -233,7 +235,12 @@ pub(super) async fn dispatch_hydrating<
                                 scope,
                             },
                         );
-                        ctx.pending_ack_upstream = subscription.last_delivered_upstream_stage();
+                        ctx.pending_subscription_ack = subscription
+                            .last_delivered_upstream_stage()
+                            .map(|upstream| PendingSubscriptionAck {
+                                side: JoinSubscriptionSide::Reference,
+                                upstream,
+                            });
                         ctx.pending_parent = Some(envelope);
                         return Ok(EventLoopDirective::Continue);
                     }
@@ -252,7 +259,7 @@ pub(super) async fn dispatch_hydrating<
                         subscription.last_delivered_stage_input_position(),
                         subscription.last_delivered_generation(),
                     );
-                    let result = ctx.handler.process_event(
+                    let result = ctx.handler.process_reference(
                         &mut ctx.handler_state,
                         event,
                         reference_stage_id,
@@ -302,6 +309,15 @@ pub(super) async fn dispatch_hydrating<
                             }
                         }
                         Err(err) => {
+                            if let Some(fatal) = err.as_fatal() {
+                                common::record_join_stage_fatal(
+                                    ctx,
+                                    fatal,
+                                    Some(&envelope),
+                                    subscription.last_delivered_stage_input_position(),
+                                )
+                                .await?;
+                            }
                             tracing::error!(
                                 stage_name = %ctx.stage_name,
                                 error = ?err,

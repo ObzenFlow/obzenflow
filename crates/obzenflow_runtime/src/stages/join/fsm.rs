@@ -276,6 +276,20 @@ pub(crate) enum PendingTransition {
     DrainComplete,
 }
 
+/// Structural subscription branch that owns a deferred consumption ack.
+/// This is deliberately independent of event authorship and upstream ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JoinSubscriptionSide {
+    Reference,
+    Stream,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PendingSubscriptionAck {
+    pub side: JoinSubscriptionSide,
+    pub upstream: StageId,
+}
+
 /// Context for join handlers - contains everything actions need
 pub struct JoinContext<H: UnifiedJoinHandler> {
     /// The handler instance (immutable, wrapped in Arc like StatefulContext)
@@ -321,6 +335,9 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     /// Writer ID for this join (initialized during setup)
     pub writer_id: Option<WriterId>,
 
+    /// Build-resolved lineage policy used for runtime-authored fatal evidence.
+    pub lineage_policy: obzenflow_core::config::LineagePolicy,
+
     /// Subscription to reference journal ONLY (used during Hydrating)
     pub reference_subscription: Option<UpstreamSubscription<ChainEvent>>,
 
@@ -341,6 +358,11 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
 
     /// Buffered EOF event to forward when draining completes
     pub buffered_eof: Option<ChainEvent>,
+
+    /// Final stream-side EOF delivery that actually closed the stream
+    /// subscription. Earlier Poison EOFs and other non-final EOF deliveries
+    /// are deliberately not terminal-hook witnesses.
+    pub(crate) final_stream_eof: Option<EventEnvelope<ChainEvent>>,
 
     /// Worst-wins join over both sides' terminal EOF kinds (FLOWIP-095k).
     pub terminal_eof_kind: Option<EofKind>,
@@ -407,8 +429,9 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     /// Pending state transition once blocked outputs are fully written.
     pub(crate) pending_transition: Option<PendingTransition>,
 
-    /// Upstream stage awaiting a consumption ack once pending outputs are drained.
-    pub(crate) pending_ack_upstream: Option<StageId>,
+    /// Structural subscription branch and upstream awaiting a consumption ack
+    /// once pending outputs are drained.
+    pub(crate) pending_subscription_ack: Option<PendingSubscriptionAck>,
 
     /// Backpressure activity pulse accumulator (Hz UI animation driver).
     pub(crate) backpressure_pulse: BackpressureActivityPulse,

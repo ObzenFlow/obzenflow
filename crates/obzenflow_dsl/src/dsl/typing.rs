@@ -4,7 +4,9 @@
 
 //! Types-first metadata and descriptor wrappers for the DSL layer.
 
-use crate::dsl::stage_descriptor::{StageDescriptor, StatefulDescriptor, TransformDescriptor};
+use crate::dsl::stage_descriptor::{
+    JoinDescriptor, StageDescriptor, StatefulDescriptor, TransformDescriptor,
+};
 use crate::dsl::StageCreationResult;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
@@ -12,8 +14,9 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_core::{Member, OneFactStageOutput, StageFactSet, TypedFactType, TypedPayload};
+use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
 use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, PayloadTypeDescriptor,
     StageOutputContract,
@@ -24,13 +27,13 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulEmission, TransformHandler,
-    TypedStatefulHandler, TypedStatefulHandlerAdapter, TypedTransformHandler,
+    InfiniteSourceHandler, JoinReferenceView, SinkHandler, StatefulEmission, TransformHandler,
+    TypedJoinHandler, TypedStatefulHandler, TypedStatefulHandlerAdapter, TypedTransformHandler,
     TypedTransformHandlerAdapter,
 };
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
-use obzenflow_runtime::typing::{JoinTyping, SinkTyping, SourceTyping, TransformTyping};
+use obzenflow_runtime::typing::{SinkTyping, SourceTyping, TransformTyping};
 use obzenflow_topology::{EdgeKind, StageTypingInfo, Topology, TypeHintInfo};
 use std::any::{type_name, TypeId};
 use std::collections::{HashMap, HashSet};
@@ -93,6 +96,32 @@ pub trait StatefulInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput>
 
 #[diagnostic::do_not_recommend]
 impl<Input> StatefulInputMatchesArrow<Input> for Input {}
+
+/// Diagnostic facade for equality between a typed join handler's authoritative
+/// reference type and the `catalog` position of the stage arrow.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "this join handler does not witness its arrow contract",
+    label = "the handler's `Reference` does not match the catalog fact type",
+    note = "implement TypedJoinHandler with Reference, Stream, and Output matching the join! arrow (FLOWIP-134f)"
+)]
+pub trait JoinReferenceMatchesArrow<ArrowReference>: proof_sealed::Equal<ArrowReference> {}
+
+#[diagnostic::do_not_recommend]
+impl<Reference> JoinReferenceMatchesArrow<Reference> for Reference {}
+
+/// Diagnostic facade for equality between a typed join handler's authoritative
+/// stream type and the stream position of the stage arrow.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "this join handler does not witness its arrow contract",
+    label = "the handler's `Stream` does not match the stream fact type",
+    note = "implement TypedJoinHandler with Reference, Stream, and Output matching the join! arrow (FLOWIP-134f)"
+)]
+pub trait JoinStreamMatchesArrow<ArrowStream>: proof_sealed::Equal<ArrowStream> {}
+
+#[diagnostic::do_not_recommend]
+impl<Stream> JoinStreamMatchesArrow<Stream> for Stream {}
 
 /// Diagnostic facade for equality between an effectful stateful handler's
 /// authoritative input and the stage-arrow input projection.
@@ -735,6 +764,114 @@ where
     wrap_typed_descriptor(descriptor, metadata)
 }
 
+fn join_metadata_from_contract<ArrowReference, ArrowStream, PrimaryOutput, ArrowOutputSet>(
+    is_placeholder: bool,
+    placeholder_message: Option<String>,
+) -> StageTypingMetadata
+where
+    ArrowReference: TypedPayload + 'static,
+    ArrowStream: TypedPayload + 'static,
+    PrimaryOutput: TypedPayload + 'static,
+    ArrowOutputSet: StageFactSet,
+{
+    let output_contract = ArrowOutputSet::member_fact_types()
+        .into_iter()
+        .map(TypeHint::exact_fact_type)
+        .collect();
+    StageTypingMetadata::join(
+        TypeHint::exact_payload::<ArrowReference>(),
+        TypeHint::exact_payload::<ArrowStream>(),
+        TypeHint::exact_payload::<PrimaryOutput>(),
+        is_placeholder,
+        placeholder_message,
+    )
+    .with_output_contract(output_contract)
+}
+
+/// Canonical admission factory for a real typed join.
+#[doc(hidden)]
+pub fn typed_join_descriptor<
+    H,
+    ArrowReference,
+    ArrowStream,
+    PrimaryOutput,
+    ArrowOutputSet,
+    PrimaryOutputIndex,
+    ArrowToHandlerProof,
+    HandlerToArrowProof,
+>(
+    name: impl Into<String>,
+    reference_stage_var: &'static str,
+    handler: H,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+) -> Box<dyn StageDescriptor>
+where
+    H: TypedJoinHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    H::Reference: JoinReferenceMatchesArrow<ArrowReference>,
+    H::Stream: JoinStreamMatchesArrow<ArrowStream>,
+    ArrowReference: TypedPayload + Clone + Send + Sync + 'static,
+    ArrowStream: TypedPayload + Send + Sync + 'static,
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
+    <H::Output as StageFactSet>::Members:
+        HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
+{
+    let metadata =
+        join_metadata_from_contract::<ArrowReference, ArrowStream, PrimaryOutput, ArrowOutputSet>(
+            false, None,
+        );
+    let descriptor: Box<dyn StageDescriptor> = Box::new(JoinDescriptor {
+        name: name.into(),
+        reference_stage_id: StageId::new(),
+        reference_stage_var: Some(reference_stage_var),
+        handler: TypedJoinHandlerAdapter::new(handler),
+        observers,
+    });
+    wrap_typed_descriptor(descriptor, metadata)
+}
+
+/// Canonical admission factory for a typed join placeholder.
+#[doc(hidden)]
+pub fn placeholder_join_descriptor<
+    ArrowReference,
+    ArrowStream,
+    PrimaryOutput,
+    ArrowOutputSet,
+    PrimaryOutputIndex,
+>(
+    name: impl Into<String>,
+    reference_stage_var: &'static str,
+    message: Option<&'static str>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+) -> Box<dyn StageDescriptor>
+where
+    ArrowReference: TypedPayload + Clone + Send + Sync + 'static,
+    ArrowStream: TypedPayload + Send + Sync + 'static,
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>,
+{
+    let metadata =
+        join_metadata_from_contract::<ArrowReference, ArrowStream, PrimaryOutput, ArrowOutputSet>(
+            true,
+            message.map(str::to_string),
+        );
+    let descriptor: Box<dyn StageDescriptor> = Box::new(JoinDescriptor {
+        name: name.into(),
+        reference_stage_id: StageId::new(),
+        reference_stage_var: Some(reference_stage_var),
+        handler: TypedJoinHandlerAdapter::new(PlaceholderJoin::<
+            ArrowReference,
+            ArrowStream,
+            PrimaryOutput,
+        >::new(message)),
+        observers,
+    });
+    wrap_typed_descriptor(descriptor, metadata)
+}
+
 fn placeholder_message(stage_kind: &str, message: Option<&str>) -> String {
     match message {
         Some(message) => format!("{stage_kind} placeholder executed: {message}"),
@@ -1130,49 +1267,58 @@ impl<Ref, Stream, Out> fmt::Debug for PlaceholderJoin<Ref, Stream, Out> {
     }
 }
 
-impl<Ref, Stream, Out> JoinTyping for PlaceholderJoin<Ref, Stream, Out> {
+impl<Ref, Stream, Out> TypedJoinHandler for PlaceholderJoin<Ref, Stream, Out>
+where
+    Ref: TypedPayload + Clone + Send + Sync + 'static,
+    Stream: TypedPayload + Send + Sync + 'static,
+    Out: OneFactStageOutput + Send + Sync + 'static,
+{
+    type State = ();
+    type ReferenceKey = ();
     type Reference = Ref;
     type Stream = Stream;
     type Output = Out;
-}
-
-#[async_trait]
-impl<Ref, Stream, Out> JoinHandler for PlaceholderJoin<Ref, Stream, Out>
-where
-    Ref: Send + Sync + 'static,
-    Stream: Send + Sync + 'static,
-    Out: Send + Sync + 'static,
-{
-    type State = ();
 
     fn initial_state(&self) -> Self::State {}
 
-    fn process_event(
+    fn admit_reference(
+        &self,
+        _reference: &Self::Reference,
+    ) -> Result<Self::ReferenceKey, HandlerError> {
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("join", self.message));
+        }
+        Ok(())
+    }
+
+    fn process_stream(
         &self,
         _state: &mut Self::State,
-        _event: ChainEvent,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        _references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
+        _stream: Self::Stream,
+    ) -> Result<Vec<Self::Output>, HandlerError> {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("join", self.message));
         }
         Ok(Vec::new())
     }
 
-    fn on_source_eof(
+    fn on_stream_eof(
         &self,
         _state: &mut Self::State,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        _references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
+    ) -> Result<Vec<Self::Output>, HandlerError> {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("join", self.message));
         }
         Ok(Vec::new())
     }
 
-    async fn drain(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn drain(
+        &self,
+        _state: &Self::State,
+        _references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
+    ) -> Result<Vec<Self::Output>, HandlerError> {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("join", self.message));
         }
