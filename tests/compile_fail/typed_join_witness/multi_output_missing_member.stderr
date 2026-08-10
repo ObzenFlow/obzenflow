@@ -1,11 +1,11 @@
 error[E0277]: the stage arrow declares an output fact missing from the handler's `Output`
-  --> tests/compile_fail/typed_join_witness/multi_output_missing_member.rs:8:13
+  --> tests/compile_fail/typed_join_witness/multi_output_missing_member.rs:10:13
    |
- 8 |       let _ = obzenflow_dsl::join!(
+10 |       let _ = obzenflow_dsl::join!(
    |  _____________^
- 9 | |         catalog reference_stage: Reference,
-10 | |         Stream -> { First, Second } => Exact
-11 | |     );
+11 | |         catalog reference_stage: Reference,
+12 | |         Stream -> { First, Second } => Exact
+13 | |     );
    | |_____^ this arrow output contract is not contained in the handler's `Output` set
    |
    = help: the trait `ArrowOutputsAreDeclaredByHandler<WithMember<First, EmptySet>, SubsetProofStep<MemberFound, SubsetProofStep<MemberAfter<_>, SubsetProofEnd>>>` is not implemented for `WithMember<First, WithMember<support::Second, EmptySet>>`

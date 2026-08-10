@@ -1,11 +1,11 @@
 error[E0283]: type annotations needed
-  --> tests/compile_fail/typed_join_witness/duplicate_arrow_members.rs:8:13
+  --> tests/compile_fail/typed_join_witness/duplicate_arrow_members.rs:10:13
    |
- 8 |       let _ = obzenflow_dsl::join!(
+10 |       let _ = obzenflow_dsl::join!(
    |  _____________^
- 9 | |         catalog reference_stage: Reference,
-10 | |         Stream -> { First, First } => Exact
-11 | |     );
+11 | |         catalog reference_stage: Reference,
+12 | |         Stream -> { First, First } => Exact
+13 | |     );
    | |_____^ cannot infer type
    |
    = note: multiple `impl`s satisfying `WithMember<First, WithMember<First, EmptySet>>: Member<First, _>` found in the `obzenflow_core` crate:

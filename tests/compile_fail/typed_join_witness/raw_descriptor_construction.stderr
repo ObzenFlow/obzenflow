@@ -1,7 +1,7 @@
 error[E0603]: struct `JoinDescriptor` is private
- --> tests/compile_fail/typed_join_witness/raw_descriptor_construction.rs:3:43
+ --> tests/compile_fail/typed_join_witness/raw_descriptor_construction.rs:5:43
   |
-3 | use obzenflow_dsl::dsl::stage_descriptor::JoinDescriptor;
+5 | use obzenflow_dsl::dsl::stage_descriptor::JoinDescriptor;
   |                                           ^^^^^^^^^^^^^^ private struct
   |
 note: the struct `JoinDescriptor` is defined here
