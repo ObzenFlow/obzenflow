@@ -42,13 +42,14 @@ use std::sync::Arc;
 use crate::stages::observer::{ObserverReport, StageObserverBundle};
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::payloads::observability_payload::{
     MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::event::{ChainEventContent, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::{ChainEvent, WriterId};
 
 use crate::backpressure::{BackpressureReservation, BackpressureWriter, DirectFactClaim};
 use crate::feed_plan::StageOutputContract;
@@ -72,6 +73,30 @@ fn output_contract_summary(output_contract: &StageOutputContract) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn event_is_authored_by_stage(
+    event: &ChainEvent,
+    flow_context: &FlowContext,
+    _scope: MiddlewareExecutionScope,
+) -> bool {
+    // Sources have no upstream data journal from which they can forward a
+    // foreign Data row. Until the source witness pass installs the runtime
+    // writer before handler dispatch, raw source handlers may still construct
+    // their output with a handler-owned WriterId. The source commit boundary
+    // is therefore the structural authorship proof in both live and replay.
+    if matches!(
+        flow_context.stage_type,
+        StageType::FiniteSource | StageType::InfiniteSource
+    ) {
+        return true;
+    }
+
+    if event.writer_id == WriterId::from(flow_context.stage_id) {
+        return true;
+    }
+
+    false
 }
 
 /// A boxed, thread-safe error from a commit attempt. Each caller maps this onto
@@ -158,7 +183,7 @@ pub(crate) enum MirrorPolicy {
 /// The kind of stage-runtime journal append, used to gate the
 /// `before_output_commit` observer hook and the framework system-journal mirror.
 ///
-/// Only the four wired variants exist. Other stage-runtime appends are
+/// Only the five wired variants exist. Other stage-runtime appends are
 /// out-of-surface raw appends today: error-journal and error-routed-data writes,
 /// backpressure activity pulses, sink delivery receipts, forwarded sink-boundary
 /// control rows, source/stage lifecycle events, ingress refusal facts, and the
@@ -172,6 +197,7 @@ pub(crate) enum MirrorPolicy {
 pub(crate) enum StageAppendIntent {
     NormalStageData,
     NonDataStageFact,
+    FrameworkTerminal,
     FrameworkObservability,
     ObserverDiagnostic,
 }
@@ -187,9 +213,10 @@ impl StageAppendIntent {
     pub(crate) fn mirror_policy(self) -> MirrorPolicy {
         match self {
             Self::FrameworkObservability => MirrorPolicy::FrameworkMiddlewareAllowlist,
-            Self::NormalStageData | Self::NonDataStageFact | Self::ObserverDiagnostic => {
-                MirrorPolicy::None
-            }
+            Self::NormalStageData
+            | Self::NonDataStageFact
+            | Self::FrameworkTerminal
+            | Self::ObserverDiagnostic => MirrorPolicy::None,
         }
     }
 
@@ -286,6 +313,87 @@ impl OutputCommitter<'_> {
 
         self.finish_committed(&written, options, intent).await;
         Ok(written)
+    }
+
+    /// Seal and commit a framework-owned terminal EOF at the current durable
+    /// output frontier.
+    ///
+    /// Framework strategy code carries only terminal intent. The runtime owns
+    /// these transport fields because only the commit boundary knows which
+    /// preceding Data facts are durably visible.
+    pub(crate) async fn commit_authored_terminal(
+        &self,
+        mut event: ChainEvent,
+        parent: Option<&EventEnvelope<ChainEvent>>,
+    ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
+        let flow_context = self
+            .flow_context
+            .ok_or("framework terminal commit requires a flow context")?;
+        let instrumentation = self
+            .instrumentation
+            .ok_or("framework terminal commit requires stage instrumentation")?;
+        let expected_writer = WriterId::from(flow_context.stage_id);
+
+        if event.writer_id != expected_writer {
+            return Err(format!(
+                "framework terminal envelope writer {:?} does not match stage {:?}",
+                event.writer_id, expected_writer
+            )
+            .into());
+        }
+
+        let (expected_seq, expected_by_type, expected_last_event_id) =
+            instrumentation.authored_data_frontier();
+
+        let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+            writer_id,
+            writer_seq,
+            writer_seq_by_event_type,
+            last_event_id,
+            ..
+        }) = &mut event.content
+        else {
+            return Err("framework terminal commit requires an EOF event".into());
+        };
+
+        if writer_id.is_some_and(|writer| writer != expected_writer) {
+            return Err("framework terminal payload writer conflicts with its stage author".into());
+        }
+        if writer_seq.is_some_and(|seq| seq != expected_seq) {
+            return Err(format!(
+                "framework terminal writer_seq {:?} conflicts with committed frontier {:?}",
+                writer_seq, expected_seq
+            )
+            .into());
+        }
+        if !writer_seq_by_event_type.is_empty() && *writer_seq_by_event_type != expected_by_type {
+            return Err(
+                "framework terminal per-type frontier conflicts with committed output counts"
+                    .into(),
+            );
+        }
+        if last_event_id.is_some() && *last_event_id != expected_last_event_id {
+            return Err(
+                "framework terminal last_event_id conflicts with the committed output frontier"
+                    .into(),
+            );
+        }
+
+        *writer_id = Some(expected_writer);
+        *writer_seq = Some(expected_seq);
+        *writer_seq_by_event_type = expected_by_type;
+        *last_event_id = expected_last_event_id;
+
+        self.commit_prebuilt_with_intent(
+            event,
+            parent,
+            CommitOptions {
+                count_output: false,
+                validate_output_contract: false,
+            },
+            StageAppendIntent::FrameworkTerminal,
+        )
+        .await
     }
 
     /// Commit every member through one journal atomic-group primitive. Event
@@ -401,6 +509,22 @@ impl OutputCommitter<'_> {
         }
 
         if let Some(flow_context) = self.flow_context {
+            // A live source has no upstream author to preserve: every Data row
+            // crossing this commit boundary is authored by the source stage.
+            // Raw source handlers predate runtime-installed writers and may
+            // construct envelopes with an arbitrary WriterId, so seal that
+            // identity here. Strict replay preserves the archived writer and
+            // resolves it through the topology-keyed replay alias instead.
+            if intent == StageAppendIntent::NormalStageData
+                && event.is_data()
+                && !self.observer_scope.is_deterministic_replay()
+                && matches!(
+                    flow_context.stage_type,
+                    StageType::FiniteSource | StageType::InfiniteSource
+                )
+            {
+                event.writer_id = WriterId::from(flow_context.stage_id);
+            }
             event = event.with_flow_context(flow_context.clone());
             if intent.runs_output_commit_hooks() && !self.observer_scope.is_deterministic_replay() {
                 apply_runtime_journey_identity(&mut event, flow_context);
@@ -458,7 +582,14 @@ impl OutputCommitter<'_> {
     ) {
         if let Some(instrumentation) = self.instrumentation {
             if options.count_output && written.event.is_data() {
-                instrumentation.record_output_event(&written.event);
+                let authored_here = self.flow_context.is_none_or(|flow_context| {
+                    event_is_authored_by_stage(&written.event, flow_context, self.observer_scope)
+                });
+                if authored_here {
+                    instrumentation.record_output_event(&written.event);
+                } else {
+                    instrumentation.record_forwarded_output_event(&written.event);
+                }
             }
         }
 
@@ -720,6 +851,7 @@ fn apply_runtime_journey_identity(event: &mut ChainEvent, flow: &FlowContext) {
 #[cfg(test)]
 mod observer_diagnostic_tests {
     use super::*;
+    use obzenflow_core::event::context::ReplayContext;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{StageId, WriterId};
 
@@ -746,5 +878,52 @@ mod observer_diagnostic_tests {
                 "prohibited diagnostics must fail before any journal append"
             );
         }
+    }
+
+    #[test]
+    fn source_commit_boundary_is_structural_authorship_proof() {
+        let current = StageId::new();
+        let archived = StageId::new();
+        let mut event = ChainEventFactory::data_event(
+            WriterId::from(archived),
+            "test.replayed.v1",
+            serde_json::json!({ "value": 1 }),
+        );
+        event.replay_context = Some(ReplayContext {
+            original_event_id: event.id,
+            original_flow_id: "archived-flow".to_string(),
+            original_stage_id: archived,
+            archive_path: "archive".into(),
+            replayed_at: chrono::Utc::now(),
+        });
+        let source_context = FlowContext {
+            flow_name: "flow".to_string(),
+            flow_id: "current-flow".to_string(),
+            stage_name: "source".to_string(),
+            stage_id: current,
+            stage_type: StageType::FiniteSource,
+        };
+
+        assert!(event_is_authored_by_stage(
+            &event,
+            &source_context,
+            MiddlewareExecutionScope::StrictReplayHandler,
+        ));
+        assert!(event_is_authored_by_stage(
+            &event,
+            &source_context,
+            MiddlewareExecutionScope::LiveHandler,
+        ));
+
+        let derived_context = FlowContext {
+            stage_name: "transform".to_string(),
+            stage_type: StageType::Transform,
+            ..source_context
+        };
+        assert!(!event_is_authored_by_stage(
+            &event,
+            &derived_context,
+            MiddlewareExecutionScope::StrictReplayHandler,
+        ));
     }
 }

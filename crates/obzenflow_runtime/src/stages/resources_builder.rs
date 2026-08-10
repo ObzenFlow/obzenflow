@@ -78,6 +78,9 @@ impl DirectFactPlan {
 pub struct SubscriptionFactory {
     /// Pre-computed stage names for all potential upstreams
     stage_names: HashMap<StageId, String>,
+    /// Stable current-to-archive stage identity used by contract authorship
+    /// during replay and resume.
+    archived_stage_ids_by_current: HashMap<StageId, StageId>,
     /// The generation this run entered at (FLOWIP-120n F18): 0 live, archive
     /// max recorded generation + 1 on replay/resume. Copied into every bound
     /// factory; seq-mode subscriptions gate the quiet-input wait on it.
@@ -92,6 +95,7 @@ pub struct BoundSubscriptionFactory {
     /// Owner label for logging/attribution
     pub owner_label: String,
     journals_with_names: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)>,
+    archived_stage_ids_by_current: HashMap<StageId, StageId>,
     selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
     composite_entries_by_stage: HashMap<StageId, Vec<CompositeEntrySpec>>,
     /// Reader-selection policy for built subscriptions (FLOWIP-095d).
@@ -111,6 +115,7 @@ impl SubscriptionFactory {
     pub fn new(stage_names: HashMap<StageId, String>) -> Self {
         Self {
             stage_names,
+            archived_stage_ids_by_current: HashMap::new(),
             entered_generation: obzenflow_core::ReaderGeneration::default(),
         }
     }
@@ -135,6 +140,9 @@ impl SubscriptionFactory {
 
         UpstreamSubscription::new_with_names("unknown_owner", &journals_with_names)
             .await
+            .map(|subscription| {
+                subscription.with_archived_stage_ids(self.archived_stage_ids_by_current.clone())
+            })
             .map_err(|e| format!("Failed to create subscription: {e:?}"))
     }
 
@@ -158,6 +166,7 @@ impl SubscriptionFactory {
         BoundSubscriptionFactory {
             owner_label: "unknown_owner".to_string(),
             journals_with_names,
+            archived_stage_ids_by_current: self.archived_stage_ids_by_current.clone(),
             selected_feeds_by_stage: HashMap::new(),
             composite_entries_by_stage: HashMap::new(),
             reader_selection: ReaderSelectionPolicy::default(),
@@ -185,6 +194,7 @@ impl BoundSubscriptionFactory {
             .await
             .map(|sub| {
                 sub.with_selected_feeds(self.selected_feeds_by_stage.clone())
+                    .with_archived_stage_ids(self.archived_stage_ids_by_current.clone())
                     .with_composite_entries(self.composite_entries_by_stage.clone())
                     .with_reader_selection(self.reader_selection)
                     .with_seq_ordered(self.seq_ordered)
@@ -204,6 +214,7 @@ impl BoundSubscriptionFactory {
                 .await
                 .map_err(|e| format!("Failed to create subscription: {e:?}"))?
                 .with_selected_feeds(self.selected_feeds_by_stage.clone())
+                .with_archived_stage_ids(self.archived_stage_ids_by_current.clone())
                 .with_composite_entries(self.composite_entries_by_stage.clone())
                 .with_reader_selection(self.reader_selection)
                 .with_seq_ordered(self.seq_ordered)
@@ -505,6 +516,23 @@ impl StageResourcesBuilder {
             }
         };
 
+        let mut archived_stage_ids_by_current = HashMap::new();
+        if let Some(archive) = &self.replay_archive {
+            for stage_info in self.topology.stages() {
+                let current_stage = StageId::from_topology_id(stage_info.id);
+                let archived_stage =
+                    archive
+                        .archived_stage_id(&stage_info.name)
+                        .map_err(|error| {
+                            format!(
+                                "failed to resolve archived author for stage '{}': {error}",
+                                stage_info.name
+                            )
+                        })?;
+                archived_stage_ids_by_current.insert(current_stage, archived_stage);
+            }
+        }
+
         // Keep track of all stage journals for metrics aggregator
         let mut all_stage_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)> = Vec::new();
 
@@ -649,6 +677,8 @@ impl StageResourcesBuilder {
             let all_stage_names_for_log = all_stage_names.clone();
             let mut subscription_factory = SubscriptionFactory::new(all_stage_names);
             subscription_factory.entered_generation = entered_generation;
+            subscription_factory.archived_stage_ids_by_current =
+                archived_stage_ids_by_current.clone();
             let output_contract = self
                 .feed_plan
                 .output_contract(stage_id)

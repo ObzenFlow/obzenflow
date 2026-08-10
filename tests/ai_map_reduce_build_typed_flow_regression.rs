@@ -33,7 +33,9 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::EffectPortRegistry;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    FiniteSourceHandler, JoinReferenceView, SinkHandler, TypedJoinHandler,
+};
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -743,28 +745,25 @@ impl TypedPayload for JoinedP {
 #[derive(Clone, Debug)]
 struct LocalNoopJoin;
 
-#[async_trait]
-impl obzenflow_runtime::stages::common::handlers::JoinHandler for LocalNoopJoin {
+impl TypedJoinHandler for LocalNoopJoin {
     type State = ();
+    type ReferenceKey = ();
+    type Reference = BuildOnlyOut;
+    type Stream = JoinStreamP;
+    type Output = JoinedP;
 
     fn initial_state(&self) -> Self::State {}
 
-    fn process_event(
-        &self,
-        _state: &mut Self::State,
-        _event: ChainEvent,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![])
+    fn admit_reference(&self, _reference: &Self::Reference) -> Result<(), HandlerError> {
+        Ok(())
     }
 
-    fn on_source_eof(
+    fn process_stream(
         &self,
         _state: &mut Self::State,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        _references: &mut JoinReferenceView<'_, (), BuildOnlyOut>,
+        _stream: JoinStreamP,
+    ) -> std::result::Result<Vec<JoinedP>, HandlerError> {
         Ok(vec![])
     }
 }

@@ -6,12 +6,11 @@
 //!
 //! SQL Equivalent: SELECT * FROM stream LEFT JOIN reference ON ...
 
-use super::common::{JoinStrategy, JoinStrategyOutput, JoinWithStrategy};
+use super::common::{JoinStrategy, JoinStrategyValueOutput, JoinWithStrategy};
 use crate::stages::common::stage_handle::StageHandle;
-use crate::stages::join::config::{JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP};
+use crate::stages::join::config::JoinReferenceMode;
+use obzenflow_core::StageId;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
-use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -35,9 +34,9 @@ impl<C, S, E> Default for LeftJoinBuilder<C, S, E> {
 
 impl<C, S, E> LeftJoinBuilder<C, S, E>
 where
-    C: TypedPayload + Clone + Send + Sync,
-    S: TypedPayload + Clone + Send + Sync,
-    E: TypedPayload + Clone + Send + Sync,
+    C: TypedPayload + Clone + Send + Sync + 'static,
+    S: TypedPayload + Clone + Send + Sync + 'static,
+    E: TypedPayload + Clone + Send + Sync + 'static,
 {
     pub fn new() -> Self {
         Self::default()
@@ -102,7 +101,6 @@ where
             catalog_key_fn: self.catalog_key_fn,
             stream_key_fn: key_fn,
             reference_mode: JoinReferenceMode::FiniteEof,
-            reference_batch_cap: Some(DEFAULT_REFERENCE_BATCH_CAP),
             _phantom: PhantomData,
         }
     }
@@ -113,7 +111,6 @@ pub struct LeftJoinBuilderDslWithKeys<C, S, E, K, CatalogKeyFn, StreamKeyFn> {
     catalog_key_fn: CatalogKeyFn,
     stream_key_fn: StreamKeyFn,
     reference_mode: JoinReferenceMode,
-    reference_batch_cap: Option<usize>,
     _phantom: PhantomData<(C, S, E, K)>,
 }
 
@@ -133,11 +130,6 @@ where
         self
     }
 
-    pub fn reference_batch_cap(mut self, cap: Option<usize>) -> Self {
-        self.reference_batch_cap = cap;
-        self
-    }
-
     pub fn build<J>(self, join_fn: J) -> LeftJoin<C, S, E, K, CatalogKeyFn, StreamKeyFn, J>
     where
         J: Fn(Option<C>, S) -> E + Send + Sync + Clone,
@@ -150,8 +142,6 @@ where
             catalog_key_fn: self.catalog_key_fn,
             stream_key_fn: self.stream_key_fn,
             reference_mode: self.reference_mode,
-            reference_batch_cap: self.reference_batch_cap,
-            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: PhantomData,
         }
     }
@@ -208,7 +198,6 @@ where
             catalog_key_fn: self.catalog_key_fn,
             stream_key_fn: key_fn,
             reference_mode: JoinReferenceMode::FiniteEof,
-            reference_batch_cap: Some(DEFAULT_REFERENCE_BATCH_CAP),
             _phantom: PhantomData,
         }
     }
@@ -220,7 +209,6 @@ pub struct LeftJoinBuilderWithKeys<C, S, E, K, CatalogKeyFn, StreamKeyFn> {
     catalog_key_fn: CatalogKeyFn,
     stream_key_fn: StreamKeyFn,
     reference_mode: JoinReferenceMode,
-    reference_batch_cap: Option<usize>,
     _phantom: PhantomData<(C, S, E, K)>,
 }
 
@@ -244,11 +232,6 @@ where
         self
     }
 
-    pub fn reference_batch_cap(mut self, cap: Option<usize>) -> Self {
-        self.reference_batch_cap = cap;
-        self
-    }
-
     pub fn join<J>(
         self,
         join_fn: J,
@@ -266,8 +249,6 @@ where
                 catalog_key_fn: self.catalog_key_fn,
                 stream_key_fn: self.stream_key_fn,
                 reference_mode: self.reference_mode,
-                reference_batch_cap: self.reference_batch_cap,
-                lineage: obzenflow_core::config::LineagePolicy::default(),
                 _phantom: PhantomData,
             },
         )
@@ -294,16 +275,13 @@ where
     type EnrichedType = E;
     type Key = K;
 
-    fn match_stream_event(
+    fn match_reference(
         &self,
-        catalog: &HashMap<Self::Key, Self::CatalogType>,
+        reference: Option<Self::CatalogType>,
         stream_data: Self::StreamType,
         stream_key: Self::Key,
-        writer_id: WriterId,
-    ) -> JoinStrategyOutput<Self::Key> {
-        let catalog_data = catalog.get(&stream_key).cloned();
-        let matched = catalog_data.is_some();
-
+    ) -> JoinStrategyValueOutput<Self::EnrichedType> {
+        let catalog_data = reference;
         if catalog_data.is_some() {
             tracing::debug!("LeftJoin: Found match for key: {:?}", stream_key);
         } else {
@@ -314,85 +292,10 @@ where
         }
 
         let output = (self.join_fn)(catalog_data, stream_data);
-        let contributing_reference_keys = matched.then_some(stream_key).into_iter().collect();
-        JoinStrategyOutput::new(
-            vec![output.to_event(writer_id)],
-            contributing_reference_keys,
-        )
+        JoinStrategyValueOutput::facts(vec![output])
     }
 }
 
 /// Type alias for wrapped LeftJoin strategy
 pub type LeftJoin<C, S, E, K, CatalogKeyFn, StreamKeyFn, J> =
     JoinWithStrategy<LeftJoinStrategy<C, S, E, K, J>, CatalogKeyFn, StreamKeyFn>;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::stages::JoinHandler;
-    use obzenflow_core::TypedPayload;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-    struct CatalogRow {
-        key: String,
-        value: String,
-    }
-    impl TypedPayload for CatalogRow {
-        const EVENT_TYPE: &'static str = "test.catalog";
-    }
-
-    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-    struct StreamRow {
-        key: String,
-    }
-    impl TypedPayload for StreamRow {
-        const EVENT_TYPE: &'static str = "test.stream";
-    }
-
-    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-    struct OutputRow {
-        stream_key: String,
-        catalog_value: Option<String>,
-    }
-    impl TypedPayload for OutputRow {
-        const EVENT_TYPE: &'static str = "test.output";
-    }
-
-    #[test]
-    fn left_join_passes_through_missing_catalog() {
-        let (_ref_id, handler) = LeftJoinBuilder::<CatalogRow, StreamRow, OutputRow>::new()
-            .with_reference_id(StageId::new())
-            .catalog_key(|c| c.key.clone())
-            .stream_key(|s| s.key.clone())
-            .join(|catalog, stream| OutputRow {
-                stream_key: stream.key,
-                catalog_value: catalog.map(|c| c.value),
-            });
-
-        let mut state = handler.initial_state();
-        let w = WriterId::from(StageId::new());
-
-        let out = handler
-            .process_event(
-                &mut state,
-                StreamRow {
-                    key: "missing".into(),
-                }
-                .to_event(w),
-                StageId::new(),
-                w,
-            )
-            .expect("process_event should succeed for left join miss case");
-
-        let typed =
-            OutputRow::from_event(&out[0]).expect("should deserialize left join output row");
-        assert_eq!(
-            typed,
-            OutputRow {
-                stream_key: "missing".into(),
-                catalog_value: None
-            }
-        );
-    }
-}

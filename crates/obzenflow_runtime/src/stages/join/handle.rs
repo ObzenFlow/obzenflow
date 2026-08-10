@@ -4,14 +4,14 @@
 
 //! Handle for join stages
 
-use crate::stages::common::handlers::{JoinHandler, UnifiedJoinHandler};
+use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 use obzenflow_core::StageId;
 
 use super::fsm::{JoinEvent, JoinState};
 
 /// Type alias for the join handle
-pub type JoinHandle<H = Box<dyn JoinHandler>> = StandardHandle<JoinEvent<H>, JoinState<H>>;
+pub type JoinHandle<H> = StandardHandle<JoinEvent<H>, JoinState<H>>;
 
 /// Extension trait for join-specific convenience methods
 pub trait JoinHandleExt<H> {

@@ -92,11 +92,15 @@ pub fn print_summary(summary: &CatalogAnalyticsSummary) {
 
     println!("\n💡 Join Strategy Summary:");
     println!("   ✅ InnerJoin (SKU→Product→Category): All orders matched");
-    println!("   ✅ StrictJoin (Payment Validation): All payments valid");
+    println!(
+        "   🛡️  StrictJoin (Payment Validation): Only catalogued payments crossed the boundary"
+    );
     println!(
         "   ✨ LeftJoin (Promotions): {}/{} orders had promos",
         summary.promo_orders, summary.order_count
     );
     println!("\n   Note: LeftJoin preserved all orders, even without promotions!");
-    println!("   Note: StrictJoin would have failed on invalid payment (try INJECT_BAD_PAYMENT=1)");
+    println!(
+        "   Note: An invalid payment makes StrictJoin emit Poison after its exact committed prefix"
+    );
 }

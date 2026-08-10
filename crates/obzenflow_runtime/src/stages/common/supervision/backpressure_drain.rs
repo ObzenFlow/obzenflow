@@ -16,7 +16,6 @@ use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControl
 use obzenflow_core::event::payloads::observability_payload::{
     BackpressureEvent, ObservabilityPayload,
 };
-use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
@@ -262,6 +261,14 @@ pub(crate) async fn drain_one_pending_resolve(
     pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
 ) -> Result<DrainAttempt, Box<dyn std::error::Error + Send + Sync>> {
     let is_data = pending.event.is_data();
+    // The envelope author identifies a locally authored terminal. Inspecting
+    // the payload writer here would let conflicting producer evidence bypass
+    // the fail-closed validation in `commit_authored_terminal`.
+    let requires_terminal_frontier_seal = pending.event.writer_id == WriterId::from(stage_id)
+        && matches!(
+            &pending.event.content,
+            obzenflow_core::event::ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+        );
 
     // FLOWIP-120b Step 1: the commit core (flow/runtime enrichment, per-type
     // counting, journal append, heartbeat tracking, middleware mirror) is owned
@@ -384,17 +391,24 @@ pub(crate) async fn drain_one_pending_resolve(
         Ok(DrainAttempt::Committed { was_data: true })
     } else {
         // Non-data events bypass credit gating.
-        committer
-            .commit_prebuilt(
-                pending.event,
-                pending_parent,
-                CommitOptions {
-                    count_output: false,
-                    validate_output_contract: false,
-                },
-            )
-            .await
-            .map_err(|e| format!("Failed to write pending output: {e}"))?;
+        if requires_terminal_frontier_seal {
+            committer
+                .commit_authored_terminal(pending.event, pending_parent)
+                .await
+                .map_err(|e| format!("Failed to write pending terminal output: {e}"))?;
+        } else {
+            committer
+                .commit_prebuilt(
+                    pending.event,
+                    pending_parent,
+                    CommitOptions {
+                        count_output: false,
+                        validate_output_contract: false,
+                    },
+                )
+                .await
+                .map_err(|e| format!("Failed to write pending output: {e}"))?;
+        }
 
         Ok(DrainAttempt::Committed { was_data: false })
     }
@@ -482,7 +496,8 @@ async fn emit_poison_eof(
 ) {
     let writer_id = WriterId::from(stage_id);
     let runtime_context = instrumentation.snapshot_with_control();
-    let writer_seq_by_event_type = instrumentation.data_writer_seq_by_event_type();
+    let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
+        instrumentation.authored_data_frontier();
 
     let mut event = ChainEventFactory::eof_event_with_kind(writer_id, EofKind::Poison);
     if let obzenflow_core::event::ChainEventContent::FlowControl(FlowControlPayload::Eof {
@@ -494,9 +509,9 @@ async fn emit_poison_eof(
     }) = &mut event.content
     {
         *eof_writer = Some(writer_id);
-        *writer_seq = Some(SeqNo(runtime_context.writer_seq));
+        *writer_seq = Some(authored_writer_seq);
         *eof_writer_seq_by_event_type = writer_seq_by_event_type;
-        *last_event_id = runtime_context.last_emitted_event_id;
+        *last_event_id = authored_last_event_id;
     }
 
     event.flow_context = flow_context.clone();

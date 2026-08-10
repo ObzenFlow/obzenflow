@@ -4,6 +4,7 @@
 
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::messaging::UpstreamSubscription;
+use crate::stages::common::handler_error::StageFatal;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::catch_up::{
@@ -11,7 +12,8 @@ use crate::stages::common::supervision::catch_up::{
 };
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
-use crate::stages::join::fsm::{JoinContext, JoinEvent, PendingTransition};
+use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
+use crate::stages::join::fsm::{JoinContext, JoinEvent, JoinSubscriptionSide, PendingTransition};
 use crate::stages::observer::dispatch::{
     run_join_after_output_observers, run_join_before_input_observers,
 };
@@ -148,6 +150,31 @@ pub(super) async fn forward_control_event_and_mirror<H: UnifiedJoinHandler>(
     Ok(())
 }
 
+pub(super) async fn record_join_stage_fatal<H: UnifiedJoinHandler>(
+    ctx: &JoinContext<H>,
+    fatal: &StageFatal,
+    parent: Option<&EventEnvelope<ChainEvent>>,
+    input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let writer_id = ctx
+        .writer_id
+        .ok_or_else(|| "fatal join input has no stage writer id".to_string())?;
+    record_stage_fatal(
+        fatal,
+        StageFatalCommit {
+            error_journal: &ctx.error_journal,
+            writer_id,
+            stage_id: ctx.stage_id,
+            stage_key: &ctx.stage_name,
+            input_position,
+            parent,
+            lineage: ctx.lineage_policy,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 pub(super) async fn flush_pending_outputs<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
@@ -191,8 +218,8 @@ pub(super) async fn flush_pending_outputs<
         }
     }
 
-    if let Some(upstream) = ctx.pending_ack_upstream.take() {
-        if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+    if let Some(ack) = ctx.pending_subscription_ack.take() {
+        if let Some(reader) = ctx.backpressure_readers.get(&ack.upstream) {
             reader.ack_consumed(1);
         }
     }
@@ -339,13 +366,13 @@ fn track_output_event_for_pending_source<
     sup: &mut JoinSupervisor<H>,
     ctx: &JoinContext<H>,
 ) {
-    match ctx.pending_ack_upstream {
-        Some(upstream) if upstream == ctx.reference_stage_id => {
+    match ctx.pending_subscription_ack.map(|ack| ack.side) {
+        Some(JoinSubscriptionSide::Reference) => {
             if let Some(sub) = sup.reference_subscription.as_mut() {
                 sub.track_output_event();
             }
         }
-        Some(_) => {
+        Some(JoinSubscriptionSide::Stream) => {
             if let Some(sub) = sup.stream_subscription.as_mut() {
                 sub.track_output_event();
             }

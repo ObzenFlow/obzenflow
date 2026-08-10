@@ -111,7 +111,7 @@ where
         }
 
         let (is_authored_eof, is_drain) = chain_event
-            .map(|chain_event| Self::classify_eof_drain(chain_event, stage_id))
+            .map(|chain_event| self.classify_eof_drain(chain_event, stage_id))
             .unwrap_or((false, false));
         let catch_up = match chain_event.map(|chain_event| &chain_event.content) {
             Some(ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
@@ -165,26 +165,66 @@ where
     /// events omit the payload writer_id; fall back to the ChainEvent's
     /// writer_id, which still distinguishes "authored here" from "forwarded
     /// from elsewhere".
-    fn eof_authored_by_upstream(chain_event: &ChainEvent, stage_id: StageId) -> bool {
+    fn writer_matches_upstream(&self, writer: WriterId, stage_id: StageId) -> bool {
+        matches!(writer, WriterId::Stage(author)
+            if author == stage_id
+                || self.archived_stage_ids_by_current.get(&stage_id) == Some(&author))
+    }
+
+    /// Resolve a re-admitted source row through the immediately archived
+    /// journal owner. Source facts retain their first-generation writer across
+    /// replay generations, while `ReplayDriver` stamps `original_stage_id`
+    /// from the archive currently being replayed. Coupling that runtime-owned
+    /// context to the topology-keyed alias makes the proof transitive without
+    /// admitting a forwarded row from another archived stage.
+    fn replayed_source_data_matches_upstream(
+        &self,
+        chain_event: &ChainEvent,
+        stage_id: StageId,
+    ) -> bool {
+        if !chain_event.is_data() {
+            return false;
+        }
+        let Some(archived_stage_id) = self.archived_stage_ids_by_current.get(&stage_id) else {
+            return false;
+        };
+        chain_event
+            .replay_context
+            .as_ref()
+            .is_some_and(|context| context.original_stage_id == *archived_stage_id)
+    }
+
+    fn eof_authored_by_upstream(&self, chain_event: &ChainEvent, stage_id: StageId) -> bool {
         let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id, .. }) =
             &chain_event.content
         else {
             return false;
         };
-        match writer_id {
-            Some(WriterId::Stage(eof_stage)) => *eof_stage == stage_id,
-            Some(_) => false,
-            None => {
-                matches!(&chain_event.writer_id, WriterId::Stage(eof_stage) if *eof_stage == stage_id)
-            }
+        writer_id
+            .map(|writer| self.writer_matches_upstream(writer, stage_id))
+            .unwrap_or_else(|| self.writer_matches_upstream(chain_event.writer_id, stage_id))
+    }
+
+    /// Whether this row may contribute to the subscribed journal owner's
+    /// contract population. Forwarded rows retain their original author and
+    /// remain deliverable journal evidence, but they cannot speak for the
+    /// intermediate stage's output frontier.
+    fn event_authored_by_upstream(&self, chain_event: &ChainEvent, stage_id: StageId) -> bool {
+        if matches!(
+            &chain_event.content,
+            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+        ) {
+            return self.eof_authored_by_upstream(chain_event, stage_id);
         }
+        self.writer_matches_upstream(chain_event.writer_id, stage_id)
+            || self.replayed_source_data_matches_upstream(chain_event, stage_id)
     }
 
     /// Detect terminal EOF and drain signals for one upstream reader.
-    fn classify_eof_drain(chain_event: &ChainEvent, stage_id: StageId) -> (bool, bool) {
+    fn classify_eof_drain(&self, chain_event: &ChainEvent, stage_id: StageId) -> (bool, bool) {
         match &chain_event.content {
             ChainEventContent::FlowControl(FlowControlPayload::Eof { .. }) => {
-                (Self::eof_authored_by_upstream(chain_event, stage_id), false)
+                (self.eof_authored_by_upstream(chain_event, stage_id), false)
             }
             ChainEventContent::FlowControl(FlowControlPayload::Drain) => (false, true),
             _ => (false, false),
@@ -418,7 +458,7 @@ where
             self.normalized_eof_for_contracts(reader_index, stage_id, original_chain_event, is_eof);
         let contract_chain_event = normalized_contract_event.as_ref().or(original_chain_event);
 
-        self.bump_selected_data_counters(reader_index, original_chain_event);
+        self.bump_selected_data_counters(reader_index, stage_id, original_chain_event);
 
         // Reader progress lives in FSM contexts; it is updated here so later
         // contract checks emit progress/final events from the same state
@@ -557,9 +597,19 @@ where
     }
 
     /// Per-reader selected-data counters (delivery side).
-    fn bump_selected_data_counters(&mut self, reader_index: usize, original: Option<&ChainEvent>) {
-        let Some(ChainEventContent::Data { event_type, .. }) = original.map(|event| &event.content)
-        else {
+    fn bump_selected_data_counters(
+        &mut self,
+        reader_index: usize,
+        stage_id: StageId,
+        original: Option<&ChainEvent>,
+    ) {
+        let Some(chain_event) = original else {
+            return;
+        };
+        if !self.event_authored_by_upstream(chain_event, stage_id) {
+            return;
+        }
+        let ChainEventContent::Data { event_type, .. } = &chain_event.content else {
             return;
         };
         if let Some(selected_seq) = self.selected_data_seq_by_reader.get_mut(reader_index) {
@@ -587,7 +637,7 @@ where
         set_read_instant: bool,
     ) -> SeqNo {
         if let Some(chain_event) = contract_chain_event {
-            if chain_event.is_data() {
+            if chain_event.is_data() && self.event_authored_by_upstream(chain_event, stage_id) {
                 progress.reader_seq.0 += 1;
                 if set_read_instant {
                     progress.last_read_instant = Some(Instant::now());
@@ -614,7 +664,7 @@ where
                 ..
             }) = &chain_event.content
             {
-                if Self::eof_authored_by_upstream(chain_event, stage_id) {
+                if self.eof_authored_by_upstream(chain_event, stage_id) {
                     progress.advertised_writer_seq = *writer_seq;
                     progress.last_vector_clock = vector_clock.clone();
                     if let Some(by_type) = self
@@ -654,20 +704,23 @@ where
             return;
         };
 
+        let authored_by_upstream = self.event_authored_by_upstream(chain_event, stage_id);
         if let Some(chain) = self
             .contract_chains
             .get_mut(reader_index)
             .and_then(|slot| slot.as_mut())
         {
             let reader_seq = reader_seq_for_contracts.unwrap_or(SeqNo(0));
-            // From the contract framework's perspective, the upstream writer
-            // is `stage_id` and the downstream reader is `reader_stage`.
-            chain.on_read(chain_event, reader_stage, reader_seq, stage_id);
-
-            // Also feed the writer side of the transport contract: its
-            // writer-side count is derived from EOF writer_seq, and
-            // `TransportContract` ignores non-EOF events on the write side.
-            chain.on_write(chain_event, stage_id, SeqNo(0));
+            // The reader slot chooses the edge. Each contract declares whether
+            // its evidence population is the upstream-authored prefix or every
+            // physical delivery on that edge.
+            chain.on_edge_delivery(
+                chain_event,
+                reader_stage,
+                reader_seq,
+                stage_id,
+                authored_by_upstream,
+            );
         }
 
         self.feed_selected_contract_chains_on_event(
@@ -685,6 +738,9 @@ where
         event: &ChainEvent,
         reader_stage: StageId,
     ) {
+        if !self.event_authored_by_upstream(event, upstream_stage) {
+            return;
+        }
         if self
             .contract_feed_chains
             .get(reader_index)

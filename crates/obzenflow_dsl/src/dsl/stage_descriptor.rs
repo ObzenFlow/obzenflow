@@ -22,6 +22,7 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
+use obzenflow_runtime::__private::UnifiedJoinHandler;
 use obzenflow_runtime::{
     effects::{
         EffectBoundary, EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
@@ -39,7 +40,7 @@ use obzenflow_runtime::{
                 AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulStatefulHandler,
                 EffectfulStatefulHandlerAdapter, EffectfulTransformHandler,
                 EffectfulTransformHandlerAdapter, FiniteSourceHandler, InfiniteSourceHandler,
-                JoinHandler, SinkHandler, TransformHandler, UnifiedStatefulHandler,
+                SinkHandler, TransformHandler, UnifiedStatefulHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -2439,16 +2440,16 @@ fn check_stateful_state<H>(state: &StatefulState<H>) -> crate::stage_handle_adap
 // ============================================================================
 
 /// Descriptor for join stages
-pub struct JoinDescriptor<H: JoinHandler + 'static> {
-    pub name: String,
-    pub reference_stage_id: StageId,
-    pub reference_stage_var: Option<&'static str>, // For DSL resolution - stage variable name
-    pub handler: H,
-    pub observers: Vec<Box<dyn MiddlewareFactory>>,
+pub(crate) struct JoinDescriptor<H: UnifiedJoinHandler + 'static> {
+    pub(crate) name: String,
+    pub(crate) reference_stage_id: StageId,
+    pub(crate) reference_stage_var: Option<&'static str>, // For DSL resolution - stage variable name
+    pub(crate) handler: H,
+    pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
 }
 
 #[async_trait]
-impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for JoinDescriptor<H>
 {
     fn name(&self) -> &str {
@@ -2644,7 +2645,7 @@ impl<H: EffectfulTransformHandler + 'static> sealed::Sealed for EffectfulTransfo
 impl<H: SinkHandler + 'static> sealed::Sealed for SinkDescriptor<H> {}
 impl<H: UnifiedStatefulHandler + 'static> sealed::Sealed for StatefulDescriptor<H> {}
 impl<H: EffectfulStatefulHandler + 'static> sealed::Sealed for EffectfulStatefulDescriptor<H> {}
-impl<H: JoinHandler + 'static> sealed::Sealed for JoinDescriptor<H> {}
+impl<H: UnifiedJoinHandler + 'static> sealed::Sealed for JoinDescriptor<H> {}
 
 #[cfg(test)]
 mod tests {

@@ -195,6 +195,7 @@ where
             last_delivered_generation: None,
             reader_tiebreak_keys,
             readers,
+            archived_stage_ids_by_current: HashMap::new(),
             selected_event_types_by_stage: HashMap::new(),
             selected_feeds_by_stage: HashMap::new(),
             composite_entries_by_stage: HashMap::new(),
@@ -255,6 +256,16 @@ where
     /// quiet-input wait exemption per reader.
     pub fn with_entered_generation(mut self, entered: obzenflow_core::ReaderGeneration) -> Self {
         self.entered_generation = entered;
+        self
+    }
+
+    /// Install stable replay aliases from current topology stages to the
+    /// corresponding archived stage authors.
+    pub fn with_archived_stage_ids(
+        mut self,
+        archived_stage_ids_by_current: HashMap<StageId, StageId>,
+    ) -> Self {
+        self.archived_stage_ids_by_current = archived_stage_ids_by_current;
         self
     }
 

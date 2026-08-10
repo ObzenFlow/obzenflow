@@ -11,7 +11,7 @@
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::types::{Count, SeqNo};
+use obzenflow_core::event::types::Count;
 use obzenflow_core::event::{
     ChainEventContent, ChainEventFactory, ConsumptionFinalEventParams, SystemEvent,
 };
@@ -457,19 +457,22 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
 
                 // Take a final runtime snapshot for wide-event semantics
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
-                let writer_seq_by_event_type = ctx.instrumentation.data_writer_seq_by_event_type();
+                let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
+                    ctx.instrumentation.authored_data_frontier();
 
                 let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, eof_kind);
                 if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
                     writer_id: writer_id_field,
                     writer_seq,
                     writer_seq_by_event_type: eof_writer_seq_by_event_type,
+                    last_event_id,
                     ..
                 }) = &mut eof_event.content
                 {
                     *writer_id_field = Some(writer_id);
-                    *writer_seq = Some(SeqNo(emitted));
+                    *writer_seq = Some(authored_writer_seq);
                     *eof_writer_seq_by_event_type = writer_seq_by_event_type;
+                    *last_event_id = authored_last_event_id;
                 }
 
                 // Attach flow/runtime context so the final journal record is a wide snapshot
@@ -493,12 +496,12 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     writer_id,
                     ConsumptionFinalEventParams {
                         pass: true,
-                        consumed_count: Count(emitted),
+                        consumed_count: Count(authored_writer_seq.0),
                         expected_count: None,
                         eof_seen: true,
                         last_event_id: None,
-                        reader_seq: SeqNo(emitted),
-                        advertised_writer_seq: Some(SeqNo(emitted)),
+                        reader_seq: authored_writer_seq,
+                        advertised_writer_seq: Some(authored_writer_seq),
                         advertised_vector_clock: None,
                         failure_reason: None,
                     },

@@ -11,7 +11,7 @@
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::types::{Count, JournalIndex, JournalPath, SeqNo};
+use obzenflow_core::event::types::{Count, JournalIndex, JournalPath};
 use obzenflow_core::event::{
     ChainEventContent, ChainEventFactory, ConsumptionFinalEventParams, SourceContractEventParams,
     SystemEvent,
@@ -455,7 +455,8 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
 
                 // Take a final runtime snapshot for wide-event semantics
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
-                let writer_seq_by_event_type = ctx.instrumentation.data_writer_seq_by_event_type();
+                let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
+                    ctx.instrumentation.authored_data_frontier();
 
                 // Emit EOF with writer positions populated
                 let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, eof_kind);
@@ -463,12 +464,14 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     writer_id: writer_id_field,
                     writer_seq,
                     writer_seq_by_event_type: eof_writer_seq_by_event_type,
+                    last_event_id,
                     ..
                 }) = &mut eof_event.content
                 {
                     *writer_id_field = Some(writer_id);
-                    *writer_seq = Some(SeqNo(emitted));
+                    *writer_seq = Some(authored_writer_seq);
                     *eof_writer_seq_by_event_type = writer_seq_by_event_type;
+                    *last_event_id = authored_last_event_id;
                 }
 
                 // Attach flow/runtime context for downstream consumers
@@ -486,13 +489,13 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     writer_id,
                     ConsumptionFinalEventParams {
                         pass: true, // sources are authoritative on what they wrote
-                        consumed_count: Count(emitted),
+                        consumed_count: Count(authored_writer_seq.0),
                         expected_count: None, // unknown until config plumbing (010)
                         eof_seen: true,
                         last_event_id: None, // unknown here
-                        reader_seq: SeqNo(emitted),
-                        advertised_writer_seq: Some(SeqNo(emitted)), // = what we wrote
-                        advertised_vector_clock: None,               // unavailable here
+                        reader_seq: authored_writer_seq,
+                        advertised_writer_seq: Some(authored_writer_seq), // = what we wrote
+                        advertised_vector_clock: None,                    // unavailable here
                         failure_reason: None,
                     },
                 );
@@ -771,6 +774,7 @@ mod tests {
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::journal_event::JournalEvent;
     use obzenflow_core::event::system_event::SystemEvent;
+    use obzenflow_core::event::types::SeqNo;
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;

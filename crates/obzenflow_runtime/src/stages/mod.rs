@@ -28,9 +28,9 @@ pub use common::{
     CreditWaker, WakeOn,
 };
 
-// Re-export JoinHandler from common::handlers
-pub use common::handlers::{JoinHandler, TypedTransformHandler, UnifiedJoinHandler};
+// Public join authoring is the typed witness surface.
+pub use common::handlers::{JoinReferenceView, TypedJoinHandler, TypedTransformHandler};
 
 // Re-export resources builder
-pub use crate::typing::{JoinTyping, SinkTyping, SourceTyping, TransformTyping};
+pub use crate::typing::{SinkTyping, SourceTyping, TransformTyping};
 pub use resources_builder::{StageResources, StageResourcesBuilder, StageResourcesSet};

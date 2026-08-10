@@ -11,7 +11,6 @@
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
@@ -276,6 +275,20 @@ pub(crate) enum PendingTransition {
     DrainComplete,
 }
 
+/// Structural subscription branch that owns a deferred consumption ack.
+/// This is deliberately independent of event authorship and upstream ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JoinSubscriptionSide {
+    Reference,
+    Stream,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PendingSubscriptionAck {
+    pub side: JoinSubscriptionSide,
+    pub upstream: StageId,
+}
+
 /// Context for join handlers - contains everything actions need
 pub struct JoinContext<H: UnifiedJoinHandler> {
     /// The handler instance (immutable, wrapped in Arc like StatefulContext)
@@ -321,6 +334,9 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     /// Writer ID for this join (initialized during setup)
     pub writer_id: Option<WriterId>,
 
+    /// Build-resolved lineage policy used for runtime-authored fatal evidence.
+    pub lineage_policy: obzenflow_core::config::LineagePolicy,
+
     /// Subscription to reference journal ONLY (used during Hydrating)
     pub reference_subscription: Option<UpstreamSubscription<ChainEvent>>,
 
@@ -341,6 +357,11 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
 
     /// Buffered EOF event to forward when draining completes
     pub buffered_eof: Option<ChainEvent>,
+
+    /// Final stream-side EOF delivery that actually closed the stream
+    /// subscription. Earlier Poison EOFs and other non-final EOF deliveries
+    /// are deliberately not terminal-hook witnesses.
+    pub(crate) final_stream_eof: Option<EventEnvelope<ChainEvent>>,
 
     /// Worst-wins join over both sides' terminal EOF kinds (FLOWIP-095k).
     pub terminal_eof_kind: Option<EofKind>,
@@ -407,8 +428,9 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     /// Pending state transition once blocked outputs are fully written.
     pub(crate) pending_transition: Option<PendingTransition>,
 
-    /// Upstream stage awaiting a consumption ack once pending outputs are drained.
-    pub(crate) pending_ack_upstream: Option<StageId>,
+    /// Structural subscription branch and upstream awaiting a consumption ack
+    /// once pending outputs are drained.
+    pub(crate) pending_subscription_ack: Option<PendingSubscriptionAck>,
 
     /// Backpressure activity pulse accumulator (Hz UI animation driver).
     pub(crate) backpressure_pulse: BackpressureActivityPulse,
@@ -609,32 +631,31 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                     )
                 })?;
 
-                // Always emit an EOF authored by this stage, preserving upstream
-                // metadata when available.
+                // Always emit an EOF authored by this stage, preserving the
+                // upstream vector clock while sealing only this stage's Data
+                // frontier.
                 let buffered = ctx.buffered_eof.take();
                 // FLOWIP-095k: the authored kind is the worst-wins join over
                 // both sides' terminal kinds; Natural covers the
                 // drain-terminated path where no EOF was received.
                 let eof_kind = ctx.terminal_eof_kind.unwrap_or(EofKind::Natural);
                 let mut upstream_vector_clock = None;
-                let mut upstream_last_event = None;
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
-                let writer_seq_by_event_type = ctx.instrumentation.data_writer_seq_by_event_type();
+                let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
+                    ctx.instrumentation.authored_data_frontier();
 
                 if let Some(buffered_event) = buffered {
                     if let obzenflow_core::event::ChainEventContent::FlowControl(
                         FlowControlPayload::Eof {
                             writer_seq: _writer_seq,
                             vector_clock,
-                            last_event_id,
                             ..
                         },
                     ) = buffered_event.content.clone()
                     {
                         upstream_vector_clock = vector_clock;
-                        upstream_last_event = last_event_id;
                         // We intentionally ignore the upstream writer_seq and
-                        // advertise our own position below.
+                        // last_event_id and advertise our own position below.
                     }
                 }
 
@@ -652,12 +673,12 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                 ) = &mut eof_event.content
                 {
                     *eof_writer = Some(writer_id);
-                    *writer_seq = Some(SeqNo(runtime_context.writer_seq));
+                    *writer_seq = Some(authored_writer_seq);
                     *eof_writer_seq_by_event_type = writer_seq_by_event_type;
                     if let Some(vc) = upstream_vector_clock {
                         *vector_clock = Some(vc);
                     }
-                    *last_event_id = upstream_last_event.or(runtime_context.last_emitted_event_id);
+                    *last_event_id = authored_last_event_id;
                 }
 
                 // Attach flow/runtime context for downstream contract tracking

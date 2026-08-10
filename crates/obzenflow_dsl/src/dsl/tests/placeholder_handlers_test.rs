@@ -9,9 +9,10 @@ use crate::dsl::typing::{
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_runtime::__private::{TypedJoinHandlerAdapter, UnifiedJoinHandler};
 use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler, JoinHandler, SinkHandler, TransformHandler, TypedStatefulHandler,
+    InfiniteSourceHandler, SinkHandler, TransformHandler, TypedStatefulHandler,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -119,32 +120,51 @@ async fn placeholder_sink_acks_and_flushes_safely() {
 
 #[tokio::test]
 async fn placeholder_join_discards_and_drains_safely() {
-    let handler = PlaceholderJoin::<u8, u16, u32>::new(None);
-    let event = ChainEventFactory::data_event(
-        WriterId::from(StageId::new()),
-        "test.event",
-        json!({"hello": "world"}),
-    );
+    let writer_id = WriterId::from(StageId::new());
+    let mut handler = TypedJoinHandlerAdapter::new(PlaceholderJoin::<
+        PlaceholderInput,
+        PlaceholderInput,
+        PlaceholderOutput,
+    >::new(None));
+    UnifiedJoinHandler::install_writer_id(&mut handler, writer_id);
+    let mut state = UnifiedJoinHandler::initial_state(&handler);
 
-    let outputs = JoinHandler::process_event(
+    let reference_outputs = UnifiedJoinHandler::process_reference(
         &handler,
-        &mut (),
-        event,
+        &mut state,
+        PlaceholderInput.to_event(writer_id),
         StageId::new(),
-        WriterId::from(StageId::new()),
+        writer_id,
+        obzenflow_core::MiddlewareExecutionScope::default(),
     )
-    .expect("join process_event");
+    .expect("join reference");
+    assert!(reference_outputs.is_empty());
+
+    let invocation = UnifiedJoinHandler::process_stream(
+        &handler,
+        &mut state,
+        PlaceholderInput.to_event(writer_id),
+        StageId::new(),
+        writer_id,
+        obzenflow_core::MiddlewareExecutionScope::default(),
+    )
+    .expect("join stream");
+    let (outputs, framework_eof) = invocation.into_parts();
     assert!(outputs.is_empty());
+    assert!(framework_eof.is_none());
 
-    let eof_outputs = JoinHandler::on_source_eof(
+    let eof_outputs = UnifiedJoinHandler::on_stream_eof(
         &handler,
-        &mut (),
+        &mut state,
+        ChainEventFactory::eof_event(writer_id, true),
         StageId::new(),
-        WriterId::from(StageId::new()),
+        writer_id,
     )
-    .expect("join on_source_eof");
+    .expect("join on_stream_eof");
     assert!(eof_outputs.is_empty());
 
-    let drained = JoinHandler::drain(&handler, &()).await.expect("join drain");
+    let drained = UnifiedJoinHandler::drain(&handler, &state, None)
+        .await
+        .expect("join drain");
     assert!(drained.is_empty());
 }

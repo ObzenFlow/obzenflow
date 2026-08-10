@@ -28,7 +28,7 @@ fn main() -> anyhow::Result<()> {
         .section("Background", "Based on industrial-scale product catalog patterns")
         .config_block_if(
             inject_bad_payment,
-            "INJECT_BAD_PAYMENT is set!\nPipeline will trigger Jonestown Protocol on invalid payment.\nStrictJoin will emit poison EOF and cascade shutdown.",
+            "INJECT_BAD_PAYMENT is set!\nStrictJoin will trigger the Jonestown Protocol on the invalid payment.\nIt preserves the valid committed prefix, then emits a sealed Poison EOF.",
         );
 
     let presentation = Presentation::new(banner).with_footer(|outcome| {

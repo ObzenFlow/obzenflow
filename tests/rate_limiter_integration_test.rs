@@ -14,8 +14,8 @@ use obzenflow_dsl::{async_source, join, sink, source, stateful, test_flow, trans
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, FiniteSourceHandler, JoinHandler, SinkHandler, StatefulEmission,
-    TypedStatefulHandler, TypedTransformHandler,
+    AsyncFiniteSourceHandler, FiniteSourceHandler, JoinReferenceView, SinkHandler,
+    StatefulEmission, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -888,44 +888,29 @@ impl AsyncFiniteSourceHandler for TwoStreamEventsSource {
 #[derive(Clone, Debug)]
 struct PassthroughJoin;
 
-#[async_trait]
-impl JoinHandler for PassthroughJoin {
+impl TypedJoinHandler for PassthroughJoin {
     type State = ();
+    type ReferenceKey = u64;
+    type Reference = RefPayload;
+    type Stream = StreamPayload;
+    type Output = EnrichedPayload;
 
     fn initial_state(&self) -> Self::State {}
 
-    fn process_event(
-        &self,
-        _state: &mut Self::State,
-        event: ChainEvent,
-        _source_id: StageId,
-        writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        let source = if RefPayload::event_type_matches(&event.event_type()) {
-            "ref"
-        } else {
-            "stream"
-        };
-        let id = event
-            .payload()
-            .get("id")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-
-        Ok(vec![ChainEventFactory::data_event(
-            writer_id,
-            EnrichedPayload::EVENT_TYPE,
-            json!({ "source": source, "id": id }),
-        )])
+    fn admit_reference(&self, reference: &Self::Reference) -> Result<u64, HandlerError> {
+        Ok(reference.id)
     }
 
-    fn on_source_eof(
+    fn process_stream(
         &self,
         _state: &mut Self::State,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
+        _references: &mut JoinReferenceView<'_, u64, RefPayload>,
+        stream: StreamPayload,
+    ) -> Result<Vec<EnrichedPayload>, HandlerError> {
+        Ok(vec![EnrichedPayload {
+            source: "stream".to_string(),
+            id: stream.id,
+        }])
     }
 }
 

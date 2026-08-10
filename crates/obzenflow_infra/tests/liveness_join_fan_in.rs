@@ -14,7 +14,7 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, JoinHandler, SinkHandler,
+    AsyncFiniteSourceHandler, JoinReferenceView, SinkHandler, TypedJoinHandler,
 };
 use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
@@ -132,43 +132,30 @@ impl AsyncFiniteSourceHandler for DelayedStreamSource {
 #[derive(Clone, Debug)]
 struct SlowJoin;
 
-#[async_trait]
-impl JoinHandler for SlowJoin {
+impl TypedJoinHandler for SlowJoin {
     type State = ();
+    type ReferenceKey = u64;
+    type Reference = CatalogRecord;
+    type Stream = LiveEvent;
+    type Output = EnrichedRecord;
 
     fn initial_state(&self) -> Self::State {}
 
-    fn process_event(
-        &self,
-        _state: &mut Self::State,
-        event: ChainEvent,
-        _source_id: StageId,
-        writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        let is_stream = event
-            .payload()
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .is_some_and(|k| k == "stream");
-
-        if is_stream {
-            std::thread::sleep(Duration::from_secs(8));
-        }
-
-        Ok(vec![ChainEventFactory::data_event(
-            writer_id,
-            EnrichedRecord::versioned_event_type(),
-            event.payload().clone(),
-        )])
+    fn admit_reference(&self, reference: &Self::Reference) -> Result<u64, HandlerError> {
+        Ok(reference.value)
     }
 
-    fn on_source_eof(
+    fn process_stream(
         &self,
         _state: &mut Self::State,
-        _source_id: StageId,
-        _writer_id: WriterId,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![])
+        _references: &mut JoinReferenceView<'_, u64, CatalogRecord>,
+        stream: LiveEvent,
+    ) -> Result<Vec<EnrichedRecord>, HandlerError> {
+        std::thread::sleep(Duration::from_secs(8));
+        Ok(vec![EnrichedRecord {
+            kind: stream.kind,
+            value: stream.value,
+        }])
     }
 }
 

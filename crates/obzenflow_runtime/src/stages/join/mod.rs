@@ -33,7 +33,7 @@ pub mod strategies;
 pub mod supervisor;
 
 // Public API - only expose builder, handle, and essential types
-pub use crate::stages::common::handlers::{JoinHandler, UnifiedJoinHandler};
+pub use crate::stages::common::handlers::{JoinReferenceView, TypedJoinHandler};
 pub use builder::JoinBuilder;
 pub use config::{JoinConfig, JoinReferenceMode};
 pub use fsm::{JoinEvent, JoinState};
@@ -42,7 +42,6 @@ pub use handle::JoinHandle;
 // Re-export join strategies
 pub use strategies::{
     InnerJoin, InnerJoinBuilder, LeftJoin, LeftJoinBuilder, StrictJoin, StrictJoinBuilder,
-    TypedJoinState,
 };
 
 // Note: JoinSupervisor is NOT exported! It's an implementation detail.

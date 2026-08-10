@@ -15,15 +15,15 @@ use obzenflow_core::Ulid;
 use obzenflow_core::{FlowId, StageId, SystemId, TypedPayload, WriterId};
 use obzenflow_infra::journal::DiskJournal;
 use obzenflow_infra::journal::MemoryJournal;
+use obzenflow_runtime::__private::{TypedJoinHandlerAdapter, UnifiedJoinHandler};
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::control_strategies::JonestownSignalStrategy;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::stateful::traits::StatefulHandler;
 use obzenflow_runtime::stages::join::handle::JoinHandleExt;
-use obzenflow_runtime::stages::join::{JoinBuilder, JoinConfig, StrictJoinBuilder, TypedJoinState};
+use obzenflow_runtime::stages::join::{JoinBuilder, JoinConfig, StrictJoinBuilder};
 use obzenflow_runtime::stages::resources_builder::StageResourcesBuilder;
 use obzenflow_runtime::stages::stateful::{StatefulBuilder, StatefulConfig, StatefulHandleExt};
-use obzenflow_runtime::stages::JoinHandler;
 use obzenflow_runtime::supervised_base::{SupervisorBuilder, SupervisorHandle};
 use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
 use serde::{Deserialize, Serialize};
@@ -262,8 +262,12 @@ async fn run_strict_join_once() -> Vec<JoinedRow> {
             stream: stream.key,
         });
 
-    let mut state = handler.initial_state();
     let writer = WriterId::from(StageId::new());
+    let mut handler = TypedJoinHandlerAdapter::new(handler);
+    handler.install_writer_id(writer);
+    let mut state = handler.initial_state();
+    let reference_source = StageId::new();
+    let stream_source = StageId::new();
 
     // Hydrate reference catalog.
     let ref_rows = vec![
@@ -279,17 +283,15 @@ async fn run_strict_join_once() -> Vec<JoinedRow> {
     for row in &ref_rows {
         let event = row.clone().to_event(writer);
         let _ = handler
-            .process_event(&mut state, event, StageId::new(), writer)
+            .process_reference(
+                &mut state,
+                event,
+                reference_source,
+                writer,
+                obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+            )
             .expect("Reference catalog hydration should not fail");
     }
-
-    // Ensure catalog hydration worked as expected.
-    let typed_state: TypedJoinState<CatalogRow, StreamRow, String> = state.clone();
-    assert_eq!(
-        typed_state.reference_catalog.len(),
-        2,
-        "reference catalog should contain two rows"
-    );
 
     // Stream side: one hit, one miss.
     let stream_rows = [
@@ -302,9 +304,16 @@ async fn run_strict_join_once() -> Vec<JoinedRow> {
     let mut joined = Vec::new();
     for (idx, row) in stream_rows.iter().enumerate() {
         let event = row.clone().to_event(writer);
-        let out = handler
-            .process_event(&mut state, event, StageId::new(), writer)
+        let invocation = handler
+            .process_stream(
+                &mut state,
+                event,
+                stream_source,
+                writer,
+                obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+            )
             .expect("Join handler in replay_determinism test should not fail");
+        let (out, _framework_eof) = invocation.into_parts();
         if idx == 0 {
             assert!(
                 !out.is_empty(),
@@ -700,7 +709,7 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
     join_config.control_strategy = Some(Arc::new(JonestownSignalStrategy));
 
     let handle = JoinBuilder::new(
-        handler,
+        TypedJoinHandlerAdapter::new(handler),
         join_config,
         join_resources,
         reference_journal.clone() as Arc<dyn Journal<ChainEvent>>,

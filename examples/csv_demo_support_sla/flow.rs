@@ -9,12 +9,12 @@ use super::fixtures;
 use anyhow::{Context, Result};
 use obzenflow::sinks::CsvSink;
 use obzenflow::sources::CsvSource;
-use obzenflow::typed::joins;
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::TypedTransformHandler;
+use obzenflow_runtime::stages::{JoinReferenceView, TypedJoinHandler};
 use std::path::PathBuf;
 
 pub struct DemoPaths {
@@ -61,6 +61,55 @@ impl TypedTransformHandler for TicketTriage {
     }
 }
 
+/// An authored join witness: these associated types are what `join!` proves
+/// against its catalog, stream, and output declaration.
+#[derive(Clone, Debug)]
+struct SupportSlaJoin;
+
+impl TypedJoinHandler for SupportSlaJoin {
+    type State = ();
+    type ReferenceKey = String;
+    type Reference = Customer;
+    type Stream = TriagedTicket;
+    type Output = EnrichedTicket;
+
+    fn initial_state(&self) -> Self::State {}
+
+    fn admit_reference(
+        &self,
+        customer: &Self::Reference,
+    ) -> Result<Self::ReferenceKey, HandlerError> {
+        Ok(customer.customer_id.clone())
+    }
+
+    fn process_stream(
+        &self,
+        _state: &mut Self::State,
+        references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
+        ticket: Self::Stream,
+    ) -> Result<Vec<Self::Output>, HandlerError> {
+        let Some(customer) = references.select(&ticket.customer_id) else {
+            return Ok(Vec::new());
+        };
+        let cap_hours = plan_sla_cap_hours(&customer.plan);
+        let effective_sla_hours = ticket.priority_sla_hours.min(cap_hours);
+        let due_bucket = due_bucket(effective_sla_hours).to_string();
+
+        Ok(vec![EnrichedTicket {
+            ticket_id: ticket.ticket_id,
+            customer_id: ticket.customer_id,
+            plan: customer.plan,
+            region: customer.region,
+            created_at: ticket.created_at,
+            priority: ticket.priority,
+            category: ticket.category,
+            priority_sla_hours: ticket.priority_sla_hours,
+            effective_sla_hours,
+            due_bucket,
+        }])
+    }
+}
+
 fn build_flow(
     customers: CsvSource<Customer>,
     tickets: CsvSource<Ticket>,
@@ -68,28 +117,7 @@ fn build_flow(
     journals_dir: PathBuf,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let join_handler = joins::inner(
-            |c: &Customer| c.customer_id.clone(),
-            |t: &TriagedTicket| t.customer_id.clone(),
-            |customer: Customer, ticket: TriagedTicket| {
-                let cap_hours = plan_sla_cap_hours(&customer.plan);
-                let effective_sla_hours = ticket.priority_sla_hours.min(cap_hours);
-                let due_bucket = due_bucket(effective_sla_hours).to_string();
-
-                EnrichedTicket {
-                    ticket_id: ticket.ticket_id,
-                    customer_id: ticket.customer_id,
-                    plan: customer.plan,
-                    region: customer.region,
-                    created_at: ticket.created_at,
-                    priority: ticket.priority,
-                    category: ticket.category,
-                    priority_sla_hours: ticket.priority_sla_hours,
-                    effective_sla_hours,
-                    due_bucket,
-                }
-            },
-        );
+        let join_handler = SupportSlaJoin;
         let triage_handler = TicketTriage::new();
 
         Ok(flow! {

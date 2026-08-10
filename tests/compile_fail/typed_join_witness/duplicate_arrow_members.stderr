@@ -1,0 +1,51 @@
+error[E0283]: type annotations needed
+  --> tests/compile_fail/typed_join_witness/duplicate_arrow_members.rs:10:13
+   |
+10 |       let _ = obzenflow_dsl::join!(
+   |  _____________^
+11 | |         catalog reference_stage: Reference,
+12 | |         Stream -> { First, First } => Exact
+13 | |     );
+   | |_____^ cannot infer type
+   |
+   = note: multiple `impl`s satisfying `WithMember<First, WithMember<First, EmptySet>>: Member<First, _>` found in the `obzenflow_core` crate:
+           - impl<T, Head, Rest, Index> Member<T, MemberAfter<Index>> for WithMember<Head, Rest>
+             where Rest: Member<T, Index>;
+           - impl<T, Rest> Member<T, MemberFound> for WithMember<T, Rest>;
+note: required by a bound in `typed_join_descriptor`
+  --> crates/obzenflow_dsl/src/dsl/typing.rs
+   |
+   | pub fn typed_join_descriptor<
+   |        --------------------- required by a bound in this function
+...
+   |     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
+   |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `typed_join_descriptor`
+   = note: this error originates in the macro `$crate::__obzenflow_join_typed` which comes from the expansion of the macro `obzenflow_dsl::join` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0080]: evaluation panicked: duplicate member in a declared stage fact set: two members share an event type; each fact type appears exactly once (FLOWIP-120z)
+ --> crates/obzenflow_core/src/event/schema/member_set.rs
+  |
+  | /         assert!(
+  | |             !const_str_eq(X::EVENT_TYPE, Head::EVENT_TYPE),
+  | |             "duplicate member in a declared stage fact set: two members share an event \
+  | |              type; each fact type appears exactly once (FLOWIP-120z)"
+  | |         );
+  | |_________^ evaluation of `<obzenflow_core::event::schema::WithMember<support::First, obzenflow_core::event::schema::EmptySet> as obzenflow_core::event::schema::FactNameDisjoint<support::First>>::OK` failed here
+
+note: erroneous constant encountered
+ --> crates/obzenflow_core/src/event/schema/member_set.rs
+  |
+  |         <Rest as FactNameDisjoint<Head>>::OK,
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+ --> crates/obzenflow_core/src/event/schema/stage_fact_set.rs
+  |
+  |     const MEMBERS_DISTINCT: () = L::DISTINCT_EVENT_TYPES;
+  |                                  ^^^^^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+ --> crates/obzenflow_core/src/event/schema/stage_fact_set.rs
+  |
+  |     S::MEMBERS_DISTINCT
+  |     ^^^^^^^^^^^^^^^^^^^

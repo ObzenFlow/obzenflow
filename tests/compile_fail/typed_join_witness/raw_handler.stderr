@@ -1,0 +1,29 @@
+error[E0277]: this join handler does not witness its arrow contract
+  --> tests/compile_fail/typed_join_witness/raw_handler.rs:10:13
+   |
+10 |     let _ = obzenflow_dsl::join!(catalog reference_stage: Reference, Stream -> First => RawHandler);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this handler does not implement the typed join contract
+   |
+help: the trait `TypedJoinHandler` is not implemented for `RawHandler`
+  --> tests/compile_fail/typed_join_witness/../support/typed_join.rs
+   |
+   | pub struct RawHandler;
+   | ^^^^^^^^^^^^^^^^^^^^^
+   = note: implement TypedJoinHandler with Reference, Stream, and Output matching the join! arrow (FLOWIP-134f)
+   = help: the following other types implement trait `TypedJoinHandler`:
+             BadReference
+             BadStream
+             MultiOutput
+             PlaceholderJoin<Ref, Stream, Out>
+             WrongOutput
+             obzenflow_runtime::stages::join::strategies::common::JoinWithStrategy<S, CatalogKeyFn, StreamKeyFn>
+             support::Exact
+note: required by a bound in `typed_join_descriptor`
+  --> crates/obzenflow_dsl/src/dsl/typing.rs
+   |
+   | pub fn typed_join_descriptor<
+   |        --------------------- required by a bound in this function
+...
+   |     H: TypedJoinHandler + Clone + fmt::Debug + Send + Sync + 'static,
+   |        ^^^^^^^^^^^^^^^^ required by this bound in `typed_join_descriptor`
+   = note: this error originates in the macro `$crate::__obzenflow_join_typed` which comes from the expansion of the macro `obzenflow_dsl::join` (in Nightly builds, run with -Z macro-backtrace for more info)

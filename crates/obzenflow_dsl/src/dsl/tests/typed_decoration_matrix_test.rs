@@ -19,8 +19,8 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulStatefulHandler,
-        EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinHandler,
-        SinkHandler, StatefulEmission, TransformHandler, TypedStatefulHandler,
+        EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinReferenceView,
+        SinkHandler, StatefulEmission, TransformHandler, TypedJoinHandler, TypedStatefulHandler,
         TypedTransformHandler,
     };
     use obzenflow_runtime::stages::sink::SinkTyped;
@@ -230,28 +230,28 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct Jn;
-    #[async_trait]
-    impl JoinHandler for Jn {
+    impl TypedJoinHandler for Jn {
         type State = ();
+        type ReferenceKey = ();
+        type Reference = In;
+        type Stream = In;
+        type Output = Out;
 
         fn initial_state(&self) -> Self::State {}
 
-        fn process_event(
+        fn admit_reference(
             &self,
-            _state: &mut Self::State,
-            _event: ChainEvent,
-            _source_id: obzenflow_core::StageId,
-            _writer_id: obzenflow_core::WriterId,
-        ) -> Result<Vec<ChainEvent>, HandlerError> {
-            Ok(vec![])
+            _reference: &Self::Reference,
+        ) -> Result<Self::ReferenceKey, HandlerError> {
+            Ok(())
         }
 
-        fn on_source_eof(
+        fn process_stream(
             &self,
             _state: &mut Self::State,
-            _source_id: obzenflow_core::StageId,
-            _writer_id: obzenflow_core::WriterId,
-        ) -> Result<Vec<ChainEvent>, HandlerError> {
+            _references: &mut JoinReferenceView<'_, Self::ReferenceKey, Self::Reference>,
+            _stream: Self::Stream,
+        ) -> Result<Vec<Self::Output>, HandlerError> {
             Ok(vec![])
         }
     }

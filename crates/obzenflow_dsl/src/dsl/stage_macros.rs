@@ -3570,149 +3570,89 @@ macro_rules! effectful_stateful {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_join_untyped {
-    (name = $name:literal, reference_stage_var = $ref_var:ident, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
-        use $crate::dsl::stage_descriptor::{JoinDescriptor, StageDescriptor};
-        use obzenflow_core::id::StageId;
-        Box::new(JoinDescriptor {
-            name: $name.to_string(),
-            reference_stage_id: StageId::new(),
-            reference_stage_var: Some(stringify!($ref_var)),
-            handler: $handler,
-            observers: vec![$(Box::new($mw)),*],
-        }) as Box<dyn StageDescriptor>
-    }};
-}
-
-#[doc(hidden)]
-#[macro_export]
 macro_rules! __obzenflow_join_typed {
     // -- placeholder, explicit output contract --
-    (reference = $ref_hint:tt, stream = $str_hint:tt, output = $out:ty,
+    (reference = exact, stream = exact, output = $out:ty,
      output_contract = [$($member:ty),+ $(,)?],
-     ref_type = ($($ref_ty:ty)?), stream_type = ($($str_ty:ty)?),
+     ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
      name = $name:literal, ref_var = $ref_var:ident, handler = placeholder!(),
      middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::__obzenflow_join_hint!($ref_hint $(, $ref_ty)?),
-            $crate::__obzenflow_join_hint!($str_hint $(, $str_ty)?),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_join_untyped!(
-            name = $name,
-            reference_stage_var = $ref_var,
-            handler = $crate::dsl::typing::PlaceholderJoin::<
-                $crate::__obzenflow_join_phantom_type!($ref_hint $(, $ref_ty)?),
-                $crate::__obzenflow_join_phantom_type!($str_hint $(, $str_ty)?),
-                $out
-            >::new(None),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
+            ::obzenflow_core::stage_fact_set![$($member),+],
+        >();
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($mw)),*];
+        $crate::dsl::typing::placeholder_join_descriptor::<
+            $ref_ty,
+            $str_ty,
+            $out,
+            ::obzenflow_core::stage_fact_set![$($member),+],
+            _,
+        >($name, stringify!($ref_var), None, __observers)
     }};
-    (reference = $ref_hint:tt, stream = $str_hint:tt, output = $out:ty,
+    (reference = exact, stream = exact, output = $out:ty,
      output_contract = [$($member:ty),+ $(,)?],
-     ref_type = ($($ref_ty:ty)?), stream_type = ($($str_ty:ty)?),
+     ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
      name = $name:literal, ref_var = $ref_var:ident, handler = placeholder!($msg:expr),
      middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::__obzenflow_join_hint!($ref_hint $(, $ref_ty)?),
-            $crate::__obzenflow_join_hint!($str_hint $(, $str_ty)?),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_join_untyped!(
-            name = $name,
-            reference_stage_var = $ref_var,
-            handler = $crate::dsl::typing::PlaceholderJoin::<
-                $crate::__obzenflow_join_phantom_type!($ref_hint $(, $ref_ty)?),
-                $crate::__obzenflow_join_phantom_type!($str_hint $(, $str_ty)?),
-                $out
-            >::new(Some($msg)),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
+            ::obzenflow_core::stage_fact_set![$($member),+],
+        >();
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($mw)),*];
+        $crate::dsl::typing::placeholder_join_descriptor::<
+            $ref_ty,
+            $str_ty,
+            $out,
+            ::obzenflow_core::stage_fact_set![$($member),+],
+            _,
+        >($name, stringify!($ref_var), Some($msg), __observers)
     }};
 
     // -- placeholder --
-    (reference = $ref_hint:tt, stream = $str_hint:tt, output = $out:ty,
-     ref_type = ($($ref_ty:ty)?), stream_type = ($($str_ty:ty)?),
+    (reference = exact, stream = exact, output = $out:ty,
+     ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
      name = $name:literal, ref_var = $ref_var:ident, handler = placeholder!(),
      middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::__obzenflow_join_hint!($ref_hint $(, $ref_ty)?),
-            $crate::__obzenflow_join_hint!($str_hint $(, $str_ty)?),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_join_untyped!(
-            name = $name,
-            reference_stage_var = $ref_var,
-            handler = $crate::dsl::typing::PlaceholderJoin::<
-                $crate::__obzenflow_join_phantom_type!($ref_hint $(, $ref_ty)?),
-                $crate::__obzenflow_join_phantom_type!($str_hint $(, $str_ty)?),
-                $out
-            >::new(None),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($mw)),*];
+        $crate::dsl::typing::placeholder_join_descriptor::<
+            $ref_ty, $str_ty, $out, $out, _,
+        >($name, stringify!($ref_var), None, __observers)
     }};
-    (reference = $ref_hint:tt, stream = $str_hint:tt, output = $out:ty,
-     ref_type = ($($ref_ty:ty)?), stream_type = ($($str_ty:ty)?),
+    (reference = exact, stream = exact, output = $out:ty,
+     ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
      name = $name:literal, ref_var = $ref_var:ident, handler = placeholder!($msg:expr),
      middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::__obzenflow_join_hint!($ref_hint $(, $ref_ty)?),
-            $crate::__obzenflow_join_hint!($str_hint $(, $str_ty)?),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_join_untyped!(
-            name = $name,
-            reference_stage_var = $ref_var,
-            handler = $crate::dsl::typing::PlaceholderJoin::<
-                $crate::__obzenflow_join_phantom_type!($ref_hint $(, $ref_ty)?),
-                $crate::__obzenflow_join_phantom_type!($str_hint $(, $str_ty)?),
-                $out
-            >::new(Some($msg)),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($mw)),*];
+        $crate::dsl::typing::placeholder_join_descriptor::<
+            $ref_ty, $str_ty, $out, $out, _,
+        >($name, stringify!($ref_var), Some($msg), __observers)
     }};
 
     // ── real handler: both exact ──
-    //
-    // FLOWIP-114c PR D: __obzenflow_anchor_join JoinTyping bound dropped.
-    // The metadata declares ref/stream/output types; the handler does not need
-    // to implement JoinTyping itself, which would make the proof tautological.
     (reference = exact, stream = exact, output = $out:ty,
      output_contract = [$($member:ty),+ $(,)?],
      ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
      name = $name:literal, ref_var = $ref_var:ident, handler = $handler:expr,
      middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::dsl::typing::TypeHint::exact_payload::<$ref_ty>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$str_ty>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_join_untyped!(
-            name = $name,
-            reference_stage_var = $ref_var,
-            handler = __handler,
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
+            ::obzenflow_core::stage_fact_set![$($member),+],
+        >();
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($mw)),*];
+        $crate::dsl::typing::typed_join_descriptor::<
+            _,
+            $ref_ty,
+            $str_ty,
+            $out,
+            ::obzenflow_core::stage_fact_set![$($member),+],
+            _,
+            _,
+            _,
+        >($name, stringify!($ref_var), __handler, __observers)
     }};
 
     (reference = exact, stream = exact, output = $out:ty,
@@ -3720,43 +3660,13 @@ macro_rules! __obzenflow_join_typed {
      name = $name:literal, ref_var = $ref_var:ident, handler = $handler:expr,
      middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::dsl::typing::TypeHint::exact_payload::<$ref_ty>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$str_ty>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_join_untyped!(
-            name = $name,
-            reference_stage_var = $ref_var,
-            handler = __handler,
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($mw)),*];
+        $crate::dsl::typing::typed_join_descriptor::<
+            _, $ref_ty, $str_ty, $out, $out, _, _, _,
+        >($name, stringify!($ref_var), __handler, __observers)
     }};
 
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_join_hint {
-    (exact, $ty:ty) => {
-        $crate::dsl::typing::TypeHint::exact_payload::<$ty>()
-    };
-    (exact) => {
-        compile_error!(
-            "__obzenflow_join_hint!(exact) requires a type; this is a bug in the macro dispatch"
-        )
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_join_phantom_type {
-    (exact, $ty:ty) => {
-        $ty
-    };
 }
 
 #[doc(hidden)]
