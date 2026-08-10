@@ -30,17 +30,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::typed::sources;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
-    id::StageId,
-    TypedPayload, WriterId,
-};
+use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{SinkHandler, StatefulHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    SinkHandler, StatefulEmission, TypedStatefulHandler,
+};
 use obzenflow_runtime::stages::transform::MapTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -84,7 +82,7 @@ struct AggregatorState {
     /// Total output events emitted (for demo-local accounting)
     outputs_emitted: usize,
     /// Current event being processed (for emission)
-    current_event: Option<ChainEvent>,
+    current_event: Option<RawDataEvent>,
     /// Flag when EOF has been observed for audit
     eof_seen: bool,
 }
@@ -95,14 +93,12 @@ struct AggregatorState {
 /// Each source has its own journal reader at independent positions
 #[derive(Clone, Debug)]
 struct MultiSourceAggregator {
-    writer_id: WriterId,
     expected_counts: BTreeMap<String, usize>,
 }
 
 impl MultiSourceAggregator {
     fn new() -> Self {
         Self {
-            writer_id: WriterId::from(StageId::new()),
             expected_counts: BTreeMap::new(),
         }
     }
@@ -111,87 +107,8 @@ impl MultiSourceAggregator {
         self.expected_counts = expected;
         self
     }
-}
 
-#[async_trait]
-impl StatefulHandler for MultiSourceAggregator {
-    type State = AggregatorState;
-
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        let payload = event.payload();
-        let source = payload["source"].as_str().unwrap_or("unknown").to_string();
-        let value = payload["value"].as_i64().unwrap_or(0);
-
-        // Update statistics
-        *state.events_by_source.entry(source.clone()).or_insert(0) += 1;
-        *state.value_by_source.entry(source.clone()).or_insert(0) += value;
-        state.total_events += 1;
-
-        let event_count = *state.events_by_source.get(&source).unwrap();
-
-        println!(
-            "[FAN-IN] Aggregator received event from '{}' (#{} from this source, total: {})",
-            source, event_count, state.total_events
-        );
-
-        // Store the current event for emission
-        state.current_event = Some(event);
-    }
-
-    fn should_emit(&self, state: &mut Self::State) -> bool {
-        // Emit after every event (immediate enrichment pattern)
-        state.current_event.is_some()
-    }
-
-    fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-        if let Some(event) = state.current_event.take() {
-            let payload = event.payload();
-            let source = payload["source"].as_str().unwrap_or("unknown").to_string();
-
-            let event_count = *state.events_by_source.get(&source).unwrap_or(&0);
-            let total_value = *state.value_by_source.get(&source).unwrap_or(&0);
-
-            // Enrich event with aggregation stats
-            let mut enriched = payload.clone();
-            enriched["aggregation"] = json!({
-                "total_events": state.total_events,
-                "source_event_count": event_count,
-                "source_total_value": total_value,
-                "sources_seen": state.events_by_source.len(),
-            });
-
-            let aggregated_event = ChainEventFactory::derived_data_event(
-                self.writer_id,
-                &event,
-                "data.aggregated",
-                enriched,
-                obzenflow_core::config::LineagePolicy::default(),
-            );
-
-            // Demo-local accounting: track outputs emitted so we can ensure
-            // that every input observed by this stateful handler results in
-            // a corresponding output (for this immediate-enrichment pattern).
-            // FLOWIP-090c/090d: Once `StatefulAccountingContract` is available and wired
-            // via the contract DSL, this counter/assertion is expected to be removed
-            // in favor of a generic accounting contract; see FLOWIP-090d exit criteria.
-            state.outputs_emitted += 1;
-
-            Ok(vec![aggregated_event])
-        } else {
-            Ok(vec![])
-        }
-    }
-
-    fn initial_state(&self) -> Self::State {
-        AggregatorState {
-            expected_counts: self.expected_counts.clone(),
-            eof_seen: false,
-            ..AggregatorState::default()
-        }
-    }
-
-    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-        // Audit: verify counts match expectations, log loudly if not
+    fn audit(&self, state: &AggregatorState) {
         for (src, expected) in &state.expected_counts {
             let got = state.events_by_source.get(src).cloned().unwrap_or(0);
             if got != *expected {
@@ -216,31 +133,101 @@ impl StatefulHandler for MultiSourceAggregator {
         }
         println!("╚════════════════════════╩═════════════╝");
 
-        // Hard audit check for the demo: panic if any source is short
         for (src, expected) in &state.expected_counts {
             let got = state.events_by_source.get(src).cloned().unwrap_or(0);
             if got != *expected {
-                let eof_seen = state.eof_seen;
-                panic!("AUDIT FAILED: source={src} expected={expected} got={got} (eof_seen={eof_seen})");
+                panic!(
+                    "AUDIT FAILED: source={src} expected={expected} got={got} (eof_seen={})",
+                    state.eof_seen
+                );
             }
         }
-
-        // Demo-local stateful accounting guard (FLOWIP-081b):
-        // For this immediate-enrichment handler, every input that was
-        // accumulated should have produced exactly one output event via
-        // `emit`. If this ever diverges, it means the stateful FSM or
-        // handler semantics have regressed and are silently dropping
-        // inputs during draining or emission. FLOWIP-090c/090d will replace this
-        // handler-local guard with a first-class `StatefulAccountingContract`
-        // configured from the contract DSL; at that point this demo-local logic
-        // should be removed and enforced purely via contracts.
         if state.outputs_emitted != state.total_events {
             panic!(
                 "STATEFUL ACCOUNTING FAILED: inputs_observed={} outputs_emitted={} (eof_seen={})",
                 state.total_events, state.outputs_emitted, state.eof_seen
             );
         }
+    }
+}
 
+impl TypedStatefulHandler for MultiSourceAggregator {
+    type State = AggregatorState;
+    type Input = RawDataEvent;
+    type Output = RawDataEvent;
+
+    fn accumulate(&self, state: &mut Self::State, event: RawDataEvent) {
+        let source = event.source.clone();
+        let value = event.value;
+
+        // Update statistics
+        *state.events_by_source.entry(source.clone()).or_insert(0) += 1;
+        *state.value_by_source.entry(source.clone()).or_insert(0) += value;
+        state.total_events += 1;
+
+        let event_count = *state.events_by_source.get(&source).unwrap();
+
+        println!(
+            "[FAN-IN] Aggregator received event from '{}' (#{} from this source, total: {})",
+            source, event_count, state.total_events
+        );
+
+        // Store the current event for emission
+        state.current_event = Some(event);
+    }
+
+    fn should_emit(&self, state: &Self::State) -> bool {
+        // Emit after every event (immediate enrichment pattern)
+        state.current_event.is_some()
+    }
+
+    fn emit(
+        &self,
+        state: &Self::State,
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        let mut next_state = state.clone();
+        let outputs = if let Some(mut event) = next_state.current_event.take() {
+            let source = event.source.clone();
+
+            let event_count = *state.events_by_source.get(&source).unwrap_or(&0);
+            let total_value = *state.value_by_source.get(&source).unwrap_or(&0);
+
+            // Enrich event with aggregation stats
+            event.aggregation = Some(json!({
+                "total_events": state.total_events,
+                "source_event_count": event_count,
+                "source_total_value": total_value,
+                "sources_seen": state.events_by_source.len(),
+            }));
+
+            // Demo-local accounting: track outputs emitted so we can ensure
+            // that every input observed by this stateful handler results in
+            // a corresponding output (for this immediate-enrichment pattern).
+            // FLOWIP-090c/090d: Once `StatefulAccountingContract` is available and wired
+            // via the contract DSL, this counter/assertion is expected to be removed
+            // in favor of a generic accounting contract; see FLOWIP-090d exit criteria.
+            next_state.outputs_emitted += 1;
+
+            vec![event]
+        } else {
+            vec![]
+        };
+        Ok(StatefulEmission::RetainEpoch {
+            next_state,
+            outputs,
+        })
+    }
+
+    fn initial_state(&self) -> Self::State {
+        AggregatorState {
+            expected_counts: self.expected_counts.clone(),
+            eof_seen: false,
+            ..AggregatorState::default()
+        }
+    }
+
+    fn drain(&self, state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
+        self.audit(state);
         Ok(vec![])
     }
 }

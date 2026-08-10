@@ -1,0 +1,9 @@
+# category|workspace-relative Rust source|implementing type
+#
+# New, moved, or removed raw handlers fail the FLOWIP-134e source gate until
+# this classification is deliberately reviewed.
+framework_erasure|crates/obzenflow_runtime/src/stages/common/handlers/stateful/typed.rs|TypedStatefulHandlerAdapter
+structural_adapter|crates/obzenflow_runtime/src/stages/stateful/ai_map_reduce.rs|SeededCollectByInput
+test_harness|crates/obzenflow_infra/tests/stateful_emit_interval.rs|TimerEmitHandler
+test_harness|crates/obzenflow_infra/tests/stateful_emit_interval.rs|AlwaysEmitHandler
+test_harness|crates/obzenflow_infra/tests/replay_determinism.rs|SupervisorCountingHandler

@@ -12,7 +12,6 @@
 //! matches under whole-run verification. A `Completed` archive still replays
 //! as `Natural` and finalizes.
 
-use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainEventContent, EventEnvelope};
@@ -23,7 +22,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, StatefulHandler, TypedTransformHandler,
+    FiniteSourceHandler, StatefulEmission, TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
@@ -116,36 +115,35 @@ impl FiniteSourceHandler for Ticks {
 }
 
 #[derive(Debug, Clone)]
-struct SumHandler {
-    writer_id: WriterId,
-}
+struct SumHandler;
 
 impl SumHandler {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl StatefulHandler for SumHandler {
+impl TypedStatefulHandler for SumHandler {
     type State = u64;
+    type Input = Tick;
+    type Output = SumResult;
 
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        *state += event.payload()["n"].as_u64().unwrap_or(0);
+    fn accumulate(&self, state: &mut Self::State, event: Tick) {
+        *state += event.n;
     }
 
     fn initial_state(&self) -> Self::State {
         0
     }
 
-    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            SumResult::EVENT_TYPE,
-            json!(SumResult { total: *state }),
-        )])
+    fn emit(
+        &self,
+        state: &Self::State,
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: *state,
+            outputs: vec![SumResult { total: *state }],
+        })
     }
 }
 
@@ -326,7 +324,12 @@ async fn truncated_replay_suppresses_finalization_and_records_the_kind() {
     // End-of-input finalization is suppressed: no final aggregate, and the
     // stateful stage's authored EOF carries the folded Truncated kind.
     assert_eq!(
-        data_rows(&candidate, "summer", SumResult::EVENT_TYPE).await,
+        data_rows(
+            &candidate,
+            "summer",
+            SumResult::versioned_event_type().as_str(),
+        )
+        .await,
         0,
         "the killed original never finalized, so the replay must not"
     );
@@ -435,7 +438,12 @@ async fn clean_archive_replay_still_finalizes_naturally() {
     let baseline = replay_testkit::latest_run_dir(&journal_base);
     assert_eq!(eof_kinds(&baseline, "ticks").await, vec![EofKind::Natural]);
     assert_eq!(
-        data_rows(&baseline, "summer", SumResult::EVENT_TYPE).await,
+        data_rows(
+            &baseline,
+            "summer",
+            SumResult::versioned_event_type().as_str(),
+        )
+        .await,
         1
     );
     assert_eq!(delivered.load(Ordering::SeqCst), 1);
@@ -446,7 +454,12 @@ async fn clean_archive_replay_still_finalizes_naturally() {
     let candidate = replay_testkit::latest_run_dir(&journal_base);
     assert_eq!(eof_kinds(&candidate, "ticks").await, vec![EofKind::Natural]);
     assert_eq!(
-        data_rows(&candidate, "summer", SumResult::EVENT_TYPE).await,
+        data_rows(
+            &candidate,
+            "summer",
+            SumResult::versioned_event_type().as_str(),
+        )
+        .await,
         1,
         "a clean archive's replay still finalizes"
     );
@@ -611,7 +624,12 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
 
     // Finalization suppressed below the mixed-kind fan-in.
     assert_eq!(
-        data_rows(&candidate, "summer", SumResult::EVENT_TYPE).await,
+        data_rows(
+            &candidate,
+            "summer",
+            SumResult::versioned_event_type().as_str(),
+        )
+        .await,
         0
     );
     assert_eq!(replay_delivered.load(Ordering::SeqCst), 0);

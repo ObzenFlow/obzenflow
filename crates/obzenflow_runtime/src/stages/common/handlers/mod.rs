@@ -25,9 +25,9 @@ pub use source::{
     InfiniteSourceHandler,
 };
 pub use stateful::{
-    EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter, StatefulHandler, StatefulHandlerExt,
-    StatefulHandlerWithEmission, StatefulOutputContext, StatefulTerminationKind,
-    TerminalValidation, UnifiedStatefulHandler,
+    EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter, StatefulEmission,
+    StatefulOutputContext, StatefulTerminationKind, TerminalValidation, TypedStatefulHandler,
+    TypedStatefulHandlerAdapter, TypedStatefulInvocation, UnifiedStatefulHandler,
 };
 pub use transform::{
     EffectfulTransformHandler, EffectfulTransformHandlerAdapter, TransformHandler,

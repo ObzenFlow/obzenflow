@@ -16,12 +16,10 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulTransformHandler,
-        FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
-        TransformHandler, TypedTransformHandler,
+        FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulEmission,
+        TransformHandler, TypedStatefulHandler, TypedTransformHandler,
     };
-    use obzenflow_runtime::typing::{
-        JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
-    };
+    use obzenflow_runtime::typing::{JoinTyping, SinkTyping, SourceTyping, TransformTyping};
     use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder, TypeHintInfo};
     use serde::{Deserialize, Serialize};
     use std::any::type_name;
@@ -258,21 +256,46 @@ mod tests {
     #[derive(Clone, Debug)]
     struct ExactStateful;
 
-    impl StatefulTyping for ExactStateful {
+    impl TypedStatefulHandler for ExactStateful {
+        type State = ();
         type Input = InputEvent;
         type Output = OutputEvent;
-    }
 
-    #[async_trait]
-    impl StatefulHandler for ExactStateful {
-        type State = ();
-
-        fn accumulate(&mut self, _state: &mut Self::State, _event: ChainEvent) {}
+        fn accumulate(&self, _state: &mut Self::State, _input: InputEvent) {}
 
         fn initial_state(&self) -> Self::State {}
 
-        fn create_events(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-            Ok(vec![])
+        fn emit(
+            &self,
+            _state: &Self::State,
+        ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+            Ok(StatefulEmission::RetainEpoch {
+                next_state: (),
+                outputs: vec![],
+            })
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct MultiOutputStateful;
+
+    impl TypedStatefulHandler for MultiOutputStateful {
+        type State = ();
+        type Input = InputEvent;
+        type Output = ExactTransformOutput;
+
+        fn initial_state(&self) -> Self::State {}
+
+        fn accumulate(&self, _state: &mut Self::State, _input: InputEvent) {}
+
+        fn emit(
+            &self,
+            _state: &Self::State,
+        ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+            Ok(StatefulEmission::RetainEpoch {
+                next_state: (),
+                outputs: vec![],
+            })
         }
     }
 
@@ -587,7 +610,7 @@ mod tests {
 
         let stateful = crate::stateful!(
             name: "multi_output_stateful",
-            InputEvent -> { OutputEvent, AlternateEvent } => ExactStateful,
+            InputEvent -> { OutputEvent, AlternateEvent } => MultiOutputStateful,
             emit_interval = Duration::from_secs(1)
         );
         let stateful_meta = stateful.typing_metadata().unwrap();

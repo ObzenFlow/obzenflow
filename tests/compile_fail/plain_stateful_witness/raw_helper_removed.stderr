@@ -1,0 +1,5 @@
+error[E0433]: failed to resolve: could not find `__obzenflow_stateful_untyped` in `obzenflow_dsl`
+ --> tests/compile_fail/plain_stateful_witness/raw_helper_removed.rs:6:20
+  |
+6 |     obzenflow_dsl::__obzenflow_stateful_untyped!();
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ could not find `__obzenflow_stateful_untyped` in `obzenflow_dsl`

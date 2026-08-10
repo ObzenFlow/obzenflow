@@ -20,10 +20,11 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulStatefulHandler,
         EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinHandler,
-        SinkHandler, StatefulHandler, TransformHandler, TypedTransformHandler,
+        SinkHandler, StatefulEmission, TransformHandler, TypedStatefulHandler,
+        TypedTransformHandler,
     };
     use obzenflow_runtime::stages::sink::SinkTyped;
-    use obzenflow_runtime::typing::{SinkTyping, SourceTyping, StatefulTyping, TransformTyping};
+    use obzenflow_runtime::typing::{SinkTyping, SourceTyping, TransformTyping};
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -168,17 +169,21 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct St;
-    impl StatefulTyping for St {
+    impl TypedStatefulHandler for St {
+        type State = ();
         type Input = In;
         type Output = Out;
-    }
-    #[async_trait]
-    impl StatefulHandler for St {
-        type State = ();
-        fn accumulate(&mut self, _s: &mut Self::State, _e: ChainEvent) {}
+
+        fn accumulate(&self, _s: &mut Self::State, _input: In) {}
         fn initial_state(&self) -> Self::State {}
-        fn create_events(&self, _s: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-            Ok(vec![])
+        fn emit(
+            &self,
+            _s: &Self::State,
+        ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+            Ok(StatefulEmission::RetainEpoch {
+                next_state: (),
+                outputs: vec![],
+            })
         }
     }
 

@@ -1,0 +1,282 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+//! Architecture and erasure-boundary guards for FLOWIP-134e.
+
+use proc_macro2::{TokenStream, TokenTree};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use syn::visit::Visit;
+
+const RETIRED_IDENTIFIERS: &[&str] = &[
+    "StatefulTyping",
+    "StatefulHandlerExt",
+    "StatefulHandlerWithEmission",
+    "__obzenflow_stateful_untyped",
+    "with_writer_id",
+];
+
+const RAW_ALLOWLIST: &str = include_str!("fixtures/flowip_134e_raw_stateful_handler_allowlist.txt");
+
+fn rust_sources_under(path: &Path, output: &mut Vec<PathBuf>) {
+    if !path.is_dir() {
+        return;
+    }
+
+    for entry in fs::read_dir(path).expect("read source directory") {
+        let path = entry.expect("read source entry").path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|name| name == "compile_fail") {
+                continue;
+            }
+            rust_sources_under(&path, output);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            output.push(path);
+        }
+    }
+}
+
+fn workspace_rust_sources(root: &Path) -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    for relative in ["src", "examples", "tests", "benches"] {
+        rust_sources_under(&root.join(relative), &mut sources);
+    }
+    for crate_entry in fs::read_dir(root.join("crates")).expect("read crates directory") {
+        let crate_root = crate_entry.expect("read crate entry").path();
+        for relative in ["src", "tests", "benches", "examples"] {
+            rust_sources_under(&crate_root.join(relative), &mut sources);
+        }
+    }
+    sources.sort();
+    sources
+}
+
+#[derive(Default)]
+struct SurfaceVisitor {
+    retired: Vec<String>,
+    raw_implementors: Vec<String>,
+}
+
+impl SurfaceVisitor {
+    fn record_ident(&mut self, ident: String) {
+        if RETIRED_IDENTIFIERS.contains(&ident.as_str()) {
+            self.retired.push(ident);
+        }
+    }
+
+    fn visit_macro_tokens(&mut self, tokens: TokenStream) {
+        for token in tokens {
+            match token {
+                TokenTree::Group(group) => self.visit_macro_tokens(group.stream()),
+                TokenTree::Ident(ident) => self.record_ident(ident.to_string()),
+                TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+            }
+        }
+    }
+}
+
+fn implementing_type_name(ty: &syn::Type) -> String {
+    match ty {
+        syn::Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+            .unwrap_or_else(|| "<empty-path>".to_string()),
+        _ => "<non-path-type>".to_string(),
+    }
+}
+
+impl<'ast> Visit<'ast> for SurfaceVisitor {
+    fn visit_ident(&mut self, ident: &'ast syn::Ident) {
+        self.record_ident(ident.to_string());
+    }
+
+    fn visit_token_stream(&mut self, tokens: &'ast TokenStream) {
+        self.visit_macro_tokens(tokens.clone());
+    }
+
+    fn visit_item_impl(&mut self, implementation: &'ast syn::ItemImpl) {
+        let implements_raw_stateful = implementation
+            .trait_
+            .as_ref()
+            .and_then(|(_, path, _)| path.segments.last())
+            .is_some_and(|segment| segment.ident == "StatefulHandler");
+        if implements_raw_stateful {
+            self.raw_implementors
+                .push(implementing_type_name(&implementation.self_ty));
+        }
+        syn::visit::visit_item_impl(self, implementation);
+    }
+}
+
+fn parse_raw_allowlist() -> BTreeMap<(String, String), String> {
+    let mut entries = BTreeMap::new();
+    for (line_index, line) in RAW_ALLOWLIST.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields = line.split('|').map(str::trim).collect::<Vec<_>>();
+        assert_eq!(
+            fields.len(),
+            3,
+            "invalid raw-handler allowlist line {}: {line}",
+            line_index + 1
+        );
+        assert!(
+            matches!(
+                fields[0],
+                "framework_erasure" | "structural_adapter" | "test_harness"
+            ),
+            "invalid raw-handler category on line {}: {}",
+            line_index + 1,
+            fields[0]
+        );
+        let key = (fields[1].to_string(), fields[2].to_string());
+        assert!(
+            entries.insert(key.clone(), fields[0].to_string()).is_none(),
+            "duplicate raw-handler allowlist entry: {}|{}",
+            key.0,
+            key.1
+        );
+    }
+    entries
+}
+
+#[test]
+fn retired_plain_stateful_surface_stays_absent() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut violations = Vec::new();
+
+    for source_path in workspace_rust_sources(&root) {
+        let source = fs::read_to_string(&source_path).expect("read Rust source");
+        let syntax = syn::parse_file(&source)
+            .unwrap_or_else(|error| panic!("parse {}: {error}", source_path.display()));
+        let mut visitor = SurfaceVisitor::default();
+        visitor.visit_file(&syntax);
+        for ident in visitor.retired {
+            let relative = source_path
+                .strip_prefix(&root)
+                .expect("workspace source has relative path")
+                .display();
+            violations.push(format!("{relative}: {ident}"));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "retired plain-stateful identifiers resurfaced:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn raw_stateful_implementations_match_the_checked_in_allowlist() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let expected = parse_raw_allowlist();
+    let mut actual = BTreeSet::new();
+
+    for source_path in workspace_rust_sources(&root) {
+        let source = fs::read_to_string(&source_path).expect("read Rust source");
+        let syntax = syn::parse_file(&source)
+            .unwrap_or_else(|error| panic!("parse {}: {error}", source_path.display()));
+        let mut visitor = SurfaceVisitor::default();
+        visitor.visit_file(&syntax);
+        let relative = source_path
+            .strip_prefix(&root)
+            .expect("workspace source has relative path")
+            .to_string_lossy()
+            .replace('\\', "/");
+        for implementor in visitor.raw_implementors {
+            assert!(
+                actual.insert((relative.clone(), implementor.clone())),
+                "duplicate raw StatefulHandler implementation: {relative}|{implementor}"
+            );
+        }
+    }
+
+    let expected_keys = expected.keys().cloned().collect::<BTreeSet<_>>();
+    let unexpected = actual.difference(&expected_keys).collect::<Vec<_>>();
+    let stale = expected_keys.difference(&actual).collect::<Vec<_>>();
+    assert!(
+        unexpected.is_empty() && stale.is_empty(),
+        "raw StatefulHandler allowlist drifted\nunexpected: {unexpected:#?}\nstale: {stale:#?}"
+    );
+}
+
+#[test]
+fn stateful_macro_and_builder_keep_the_typed_erasure_boundary() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let macro_source =
+        fs::read_to_string(root.join("crates/obzenflow_dsl/src/dsl/stage_macros.rs"))
+            .expect("read stateful macro source");
+    assert!(macro_source.contains("typed_stateful_descriptor"));
+    assert!(!macro_source.contains("__obzenflow_stateful_untyped"));
+
+    let builder_source =
+        fs::read_to_string(root.join("crates/obzenflow_runtime/src/stages/stateful/builder.rs"))
+            .expect("read stateful builder source");
+    assert!(
+        builder_source.contains("install_writer_id"),
+        "the runtime must install stage authorship before initialisation"
+    );
+}
+
+#[test]
+fn first_class_accumulator_catalogue_cannot_be_collapsed_or_shrunk() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let accumulator_root =
+        root.join("crates/obzenflow_runtime/src/stages/stateful/strategies/accumulators");
+    let module_source =
+        fs::read_to_string(accumulator_root.join("mod.rs")).expect("read accumulator module");
+    let helper_source = fs::read_to_string(root.join("src/typed/stateful.rs"))
+        .expect("read typed stateful constructors");
+
+    for (module, concept) in [
+        ("reduce", "Reduce"),
+        ("conflate", "Conflate"),
+        ("group_by", "GroupBy"),
+        ("top_n", "TopN"),
+        ("top_n_by", "TopNBy"),
+    ] {
+        let path = accumulator_root.join(format!("{module}.rs"));
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("missing first-class {concept} module: {error}"));
+        assert!(
+            module_source.contains(&format!("pub mod {module};")),
+            "{concept} must remain a public accumulator module"
+        );
+        assert!(
+            source.contains(&format!("pub struct {concept}")),
+            "{concept} must remain a primary public strategy type"
+        );
+        assert!(
+            helper_source.contains(&format!("pub fn {module}")),
+            "typed::stateful::{module} must remain a convenience constructor"
+        );
+        for combinator in [
+            "emit_on_eof",
+            "emit_every_n",
+            "emit_within",
+            "emit_always",
+            "with_emission",
+        ] {
+            assert!(
+                source.contains(combinator),
+                "{concept} lost emission combinator {combinator}"
+            );
+        }
+    }
+
+    assert!(
+        module_source.contains("pub use wrapper::{Accumulator,"),
+        "Accumulator must remain a public first-class strategy contract"
+    );
+    assert!(
+        !accumulator_root.join("typed_facades.rs").exists(),
+        "the first-class catalogue must not be collapsed into typed_facades.rs"
+    );
+}

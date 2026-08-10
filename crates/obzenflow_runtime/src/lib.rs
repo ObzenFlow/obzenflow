@@ -70,7 +70,7 @@ pub mod testing;
 /// [`InfiniteSourceHandler`](crate::stages::InfiniteSourceHandler),
 /// [`TypedTransformHandler`](crate::stages::TypedTransformHandler),
 /// [`SinkHandler`](crate::stages::SinkHandler),
-/// [`StatefulHandler`](crate::stages::StatefulHandler),
+/// [`TypedStatefulHandler`](crate::stages::TypedStatefulHandler),
 /// [`ObserverHandler`](crate::stages::ObserverHandler), and the
 /// [`ResourceManaged`](crate::stages::ResourceManaged) trait for stages
 /// that own resources. Also includes
@@ -101,11 +101,9 @@ pub mod prelude {
     pub use crate::stages::{
         EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler,
         InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler, SourceError,
-        StatefulHandler, TypedTransformHandler,
+        TypedStatefulHandler, TypedTransformHandler,
     };
-    pub use crate::typing::{
-        JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
-    };
+    pub use crate::typing::{JoinTyping, SinkTyping, SourceTyping, TransformTyping};
 
     // Event flow
     pub use crate::effects::{

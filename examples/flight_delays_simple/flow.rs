@@ -23,8 +23,8 @@ pub fn run_example() -> Result<()> {
         move |_runtime_config| {
             let carriers_handler = sources::finite(fixtures::carriers());
             let flights_handler = sources::finite(fixtures::flights());
-            let validator_handler = FlightValidator::new();
-            let calculator_handler = DelayCalculator::new();
+            let validator_handler = FlightValidator;
+            let calculator_handler = DelayCalculator;
             let enricher_handler =
                 joins::inner::<CarrierDetails, FlightRecord, EnrichedFlight, _, _, _, _>(
                     |carrier| carrier.carrier_code.clone(),
@@ -42,7 +42,7 @@ pub fn run_example() -> Result<()> {
                         delay_category: flight.delay_category.clone(),
                     },
                 );
-            let aggregator_handler = CarrierAggregator::new();
+            let aggregator_handler = CarrierAggregator;
             let printer_handler = sinks::table::<CarrierStatistics, _>(
                 &["status", "carrier", "avg_delay", "flights"],
                 |stats: &CarrierStatistics| {

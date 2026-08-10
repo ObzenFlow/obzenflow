@@ -3,12 +3,8 @@
 // https://obzenflow.dev
 
 use super::domain::*;
-use async_trait::async_trait;
-use obzenflow_core::event::schema::TypedPayload;
-use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::StatefulHandler;
-use obzenflow_runtime::typing::StatefulTyping;
+use obzenflow_runtime::stages::common::handlers::{StatefulEmission, TypedStatefulHandler};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default)]
@@ -27,27 +23,14 @@ struct AccountLedger {
 }
 
 #[derive(Clone, Debug)]
-pub struct Checkbook {
-    writer_id: WriterId,
-}
+pub struct Checkbook;
 
-impl Checkbook {
-    pub fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl StatefulHandler for Checkbook {
+impl TypedStatefulHandler for Checkbook {
     type State = CheckbookState;
+    type Input = PostedEntry;
+    type Output = CheckbookSnapshot;
 
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        let Some(entry) = PostedEntry::from_event(&event) else {
-            return;
-        };
-
+    fn accumulate(&self, state: &mut Self::State, entry: PostedEntry) {
         let ledger = state
             .ledgers
             .entry(entry.account_id.clone())
@@ -104,25 +87,19 @@ impl StatefulHandler for Checkbook {
         CheckbookState::default()
     }
 
-    fn create_events(
+    fn should_emit(&self, state: &Self::State) -> bool {
+        state.last_snapshot.is_some()
+    }
+
+    fn emit(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let Some(snapshot) = state.last_snapshot.as_ref() else {
-            return Ok(Vec::new());
-        };
-        Ok(vec![snapshot.clone().to_event(self.writer_id)])
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        let mut next_state = state.clone();
+        let outputs = next_state.last_snapshot.take().into_iter().collect();
+        Ok(StatefulEmission::RetainEpoch {
+            next_state,
+            outputs,
+        })
     }
-
-    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let Some(snapshot) = state.last_snapshot.take() else {
-            return Ok(Vec::new());
-        };
-        Ok(vec![snapshot.to_event(self.writer_id)])
-    }
-}
-
-impl StatefulTyping for Checkbook {
-    type Input = PostedEntry;
-    type Output = CheckbookSnapshot;
 }

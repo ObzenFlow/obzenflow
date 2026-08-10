@@ -19,7 +19,7 @@ pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
     EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler, HeartbeatConfig,
     InfiniteSourceHandler, ObserverHandler, ProcessingContext, ResourceManaged, SignalDecision,
-    SignalGate, SinkHandler, StatefulHandler,
+    SignalGate, SinkHandler, StatefulEmission, TypedStatefulHandler,
 };
 
 // FLOWIP-115c runtime control-strategy hooks.
@@ -32,5 +32,5 @@ pub use common::{
 pub use common::handlers::{JoinHandler, TypedTransformHandler, UnifiedJoinHandler};
 
 // Re-export resources builder
-pub use crate::typing::{JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping};
+pub use crate::typing::{JoinTyping, SinkTyping, SourceTyping, TransformTyping};
 pub use resources_builder::{StageResources, StageResourcesBuilder, StageResourcesSet};

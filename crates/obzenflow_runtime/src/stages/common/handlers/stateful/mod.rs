@@ -5,10 +5,13 @@
 //! Stateful handler components
 
 pub mod traits;
-pub mod wrapper;
+pub mod typed;
 
-pub use traits::{EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter, StatefulHandler};
+pub use traits::{EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter};
 pub use traits::{
     StatefulOutputContext, StatefulTerminationKind, TerminalValidation, UnifiedStatefulHandler,
 };
-pub use wrapper::{StatefulHandlerExt, StatefulHandlerWithEmission};
+pub use typed::{
+    StatefulEmission, TypedStatefulContribution, TypedStatefulDrainInvocation,
+    TypedStatefulHandler, TypedStatefulHandlerAdapter, TypedStatefulInvocation,
+};

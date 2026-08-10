@@ -39,7 +39,7 @@ use obzenflow_runtime::{
                 AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulStatefulHandler,
                 EffectfulStatefulHandlerAdapter, EffectfulTransformHandler,
                 EffectfulTransformHandlerAdapter, FiniteSourceHandler, InfiniteSourceHandler,
-                JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
+                JoinHandler, SinkHandler, TransformHandler, UnifiedStatefulHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -2098,45 +2098,16 @@ fn check_sink_state<H>(state: &JournalSinkState<H>) -> crate::stage_handle_adapt
 // ============================================================================
 
 /// Descriptor for stateful transform stages
-pub struct StatefulDescriptor<H: StatefulHandler + 'static> {
-    pub name: String,
-    pub handler: H,
-    pub emit_interval: Option<Duration>,
-    pub observers: Vec<Box<dyn MiddlewareFactory>>,
-    pub backpressure: Option<BackpressureClause>,
-}
-
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StatefulDescriptor<H> {
-    /// Create a new stateful descriptor with no emit interval.
-    pub fn new(name: impl Into<String>, handler: H) -> Self {
-        Self {
-            name: name.into(),
-            handler,
-            emit_interval: None,
-            observers: Vec::new(),
-            backpressure: None,
-        }
-    }
-
-    /// Configure a supervisor-driven emit interval for timer-driven emission while idle.
-    pub fn with_emit_interval(mut self, emit_interval: Duration) -> Self {
-        self.emit_interval = Some(emit_interval);
-        self
-    }
-
-    pub fn with_observer<M: MiddlewareFactory + 'static>(mut self, observer: M) -> Self {
-        self.observers.push(Box::new(observer));
-        self
-    }
-
-    /// Build into a boxed StageDescriptor for DSL compatibility.
-    pub fn build(self) -> Box<dyn StageDescriptor> {
-        Box::new(self)
-    }
+pub(crate) struct StatefulDescriptor<H: UnifiedStatefulHandler + 'static> {
+    pub(crate) name: String,
+    pub(crate) handler: H,
+    pub(crate) emit_interval: Option<Duration>,
+    pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for StatefulDescriptor<H>
 {
     fn name(&self) -> &str {
@@ -2671,7 +2642,7 @@ impl<H: AsyncInfiniteSourceHandler + 'static> sealed::Sealed for AsyncInfiniteSo
 impl<H: TransformHandler + 'static> sealed::Sealed for TransformDescriptor<H> {}
 impl<H: EffectfulTransformHandler + 'static> sealed::Sealed for EffectfulTransformDescriptor<H> {}
 impl<H: SinkHandler + 'static> sealed::Sealed for SinkDescriptor<H> {}
-impl<H: StatefulHandler + 'static> sealed::Sealed for StatefulDescriptor<H> {}
+impl<H: UnifiedStatefulHandler + 'static> sealed::Sealed for StatefulDescriptor<H> {}
 impl<H: EffectfulStatefulHandler + 'static> sealed::Sealed for EffectfulStatefulDescriptor<H> {}
 impl<H: JoinHandler + 'static> sealed::Sealed for JoinDescriptor<H> {}
 

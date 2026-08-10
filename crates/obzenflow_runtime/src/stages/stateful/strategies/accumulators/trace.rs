@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::composite_activation_context::union_composite_activations;
 use obzenflow_core::event::context::{CompositeActivationContext, ReplayContext};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
@@ -175,8 +176,13 @@ impl TraceState {
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.parent_ids.is_empty()
+    pub(crate) fn apply_to_event(&self, event: &mut ChainEvent) {
+        let parent_ids = self.parent_ids();
+        if parent_ids.is_empty() {
+            return;
+        }
+        event.causality = CausalityContext { parent_ids };
+        self.apply_correlation_to_event(event);
     }
 }
 

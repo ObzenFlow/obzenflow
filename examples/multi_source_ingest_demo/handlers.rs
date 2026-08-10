@@ -14,13 +14,12 @@
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::id::StageId;
 use obzenflow_core::{TypedPayload, WriterId};
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulHandler,
+    FiniteSourceHandler, SinkHandler, StatefulEmission, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::transform::MapTyped;
 use serde_json::json;
@@ -127,31 +126,28 @@ pub fn align_file_fn(
 #[derive(Clone, Debug, Default)]
 pub struct IngestAggregator;
 
-#[async_trait]
-impl StatefulHandler for IngestAggregator {
+impl TypedStatefulHandler for IngestAggregator {
     type State = IngestSummary;
+    type Input = IngestedEvent;
+    type Output = IngestSummary;
 
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        let origin = event.payload()["origin"]
-            .as_str()
-            .unwrap_or("?")
-            .to_string();
+    fn accumulate(&self, state: &mut Self::State, event: IngestedEvent) {
         state.total += 1;
-        *state.per_origin.entry(origin).or_insert(0) += 1;
+        *state.per_origin.entry(event.origin).or_insert(0) += 1;
     }
 
     fn initial_state(&self) -> Self::State {
         IngestSummary::default()
     }
 
-    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-        let writer_id = WriterId::from(StageId::new());
-        let body = serde_json::to_value(state).map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(vec![ChainEventFactory::data_event(
-            writer_id,
-            IngestSummary::EVENT_TYPE,
-            body,
-        )])
+    fn emit(
+        &self,
+        state: &Self::State,
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: state.clone(),
+            outputs: vec![state.clone()],
+        })
     }
 }
 

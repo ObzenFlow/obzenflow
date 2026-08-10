@@ -16,7 +16,7 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulHandler,
+    FiniteSourceHandler, SinkHandler, StatefulEmission, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -156,23 +156,20 @@ struct CounterState {
 }
 
 #[derive(Debug, Clone)]
-struct CounterHandler {
-    writer_id: WriterId,
-}
+struct CounterHandler;
 
 impl CounterHandler {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl StatefulHandler for CounterHandler {
+impl TypedStatefulHandler for CounterHandler {
     type State = CounterState;
+    type Input = NumberEvent;
+    type Output = CountResult;
 
-    fn accumulate(&mut self, state: &mut Self::State, _event: ChainEvent) {
+    fn accumulate(&self, state: &mut Self::State, _event: NumberEvent) {
         state.count += 1;
     }
 
@@ -180,142 +177,129 @@ impl StatefulHandler for CounterHandler {
         CounterState::default()
     }
 
-    fn create_events(
+    fn emit(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            CountResult::versioned_event_type(),
-            json!({ "total_count": state.count }),
-        )])
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: state.clone(),
+            outputs: vec![CountResult {
+                total_count: state.count,
+            }],
+        })
     }
 }
 
 #[derive(Debug, Clone)]
-struct AccumulatorHandler {
-    writer_id: WriterId,
-}
+struct AccumulatorHandler;
 
 impl AccumulatorHandler {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl StatefulHandler for AccumulatorHandler {
+impl TypedStatefulHandler for AccumulatorHandler {
     type State = Vec<u64>;
+    type Input = NumberEvent;
+    type Output = CollectedValue;
 
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        if let Some(value) = event.payload()["value"].as_u64() {
-            state.push(value);
-        }
+    fn accumulate(&self, state: &mut Self::State, event: NumberEvent) {
+        state.push(event.value);
     }
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
     }
 
-    fn create_events(
+    fn emit(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(state
-            .iter()
-            .map(|&value| {
-                ChainEventFactory::data_event(
-                    self.writer_id,
-                    CollectedValue::versioned_event_type(),
-                    json!({ "value": value }),
-                )
-            })
-            .collect())
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: state.clone(),
+            outputs: state
+                .iter()
+                .copied()
+                .map(|value| CollectedValue { value })
+                .collect(),
+        })
     }
 }
 
 #[derive(Debug, Clone)]
-struct SumHandler {
-    writer_id: WriterId,
-}
+struct SumHandler;
 
 impl SumHandler {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl StatefulHandler for SumHandler {
+impl TypedStatefulHandler for SumHandler {
     type State = u64;
+    type Input = NumberEvent;
+    type Output = SumResult;
 
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        let value = event.payload()["value"].as_u64().unwrap_or(0);
-        *state += value;
+    fn accumulate(&self, state: &mut Self::State, event: NumberEvent) {
+        *state += event.value;
     }
 
     fn initial_state(&self) -> Self::State {
         0
     }
 
-    fn create_events(
+    fn emit(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            SumResult::versioned_event_type(),
-            json!({ "total_sum": *state }),
-        )])
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: *state,
+            outputs: vec![SumResult { total_sum: *state }],
+        })
     }
 }
 
 #[derive(Debug, Clone)]
-struct ImmediateEmitter {
-    writer_id: WriterId,
-}
+struct ImmediateEmitter;
 
 impl ImmediateEmitter {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
-#[async_trait]
-impl StatefulHandler for ImmediateEmitter {
+impl TypedStatefulHandler for ImmediateEmitter {
     type State = u64;
+    type Input = NumberEvent;
+    type Output = ProgressUpdate;
 
-    fn accumulate(&mut self, state: &mut Self::State, _event: ChainEvent) {
+    fn accumulate(&self, state: &mut Self::State, _event: NumberEvent) {
         *state += 1;
     }
 
-    fn should_emit(&self, _state: &mut Self::State) -> bool {
-        true
+    fn should_emit(&self, state: &Self::State) -> bool {
+        *state > 0
     }
 
-    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            ProgressUpdate::versioned_event_type(),
-            json!({ "current_count": *state }),
-        )])
+    fn emit(
+        &self,
+        state: &Self::State,
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: *state,
+            outputs: vec![ProgressUpdate {
+                current_count: *state,
+            }],
+        })
     }
 
     fn initial_state(&self) -> Self::State {
         0
     }
 
-    fn create_events(
-        &self,
-        _state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![])
+    fn drain(&self, _state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
+        Ok(Vec::new())
     }
 }
 

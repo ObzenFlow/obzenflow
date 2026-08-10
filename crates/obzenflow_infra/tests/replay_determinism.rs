@@ -18,7 +18,7 @@ use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::control_strategies::JonestownSignalStrategy;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::StatefulHandler;
+use obzenflow_runtime::stages::common::handlers::stateful::traits::StatefulHandler;
 use obzenflow_runtime::stages::join::handle::JoinHandleExt;
 use obzenflow_runtime::stages::join::{JoinBuilder, JoinConfig, StrictJoinBuilder, TypedJoinState};
 use obzenflow_runtime::stages::resources_builder::StageResourcesBuilder;

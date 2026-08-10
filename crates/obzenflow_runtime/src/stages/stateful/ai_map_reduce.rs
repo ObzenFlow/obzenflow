@@ -16,10 +16,8 @@
 
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handler_error::StageFatal;
-use crate::stages::common::handlers::{
-    StatefulHandler, StatefulTerminationKind, TerminalValidation,
-};
-use crate::typing::StatefulTyping;
+use crate::stages::common::handlers::stateful::traits::StatefulHandler;
+use crate::stages::common::handlers::{StatefulTerminationKind, TerminalValidation};
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     canonical_json_bytes_v1, AiMapReduceChunkFailed, AiMapReduceJobFailed,
@@ -184,11 +182,6 @@ impl<Partial, Seed, Collected> fmt::Debug for SeededCollectByInput<Partial, Seed
         f.debug_struct("SeededCollectByInput")
             .finish_non_exhaustive()
     }
-}
-
-impl<Partial, Seed, Collected> StatefulTyping for SeededCollectByInput<Partial, Seed, Collected> {
-    type Input = Partial;
-    type Output = AiMapReduceReduceInput<Seed, Collected>;
 }
 
 impl<Partial, Seed, Collected> SeededCollectByInput<Partial, Seed, Collected> {

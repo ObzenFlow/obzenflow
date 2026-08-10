@@ -2,128 +2,154 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-// FLOWIP-080c: StatefulWithEmission Wrapper
-//
-// Combines an Accumulator with an EmissionStrategy to implement the StatefulHandler trait.
-// This is the bridge between the composable primitives and the existing infrastructure.
+//! Stateful accumulator/emission composition.
+//!
+//! FLOWIP-134e makes the emission policy immutable configuration. All cadence
+//! evolution lives in [`WrapperState`], alongside the accumulator's domain state.
 
 use super::trace::TraceState;
-use super::Accumulator;
 use crate::stages::common::handler_error::HandlerError;
-use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::common::handlers::stateful::{
+    StatefulEmission, TypedStatefulContribution, TypedStatefulDrainInvocation,
+    TypedStatefulHandler, TypedStatefulInvocation,
+};
 use crate::stages::stateful::strategies::emissions::EmissionStrategy;
-use crate::typing::StatefulTyping;
-use obzenflow_core::event::context::causality_context::CausalityContext;
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::{OneFactStageOutput, TypedPayload};
 use std::fmt::Debug;
 use std::time::{Duration, Instant};
 
-/// Apply the wrapper's whole-batch trace to root-causality outputs.
-///
-/// Built-in accumulators author their own per-output causality and correlation, so
-/// their emitted events are non-root and are left untouched here. Any output left at
-/// root causality (the common case for a custom single-output accumulator that just
-/// calls `ChainEventFactory::data_event`) is stamped with the full contributing
-/// input frontier and a uniform-or-mixed correlation reconciliation. This is exact
-/// for single-output emission and intentionally over-attributes, rather than
-/// dropping parents, for multi-output custom accumulators, which should author their
-/// own per-output causality instead.
-///
-/// The frontier is already bounded: `TraceState::record_event` caps `parent_ids` and
-/// the distinct correlation set at the lineage-depth limit.
-fn apply_batch_trace(trace: &TraceState, events: &mut [ChainEvent]) {
-    let parent_ids = trace.parent_ids();
-    if parent_ids.is_empty() {
-        return;
-    }
+type AccumulatorTransition<S, O> = (
+    StatefulEmission<WrapperState<S>, O>,
+    Option<Vec<TraceState>>,
+);
 
-    for event in events.iter_mut() {
-        if event.is_lifecycle() || event.is_control() {
-            continue;
-        }
-
-        // Leave accumulator-authored provenance alone; only stamp root outputs.
-        if !event.causality.is_root() {
-            continue;
-        }
-
-        event.causality = CausalityContext {
-            parent_ids: parent_ids.clone(),
-        };
-
-        if event.correlation.is_none() {
-            trace.apply_correlation_to_event(event);
-        }
-
-        if event.replay_context.is_none() {
-            event.replay_context = trace.replay_context();
-        }
-    }
-}
-
-/// Wrapper state that includes accumulator state, emission strategy, and tracking.
+/// Explicit domain and cadence state for an accumulator strategy.
 #[derive(Clone, Debug)]
-pub struct WrapperState<S, E>
-where
-    E: EmissionStrategy,
-{
-    /// The accumulator's state
+pub struct WrapperState<S> {
     pub inner: S,
-    /// The emission strategy (part of state so it can maintain its own state)
-    pub emission: E,
-    /// Number of events processed
     pub events_seen: u64,
-    /// Last emission timestamp
-    pub last_emit: Option<Instant>,
-    /// Whole-batch provenance trace of contributing inputs since the last reset.
-    ///
-    /// Used as a fallback to stamp lineage and correlation onto root-causality
-    /// outputs from accumulators that do not author their own provenance. Its
-    /// lifecycle is coupled to the accumulator's: it resets exactly when the
-    /// accumulator resets (`EmissionStrategy::resets_accumulator_on_emit`).
-    ///
-    /// Scoped to the crate: exposing the trace type publicly is a deferred API
-    /// decision (see FLOWIP-054j), so this field is not part of the public surface.
-    pub(crate) trace: TraceState,
+    pub period_started_at: Option<Instant>,
 }
 
-/// Combines an Accumulator with an EmissionStrategy to implement StatefulHandler.
-///
-/// This wrapper bridges the gap between the composable accumulator/emission
-/// primitives and the existing StatefulHandler infrastructure from FLOWIP-080b.
-///
-/// # Type Parameters
-///
-/// * `A` - The accumulator type
-/// * `E` - The emission strategy type
-///
-/// # Examples
-///
-/// ```ignore
-/// use obzenflow_runtime::stages::stateful::strategies::accumulators::{GroupBy, StatefulWithEmission};
-/// use obzenflow_runtime::stages::stateful::strategies::emissions::OnEOF;
-///
-/// let accumulator = GroupBy::new("user_id", |event, count: &mut u64| {
-///     *count += 1;
-/// });
-/// let emission = OnEOF::new();
-///
-/// let handler = StatefulWithEmission::new(accumulator, emission);
-/// ```
+impl<S> WrapperState<S> {
+    fn period_elapsed(&self) -> Option<Duration> {
+        self.period_started_at
+            .map(|started| Instant::now().saturating_duration_since(started))
+    }
+
+    fn record_input(&mut self) {
+        if self.period_started_at.is_none() {
+            self.period_started_at = Some(Instant::now());
+        }
+        self.events_seen = self.events_seen.saturating_add(1);
+    }
+
+    fn advance_period(&mut self) {
+        self.events_seen = 0;
+        self.period_started_at = None;
+    }
+}
+
+/// Combines an accumulator with immutable emission configuration.
 #[derive(Debug)]
-pub struct StatefulWithEmission<A, E>
+pub struct StatefulWithEmission<A, E> {
+    accumulator: A,
+    emission: E,
+}
+
+impl<A, E> StatefulWithEmission<A, E>
 where
-    A: Accumulator,
     E: EmissionStrategy,
 {
-    accumulator: A,
-    initial_emission: E,
-    /// FLOWIP-010 §7: build-resolved, installed by the stage builder;
-    /// default until then. Passed to `TraceState::record_event` as data
-    /// (never stored in the serialized state).
-    lineage: obzenflow_core::config::LineagePolicy,
+    pub fn new(accumulator: A, emission: E) -> Self {
+        Self {
+            accumulator,
+            emission,
+        }
+    }
+}
+
+impl<A, E> Clone for StatefulWithEmission<A, E>
+where
+    A: Clone,
+    E: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            accumulator: self.accumulator.clone(),
+            emission: self.emission.clone(),
+        }
+    }
+}
+
+/// One accumulator projection plus optional framework-owned contribution evidence.
+#[doc(hidden)]
+pub struct AccumulatorOutput<O> {
+    pub(crate) output: O,
+    pub(crate) trace: Option<TraceState>,
+}
+
+impl<O> AccumulatorOutput<O> {
+    pub(crate) fn whole_batch(output: O) -> Self {
+        Self {
+            output,
+            trace: None,
+        }
+    }
+
+    pub(crate) fn exact(output: O, trace: TraceState) -> Self {
+        Self {
+            output,
+            trace: Some(trace),
+        }
+    }
+}
+
+/// A first-class typed stateful accumulation strategy.
+///
+/// An accumulator owns the domain fold and its value projection. It composes
+/// with an [`EmissionStrategy`] through [`StatefulWithEmission`] to become a
+/// [`TypedStatefulHandler`]. Implementations work only with typed values; event
+/// envelopes, writer identity, and contribution evidence remain runtime-owned.
+pub trait Accumulator: Send + Sync + Debug {
+    type State: Clone + Send + Sync + Debug;
+    type Input: TypedPayload + Send + Sync + 'static;
+    type Output: OneFactStageOutput + Send + Sync + 'static;
+
+    fn initial_state(&self) -> Self::State;
+    fn accumulate(&self, state: &mut Self::State, input: Self::Input);
+    fn outputs(&self, state: &Self::State) -> Vec<Self::Output>;
+
+    /// Runtime-only accumulation hook for opaque contribution evidence.
+    ///
+    /// External accumulators inherit whole-batch attribution and cannot inspect
+    /// the contribution token. Framework accumulators may override this hook to
+    /// retain exact per-output partitions.
+    #[doc(hidden)]
+    fn accumulate_with_contribution(
+        &self,
+        state: &mut Self::State,
+        input: Self::Input,
+        _contribution: TypedStatefulContribution,
+    ) {
+        self.accumulate(state, input);
+    }
+
+    /// Runtime-only projection hook for exact contribution partitions.
+    ///
+    /// The default deliberately applies the adapter's whole-batch frontier to
+    /// every projected value. Evidence-bearing constructors remain private to
+    /// the runtime, so authored accumulators cannot manufacture provenance.
+    #[doc(hidden)]
+    fn outputs_with_contribution(
+        &self,
+        state: &Self::State,
+    ) -> Vec<AccumulatorOutput<Self::Output>> {
+        self.outputs(state)
+            .into_iter()
+            .map(AccumulatorOutput::whole_batch)
+            .collect()
+    }
 }
 
 impl<A, E> StatefulWithEmission<A, E>
@@ -131,548 +157,148 @@ where
     A: Accumulator,
     E: EmissionStrategy,
 {
-    /// Create a new StatefulWithEmission handler.
-    ///
-    /// # Arguments
-    ///
-    /// * `accumulator` - The accumulator that defines aggregation logic
-    /// * `emission` - The strategy that controls when to emit results
-    pub fn new(accumulator: A, emission: E) -> Self {
-        Self {
-            accumulator,
-            initial_emission: emission,
-            lineage: obzenflow_core::config::LineagePolicy::default(),
+    fn typed_outputs(
+        &self,
+        state: &WrapperState<A::State>,
+    ) -> (Vec<A::Output>, Option<Vec<TraceState>>) {
+        let projected = self.accumulator.outputs_with_contribution(&state.inner);
+        let exact = projected.iter().all(|item| item.trace.is_some());
+        let mut outputs = Vec::with_capacity(projected.len());
+        let mut traces = exact.then(|| Vec::with_capacity(projected.len()));
+        for item in projected {
+            outputs.push(item.output);
+            if let (Some(target), Some(trace)) = (traces.as_mut(), item.trace) {
+                target.push(trace);
+            }
         }
+        (outputs, traces)
+    }
+
+    fn transition(
+        &self,
+        state: &WrapperState<A::State>,
+    ) -> AccumulatorTransition<A::State, A::Output> {
+        let (outputs, traces) = self.typed_outputs(state);
+        let mut next_state = state.clone();
+        next_state.advance_period();
+
+        let emission = if self.emission.resets_accumulator_on_emit() {
+            next_state.inner = self.accumulator.initial_state();
+            StatefulEmission::ResetEpoch {
+                next_state,
+                outputs,
+            }
+        } else {
+            StatefulEmission::RetainEpoch {
+                next_state,
+                outputs,
+            }
+        };
+        (emission, traces)
     }
 }
 
-impl<A, E> StatefulTyping for StatefulWithEmission<A, E>
+impl<A, E> TypedStatefulHandler for StatefulWithEmission<A, E>
 where
-    A: Accumulator + StatefulTyping,
-    E: EmissionStrategy,
+    A: Accumulator + 'static,
+    E: EmissionStrategy + Clone + 'static,
 {
+    type State = WrapperState<A::State>;
     type Input = A::Input;
     type Output = A::Output;
-}
-
-#[async_trait::async_trait]
-impl<A, E> StatefulHandler for StatefulWithEmission<A, E>
-where
-    A: Accumulator + Clone + 'static,
-    E: EmissionStrategy + Clone + Debug + 'static,
-    A::State: 'static,
-{
-    type State = WrapperState<A::State, E>;
-
-    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
-        self.lineage = policy;
-        self.accumulator.install_lineage_policy(policy);
-    }
-
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        // Check for EOF control event
-        let is_eof = match &event.content {
-            ChainEventContent::FlowControl(signal) => {
-                matches!(signal, FlowControlPayload::Eof { .. })
-            }
-            _ => false,
-        };
-
-        if is_eof {
-            // Notify emission strategy about EOF
-            state.emission.notify_eof();
-            return; // Don't accumulate EOF events
-        }
-
-        // Record the input into the whole-batch fallback trace before handing it to
-        // the accumulator. `record_event` skips lifecycle/control events itself.
-        state.trace.record_event(&event, self.lineage);
-
-        // Accumulate the event
-        self.accumulator.accumulate(&mut state.inner, event);
-        state.events_seen += 1;
-    }
-
-    fn emit_interval_hint(&self) -> Option<Duration> {
-        self.initial_emission.emit_interval_hint()
-    }
-
-    fn should_emit(&self, state: &mut Self::State) -> bool {
-        state
-            .emission
-            .should_emit(state.events_seen, state.last_emit)
-    }
-
-    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        // Get the aggregated events from accumulator
-        let mut events = self.accumulator.emit(&state.inner);
-
-        apply_batch_trace(&state.trace, &mut events);
-
-        if state.emission.resets_accumulator_on_emit() {
-            self.accumulator.reset(&mut state.inner);
-            state.trace.reset();
-        }
-
-        // Reset emission strategy
-        state.emission.reset();
-        state.last_emit = Some(Instant::now());
-
-        // Return all events (GroupBy/Conflate emit multiple, others emit one)
-        Ok(events)
-    }
 
     fn initial_state(&self) -> Self::State {
         WrapperState {
             inner: self.accumulator.initial_state(),
-            emission: self.initial_emission.clone(),
             events_seen: 0,
-            last_emit: None,
-            trace: TraceState::default(),
+            period_started_at: None,
         }
     }
 
-    fn create_events(
+    fn accumulate(&self, state: &mut Self::State, input: Self::Input) {
+        state.record_input();
+        self.accumulator.accumulate(&mut state.inner, input);
+    }
+
+    fn accumulate_invocation(
+        &self,
+        state: &mut Self::State,
+        input: Self::Input,
+        contribution: TypedStatefulContribution,
+    ) {
+        state.record_input();
+        self.accumulator
+            .accumulate_with_contribution(&mut state.inner, input, contribution);
+    }
+
+    fn should_emit(&self, state: &Self::State) -> bool {
+        self.emission
+            .should_emit(state.events_seen, state.period_elapsed())
+    }
+
+    fn emit_interval_hint(&self) -> Option<Duration> {
+        self.emission.emit_interval_hint()
+    }
+
+    fn emit(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let mut events = self.accumulator.emit(&state.inner);
-        apply_batch_trace(&state.trace, &mut events);
-        Ok(events)
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(self.transition(state).0)
     }
 
-    async fn drain(
+    fn emit_invocation(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        // Always emit remaining state on drain if we have any
-        let mut events = self.accumulator.emit(&state.inner);
-        apply_batch_trace(&state.trace, &mut events);
-        Ok(events)
-    }
-}
-
-impl<A, E> Clone for StatefulWithEmission<A, E>
-where
-    A: Accumulator + Clone,
-    E: EmissionStrategy + Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            accumulator: self.accumulator.clone(),
-            initial_emission: self.initial_emission.clone(),
-            lineage: self.lineage,
-        }
-    }
-}
-
-#[cfg(test)]
-mod time_window_tests {
-    use super::*;
-    use crate::stages::stateful::strategies::emissions::TimeWindow;
-    use obzenflow_core::event::chain_event::ChainEventFactory;
-    use obzenflow_core::id::StageId;
-    use obzenflow_core::WriterId;
-    use serde_json::json;
-    use std::time::Duration;
-
-    #[derive(Clone, Debug)]
-    struct Counter;
-
-    impl Accumulator for Counter {
-        type State = u64;
-
-        fn accumulate(&self, state: &mut Self::State, _event: ChainEvent) {
-            *state += 1;
-        }
-
-        fn initial_state(&self) -> Self::State {
-            0
-        }
-
-        fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-            vec![ChainEventFactory::data_event(
-                WriterId::from(StageId::new()),
-                "test.counter",
-                json!({ "count": state }),
-            )]
-        }
-
-        fn reset(&self, state: &mut Self::State) {
-            *state = 0;
-        }
+    ) -> Result<TypedStatefulInvocation<Self::State, Self::Output>, HandlerError> {
+        let (emission, traces) = self.transition(state);
+        Ok(match traces {
+            Some(traces) => TypedStatefulInvocation::with_output_traces(emission, traces),
+            None => TypedStatefulInvocation::facts_only(emission),
+        })
     }
 
-    #[test]
-    fn stateful_with_emission_should_emit_persists_time_window_state() {
-        let handler =
-            StatefulWithEmission::new(Counter, TimeWindow::new(Duration::from_millis(20)));
-        let mut state = handler.initial_state();
-
-        assert!(
-            !handler.should_emit(&mut state),
-            "expected initial should_emit to be false"
-        );
-
-        std::thread::sleep(Duration::from_millis(30));
-
-        assert!(
-            handler.should_emit(&mut state),
-            "expected should_emit to become true after duration has elapsed"
-        );
+    fn drain(&self, state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
+        Ok(self.typed_outputs(state).0)
     }
 
-    #[test]
-    fn stateful_with_emission_emit_within_resets_accumulator_after_periodic_emit() {
-        let mut handler =
-            StatefulWithEmission::new(Counter, TimeWindow::new(Duration::from_millis(20)));
-        let mut state = handler.initial_state();
-
-        for _ in 0..3 {
-            handler.accumulate(
-                &mut state,
-                ChainEventFactory::data_event(
-                    WriterId::from(StageId::new()),
-                    "test.in",
-                    json!({ "n": 1 }),
-                ),
-            );
-        }
-
-        let _ = handler.emit(&mut state).expect("expected emit to succeed");
-
-        assert_eq!(
-            state.inner, 0,
-            "expected accumulator state to reset after a periodic time-window emit"
-        );
+    fn drain_invocation(
+        &self,
+        state: &Self::State,
+    ) -> Result<TypedStatefulDrainInvocation<Self::Output>, HandlerError> {
+        let (outputs, traces) = self.typed_outputs(state);
+        Ok(match traces {
+            Some(traces) => TypedStatefulDrainInvocation::with_output_traces(outputs, traces),
+            None => TypedStatefulDrainInvocation::facts_only(outputs),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stages::stateful::strategies::accumulators::{GroupBy, Reduce};
-    use crate::stages::stateful::strategies::emissions::{EmitAlways, EveryN, OnEOF};
-    use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::id::StageId;
-    use obzenflow_core::WriterId;
-    use serde::Serialize;
-    use serde_json::json;
+    use crate::stages::stateful::strategies::emissions::{EveryN, TimeWindow};
 
-    #[derive(Clone, Debug, Default, Serialize)]
-    struct TestStats {
-        count: u64,
-    }
-
-    #[tokio::test]
-    async fn test_wrapper_with_groupby_on_eof() {
-        let accumulator = GroupBy::new("category", |_event: &ChainEvent, stats: &mut TestStats| {
-            stats.count += 1;
-        });
-        let emission = OnEOF::new();
-        let mut handler = StatefulWithEmission::new(accumulator, emission);
-
-        // Initial state
-        let mut state = handler.initial_state();
-
-        // Process some events
-        let event1 = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "test",
-            json!({ "category": "A" }),
-        );
-        handler.accumulate(&mut state, event1);
-        assert!(!handler.should_emit(&mut state)); // OnEOF doesn't emit during processing
-
-        let event2 = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "test",
-            json!({ "category": "B" }),
-        );
-        handler.accumulate(&mut state, event2);
-        assert!(!handler.should_emit(&mut state));
-
-        // Send EOF to trigger emission
-        let eof_event = ChainEventFactory::eof_event(WriterId::from(StageId::new()), true);
-        handler.accumulate(&mut state, eof_event);
-        assert!(handler.should_emit(&mut state)); // Should emit after EOF
-
-        // Emit should return aggregated events (one per group for GroupBy)
-        let emitted = handler
-            .emit(&mut state)
-            .expect("StatefulWithEmission::emit should succeed in GroupBy EOF test");
-        assert!(!emitted.is_empty());
-        // GroupBy with 2 categories should emit 2 events
-        assert_eq!(emitted.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_wrapper_with_reduce_every_n() {
-        let accumulator = Reduce::new(0u64, |count: &mut u64, _event: &ChainEvent| {
-            *count += 1;
-        });
-        let emission = EveryN::new(3);
-        let mut handler = StatefulWithEmission::new(accumulator, emission);
-
-        let mut state = handler.initial_state();
-
-        // Process events 1-2: no emission
-        for _ in 0..2 {
-            let event =
-                ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}));
-            handler.accumulate(&mut state, event);
-            assert!(!handler.should_emit(&mut state));
-        }
-
-        // Process event 3: should emit
-        let event =
-            ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}));
-        handler.accumulate(&mut state, event);
-        assert!(handler.should_emit(&mut state)); // Should emit after 3 events
-
-        // Emit should return an event (Reduce emits one event)
-        let emitted = handler
-            .emit(&mut state)
-            .expect("StatefulWithEmission::emit should succeed in EveryN test");
-        assert!(!emitted.is_empty());
-        assert_eq!(emitted.len(), 1);
+    #[test]
+    fn probes_do_not_mutate_cadence_state() {
+        let state = WrapperState {
+            inner: (),
+            events_seen: 2,
+            period_started_at: Some(Instant::now()),
+        };
+        let before_events = state.events_seen;
+        let before_start = state.period_started_at;
+        let policy = EveryN::new(2);
+        assert!(policy.should_emit(state.events_seen, state.period_elapsed()));
+        assert!(policy.should_emit(state.events_seen, state.period_elapsed()));
+        assert_eq!(state.events_seen, before_events);
+        assert_eq!(state.period_started_at, before_start);
     }
 
     #[test]
-    fn test_wrapper_propagates_lineage_on_emit() {
-        let accumulator = Reduce::new(0u64, |count: &mut u64, _event: &ChainEvent| {
-            *count += 1;
-        });
-        let emission = EmitAlways;
-        let mut handler = StatefulWithEmission::new(accumulator, emission);
-
-        let mut state = handler.initial_state();
-
-        let event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "test",
-            json!({ "value": 1 }),
-        )
-        .with_new_correlation("test_source");
-        let correlation = event.correlation.clone();
-        let parent_id = event.id;
-
-        handler.accumulate(&mut state, event);
-        assert!(handler.should_emit(&mut state));
-
-        let mut emitted = handler
-            .emit(&mut state)
-            .expect("StatefulWithEmission::emit should succeed in lineage test");
-        assert_eq!(emitted.len(), 1);
-
-        let out = emitted.pop().expect("expected output event");
-        assert_eq!(out.correlation, correlation);
-        assert_eq!(out.causality.parent_ids, vec![parent_id]);
-        assert!(out.correlation_payload().is_some());
-    }
-
-    #[test]
-    fn test_wrapper_with_emit_always() {
-        let accumulator = Reduce::new(0u64, |count: &mut u64, _event: &ChainEvent| {
-            *count += 1;
-        });
-        let emission = EmitAlways;
-        let mut handler = StatefulWithEmission::new(accumulator, emission);
-
-        let mut state = handler.initial_state();
-
-        let event =
-            ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}));
-
-        // EmitAlways should emit after every event
-        handler.accumulate(&mut state, event);
-        assert!(handler.should_emit(&mut state)); // Should always emit
-
-        // Emit should return an event (Reduce emits one event)
-        let emitted = handler
-            .emit(&mut state)
-            .expect("StatefulWithEmission::emit should succeed in EmitAlways test");
-        assert!(!emitted.is_empty());
-        assert_eq!(emitted.len(), 1);
-    }
-
-    #[test]
-    fn test_wrapper_clone() {
-        let accumulator = Reduce::new(0u64, |count: &mut u64, _event: &ChainEvent| {
-            *count += 1;
-        });
-        let emission = OnEOF::new();
-        let handler = StatefulWithEmission::new(accumulator, emission);
-
-        let _cloned = handler.clone();
-        // Should compile and not panic
-    }
-}
-
-#[cfg(test)]
-mod batch_trace_tests {
-    use super::*;
-    use crate::stages::stateful::strategies::emissions::{OnEOF, TimeWindow};
-    use obzenflow_core::event::chain_event::ChainEventFactory;
-    use obzenflow_core::event::CorrelationId;
-    use obzenflow_core::id::StageId;
-    use obzenflow_core::WriterId;
-    use serde_json::json;
-    use std::time::Duration;
-    use ulid::Ulid;
-
-    /// A custom single-output accumulator that emits a root-causality event and does
-    /// not author any provenance, exercising the wrapper's batch-trace fallback.
-    #[derive(Clone, Debug)]
-    struct RootCounter;
-
-    impl Accumulator for RootCounter {
-        type State = u64;
-
-        fn accumulate(&self, state: &mut Self::State, _event: ChainEvent) {
-            *state += 1;
-        }
-
-        fn initial_state(&self) -> Self::State {
-            0
-        }
-
-        fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-            vec![ChainEventFactory::data_event(
-                WriterId::from(StageId::new()),
-                "root.counter",
-                json!({ "count": state }),
-            )]
-        }
-
-        fn reset(&self, state: &mut Self::State) {
-            *state = 0;
-        }
-    }
-
-    fn input_event() -> ChainEvent {
-        ChainEventFactory::data_event(WriterId::from(StageId::new()), "in", json!({ "n": 1 }))
-    }
-
-    fn deterministic_correlation_id(value: u128) -> CorrelationId {
-        CorrelationId::from_ulid(Ulid::from(value))
-    }
-
-    #[test]
-    fn batch_trace_fallback_parents_root_output_to_all_inputs() {
-        let mut handler = StatefulWithEmission::new(RootCounter, OnEOF::new());
-        let mut state = handler.initial_state();
-
-        // Three inputs, each with a distinct correlation id (mixed fan-in).
-        let mut ids = Vec::new();
-        for _ in 0..3 {
-            let event = input_event().with_new_correlation("src");
-            ids.push(event.id);
-            handler.accumulate(&mut state, event);
-        }
-
-        let eof = ChainEventFactory::eof_event(WriterId::from(StageId::new()), true);
-        handler.accumulate(&mut state, eof);
-        assert!(handler.should_emit(&mut state));
-
-        let emitted = handler.emit(&mut state).expect("emit should succeed");
-        assert_eq!(emitted.len(), 1);
-        let out = &emitted[0];
-
-        // Full contributing frontier, not just the last input.
-        assert_eq!(out.causality.parent_ids, ids);
-        // Mixed correlation must not collapse to one arbitrary scalar.
-        assert!(out.correlation_id().is_none());
-        let recorded = out
-            .correlation_ids()
-            .expect("mixed fan-in must record a correlation set");
-        assert_eq!(recorded.len(), 3);
-        assert!(!out.correlation_ids_truncated());
-    }
-
-    #[test]
-    fn batch_trace_fallback_marks_truncated_correlation_set() {
-        let mut handler = StatefulWithEmission::new(RootCounter, OnEOF::new());
-        let mut state = handler.initial_state();
-
-        for id in (100..=200).rev().map(deterministic_correlation_id) {
-            let mut event = input_event();
-            event.set_single_correlation(id, None);
-            handler.accumulate(&mut state, event);
-        }
-
-        let eof = ChainEventFactory::eof_event(WriterId::from(StageId::new()), true);
-        handler.accumulate(&mut state, eof);
-        let emitted = handler.emit(&mut state).expect("emit should succeed");
-        assert_eq!(emitted.len(), 1);
-
-        let out = &emitted[0];
-        let recorded = out
-            .correlation_ids()
-            .expect("mixed fan-in must record a correlation set");
-        assert_eq!(recorded.len(), 100);
-        assert!(out.correlation_ids_truncated());
-        assert!(!recorded.contains(&deterministic_correlation_id(100)));
-    }
-
-    #[test]
-    fn batch_trace_fallback_carries_uniform_correlation_as_scalar() {
-        let mut handler = StatefulWithEmission::new(RootCounter, OnEOF::new());
-        let mut state = handler.initial_state();
-
-        // Seed one correlation and reuse it for every input (uniform fan-in).
-        let seed = input_event().with_new_correlation("src");
-        let correlation = seed.correlation_id();
-        let payload = seed.correlation_payload().cloned();
-        assert!(correlation.is_some());
-
-        let mut ids = Vec::new();
-        for _ in 0..3 {
-            let mut event = input_event();
-            event.set_single_correlation(
-                correlation.expect("correlation should be set"),
-                payload.clone(),
-            );
-            ids.push(event.id);
-            handler.accumulate(&mut state, event);
-        }
-
-        let eof = ChainEventFactory::eof_event(WriterId::from(StageId::new()), true);
-        handler.accumulate(&mut state, eof);
-        let emitted = handler.emit(&mut state).expect("emit should succeed");
-        assert_eq!(emitted.len(), 1);
-        let out = &emitted[0];
-
-        assert_eq!(out.causality.parent_ids, ids);
-        assert_eq!(out.correlation_id(), correlation);
-        assert_eq!(out.correlation_ids().map(|ids| ids.len()), Some(1));
-    }
-
-    #[test]
-    fn batch_trace_resets_with_accumulator_on_tumbling_emit() {
-        // TimeWindow is a tumbling strategy (resets_accumulator_on_emit == true).
-        // Drive emit() directly: the reset coupling under test lives in emit(), not
-        // in the should_emit timing (which the time-window tests cover separately).
-        let mut handler =
-            StatefulWithEmission::new(RootCounter, TimeWindow::new(Duration::from_millis(10)));
-        let mut state = handler.initial_state();
-
-        // First window: two inputs.
-        handler.accumulate(&mut state, input_event());
-        handler.accumulate(&mut state, input_event());
-        let first = handler.emit(&mut state).expect("first emit should succeed");
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].causality.parent_ids.len(), 2);
-
-        // Second window: one new input. The trace must have reset with the
-        // accumulator, so the output is parented only to this window's input.
-        let third = input_event();
-        let third_id = third.id;
-        handler.accumulate(&mut state, third);
-        let second = handler
-            .emit(&mut state)
-            .expect("second emit should succeed");
-        assert_eq!(second.len(), 1);
-        assert_eq!(second[0].causality.parent_ids, vec![third_id]);
+    fn time_window_requires_an_armed_period() {
+        let policy = TimeWindow::new(Duration::ZERO);
+        assert!(!policy.should_emit(1, None));
+        assert!(policy.should_emit(1, Some(Duration::ZERO)));
     }
 }

@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use obzenflow_core::{ChainEvent, TypedPayload};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::StatefulHandler;
-use obzenflow_runtime::typing::StatefulTyping;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,11 +24,6 @@ impl TypedPayload for First {
 
 #[derive(Clone, Debug)]
 struct RawStateful;
-
-impl StatefulTyping for RawStateful {
-    type Input = Input;
-    type Output = First;
-}
 
 #[async_trait]
 impl StatefulHandler for RawStateful {

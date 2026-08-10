@@ -16,8 +16,8 @@ use obzenflow_dsl::{
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, FiniteSourceHandler, SinkHandler, StatefulHandler,
-    TypedTransformHandler,
+    AsyncFiniteSourceHandler, FiniteSourceHandler, SinkHandler, StatefulEmission,
+    TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::testing::{JournalProbe, TestClock};
 use serde::{Deserialize, Serialize};
@@ -191,19 +191,23 @@ impl TypedTransformHandler for DropAllTransform {
 #[derive(Clone, Debug)]
 struct NoopStateful;
 
-#[async_trait]
-impl StatefulHandler for NoopStateful {
+impl TypedStatefulHandler for NoopStateful {
     type State = ();
+    type Input = SeedEvent;
+    type Output = SeedEvent;
 
-    fn accumulate(&mut self, _state: &mut Self::State, _event: ChainEvent) {}
+    fn accumulate(&self, _state: &mut Self::State, _event: SeedEvent) {}
 
     fn initial_state(&self) -> Self::State {}
 
-    fn create_events(
+    fn emit(
         &self,
         _state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: (),
+            outputs: Vec::new(),
+        })
     }
 }
 

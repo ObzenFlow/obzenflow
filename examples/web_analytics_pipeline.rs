@@ -88,8 +88,7 @@ struct SessionUpdate {
 }
 
 impl TypedPayload for SessionUpdate {
-    const EVENT_TYPE: &'static str = SessionData::EVENT_TYPE;
-    const SCHEMA_VERSION: u32 = SessionData::SCHEMA_VERSION;
+    const EVENT_TYPE: &'static str = "analytics.session_update";
 }
 
 impl UserEvent {
@@ -282,6 +281,10 @@ fn main() -> Result<()> {
                 |event: &UserEvent| event.user_id.clone(),
                 |session: &mut SessionData, event: &UserEvent| {
                     event.update_session(session);
+                },
+                |key: &String, result: &SessionData| SessionUpdate {
+                    key: key.clone(),
+                    result: result.clone(),
                 },
             )
             .emit_within(Duration::from_secs(3));

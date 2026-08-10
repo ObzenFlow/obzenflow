@@ -734,15 +734,21 @@ where
                     .into_iter()
                     .flat_map(|chains| chains.iter().enumerate())
                     .filter_map(|(feed_index, feed_chain)| {
-                        writer_seq_by_event_type
+                        let mut matched = false;
+                        let total = writer_seq_by_event_type
                             .iter()
-                            .find(|(event_type, _)| {
-                                Self::selected_feed_matches_event_type(
+                            .filter(|(event_type, _)| {
+                                let is_match = Self::selected_feed_matches_event_type(
                                     &feed_chain.metadata,
                                     event_type.as_str(),
-                                )
+                                );
+                                matched |= is_match;
+                                is_match
                             })
-                            .map(|(_, writer_seq)| (feed_index, *writer_seq))
+                            .fold(0_u64, |sum, (_, writer_seq)| {
+                                sum.saturating_add(writer_seq.0)
+                            });
+                        matched.then_some((feed_index, SeqNo(total)))
                     })
                     .collect();
 

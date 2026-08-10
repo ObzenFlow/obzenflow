@@ -14,11 +14,10 @@ use obzenflow_dsl::{async_source, join, sink, source, stateful, test_flow, trans
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, FiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
-    TypedTransformHandler,
+    AsyncFiniteSourceHandler, FiniteSourceHandler, JoinHandler, SinkHandler, StatefulEmission,
+    TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_runtime::typing::StatefulTyping;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -172,21 +171,21 @@ impl TypedTransformHandler for PassthroughTransform {
 #[derive(Clone, Debug)]
 struct PassthroughStateful;
 
-impl StatefulTyping for PassthroughStateful {
+impl TypedStatefulHandler for PassthroughStateful {
+    type State = ();
     type Input = RateLimiterTestEvent;
     type Output = RateLimiterTestEvent;
-}
 
-#[async_trait]
-impl StatefulHandler for PassthroughStateful {
-    type State = ();
-    fn accumulate(&mut self, _state: &mut Self::State, _event: ChainEvent) {}
+    fn accumulate(&self, _state: &mut Self::State, _event: RateLimiterTestEvent) {}
     fn initial_state(&self) -> Self::State {}
-    fn create_events(
+    fn emit(
         &self,
         _state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![])
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: (),
+            outputs: vec![],
+        })
     }
 }
 

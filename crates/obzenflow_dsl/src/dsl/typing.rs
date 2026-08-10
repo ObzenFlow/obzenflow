@@ -4,7 +4,7 @@
 
 //! Types-first metadata and descriptor wrappers for the DSL layer.
 
-use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
+use crate::dsl::stage_descriptor::{StageDescriptor, StatefulDescriptor, TransformDescriptor};
 use crate::dsl::StageCreationResult;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
@@ -13,7 +13,7 @@ use obzenflow_adapters::middleware::{
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{ChainEvent, StageId, WriterId};
-use obzenflow_core::{Member, StageFactSet, TypedFactType, TypedPayload};
+use obzenflow_core::{Member, OneFactStageOutput, StageFactSet, TypedFactType, TypedPayload};
 use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, PayloadTypeDescriptor,
     StageOutputContract,
@@ -24,14 +24,13 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
-    TypedTransformHandler, TypedTransformHandlerAdapter,
+    InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulEmission, TransformHandler,
+    TypedStatefulHandler, TypedStatefulHandlerAdapter, TypedTransformHandler,
+    TypedTransformHandlerAdapter,
 };
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
-use obzenflow_runtime::typing::{
-    JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
-};
+use obzenflow_runtime::typing::{JoinTyping, SinkTyping, SourceTyping, TransformTyping};
 use obzenflow_topology::{EdgeKind, StageTypingInfo, Topology, TypeHintInfo};
 use std::any::{type_name, TypeId};
 use std::collections::{HashMap, HashSet};
@@ -81,6 +80,19 @@ pub trait TransformInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput
 
 #[diagnostic::do_not_recommend]
 impl<Input> TransformInputMatchesArrow<Input> for Input {}
+
+/// Diagnostic facade for equality between a plain typed stateful handler's
+/// authoritative input and the stage-arrow input projection.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "this stateful handler does not witness its arrow contract",
+    label = "the handler's `Input` does not match the fact type declared before `->`",
+    note = "implement TypedStatefulHandler with Input and Output matching the stateful! arrow (FLOWIP-134e)"
+)]
+pub trait StatefulInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput> {}
+
+#[diagnostic::do_not_recommend]
+impl<Input> StatefulInputMatchesArrow<Input> for Input {}
 
 /// Diagnostic facade for equality between an effectful stateful handler's
 /// authoritative input and the stage-arrow input projection.
@@ -625,6 +637,104 @@ where
     wrap_typed_descriptor(descriptor, metadata)
 }
 
+fn stateful_metadata_from_contract<ArrowInput, PrimaryOutput, ArrowOutputSet>(
+    is_placeholder: bool,
+    placeholder_message: Option<String>,
+) -> StageTypingMetadata
+where
+    ArrowInput: TypedPayload + 'static,
+    PrimaryOutput: TypedPayload + 'static,
+    ArrowOutputSet: StageFactSet,
+{
+    let output_contract = ArrowOutputSet::member_fact_types()
+        .into_iter()
+        .map(TypeHint::exact_fact_type)
+        .collect();
+    StageTypingMetadata::stateful(
+        TypeHint::exact_payload::<ArrowInput>(),
+        TypeHint::exact_payload::<PrimaryOutput>(),
+        is_placeholder,
+        placeholder_message,
+    )
+    .with_output_contract(output_contract)
+}
+
+/// Canonical admission factory for a real synchronous plain-stateful stage.
+#[doc(hidden)]
+pub fn typed_stateful_descriptor<
+    H,
+    ArrowInput,
+    PrimaryOutput,
+    ArrowOutputSet,
+    PrimaryOutputIndex,
+    ArrowToHandlerProof,
+    HandlerToArrowProof,
+>(
+    name: impl Into<String>,
+    handler: H,
+    emit_interval: Option<std::time::Duration>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    H: TypedStatefulHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    H::Input: StatefulInputMatchesArrow<ArrowInput>,
+    ArrowInput: TypedPayload + Send + Sync + 'static,
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
+    <H::Output as StageFactSet>::Members:
+        HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
+{
+    let metadata =
+        stateful_metadata_from_contract::<ArrowInput, PrimaryOutput, ArrowOutputSet>(false, None);
+    let descriptor: Box<dyn StageDescriptor> = Box::new(StatefulDescriptor {
+        name: name.into(),
+        handler: TypedStatefulHandlerAdapter::new(handler),
+        emit_interval,
+        observers,
+        backpressure,
+    });
+    wrap_typed_descriptor(descriptor, metadata)
+}
+
+/// Canonical admission factory for a plain-stateful placeholder.
+#[doc(hidden)]
+pub fn placeholder_stateful_descriptor<
+    ArrowInput,
+    PrimaryOutput,
+    ArrowOutputSet,
+    PrimaryOutputIndex,
+>(
+    name: impl Into<String>,
+    message: Option<&'static str>,
+    emit_interval: Option<std::time::Duration>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    ArrowInput: TypedPayload + Send + Sync + 'static,
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>,
+{
+    let metadata = stateful_metadata_from_contract::<ArrowInput, PrimaryOutput, ArrowOutputSet>(
+        true,
+        message.map(str::to_string),
+    );
+    let descriptor: Box<dyn StageDescriptor> = Box::new(StatefulDescriptor {
+        name: name.into(),
+        handler: TypedStatefulHandlerAdapter::new(
+            PlaceholderStateful::<ArrowInput, PrimaryOutput>::new(message),
+        ),
+        emit_interval,
+        observers,
+        backpressure,
+    });
+    wrap_typed_descriptor(descriptor, metadata)
+}
+
 fn placeholder_message(stage_kind: &str, message: Option<&str>) -> String {
     match message {
         Some(message) => format!("{stage_kind} placeholder executed: {message}"),
@@ -893,20 +1003,16 @@ impl<In, Out> fmt::Debug for PlaceholderStateful<In, Out> {
     }
 }
 
-impl<In, Out> StatefulTyping for PlaceholderStateful<In, Out> {
-    type Input = In;
-    type Output = Out;
-}
-
-#[async_trait]
-impl<In, Out> StatefulHandler for PlaceholderStateful<In, Out>
+impl<In, Out> TypedStatefulHandler for PlaceholderStateful<In, Out>
 where
-    In: Send + Sync + 'static,
-    Out: Send + Sync + 'static,
+    In: TypedPayload + Send + Sync + 'static,
+    Out: OneFactStageOutput + Send + Sync + 'static,
 {
     type State = ();
+    type Input = In;
+    type Output = Out;
 
-    fn accumulate(&mut self, _state: &mut Self::State, _event: ChainEvent) {
+    fn accumulate(&self, _state: &mut Self::State, _input: Self::Input) {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("stateful", self.message));
         }
@@ -914,11 +1020,17 @@ where
 
     fn initial_state(&self) -> Self::State {}
 
-    fn create_events(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
+    fn emit(
+        &self,
+        _state: &Self::State,
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: (),
+            outputs: Vec::new(),
+        })
     }
 
-    async fn drain(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn drain(&self, _state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("stateful", self.message));
         }

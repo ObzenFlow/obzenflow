@@ -42,86 +42,14 @@ pub enum TerminalValidation {
     Secondary(StageFatal),
 }
 
-/// Handler for stateful processing stages
+/// Runtime erasure substrate for stateful supervisors.
 ///
-/// Stateful handlers maintain internal state across events and use FSM states
-/// to control when accumulated results are written to the journal.
-///
-/// Key principle: Accumulation (processing many events) is separate from
-/// emission (writing ONE aggregated event to the journal).
-///
-/// # FSM States
-/// - `Accumulating`: Process events, update state, write NOTHING
-/// - `Emitting`: Write ONE aggregated event to journal
-/// - `Draining`: Handle EOF, emit final result
-///
-/// # Example
-/// ```ignore
-/// use obzenflow_runtime::stages::common::handlers::StatefulHandler;
-/// use obzenflow_core::{ChainEvent, EventId, WriterId, Result};
-/// use serde_json::json;
-/// use async_trait::async_trait;
-///
-/// #[derive(Clone, Default)]
-/// struct AggregatorState {
-///     count: u64,
-///     sum: f64,
-///     events_since_emit: u64,
-/// }
-///
-/// struct MetricsAggregator {
-///     window_size: u64,
-///     writer_id: WriterId,
-/// }
-///
-/// #[async_trait]
-/// impl StatefulHandler for MetricsAggregator {
-///     type State = AggregatorState;
-///
-///     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-///         let value = event.payload()["value"].as_f64().unwrap_or(0.0);
-///         state.count += 1;
-///         state.sum += value;
-///         state.events_since_emit += 1;
-///     }
-///
-///     fn should_emit(&self, state: &mut Self::State) -> bool {
-///         state.events_since_emit >= self.window_size
-///     }
-///
-///     fn emit(&self, state: &mut Self::State) -> Option<ChainEvent> {
-///         if state.count == 0 {
-///             return None;
-///         }
-///
-///         let event = ChainEvent::data(
-///             EventId::new(),
-///             self.writer_id.clone(),
-///             "metrics",
-///             json!({
-///                 "avg": state.sum / state.count as f64,
-///                 "count": state.count,
-///                 "window": state.events_since_emit,
-///             })
-///         );
-///
-///         // Reset window counter but keep running totals
-///         state.events_since_emit = 0;
-///
-///         Some(event)
-///     }
-///
-///     fn initial_state(&self) -> Self::State {
-///         AggregatorState::default()
-///     }
-///
-///     async fn drain(&self, state: &Self::State) -> Result<Option<ChainEvent>> {
-///         // Emit final aggregation if we have data
-///         Ok(self.emit(&mut state.clone()))
-///     }
-/// }
-/// ```
+/// This mutable, event-aware interface is intentionally hidden from authored
+/// handlers. Plain authored stages implement [`super::TypedStatefulHandler`]
+/// and enter the runtime through its sealed adapter; the few structural
+/// adapters that implement this trait are pinned by a source allowlist.
 #[async_trait]
+#[doc(hidden)]
 pub trait StatefulHandler: Send + Sync {
     /// The internal state type
     type State: Clone + Send + Sync;
@@ -130,6 +58,9 @@ pub trait StatefulHandler: Send + Sync {
     /// lineage policy. Handlers that create derived events store it; the
     /// default ignores it.
     fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
+
+    /// Installed once by the runtime before the handler is shared.
+    fn install_writer_id(&mut self, _writer_id: WriterId) {}
 
     /// Accumulate an event into the state (called in Accumulating state)
     ///
@@ -225,6 +156,9 @@ pub trait UnifiedStatefulHandler: Send + Sync {
     /// FLOWIP-010 §7: forwarded to the wrapped handler at stage build.
     fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
 
+    /// Installed once by the runtime before the handler is shared.
+    fn install_writer_id(&mut self, _writer_id: WriterId) {}
+
     /// Accumulate one event. `scope` is the per-event middleware execution
     /// scope computed by the supervisor at dispatch (FLOWIP-120c H3);
     /// handlers without middleware ignore it.
@@ -299,6 +233,10 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 
     fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
         StatefulHandler::install_lineage_policy(self, policy)
+    }
+
+    fn install_writer_id(&mut self, writer_id: WriterId) {
+        StatefulHandler::install_writer_id(self, writer_id)
     }
 
     async fn accumulate(

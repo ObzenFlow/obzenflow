@@ -17,7 +17,7 @@ use obzenflow_dsl::{join, sink, source, stateful, test_flow};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
+    FiniteSourceHandler, JoinHandler, SinkHandler, StatefulEmission, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
@@ -130,24 +130,21 @@ struct CounterState {
 
 #[derive(Clone, Debug)]
 struct SlowAccumulator {
-    writer_id: WriterId,
     sleep_per_event: Duration,
 }
 
 impl SlowAccumulator {
     fn new(sleep_per_event: Duration) -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-            sleep_per_event,
-        }
+        Self { sleep_per_event }
     }
 }
 
-#[async_trait]
-impl StatefulHandler for SlowAccumulator {
+impl TypedStatefulHandler for SlowAccumulator {
     type State = CounterState;
+    type Input = MetricEvent;
+    type Output = AggregateMetricEvent;
 
-    fn accumulate(&mut self, state: &mut Self::State, _event: ChainEvent) {
+    fn accumulate(&self, state: &mut Self::State, _event: MetricEvent) {
         std::thread::sleep(self.sleep_per_event);
         state.count = state.count.saturating_add(1);
     }
@@ -156,15 +153,14 @@ impl StatefulHandler for SlowAccumulator {
         CounterState::default()
     }
 
-    fn create_events(
+    fn emit(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            AggregateMetricEvent::versioned_event_type(),
-            json!({ "count": state.count }),
-        )])
+    ) -> Result<StatefulEmission<Self::State, Self::Output>, HandlerError> {
+        Ok(StatefulEmission::RetainEpoch {
+            next_state: state.clone(),
+            outputs: vec![AggregateMetricEvent { count: state.count }],
+        })
     }
 }
 
