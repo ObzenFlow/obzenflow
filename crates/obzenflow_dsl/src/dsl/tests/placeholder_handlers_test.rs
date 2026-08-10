@@ -140,7 +140,7 @@ async fn placeholder_join_discards_and_drains_safely() {
     .expect("join reference");
     assert!(reference_outputs.is_empty());
 
-    let outputs = UnifiedJoinHandler::process_stream(
+    let invocation = UnifiedJoinHandler::process_stream(
         &handler,
         &mut state,
         PlaceholderInput.to_event(writer_id),
@@ -149,7 +149,9 @@ async fn placeholder_join_discards_and_drains_safely() {
         obzenflow_core::MiddlewareExecutionScope::default(),
     )
     .expect("join stream");
+    let (outputs, framework_eof) = invocation.into_parts();
     assert!(outputs.is_empty());
+    assert!(framework_eof.is_none());
 
     let eof_outputs = UnifiedJoinHandler::on_stream_eof(
         &handler,
