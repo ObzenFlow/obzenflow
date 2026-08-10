@@ -1061,6 +1061,212 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
 }
 
 #[tokio::test]
+async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier() {
+    let (stage_id, writer) = make_writer_with_window(NonZeroU64::new(1).expect("window"));
+    let flow_context = make_flow_context(
+        "flow",
+        "flow_id",
+        "stage",
+        stage_id,
+        obzenflow_core::event::context::StageType::Join,
+    );
+    let journal = Arc::new(CreditCheckingJournal::new(
+        JournalOwner::stage(stage_id),
+        writer.clone(),
+        1,
+    ));
+    let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
+    let system_journal: Arc<dyn Journal<SystemEvent>> =
+        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
+    let instrumentation = Arc::new(StageInstrumentation::new());
+
+    let mut last_fact_id = None;
+    for n in 0..5 {
+        let fact = ChainEventFactory::data_event(
+            WriterId::from(stage_id),
+            "test.joined.v1",
+            json!({"n": n}),
+        );
+        last_fact_id = Some(fact.id);
+        instrumentation.record_output_event(&fact);
+    }
+
+    let terminal = ChainEventFactory::eof_event_with_kind(
+        WriterId::from(stage_id),
+        obzenflow_core::event::payloads::flow_control_payload::EofKind::Poison,
+    );
+    let mut pulse = BackpressureActivityPulse::new();
+    let mut stall = None;
+    let mut pending_outputs = VecDeque::new();
+    let outcome = drain_one_pending(
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event: terminal,
+            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        },
+        &flow_context,
+        stage_id,
+        None,
+        &data_journal,
+        &system_journal,
+        None,
+        &instrumentation,
+        &writer,
+        &mut pulse,
+        &mut stall,
+        None,
+        None,
+        &mut pending_outputs,
+    )
+    .await
+    .expect("local terminal should seal");
+    assert_eq!(outcome, DrainOutcome::Committed { was_data: false });
+
+    let appended = journal.appended();
+    assert_eq!(appended.len(), 1);
+    let obzenflow_core::event::ChainEventContent::FlowControl(
+        obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
+            writer_id,
+            writer_seq,
+            writer_seq_by_event_type,
+            last_event_id,
+            kind,
+            ..
+        },
+    ) = &appended[0].content
+    else {
+        panic!("expected sealed EOF")
+    };
+    assert_eq!(
+        *kind,
+        obzenflow_core::event::payloads::flow_control_payload::EofKind::Poison
+    );
+    assert_eq!(*writer_id, Some(WriterId::from(stage_id)));
+    assert_eq!(*writer_seq, Some(obzenflow_core::event::types::SeqNo(5)));
+    assert_eq!(
+        writer_seq_by_event_type.get("test.joined.v1"),
+        Some(&obzenflow_core::event::types::SeqNo(5))
+    );
+    assert_eq!(*last_event_id, last_fact_id);
+}
+
+#[tokio::test]
+async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
+    let (stage_id, writer) = make_writer_with_window(NonZeroU64::new(1).expect("window"));
+    let flow_context = make_flow_context(
+        "flow",
+        "flow_id",
+        "stage",
+        stage_id,
+        obzenflow_core::event::context::StageType::Join,
+    );
+    let journal = Arc::new(CreditCheckingJournal::new(
+        JournalOwner::stage(stage_id),
+        writer.clone(),
+        1,
+    ));
+    let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
+    let system_journal: Arc<dyn Journal<SystemEvent>> =
+        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
+    let instrumentation = Arc::new(StageInstrumentation::new());
+    let fact =
+        ChainEventFactory::data_event(WriterId::from(stage_id), "test.joined.v1", json!({"n": 1}));
+    instrumentation.record_output_event(&fact);
+
+    let mut terminal = ChainEventFactory::eof_event_with_kind(
+        WriterId::from(stage_id),
+        obzenflow_core::event::payloads::flow_control_payload::EofKind::Poison,
+    );
+    if let obzenflow_core::event::ChainEventContent::FlowControl(
+        obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
+            writer_seq,
+            ..
+        },
+    ) = &mut terminal.content
+    {
+        *writer_seq = Some(obzenflow_core::event::types::SeqNo(99));
+    }
+
+    let mut pulse = BackpressureActivityPulse::new();
+    let mut stall = None;
+    let mut pending_outputs = VecDeque::new();
+    let error = drain_one_pending(
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event: terminal,
+            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        },
+        &flow_context,
+        stage_id,
+        None,
+        &data_journal,
+        &system_journal,
+        None,
+        &instrumentation,
+        &writer,
+        &mut pulse,
+        &mut stall,
+        None,
+        None,
+        &mut pending_outputs,
+    )
+    .await
+    .expect_err("conflicting terminal evidence must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("conflicts with committed frontier"),
+        "unexpected error: {error}"
+    );
+    assert!(journal.appended().is_empty());
+
+    // Classification is envelope-author based, so a conflicting payload
+    // writer cannot disguise a locally authored terminal as forwarded control
+    // and bypass the sealing check.
+    let foreign_stage = StageId::new();
+    let mut terminal = ChainEventFactory::eof_event_with_kind(
+        WriterId::from(stage_id),
+        obzenflow_core::event::payloads::flow_control_payload::EofKind::Poison,
+    );
+    if let obzenflow_core::event::ChainEventContent::FlowControl(
+        obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
+            writer_id,
+            ..
+        },
+    ) = &mut terminal.content
+    {
+        *writer_id = Some(WriterId::from(foreign_stage));
+    }
+
+    let error = drain_one_pending(
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event: terminal,
+            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        },
+        &flow_context,
+        stage_id,
+        None,
+        &data_journal,
+        &system_journal,
+        None,
+        &instrumentation,
+        &writer,
+        &mut pulse,
+        &mut stall,
+        None,
+        None,
+        &mut pending_outputs,
+    )
+    .await
+    .expect_err("conflicting terminal writer must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("payload writer conflicts with its stage author"),
+        "unexpected error: {error}"
+    );
+    assert!(journal.appended().is_empty());
+}
+
+#[tokio::test]
 async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() {
     if BackpressureWriter::is_bypass_enabled() {
         return;

@@ -139,6 +139,12 @@ where
     /// Readers for each upstream journal
     readers: Vec<ReaderSlot<T>>,
 
+    /// Replay identity alias for each current upstream stage. Re-admitted
+    /// source facts preserve their archived writer, so contract authorship
+    /// resolves through this topology-keyed map instead of comparing two
+    /// unrelated per-run StageIds.
+    archived_stage_ids_by_current: HashMap<StageId, StageId>,
+
     /// Selected Data event types by upstream reader stage.
     ///
     /// When populated for a reader, non-selected Data events are consumed from
@@ -151,12 +157,12 @@ where
     /// Input-boundary activation stamps keyed by the physical upstream stage.
     composite_entries_by_stage: HashMap<StageId, Vec<CompositeEntrySpec>>,
 
-    /// Per-reader count of Data events that survived the selected event-type
-    /// filter and were delivered as stage inputs.
+    /// Per-reader count of selected Data authored by that reader's journal
+    /// owner. Forwarded rows remain deliverable but are outside this contract
+    /// population.
     selected_data_seq_by_reader: Vec<SeqNo>,
 
-    /// Per-reader, per-event-type count of selected Data events delivered as
-    /// stage inputs.
+    /// Per-reader, per-event-type owner-authored selected Data count.
     selected_data_seq_by_reader_event_type: Vec<SelectedDataSeqByEventType>,
 
     /// Per-reader producer EOF evidence keyed by event type.

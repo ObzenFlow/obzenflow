@@ -7,7 +7,7 @@
 mod traits;
 mod typed;
 
-pub use traits::UnifiedJoinHandler;
+pub use traits::{ErasedJoinInvocation, UnifiedJoinHandler};
 pub use typed::TypedJoinHandlerAdapter;
 pub(crate) use typed::TypedJoinInvocation;
 pub use typed::{JoinReferenceView, TypedJoinHandler};

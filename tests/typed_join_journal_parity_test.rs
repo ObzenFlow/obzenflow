@@ -504,7 +504,9 @@ fn assert_journal_contract(run_dir: &Path, events: &[EventEnvelope<ChainEvent>])
         .find(|envelope| envelope.event.writer_id == writer && envelope.event.is_eof())
         .expect("join-authored EOF");
     let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        writer_seq,
         writer_seq_by_event_type,
+        last_event_id,
         ..
     }) = &local_eof.event.content
     else {
@@ -517,6 +519,12 @@ fn assert_journal_contract(run_dir: &Path, events: &[EventEnvelope<ChainEvent>])
     assert_eq!(compatible.len(), 1);
     assert_eq!(compatible[0].0.as_str(), JoinedFact::versioned_event_type());
     assert_eq!(compatible[0].1 .0, 5);
+    assert_eq!(writer_seq.map(|seq| seq.0), Some(5));
+    assert_eq!(
+        *last_event_id,
+        authored.last().map(|envelope| envelope.event.id),
+        "the terminal points at the last locally authored fact, not a forwarded row"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -544,6 +552,7 @@ async fn typed_join_has_live_replay_journal_parity_and_zero_replay_reads() {
     assert_journal_contract(&live, &live_join);
 
     let validator_rows = read_stage_appended(&live, "stream_validate").await;
+    let validator_writer = stage_writer(&live, "stream_validate");
     let foreign = validator_rows
         .iter()
         .find(|envelope| {
@@ -560,6 +569,36 @@ async fn typed_join_has_live_replay_journal_parity_and_zero_replay_reads() {
         .expect("join forwards the same error envelope");
     assert_eq!(forwarded.event.writer_id, foreign.event.writer_id);
     assert_eq!(forwarded.event.event_type(), foreign.event.event_type());
+
+    let validator_authored = validator_rows
+        .iter()
+        .filter(|envelope| envelope.event.writer_id == validator_writer && envelope.event.is_data())
+        .collect::<Vec<_>>();
+    assert_eq!(validator_authored.len(), 2);
+    let validator_eof = validator_rows
+        .iter()
+        .find(|envelope| envelope.event.writer_id == validator_writer && envelope.event.is_eof())
+        .expect("validator-authored EOF");
+    let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        writer_seq,
+        writer_seq_by_event_type,
+        last_event_id,
+        ..
+    }) = &validator_eof.event.content
+    else {
+        unreachable!("validator EOF shape")
+    };
+    assert_eq!(writer_seq.map(|seq| seq.0), Some(2));
+    assert_eq!(
+        writer_seq_by_event_type
+            .get(StreamItem::versioned_event_type().as_str())
+            .map(|seq| seq.0),
+        Some(2)
+    );
+    assert_eq!(
+        *last_event_id,
+        validator_authored.last().map(|envelope| envelope.event.id)
+    );
 
     let replay_reference_reads = Arc::new(AtomicUsize::new(0));
     let replay_stream_reads = Arc::new(AtomicUsize::new(0));

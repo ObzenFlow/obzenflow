@@ -10,6 +10,7 @@ use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -360,13 +361,14 @@ pub(super) async fn dispatch_draining<
                         .fetch_add(1, Ordering::Relaxed);
 
                     match result {
-                        Ok(events) => {
+                        Ok(invocation) => {
+                            let (events, framework_eof) = invocation.into_parts();
                             ctx.instrumentation
                                 .events_accumulated_total
                                 .fetch_add(1, Ordering::Relaxed);
 
                             let upstream_stage = subscription.last_delivered_upstream_stage();
-                            if events.is_empty() {
+                            if events.is_empty() && framework_eof.is_none() {
                                 if let Some(upstream) = upstream_stage {
                                     if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
                                         reader.ack_consumed(1);
@@ -377,6 +379,14 @@ pub(super) async fn dispatch_draining<
                                 ctx.pending_outputs.extend(events.into_iter().map(|event| {
                                     crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
                                 }));
+                                if let Some(kind) = framework_eof {
+                                    ctx.pending_outputs.push_back(
+                                        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                            event: ChainEventFactory::eof_event_with_kind(writer_id, kind),
+                                            scope,
+                                        },
+                                    );
+                                }
                                 ctx.pending_subscription_ack =
                                     upstream_stage.map(|upstream| PendingSubscriptionAck {
                                         side: JoinSubscriptionSide::Stream,

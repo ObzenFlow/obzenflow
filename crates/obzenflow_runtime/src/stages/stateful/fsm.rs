@@ -11,7 +11,6 @@ use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
@@ -627,32 +626,31 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     )
                 })?;
 
-                // Always emit an EOF authored by this stage, preserving upstream
-                // metadata (vector clock, last_event_id, writer_seq) when present.
+                // Always emit an EOF authored by this stage, preserving the
+                // upstream vector clock while sealing only this stage's Data
+                // frontier.
                 let buffered = ctx.buffered_eof.take();
                 // FLOWIP-095k: the authored kind is the worst-wins join over the
                 // inputs' terminal kinds; Natural covers the drain-terminated
                 // path where no EOF was received.
                 let eof_kind = ctx.terminal_eof_kind.unwrap_or(EofKind::Natural);
                 let mut upstream_vector_clock = None;
-                let mut upstream_last_event = None;
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
-                let writer_seq_by_event_type = ctx.instrumentation.data_writer_seq_by_event_type();
+                let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
+                    ctx.instrumentation.authored_data_frontier();
 
                 if let Some(buffered_event) = buffered {
                     if let obzenflow_core::event::ChainEventContent::FlowControl(
                         FlowControlPayload::Eof {
                             writer_seq: _,
                             vector_clock,
-                            last_event_id,
                             ..
                         },
                     ) = buffered_event.content.clone()
                     {
                         upstream_vector_clock = vector_clock;
-                        upstream_last_event = last_event_id;
                         // We intentionally ignore the upstream writer_seq and
-                        // advertise our own position below.
+                        // last_event_id and advertise our own position below.
                     }
                 }
 
@@ -670,17 +668,12 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                 ) = &mut eof_event.content
                 {
                     *eof_writer = Some(writer_id);
-                    *writer_seq = Some(SeqNo(runtime_context.writer_seq));
+                    *writer_seq = Some(authored_writer_seq);
                     *eof_writer_seq_by_event_type = writer_seq_by_event_type;
                     if let Some(vc) = upstream_vector_clock {
                         *vector_clock = Some(vc);
                     }
-                    // Prefer this stage's last emitted output (final drained window) over the
-                    // upstream-advertised last_event_id; otherwise the authored EOF can
-                    // incorrectly point at an upstream terminal.
-                    *last_event_id = runtime_context
-                        .last_emitted_event_id
-                        .or(upstream_last_event);
+                    *last_event_id = authored_last_event_id;
                 }
 
                 // Attach flow/runtime context for downstream contract tracking

@@ -12,6 +12,7 @@ use hdrhistogram::Histogram;
 use obzenflow_core::event::context::{EventTypeCountContext, UpstreamEventTypeCountContext};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
+use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::event::{ChainEvent, ChainEventContent};
@@ -57,6 +58,13 @@ pub enum ControlBindError {
 
     #[error("Stage {stage_id} configured with rate_limiter middleware but none registered")]
     MissingRateLimiter { stage_id: StageId },
+}
+
+#[derive(Debug, Default)]
+struct AuthoredDataFrontier {
+    writer_seq: u64,
+    writer_seq_by_event_type: HashMap<EventType, u64>,
+    last_event_id: Option<EventId>,
 }
 
 /// Stage instrumentation that tracks metrics alongside FSM state
@@ -111,7 +119,7 @@ pub struct StageInstrumentation {
     pub last_receipted_vector_clock: RwLock<Option<VectorClock>>,
     pub last_emitted_event_id: RwLock<Option<EventId>>,
     pub last_emitted_writer: RwLock<Option<WriterId>>,
-    pub data_writer_seq_by_event_type: RwLock<HashMap<EventType, u64>>,
+    authored_data_frontier: RwLock<AuthoredDataFrontier>,
     pub data_reader_seq_by_upstream_event_type: RwLock<HashMap<(StageId, EventType), u64>>,
 
     /// Error breakdown by kind
@@ -207,7 +215,7 @@ impl StageInstrumentation {
             last_receipted_vector_clock: RwLock::new(None),
             last_emitted_event_id: RwLock::new(None),
             last_emitted_writer: RwLock::new(None),
-            data_writer_seq_by_event_type: RwLock::new(HashMap::new()),
+            authored_data_frontier: RwLock::new(AuthoredDataFrontier::default()),
             data_reader_seq_by_upstream_event_type: RwLock::new(HashMap::new()),
 
             errors_by_kind: RwLock::new(std::collections::HashMap::new()),
@@ -309,9 +317,10 @@ impl StageInstrumentation {
                 .load(Ordering::Relaxed),
             data_outputs_by_event_type: {
                 let mut counts: Vec<_> = self
-                    .data_writer_seq_by_event_type
+                    .authored_data_frontier
                     .read()
                     .unwrap()
+                    .writer_seq_by_event_type
                     .iter()
                     .map(|(event_type, total)| EventTypeCountContext {
                         event_type: event_type.clone(),
@@ -529,9 +538,22 @@ impl StageInstrumentation {
     pub fn record_output_event(&self, event: &ChainEvent) {
         self.record_emitted(event);
         if let ChainEventContent::Data { event_type, .. } = &event.content {
-            let mut by_type = self.data_writer_seq_by_event_type.write().unwrap();
-            *by_type.entry(event_type.clone().into()).or_insert(0) += 1;
+            let mut frontier = self.authored_data_frontier.write().unwrap();
+            frontier.writer_seq = frontier.writer_seq.saturating_add(1);
+            *frontier
+                .writer_seq_by_event_type
+                .entry(event_type.clone().into())
+                .or_insert(0) += 1;
+            frontier.last_event_id = Some(event.id);
         }
+        self.events_emitted_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Note a physically committed Data row whose durable author is another
+    /// stage. Forwarded pre-error rows remain emitted journal evidence and
+    /// telemetry, but cannot advance this stage's authored transport frontier.
+    pub fn record_forwarded_output_event(&self, event: &ChainEvent) {
+        self.record_emitted(event);
         self.events_emitted_total.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -546,9 +568,10 @@ impl StageInstrumentation {
     pub fn data_writer_seq_by_event_type(
         &self,
     ) -> BTreeMap<EventType, obzenflow_core::event::types::SeqNo> {
-        self.data_writer_seq_by_event_type
+        self.authored_data_frontier
             .read()
             .unwrap()
+            .writer_seq_by_event_type
             .iter()
             .map(|(event_type, count)| {
                 (
@@ -557,6 +580,24 @@ impl StageInstrumentation {
                 )
             })
             .collect()
+    }
+
+    /// Snapshot the exact committed Data prefix authored by this stage.
+    ///
+    /// All three coordinates come from one lock acquisition so a terminal can
+    /// never combine a count, per-type map, and last event from different
+    /// frontiers.
+    pub fn authored_data_frontier(&self) -> (SeqNo, BTreeMap<EventType, SeqNo>, Option<EventId>) {
+        let frontier = self.authored_data_frontier.read().unwrap();
+        (
+            SeqNo(frontier.writer_seq),
+            frontier
+                .writer_seq_by_event_type
+                .iter()
+                .map(|(event_type, count)| (event_type.clone(), SeqNo(*count)))
+                .collect(),
+            frontier.last_event_id,
+        )
     }
 
     /// Record processing duration in histogram and sum.

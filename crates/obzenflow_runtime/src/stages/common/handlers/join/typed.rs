@@ -4,7 +4,7 @@
 
 //! Typed join authoring and runtime erasure (FLOWIP-134f).
 
-use super::traits::{sealed, UnifiedJoinHandler};
+use super::traits::{sealed, ErasedJoinInvocation, UnifiedJoinHandler};
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::join::config::{JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP};
 use async_trait::async_trait;
@@ -204,12 +204,12 @@ where
         parent: Option<&ChainEvent>,
         selected_activations: Vec<CompositeActivationContext>,
         framework_eof: Option<EofKind>,
-    ) -> Result<Vec<ChainEvent>, HandlerError>
+    ) -> Result<ErasedJoinInvocation, HandlerError>
     where
         O: OneFactStageOutput,
     {
         let writer_id = self.writer_id()?;
-        let mut events = Vec::with_capacity(outputs.len() + usize::from(framework_eof.is_some()));
+        let mut events = Vec::with_capacity(outputs.len());
 
         for output in outputs {
             let mut facts = output.into_facts().map_err(|error| {
@@ -249,10 +249,7 @@ where
             events.push(event);
         }
 
-        if let Some(kind) = framework_eof {
-            events.push(ChainEventFactory::eof_event_with_kind(writer_id, kind));
-        }
-        Ok(events)
+        Ok(ErasedJoinInvocation::new(events, framework_eof))
     }
 }
 
@@ -309,7 +306,7 @@ where
         _source_id: StageId,
         _writer_id: WriterId,
         _scope: obzenflow_core::MiddlewareExecutionScope,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    ) -> Result<ErasedJoinInvocation, HandlerError> {
         self.writer_id()?;
         let stream = H::Stream::try_from_event(&event)
             .map_err(|error| HandlerError::Deserialization(error.to_string()))?;
@@ -343,7 +340,11 @@ where
             .handler
             .on_stream_eof(&mut state.inner, &mut references)?;
         let selected = references.into_selected_activations();
-        self.lower_outputs(outputs, Some(&event), selected, None)
+        let (events, framework_eof) = self
+            .lower_outputs(outputs, Some(&event), selected, None)?
+            .into_parts();
+        debug_assert!(framework_eof.is_none());
+        Ok(events)
     }
 
     async fn drain(
@@ -355,7 +356,11 @@ where
         let mut references = JoinReferenceView::new(&state.projection);
         let outputs = self.handler.drain(&state.inner, &mut references)?;
         let selected = references.into_selected_activations();
-        self.lower_outputs(outputs, parent, selected, None)
+        let (events, framework_eof) = self
+            .lower_outputs(outputs, parent, selected, None)?
+            .into_parts();
+        debug_assert!(framework_eof.is_none());
+        Ok(events)
     }
 }
 
@@ -364,8 +369,6 @@ mod tests {
     use super::*;
     use crate::stages::join::StrictJoinBuilder;
     use obzenflow_core::event::context::CompositeActivationContext;
-    use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-    use obzenflow_core::event::ChainEventContent;
     use obzenflow_core::id::CompositeId;
     use obzenflow_core::{OneFactStageOutput, StageOutputFacts};
     use serde::de::{self, Deserializer};
@@ -525,6 +528,12 @@ mod tests {
             .any(|activation| activation.entry_port == label)
     }
 
+    fn fact_events(invocation: ErasedJoinInvocation) -> Vec<ChainEvent> {
+        let (events, framework_eof) = invocation.into_parts();
+        assert_eq!(framework_eof, None, "unexpected framework terminal intent");
+        events
+    }
+
     #[test]
     fn failed_same_key_admission_leaves_value_and_evidence_unchanged() {
         let reference_writer = WriterId::from(StageId::new());
@@ -554,15 +563,17 @@ mod tests {
             .expect_err("same-key rejected admission must surface");
         assert!(matches!(error, HandlerError::Validation(_)));
 
-        let output = adapter
-            .process_stream(
-                &mut state,
-                stream_event(stream_writer, &["k"], 1, "stream"),
-                source,
-                stream_writer,
-                live_scope(),
-            )
-            .expect("stream processing after failed replacement");
+        let output = fact_events(
+            adapter
+                .process_stream(
+                    &mut state,
+                    stream_event(stream_writer, &["k"], 1, "stream"),
+                    source,
+                    stream_writer,
+                    live_scope(),
+                )
+                .expect("stream processing after failed replacement"),
+        );
         assert_eq!(output.len(), 1);
         assert_eq!(
             TestOutput::try_from_event(&output[0])
@@ -591,15 +602,17 @@ mod tests {
                 .expect("reference admission");
         }
 
-        let output = adapter
-            .process_stream(
-                &mut state,
-                stream_event(stream_writer, &["k"], 1, "stream"),
-                source,
-                stream_writer,
-                live_scope(),
-            )
-            .expect("stream processing");
+        let output = fact_events(
+            adapter
+                .process_stream(
+                    &mut state,
+                    stream_event(stream_writer, &["k"], 1, "stream"),
+                    source,
+                    stream_writer,
+                    live_scope(),
+                )
+                .expect("stream processing"),
+        );
         let value = TestOutput::try_from_event(&output[0]).expect("typed output");
         assert_eq!(value.selected_values, vec!["new".to_string()]);
         assert!(!has_activation(&output[0], "old"));
@@ -629,15 +642,17 @@ mod tests {
                 .expect("reference admission");
         }
 
-        let output = adapter
-            .process_stream(
-                &mut state,
-                stream_event(stream_writer, &["k1", "k2"], 2, "stream"),
-                source,
-                stream_writer,
-                live_scope(),
-            )
-            .expect("fanout stream processing");
+        let output = fact_events(
+            adapter
+                .process_stream(
+                    &mut state,
+                    stream_event(stream_writer, &["k1", "k2"], 2, "stream"),
+                    source,
+                    stream_writer,
+                    live_scope(),
+                )
+                .expect("fanout stream processing"),
+        );
         assert_eq!(output.len(), 2);
         for (ordinal, event) in output.iter().enumerate() {
             assert_eq!(event.writer_id, join_writer);
@@ -668,15 +683,17 @@ mod tests {
             )
             .expect("reference admission");
 
-        let output = adapter
-            .process_stream(
-                &mut state,
-                stream_event(writer, &["missing"], 1, "stream"),
-                source,
-                writer,
-                live_scope(),
-            )
-            .expect("missing selection is valid");
+        let output = fact_events(
+            adapter
+                .process_stream(
+                    &mut state,
+                    stream_event(writer, &["missing"], 1, "stream"),
+                    source,
+                    writer,
+                    live_scope(),
+                )
+                .expect("missing selection is valid"),
+        );
         assert!(!has_activation(&output[0], "present"));
         assert!(has_activation(&output[0], "stream"));
     }
@@ -861,18 +878,20 @@ mod tests {
                 live_scope(),
             )
             .expect("reference branch");
-        let output = adapter
-            .process_stream(
-                &mut state,
-                SamePayload {
-                    key: "shared".to_string(),
-                }
-                .to_event(writer),
-                shared_source,
-                writer,
-                live_scope(),
-            )
-            .expect("stream branch");
+        let output = fact_events(
+            adapter
+                .process_stream(
+                    &mut state,
+                    SamePayload {
+                        key: "shared".to_string(),
+                    }
+                    .to_event(writer),
+                    shared_source,
+                    writer,
+                    live_scope(),
+                )
+                .expect("stream branch"),
+        );
         assert_eq!(
             TestOutput::try_from_event(&output[0])
                 .expect("typed output")
@@ -1018,7 +1037,7 @@ mod tests {
         let mut adapter = TypedJoinHandlerAdapter::new(handler);
         adapter.install_writer_id(join_writer);
         let mut state = adapter.initial_state();
-        let output = adapter
+        let invocation = adapter
             .process_stream(
                 &mut state,
                 TestStream {
@@ -1031,14 +1050,8 @@ mod tests {
                 live_scope(),
             )
             .expect("strict miss emits framework poison");
-        assert_eq!(output.len(), 1);
-        assert_eq!(output[0].writer_id, join_writer);
-        assert!(matches!(
-            &output[0].content,
-            ChainEventContent::FlowControl(FlowControlPayload::Eof {
-                kind: EofKind::Poison,
-                ..
-            })
-        ));
+        let (facts, framework_eof) = invocation.into_parts();
+        assert!(facts.is_empty());
+        assert_eq!(framework_eof, Some(EofKind::Poison));
     }
 }

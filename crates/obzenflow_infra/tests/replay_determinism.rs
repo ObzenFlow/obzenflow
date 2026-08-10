@@ -304,7 +304,7 @@ async fn run_strict_join_once() -> Vec<JoinedRow> {
     let mut joined = Vec::new();
     for (idx, row) in stream_rows.iter().enumerate() {
         let event = row.clone().to_event(writer);
-        let out = handler
+        let invocation = handler
             .process_stream(
                 &mut state,
                 event,
@@ -313,6 +313,7 @@ async fn run_strict_join_once() -> Vec<JoinedRow> {
                 obzenflow_core::MiddlewareExecutionScope::LiveHandler,
             )
             .expect("Join handler in replay_determinism test should not fail");
+        let (out, _framework_eof) = invocation.into_parts();
         if idx == 0 {
             assert!(
                 !out.is_empty(),

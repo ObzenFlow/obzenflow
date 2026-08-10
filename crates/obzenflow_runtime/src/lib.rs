@@ -40,7 +40,9 @@ pub mod stages;
 /// Authored joins use [`stages::TypedJoinHandler`] instead.
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::stages::common::handlers::join::{TypedJoinHandlerAdapter, UnifiedJoinHandler};
+    pub use crate::stages::common::handlers::join::{
+        ErasedJoinInvocation, TypedJoinHandlerAdapter, UnifiedJoinHandler,
+    };
 }
 
 #[cfg(any(test, feature = "test-support"))]

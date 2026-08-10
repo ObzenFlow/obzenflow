@@ -1577,6 +1577,160 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
 }
 
 #[tokio::test]
+async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symmetrically() {
+    use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+    use obzenflow_core::event::status::processing_status::ProcessingStatus;
+
+    let upstream_stage = StageId::new();
+    let archived_upstream_stage = StageId::new();
+    let foreign_author = StageId::new();
+    let reader_stage = StageId::new();
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(JournalOwner::stage(upstream_stage)));
+    let contract_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(JournalOwner::stage(reader_stage)));
+
+    for n in 0..2 {
+        upstream_journal
+            .append(
+                ChainEventFactory::data_event(
+                    WriterId::Stage(archived_upstream_stage),
+                    "test.joined.v1",
+                    json!({"n": n}),
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    let mut forwarded_error = ChainEventFactory::data_event(
+        WriterId::Stage(foreign_author),
+        "test.joined.v1",
+        json!({"foreign": true}),
+    );
+    forwarded_error.processing_info.status = ProcessingStatus::error("forwarded pre-error row");
+    upstream_journal
+        .append(forwarded_error, None)
+        .await
+        .unwrap();
+
+    let mut forwarded_eof =
+        ChainEventFactory::eof_event_with_kind(WriterId::Stage(foreign_author), EofKind::Natural);
+    if let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) =
+        &mut forwarded_eof.content
+    {
+        *writer_seq = Some(SeqNo(3));
+    }
+    upstream_journal.append(forwarded_eof, None).await.unwrap();
+
+    let mut local_terminal =
+        ChainEventFactory::eof_event_with_kind(WriterId::Stage(upstream_stage), EofKind::Poison);
+    if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        writer_seq,
+        writer_seq_by_event_type,
+        ..
+    }) = &mut local_terminal.content
+    {
+        *writer_seq = Some(SeqNo(2));
+        writer_seq_by_event_type.insert("test.joined.v1".into(), SeqNo(2));
+    }
+    upstream_journal.append(local_terminal, None).await.unwrap();
+
+    let upstreams = [(upstream_stage, "join".to_string(), upstream_journal)];
+    let mut selected_feeds = HashMap::new();
+    selected_feeds.insert(
+        upstream_stage,
+        vec![SelectedFeedMetadata::new(
+            EventType::from("test.joined.v1"),
+            SelectedFeedRole::Input,
+        )],
+    );
+    let mut subscription = UpstreamSubscription::new_with_names("consumer", &upstreams)
+        .await
+        .unwrap()
+        .with_archived_stage_ids(HashMap::from([(upstream_stage, archived_upstream_stage)]))
+        .with_selected_feeds(selected_feeds)
+        .with_contracts(ContractsWiring {
+            writer_id: WriterId::from(reader_stage),
+            contract_journal: contract_journal.clone(),
+            config: ContractConfig::default(),
+            system_journal: None,
+            reader_stage: Some(reader_stage),
+            control_plane: Arc::new(NoControlPlane),
+            include_delivery_contract: false,
+            cycle_guard_config: None,
+        })
+        .transport_only();
+
+    let mut progress = [ReaderProgress::new(upstream_stage)];
+    let mut saw_foreign_error = false;
+    let mut saw_forwarded_eof = false;
+    loop {
+        match subscription
+            .poll_next_with_state("test_fsm", Some(&mut progress))
+            .await
+        {
+            PollResult::Event(envelope) => {
+                saw_foreign_error |= envelope.event.writer_id == WriterId::Stage(foreign_author)
+                    && envelope.event.is_data();
+                saw_forwarded_eof |= envelope.event.writer_id == WriterId::Stage(foreign_author)
+                    && matches!(
+                        envelope.event.content,
+                        ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+                    );
+            }
+            PollResult::CursorAdvanced { .. } => {}
+            PollResult::NoEvents => break,
+            PollResult::Error(error) => panic!("unexpected subscription error: {error}"),
+        }
+    }
+
+    assert!(
+        saw_foreign_error,
+        "forwarded pre-error Data remains deliverable"
+    );
+    assert!(saw_forwarded_eof, "forwarded EOF remains deliverable");
+    assert_eq!(progress[0].reader_seq, SeqNo(2));
+    assert_eq!(progress[0].advertised_writer_seq, Some(SeqNo(2)));
+
+    let status = subscription.check_contracts(&mut progress).await;
+    assert!(
+        matches!(
+            status,
+            ContractStatus::ProgressEmitted | ContractStatus::Healthy
+        ),
+        "owner-authored prefix should reconcile, got {status:?}"
+    );
+    assert!(!progress[0].contract_violated);
+
+    let contract_events = contract_journal.read_causally_ordered().await.unwrap();
+    let final_event = contract_events.iter().find(|envelope| {
+        matches!(
+            envelope.event.content,
+            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
+        )
+    });
+    let Some(final_event) = final_event else {
+        panic!("expected ConsumptionFinal")
+    };
+    let ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal {
+        pass,
+        reader_seq,
+        advertised_writer_seq,
+        failure_reason,
+        ..
+    }) = &final_event.event.content
+    else {
+        unreachable!()
+    };
+    assert!(*pass);
+    assert_eq!(*reader_seq, SeqNo(2));
+    assert_eq!(*advertised_writer_seq, Some(SeqNo(2)));
+    assert!(failure_reason.is_none());
+}
+
+#[tokio::test]
 async fn matching_input_boundary_delivery_stamps_exact_replayable_activation() {
     let upstream_stage = StageId::new();
     let upstream_journal: Arc<dyn Journal<ChainEvent>> =

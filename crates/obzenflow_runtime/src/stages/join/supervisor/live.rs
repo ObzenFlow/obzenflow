@@ -17,7 +17,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::EventEnvelope;
+use obzenflow_core::event::{ChainEventFactory, EventEnvelope};
 use obzenflow_core::ChainEvent;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -765,7 +765,8 @@ async fn handle_stream_envelope<
                 .fetch_add(1, Ordering::Relaxed);
 
             match result {
-                Ok(mut events) => {
+                Ok(invocation) => {
+                    let (mut events, framework_eof) = invocation.into_parts();
                     ctx.instrumentation
                         .events_accumulated_total
                         .fetch_add(1, Ordering::Relaxed);
@@ -778,6 +779,9 @@ async fn handle_stream_envelope<
                         Some(&merged_parent),
                     )
                     .await?;
+                    if let Some(kind) = framework_eof {
+                        events.push(ChainEventFactory::eof_event_with_kind(writer_id, kind));
+                    }
                     write_stage_outputs_and_ack(
                         subscription,
                         ctx,
