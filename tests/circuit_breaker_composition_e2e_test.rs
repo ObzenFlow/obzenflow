@@ -566,7 +566,7 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
     assert_eq!(
         data_event_count(
             &read_stage_events(&live_run, "inputs").await,
-            CompInput::EVENT_TYPE
+            &CompInput::versioned_event_type(),
         ),
         3,
         "the finite source should journal exactly three inputs"

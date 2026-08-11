@@ -268,6 +268,7 @@ async fn record_cancelled_linear(journal_base: &Path) -> std::path::PathBuf {
         .await
         .expect("baseline flow should build");
     let run_dir = replay_testkit::latest_run_dir(journal_base);
+    let tick_event_type = Tick::versioned_event_type();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         assert!(
@@ -275,7 +276,7 @@ async fn record_cancelled_linear(journal_base: &Path) -> std::path::PathBuf {
             "source rows were not committed in time"
         );
         let committed =
-            std::panic::AssertUnwindSafe(data_rows(&run_dir, "ticks", Tick::EVENT_TYPE));
+            std::panic::AssertUnwindSafe(data_rows(&run_dir, "ticks", &tick_event_type));
         if futures::FutureExt::catch_unwind(committed)
             .await
             .unwrap_or(0)
@@ -519,6 +520,7 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
     let baseline = replay_testkit::latest_run_dir(&journal_base);
 
     // Wait until A's Natural EOF is committed and B is mid-stream, then kill.
+    let tick_event_type = Tick::versioned_event_type();
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
         assert!(
@@ -530,7 +532,7 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
             .await
             .unwrap_or_default();
         let slow_rows =
-            std::panic::AssertUnwindSafe(data_rows(&baseline, "slow", Tick::EVENT_TYPE));
+            std::panic::AssertUnwindSafe(data_rows(&baseline, "slow", &tick_event_type));
         let slow_rows = futures::FutureExt::catch_unwind(slow_rows)
             .await
             .unwrap_or(0);

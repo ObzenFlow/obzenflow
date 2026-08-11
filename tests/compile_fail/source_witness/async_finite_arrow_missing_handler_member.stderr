@@ -9,13 +9,9 @@ error[E0277]: the stage arrow declares an output fact missing from the handler's
 note: required by a bound in `typed_async_finite_source_descriptor`
  --> crates/obzenflow_dsl/src/dsl/typing.rs
   |
-  |   pub fn typed_async_finite_source_descriptor<
-  |          ------------------------------------ required by a bound in this function
+  | pub fn typed_async_finite_source_descriptor<
+  |        ------------------------------------ required by a bound in this function
 ...
-  |           + ArrowOutputsAreDeclaredByHandler<
-  |  ___________^
-  | |             <H::Output as StageFactSet>::Members,
-  | |             ArrowToHandlerProof,
-  | |         >,
-  | |_________^ required by this bound in `typed_async_finite_source_descriptor`
+  |         + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
+  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `typed_async_finite_source_descriptor`
   = note: this error originates in the macro `$crate::__obzenflow_admit_typed_source` which comes from the expansion of the macro `obzenflow_dsl::async_source` (in Nightly builds, run with -Z macro-backtrace for more info)

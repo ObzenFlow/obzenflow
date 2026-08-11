@@ -4,9 +4,16 @@
 
 //! FLOWIP-134f journal oracle for typed joins, contribution evidence, and replay.
 
+use obzenflow_adapters::middleware::{
+    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
+    MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+};
+use obzenflow_core::event::context::CompositeActivationContext;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainEventContent, EventEnvelope};
+use obzenflow_core::id::CompositeId;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
@@ -16,6 +23,9 @@ use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
+};
+use obzenflow_runtime::stages::observer::{
+    HandlerObserver, HandlerObserverContext, ObserverReport,
 };
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
@@ -155,6 +165,81 @@ impl TypedTransformHandler for IdentityReference {
     }
 }
 
+/// Test-only observability middleware that restores the reference-entry
+/// evidence this join oracle needs without granting the typed source envelope
+/// authority.
+#[derive(Clone, Debug)]
+struct ReferenceActivationObserver;
+
+struct ReferenceActivationObserverFamily;
+
+const REFERENCE_ACTIVATION_OBSERVER_LABEL: &str = "typed_join_reference_activation";
+
+impl MiddlewareFactory for ReferenceActivationObserver {
+    fn label(&self) -> &'static str {
+        REFERENCE_ACTIVATION_OBSERVER_LABEL
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<ReferenceActivationObserverFamily>(
+            REFERENCE_ACTIVATION_OBSERVER_LABEL,
+        )
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::observer_with_family(
+            REFERENCE_ACTIVATION_OBSERVER_LABEL,
+            self.override_key().family_label(),
+            vec![MiddlewareSurfaceKind::Handler],
+        )
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> Result<MiddlewareSurfaceAttachment, MiddlewareFactoryError> {
+        validate_attachment_request(&self.declaration(), &request).map_err(|error| {
+            MiddlewareFactoryError::materialization_failed(
+                REFERENCE_ACTIVATION_OBSERVER_LABEL,
+                &context.config.name,
+                error,
+            )
+        })?;
+        Ok(MiddlewareSurfaceAttachment::handler_observer(Arc::new(
+            self.clone(),
+        )))
+    }
+}
+
+impl HandlerObserver for ReferenceActivationObserver {
+    fn label(&self) -> &'static str {
+        REFERENCE_ACTIVATION_OBSERVER_LABEL
+    }
+
+    fn after_handle(
+        &self,
+        ctx: &HandlerObserverContext<'_>,
+        outputs: &mut [ChainEvent],
+    ) -> ObserverReport {
+        for event in outputs {
+            let Some(reference) = ReferenceItem::from_event(event) else {
+                continue;
+            };
+            let activation = CompositeActivationContext::new(
+                CompositeId::new("flowip-134f:reference"),
+                ctx.input.id,
+                format!("reference:{}:{}", reference.key, reference.version),
+                ctx.input.processing_info.event_time,
+            );
+            event
+                .try_insert_composite_activation(activation)
+                .expect("reference activation is internally consistent");
+        }
+        ObserverReport::empty()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct RejectMarkedStream;
 
@@ -258,6 +343,7 @@ fn build_flow(
         let references = ReferenceSource::new(reference_reads.clone());
         let streams = StreamSource::new(stream_reads.clone());
         let reference_validate = IdentityReference;
+        let reference_activation = ReferenceActivationObserver;
         let stream_validate = RejectMarkedStream;
         let joined = ExactJoin {
             calls: join_calls.clone(),
@@ -270,7 +356,7 @@ fn build_flow(
 
             stages: {
                 references = source!(ReferenceItem => references);
-                reference_validate = transform!(ReferenceItem -> ReferenceItem => reference_validate);
+                reference_validate = transform!(ReferenceItem -> ReferenceItem => reference_validate, observers: [reference_activation]);
                 streams = source!(StreamItem => streams);
                 stream_validate = transform!(StreamItem -> StreamItem => stream_validate);
                 joined = join!(catalog reference_validate: ReferenceItem, StreamItem -> JoinedFact => joined);

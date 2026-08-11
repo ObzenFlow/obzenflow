@@ -18,9 +18,10 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
     validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
-    MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+    MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, SourceAdmission,
+    SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome,
 };
-use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent};
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
@@ -82,6 +83,93 @@ impl TypedFiniteSourceHandler for SeedSource {
             n: self.remaining as u64,
             looped: false,
         }]))
+    }
+}
+
+/// Test-only source-boundary policy that contributes a deliberately unhealthy
+/// signal/data ratio without returning envelope authority to the typed source.
+#[derive(Clone, Debug)]
+struct DivergenceSignalInjection {
+    signals_per_event: usize,
+    signal_seq: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl DivergenceSignalInjection {
+    fn new(signals_per_event: usize) -> Self {
+        Self {
+            signals_per_event,
+            signal_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+}
+
+struct DivergenceSignalInjectionFamily;
+
+const DIVERGENCE_SIGNAL_INJECTION_LABEL: &str = "test_divergence_signal_injection";
+
+impl MiddlewareFactory for DivergenceSignalInjection {
+    fn label(&self) -> &'static str {
+        DIVERGENCE_SIGNAL_INJECTION_LABEL
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<DivergenceSignalInjectionFamily>(
+            DIVERGENCE_SIGNAL_INJECTION_LABEL,
+        )
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::control(
+            DIVERGENCE_SIGNAL_INJECTION_LABEL,
+            vec![MiddlewareSurfaceKind::SourcePoll],
+        )
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> Result<MiddlewareSurfaceAttachment, MiddlewareFactoryError> {
+        validate_attachment_request(&self.declaration(), &request).map_err(|error| {
+            MiddlewareFactoryError::materialization_failed(
+                DIVERGENCE_SIGNAL_INJECTION_LABEL,
+                &context.config.name,
+                error,
+            )
+        })?;
+        Ok(MiddlewareSurfaceAttachment::source_poll(
+            SourcePollAttachment {
+                policy: Arc::new(self.clone()),
+                completion_gate: None,
+            },
+        ))
+    }
+}
+
+#[async_trait]
+impl SourcePolicy for DivergenceSignalInjection {
+    fn label(&self) -> &'static str {
+        DIVERGENCE_SIGNAL_INJECTION_LABEL
+    }
+
+    async fn admit(&self, _ctx: &mut SourcePolicyCtx) -> SourceAdmission {
+        SourceAdmission::Admit(None)
+    }
+
+    fn observe(&self, outcome: &SourcePollOutcome<'_>, ctx: &mut SourcePolicyCtx) {
+        if !matches!(outcome, SourcePollOutcome::Delivered { .. }) {
+            return;
+        }
+        for _ in 0..self.signals_per_event {
+            let signal_seq = self
+                .signal_seq
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ctx.write_control_event(ChainEventFactory::watermark_event(
+                ctx.writer_id(),
+                signal_seq,
+                None,
+            ));
+        }
     }
 }
 
@@ -274,6 +362,7 @@ impl SinkHandler for CountingSink {
 async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     let clock = TestClock::new().await.expect("paused runtime");
     let source = SeedSource::new(30);
+    let inject_signals = DivergenceSignalInjection::new(50);
     let delay = DelayedSeedTransform::new(Duration::from_millis(10));
     let entry = CycleEntryTransform;
     let iter = LoopBackTransform;
@@ -284,7 +373,7 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
         journals: memory_journals(),
 
         stages: {
-            src = source!(SeedEvent => source);
+            src = source!(SeedEvent => source with [inject_signals]);
             delay = effectful_transform!(
                 SeedEvent -> SeedEvent => delay,
                 effects: [],

@@ -414,7 +414,8 @@ async fn emit_within_final_aggregate_preserves_buffered_input_lineage() -> Resul
         .await
         .map_err(|e| anyhow!("flow run failed: {e}"))?;
 
-    let input_ids = data_event_ids_of_type(&src_journal, WindowInput::EVENT_TYPE).await?;
+    let input_ids =
+        data_event_ids_of_type(&src_journal, &WindowInput::versioned_event_type()).await?;
     assert_eq!(input_ids.len(), 3, "expected three input events");
 
     let aggregate = last_window_aggregate_event(&win_journal)
@@ -435,7 +436,7 @@ async fn emit_within_final_aggregate_preserves_buffered_input_lineage() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn emit_within_final_aggregate_does_not_invent_source_correlations() -> Result<()> {
+async fn emit_within_final_aggregate_folds_runtime_minted_source_correlations() -> Result<()> {
     let (sink, seen) = AggregateSink::new();
     let source = SequenceSource::new(2);
     let window = typed_stateful::reduce(
@@ -444,8 +445,8 @@ async fn emit_within_final_aggregate_does_not_invent_source_correlations() -> Re
     )
     .emit_within(Duration::from_secs(60));
     let harness = test_flow! {
-        name: "emit_within_no_synthetic_correlation",
-        journals: disk_journals(unique_journal_dir("emit_within_no_synthetic_correlation")),
+        name: "emit_within_runtime_source_correlation",
+        journals: disk_journals(unique_journal_dir("emit_within_runtime_source_correlation")),
 
         stages: {
             src = source!(WindowInput => source);
@@ -462,6 +463,7 @@ async fn emit_within_final_aggregate_does_not_invent_source_correlations() -> Re
     .map_err(|e| anyhow!("failed to build test flow: {e}"))?;
 
     let (_win_stage_id, win_journal) = harness.stage_journal_for_test("win")?;
+    let (_src_stage_id, src_journal) = harness.stage_journal_for_test("src")?;
 
     harness
         .into_inner()
@@ -479,12 +481,29 @@ async fn emit_within_final_aggregate_does_not_invent_source_correlations() -> Re
 
     assert!(
         aggregate_event.correlation_id().is_none(),
-        "the typed source adapter must not invent a scalar correlation"
+        "a window with multiple source roots must not expose one scalar correlation"
     );
-    assert!(
-        aggregate_event.correlation_ids().is_none(),
-        "the typed source adapter must not invent a correlation set"
-    );
+    let source_events = src_journal
+        .read_causally_ordered()
+        .await
+        .map_err(|e| anyhow!("failed to read source journal: {e}"))?;
+    let mut expected = source_events
+        .iter()
+        .filter(|envelope| WindowInput::from_event(&envelope.event).is_some())
+        .map(|envelope| {
+            envelope
+                .event
+                .correlation_id()
+                .expect("the runtime commit seam mints one correlation per source fact")
+        })
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(expected.len(), 2);
+
+    let recorded = aggregate_event
+        .correlation_ids()
+        .expect("the aggregate retains the complete source correlation set");
+    assert_eq!(recorded, expected.as_slice());
 
     Ok(())
 }

@@ -1026,16 +1026,25 @@ async fn held_provider_serialises_data_and_keeps_eof_out_of_mappers() {
             TicketSummarised::event_type_matches(&event.event_type()).then_some(position)
         })
         .collect::<Vec<_>>();
+    let chat_writer = chat_events
+        .iter()
+        .find(|event| TicketSummarised::event_type_matches(&event.event_type()))
+        .map(|event| event.writer_id)
+        .expect("chat authors typed output");
     let eof_position = chat_events
         .iter()
-        .position(|event| {
-            matches!(&event.content, ChainEventContent::FlowControl(obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof { .. }))
+        .rposition(|event| {
+            event.writer_id == chat_writer
+                && matches!(&event.content, ChainEventContent::FlowControl(obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof { .. }))
         })
-        .expect("chat forwards EOF after its in-flight work");
+        .expect("chat authors EOF after its in-flight work");
     assert_eq!(output_positions.len(), 2);
-    assert!(output_positions
-        .into_iter()
-        .all(|position| position < eof_position));
+    assert!(
+        output_positions
+            .iter()
+            .all(|position| *position < eof_position),
+        "chat outputs {output_positions:?} must precede its authored EOF at {eof_position}"
+    );
 }
 
 #[tokio::test]

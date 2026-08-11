@@ -473,10 +473,10 @@ fn eof_and_boundary_rejection_cannot_schedule_idle_delay() {
         );
 
         let eof_start = source
-            .find("Ok(SourcePollCompletion::Eof) =>")
+            .find("SourcePollResult::Completed(SourcePollCompletion::Eof) =>")
             .unwrap_or_else(|| panic!("{relative} must handle live EOF"));
         let eof_end = source[eof_start..]
-            .find("Err(e) =>")
+            .find("SourcePollResult::HandlerError(")
             .map(|offset| eof_start + offset)
             .unwrap_or_else(|| panic!("{relative} must handle source poll errors after EOF"));
         let eof_arm = &source[eof_start..eof_end];

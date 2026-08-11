@@ -702,8 +702,7 @@ fn test_flow_handler_construction_stays_cold_inside_its_enclosing_async_future()
 }
 
 #[tokio::test(start_paused = true)]
-async fn timeout_duration_and_error_normalisation_are_inside_the_raw_poll_execution() -> Result<()>
-{
+async fn timeout_duration_precedes_boundary_settlement_and_error_normalisation() -> Result<()> {
     let timeout = Duration::from_secs(7);
     let policy_delay = Duration::from_secs(40);
     let policy_log = Arc::new(PolicyLog::default());
@@ -753,25 +752,25 @@ async fn timeout_duration_and_error_normalisation_are_inside_the_raw_poll_execut
     assert_eq!(
         policy_observations[0],
         PolicyObservation {
-            outcome: PolicyOutcomeKind::Delivered {
-                event_count: 1,
-                has_error_marked: true,
-            },
+            outcome: PolicyOutcomeKind::Failed,
             poll_duration: Some(timeout),
         },
-        "the timeout is normalized exactly once before policy settlement"
-    );
-    assert!(
-        policy_observations
-            .iter()
-            .all(|observation| observation.outcome != PolicyOutcomeKind::Failed),
-        "a normalized timeout must never surface as SourcePollOutcome::Failed"
+        "the typed timeout crosses the source boundary before supervisor normalization"
     );
     assert_eq!(
-        observer_log.snapshot()[0].poll_duration,
-        timeout,
-        "timeout measurement excludes normalization and the later policy delay"
+        policy_observations
+            .iter()
+            .filter(|observation| observation.outcome == PolicyOutcomeKind::Failed)
+            .count(),
+        1,
+        "the timed-out poll settles dependency policy exactly once"
     );
+    let observer_observations = observer_log.snapshot();
+    assert_eq!(observer_observations[0].poll_duration, timeout);
+    assert!(matches!(
+        &observer_observations[0].outcome,
+        SourcePollObserverOutcome::Error { message } if message.contains("poll timeout exceeded")
+    ));
     assert_eq!(
         calls.load(Ordering::SeqCst),
         2,
@@ -935,7 +934,10 @@ fn custom_metric_names(events: &[obzenflow_core::EventEnvelope<ChainEvent>]) -> 
         .filter_map(|envelope| match &envelope.event.content {
             ChainEventContent::Observability(ObservabilityPayload::Metrics(
                 MetricsLifecycle::Custom { name, .. },
-            )) if name.starts_with("source.batch.") || name.starts_with("policy.outbox.") => {
+            )) if name.starts_with("source.batch.")
+                || name.starts_with("policy.outbox.")
+                || name == "policy.observe_outbox" =>
+            {
                 Some(name.clone())
             }
             _ => None,
@@ -1092,10 +1094,8 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
     );
     assert_eq!(
         names,
-        (0..9)
-            .map(|ordinal| format!("policy.outbox.{ordinal}"))
-            .collect::<Vec<_>>(),
-        "empty typed polls author no source rows while the policy outbox stays ordered"
+        vec!["policy.outbox.0"],
+        "empty typed polls neither author source rows nor enter the successful-batch after-poll hook"
     );
 
     Ok(())
@@ -1162,7 +1162,7 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
             src = async_infinite_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
-                        emit_after_poll: true,
+                        emit_on_observe: true,
                         ..PolicySettings::default()
                     },
                     Arc::new(PolicyLog::default()),
@@ -1208,8 +1208,9 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
     assert_eq!(
         names.len(),
         7,
-        "seven policy outbox rows drain before the 50ms delay; empty typed polls author no rows"
+        "seven policy observation rows drain before the 50ms delay; empty typed polls author no rows"
     );
+    assert!(names.iter().all(|name| name == "policy.observe_outbox"));
     assert_eq!(
         calls.load(Ordering::SeqCst),
         7,
