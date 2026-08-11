@@ -12,8 +12,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{rate_limit_with_burst, CircuitBreaker};
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, StageOutputs};
@@ -24,7 +23,8 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
+    TypedSinkConsumeReport, TypedSinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
@@ -146,17 +146,23 @@ impl CountingSink {
 }
 
 #[async_trait]
-impl SinkHandler for CountingSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if event.is_data() {
-            if let Ok(mut count) = self.count.lock() {
-                *count += 1;
-            }
-        }
+impl TypedSinkHandler for CountingSink {
+    type Input = MetricEvent;
 
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("count".to_string()),
-            None,
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
+    async fn consume(
+        &mut self,
+        _event: MetricEvent,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        if let Ok(mut count) = self.count.lock() {
+            *count += 1;
+        }
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("count".to_string()), None),
         ))
     }
 }
@@ -173,15 +179,21 @@ impl SleepingSink {
 }
 
 #[async_trait]
-impl SinkHandler for SleepingSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if event.is_data() {
-            sleep(self.sleep_per_event).await;
-        }
+impl TypedSinkHandler for SleepingSink {
+    type Input = MetricEvent;
 
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("sleep".to_string()),
-            None,
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
+    async fn consume(
+        &mut self,
+        _event: MetricEvent,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        sleep(self.sleep_per_event).await;
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("sleep".to_string()), None),
         ))
     }
 }

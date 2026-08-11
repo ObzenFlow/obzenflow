@@ -10,14 +10,13 @@
 //! benchmark ordering, warmup effects, or genuine framework issues.
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
+    TypedSinkConsumeReport, TypedSinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 // Monitoring removed per FLOWIP-056-666
@@ -118,31 +117,34 @@ impl LatencySink {
 }
 
 #[async_trait]
-impl SinkHandler for LatencySink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if let ChainEventContent::Data { payload, .. } = &event.content {
-            if let (Some(emit_time_nanos), Some(event_id)) = (
-                payload.get("emit_time_nanos").and_then(|v| v.as_u64()),
-                payload.get("event_id").and_then(|v| v.as_u64()),
-            ) {
-                self.received.fetch_add(1, Ordering::Relaxed);
+impl TypedSinkHandler for LatencySink {
+    type Input = BenchEvent;
 
-                // Skip warmup events
-                if event_id >= WARMUP_EVENT_COUNT {
-                    let receive_time_nanos = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos() as u64;
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
 
-                    if receive_time_nanos > emit_time_nanos {
-                        let latency = Duration::from_nanos(receive_time_nanos - emit_time_nanos);
-                        self.latencies.lock().await.push(latency);
-                    }
-                }
+    async fn consume(
+        &mut self,
+        event: BenchEvent,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        self.received.fetch_add(1, Ordering::Relaxed);
+        if event.event_id >= WARMUP_EVENT_COUNT {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            if now > event.emit_time_nanos {
+                self.latencies
+                    .lock()
+                    .await
+                    .push(Duration::from_nanos((now - event.emit_time_nanos) as u64));
             }
         }
-
-        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+        ))
     }
 }
 

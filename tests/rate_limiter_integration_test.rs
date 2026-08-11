@@ -5,16 +5,16 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{rate_limit_with_burst, RateLimiterBuilder};
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::TypedPayload;
+use obzenflow_core::{ChainEvent, TypedPayload};
 use obzenflow_dsl::{async_source, join, sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkHandler, StatefulEmission, TypedAsyncFiniteSourceHandler,
-    TypedFiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
+    JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
+    StatefulEmission, TypedAsyncFiniteSourceHandler, TypedFiniteSourceHandler, TypedJoinHandler,
+    TypedSinkConsumeReport, TypedSinkHandler, TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -171,16 +171,18 @@ impl TypedStatefulHandler for PassthroughStateful {
 }
 
 #[derive(Clone, Debug)]
-struct CountingSink {
+struct CountingSink<T> {
     count: Arc<AtomicUsize>,
+    _input: std::marker::PhantomData<fn() -> T>,
 }
 
-impl CountingSink {
+impl<T> CountingSink<T> {
     fn new() -> (Self, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
         (
             Self {
                 count: count.clone(),
+                _input: std::marker::PhantomData,
             },
             count,
         )
@@ -188,25 +190,31 @@ impl CountingSink {
 }
 
 #[async_trait]
-impl SinkHandler for CountingSink {
+impl<T> TypedSinkHandler for CountingSink<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Input = T;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
     async fn consume(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        if event.is_data() {
-            self.count.fetch_add(1, Ordering::Relaxed);
-        }
-
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Count".to_string()),
-            None,
+        _event: T,
+        _context: SinkInputContext,
+    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Count".to_string()), None),
         ))
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
-    let (sink, count) = CountingSink::new();
+    let (sink, count) = CountingSink::<RateLimiterTestEvent>::new();
     let source = SequenceSource::new(2);
     let passthrough = PassthroughTransform;
     let test_handle = test_flow! {
@@ -250,7 +258,7 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
-    let (sink, count) = CountingSink::new();
+    let (sink, count) = CountingSink::<RateLimiterTestEvent>::new();
     let source = SequenceSource::new(1);
     let passthrough = PassthroughTransform;
     let test_handle = test_flow! {
@@ -288,7 +296,7 @@ async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
 async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
     let source = SequenceSource::new(1);
     let passthrough = PassthroughTransform;
-    let (sink, _count) = CountingSink::new();
+    let (sink, _count) = CountingSink::<RateLimiterTestEvent>::new();
     let result = test_flow! {
         name: "rate_limiter_invalid",
         journals: disk_journals(unique_journal_dir("rate_limiter_invalid")),
@@ -423,7 +431,7 @@ impl TypedAsyncFiniteSourceHandler for ScriptedAsyncSource {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> Result<()> {
-    let (sink, count) = CountingSink::new();
+    let (sink, count) = CountingSink::<RateLimiterTestEvent>::new();
     let source = BatchedSource::new(vec![2, 2]);
     let passthrough = PassthroughTransform;
     let test_handle = test_flow! {
@@ -482,7 +490,7 @@ async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> R
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_async_finite_does_not_charge_eof_poll() -> Result<()> {
-    let (sink, count) = CountingSink::new();
+    let (sink, count) = CountingSink::<RateLimiterTestEvent>::new();
     let source =
         ScriptedAsyncSource::new(vec![SourceStep::Data, SourceStep::Data, SourceStep::Done]);
     let test_handle = test_flow! {
@@ -524,7 +532,7 @@ async fn rate_limiter_async_finite_does_not_charge_eof_poll() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_sync_finite_does_not_charge_eof_poll() -> Result<()> {
-    let (sink, count) = CountingSink::new();
+    let (sink, count) = CountingSink::<RateLimiterTestEvent>::new();
     let source =
         ScriptedSyncSource::new(vec![SourceStep::Data, SourceStep::Data, SourceStep::Done]);
     let test_handle = test_flow! {
@@ -566,7 +574,7 @@ async fn rate_limiter_sync_finite_does_not_charge_eof_poll() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_async_finite_does_not_charge_empty_batch() -> Result<()> {
-    let (sink, count) = CountingSink::new();
+    let (sink, count) = CountingSink::<RateLimiterTestEvent>::new();
     let source = ScriptedAsyncSource::new(vec![
         SourceStep::Data,
         SourceStep::Empty,
@@ -612,7 +620,7 @@ async fn rate_limiter_async_finite_does_not_charge_empty_batch() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_sync_finite_does_not_charge_empty_batch() -> Result<()> {
-    let (sink, count) = CountingSink::new();
+    let (sink, count) = CountingSink::<RateLimiterTestEvent>::new();
     let source = ScriptedSyncSource::new(vec![
         SourceStep::Data,
         SourceStep::Empty,
@@ -658,7 +666,7 @@ async fn rate_limiter_sync_finite_does_not_charge_empty_batch() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_async_finite_does_not_charge_source_error() -> Result<()> {
-    let (sink, count) = CountingSink::new();
+    let (sink, count) = CountingSink::<RateLimiterTestEvent>::new();
     let source = ScriptedAsyncSource::new(vec![
         SourceStep::Data,
         SourceStep::Err,
@@ -704,7 +712,7 @@ async fn rate_limiter_async_finite_does_not_charge_source_error() -> Result<()> 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_sync_finite_does_not_charge_source_error() -> Result<()> {
-    let (sink, count) = CountingSink::new();
+    let (sink, count) = CountingSink::<RateLimiterTestEvent>::new();
     let source = ScriptedSyncSource::new(vec![
         SourceStep::Data,
         SourceStep::Err,
@@ -858,7 +866,7 @@ impl TypedJoinHandler for PassthroughJoin {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
-    let (sink, _count) = CountingSink::new();
+    let (sink, _count) = CountingSink::<EnrichedPayload>::new();
     let reference_source = SingleRefSource::new();
     let stream_source = TwoStreamEventsSource::new();
     let joiner = PassthroughJoin;
@@ -900,7 +908,7 @@ async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
 /// FLOWIP-120c H1 guard rejects it and names the legitimate destinations.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_transform_stage_rejects_rate_limit_middleware() -> Result<()> {
-    let (sink, _count) = CountingSink::new();
+    let (sink, _count) = CountingSink::<RateLimiterTestEvent>::new();
     let source = SequenceSource::new(2);
     let passthrough = PassthroughTransform;
     let result = test_flow! {
@@ -938,7 +946,7 @@ async fn rate_limiter_transform_stage_rejects_rate_limit_middleware() -> Result<
 /// fails the build through the same FLOWIP-120c H1 guard.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_stateful_stage_rejects_rate_limit_middleware() -> Result<()> {
-    let (sink, _count) = CountingSink::new();
+    let (sink, _count) = CountingSink::<RateLimiterTestEvent>::new();
     let source = SequenceSource::new(2);
     let passthrough = PassthroughStateful;
     let result = test_flow! {

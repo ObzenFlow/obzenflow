@@ -8,8 +8,7 @@
 
 use obzenflow_adapters::middleware::{rate_limit, CircuitBreaker, EffectResilience};
 use obzenflow_core::config::{ConfigSubject, ResolvedForDoc};
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::journal::run_manifest::RunManifest;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
@@ -23,7 +22,8 @@ use obzenflow_runtime::runtime_config::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
+    EffectfulTransformHandler, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
+    TypedFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler,
 };
 
 use async_trait::async_trait;
@@ -64,14 +64,32 @@ impl TypedFiniteSourceHandler for OneShotSource {
 }
 
 #[derive(Clone, Debug)]
-struct NullSink;
+struct NullSink<T>(std::marker::PhantomData<fn() -> T>);
+
+impl<T> NullSink<T> {
+    fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
 
 #[async_trait]
-impl SinkHandler for NullSink {
-    async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Null".to_string()),
-            None,
+impl<T> TypedSinkHandler for NullSink<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Input = T;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
+    async fn consume(
+        &mut self,
+        _event: T,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Null".to_string()), None),
         ))
     }
 }
@@ -175,7 +193,7 @@ fn build_flow_future(
 > {
     FlowDefinition::materialize(move |_runtime_config| {
         let one_shot_source = OneShotSource { emitted: false };
-        let null_sink = NullSink;
+        let null_sink = NullSink::<Item>::new();
 
         Ok(flow! {
             name: "effective_config_manifest",
@@ -203,7 +221,7 @@ fn build_rate_limited_flow_future(
     FlowDefinition::materialize(move |_runtime_config| {
         let limiter = rate_limit(10.0);
         let one_shot_source = OneShotSource { emitted: false };
-        let null_sink = NullSink;
+        let null_sink = NullSink::<Item>::new();
 
         Ok(flow! {
             name: "effective_config_manifest_with_optional_limiter_burst",
@@ -246,7 +264,7 @@ fn build_two_effect_flow_future(
         let refund_resilience = payment_resilience();
         let one_shot_source = OneShotSource { emitted: false };
         let payment_effects = PaymentEffectsHandler;
-        let null_sink = NullSink;
+        let null_sink = NullSink::<PaymentEffectFact>::new();
 
         Ok(flow! {
             name: "effective_config_manifest_two_effects",

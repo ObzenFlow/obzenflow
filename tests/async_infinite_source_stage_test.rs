@@ -10,13 +10,16 @@ use obzenflow_adapters::middleware::{
     MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::TypedPayload;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{async_infinite_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedAsyncInfiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
+    TypedAsyncInfiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler,
+};
 use obzenflow_runtime::stages::observer::{
     ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
 };
@@ -131,16 +134,25 @@ impl CollectSink {
 }
 
 #[async_trait]
-impl SinkHandler for CollectSink {
+impl TypedSinkHandler for CollectSink {
+    type Input = AsyncInfiniteEvent;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
     async fn consume(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        self.events.lock().unwrap().push(event);
+        event: AsyncInfiniteEvent,
+        _context: SinkInputContext,
+    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(event.to_event(WriterId::from(StageId::new())));
         self.event_ready.notify_waiters();
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Collect".to_string()),
-            None,
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Collect".to_string()), None),
         ))
     }
 }

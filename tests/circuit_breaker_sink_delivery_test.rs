@@ -15,12 +15,14 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::CircuitBreaker;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
-use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    SinkDeliveryDeclaration, SinkInputContext, TypedFiniteSourceHandler, TypedSinkConsumeReport,
+    TypedSinkHandler,
+};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -81,8 +83,18 @@ struct AlwaysFailingSink {
 }
 
 #[async_trait]
-impl SinkHandler for AlwaysFailingSink {
-    async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+impl TypedSinkHandler for AlwaysFailingSink {
+    type Input = SinkBreakerEvent;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
+    async fn consume(
+        &mut self,
+        _event: SinkBreakerEvent,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(HandlerError::Remote("sink delivery failed".to_string()))
     }

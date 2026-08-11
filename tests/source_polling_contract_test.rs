@@ -17,7 +17,7 @@ use obzenflow_adapters::middleware::{
     SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::observability_payload::{
     MetricsLifecycle, ObservabilityPayload,
 };
@@ -29,8 +29,9 @@ use obzenflow_dsl::{
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-    TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedAsyncFiniteSourceHandler,
+    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    TypedSinkConsumeReport, TypedSinkHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -55,11 +56,23 @@ impl TypedPayload for PollingEvent {
 struct NoopSink;
 
 #[async_trait]
-impl SinkHandler for NoopSink {
-    async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("source-polling-proof".to_string()),
-            None,
+impl TypedSinkHandler for NoopSink {
+    type Input = PollingEvent;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
+    async fn consume(
+        &mut self,
+        _event: PollingEvent,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(
+                DeliveryMethod::Custom("source-polling-proof".to_string()),
+                None,
+            ),
         ))
     }
 }

@@ -16,8 +16,9 @@
 //!
 //! ## CSV sinks
 //!
-//! [`CsvSink`] (via [`CsvSinkBuilder`]) writes events to CSV files on disk.
-//! The output destination is controlled by [`OutputDestination`].
+//! [`CsvSink<T>`](CsvSink) (via [`CsvSinkBuilder<T>`](CsvSinkBuilder)) writes
+//! typed events to CSV files on disk. The output destination is controlled by
+//! [`OutputDestination`].
 
 /// Console and CSV sinks, formatters, and output configuration.
 pub use obzenflow_adapters::sinks::{

@@ -6,7 +6,7 @@
 
 use crate::dsl::stage_descriptor::{
     AsyncFiniteSourceDescriptor, AsyncInfiniteSourceDescriptor, FiniteSourceDescriptor,
-    InfiniteSourceDescriptor, JoinDescriptor, StageDescriptor, StatefulDescriptor,
+    InfiniteSourceDescriptor, JoinDescriptor, SinkDescriptor, StageDescriptor, StatefulDescriptor,
     TransformDescriptor,
 };
 use crate::dsl::StageCreationResult;
@@ -15,7 +15,7 @@ use obzenflow_adapters::middleware::{
     control::ControlMiddlewareAggregator, MiddlewareDeclarationPosition, MiddlewareFactory,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_core::{Member, OneFactStageOutput, StageFactSet, TypedFactType, TypedPayload};
 use obzenflow_runtime::__private::{
@@ -35,14 +35,15 @@ use obzenflow_runtime::stages::common::handlers::source::traits::{
 };
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkHandler, StatefulEmission, TransformHandler,
-    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
-    TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler,
+    JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
+    StatefulEmission, TransformHandler, TypedAsyncFiniteSourceHandler,
+    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    TypedJoinHandler, TypedSinkConsumeReport, TypedSinkHandler, TypedStatefulHandler,
     TypedStatefulHandlerAdapter, TypedTransformHandler, TypedTransformHandlerAdapter,
 };
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
-use obzenflow_runtime::typing::{SinkTyping, SourceTyping, TransformTyping};
+use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
 use obzenflow_topology::{EdgeKind, StageTypingInfo, Topology, TypeHintInfo};
 use std::any::{type_name, TypeId};
 use std::collections::{HashMap, HashSet};
@@ -105,6 +106,19 @@ pub trait StatefulInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput>
 
 #[diagnostic::do_not_recommend]
 impl<Input> StatefulInputMatchesArrow<Input> for Input {}
+
+/// Diagnostic facade for equality between a typed sink handler's authoritative
+/// input and the `sink!` arrow input.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "this sink handler does not witness its declared input",
+    label = "the handler's `Input` does not match the fact type declared before `=>`",
+    note = "implement TypedSinkHandler with Input matching the sink! arrow (FLOWIP-134h)"
+)]
+pub trait SinkInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput> {}
+
+#[diagnostic::do_not_recommend]
+impl<Input> SinkInputMatchesArrow<Input> for Input {}
 
 /// Diagnostic facade for equality between a typed join handler's authoritative
 /// reference type and the `catalog` position of the stage arrow.
@@ -1170,6 +1184,63 @@ where
     wrap_typed_descriptor(descriptor, metadata)
 }
 
+/// Canonical proof-carrying admission factory for a real typed sink.
+///
+/// The delivery declaration is queried exactly once here, after the macro has
+/// applied any sealed site-level decoration and before the handler is erased
+/// or wrapped by runtime machinery.
+#[doc(hidden)]
+pub fn typed_sink_descriptor<H, ArrowInput>(
+    name: impl Into<String>,
+    handler: H,
+    sink_policies: Vec<Box<dyn MiddlewareFactory>>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+) -> Box<dyn StageDescriptor>
+where
+    H: TypedSinkHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    H::Input: SinkInputMatchesArrow<ArrowInput>,
+    ArrowInput: TypedPayload + Send + Sync + 'static,
+{
+    let metadata = StageTypingMetadata::sink(TypeHint::exact_payload::<ArrowInput>(), false, None);
+    let delivery_declaration = handler.delivery_declaration();
+    let descriptor: Box<dyn StageDescriptor> = Box::new(SinkDescriptor {
+        name: name.into(),
+        handler,
+        delivery_declaration,
+        sink_policies,
+        observers,
+    });
+    wrap_typed_descriptor(descriptor, metadata)
+}
+
+/// Canonical structural placeholder admission for a sink.
+#[doc(hidden)]
+pub fn placeholder_sink_descriptor<ArrowInput>(
+    name: impl Into<String>,
+    message: Option<&'static str>,
+    sink_policies: Vec<Box<dyn MiddlewareFactory>>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+) -> Box<dyn StageDescriptor>
+where
+    ArrowInput: TypedPayload + Send + Sync + 'static,
+{
+    let metadata = StageTypingMetadata::sink(
+        TypeHint::exact_payload::<ArrowInput>(),
+        true,
+        message.map(str::to_string),
+    );
+    let handler = PlaceholderSink::<ArrowInput>::new(message);
+    let delivery_declaration = handler.delivery_declaration();
+    let descriptor: Box<dyn StageDescriptor> = Box::new(SinkDescriptor {
+        name: name.into(),
+        handler,
+        delivery_declaration,
+        sink_policies,
+        observers,
+    });
+    wrap_typed_descriptor(descriptor, metadata)
+}
+
 fn placeholder_message(stage_kind: &str, message: Option<&str>) -> String {
     match message {
         Some(message) => format!("{stage_kind} placeholder executed: {message}"),
@@ -1507,27 +1578,28 @@ impl<In> fmt::Debug for PlaceholderSink<In> {
     }
 }
 
-impl<In> SinkTyping for PlaceholderSink<In> {
-    type Input = In;
-}
-
 #[async_trait]
-impl<In> SinkHandler for PlaceholderSink<In>
+impl<In> TypedSinkHandler for PlaceholderSink<In>
 where
-    In: Send + Sync + 'static,
+    In: TypedPayload + Send + Sync + 'static,
 {
-    async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if !self.warned.swap(true, Ordering::Relaxed) {
-            tracing::warn!("{}", placeholder_message("sink", self.message));
-        }
-        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
+    type Input = In;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
     }
 
-    async fn flush(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
+    async fn consume(
+        &mut self,
+        _input: In,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("sink", self.message));
         }
-        Ok(None)
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+        ))
     }
 }
 
@@ -1707,16 +1779,8 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.stage_logic_version()
     }
 
-    fn sink_delivery_safety(&self) -> Option<obzenflow_runtime::effects::SinkDeliverySafety> {
-        self.inner.sink_delivery_safety()
-    }
-
-    fn sink_delivery_type(&self) -> Option<&'static str> {
-        self.inner.sink_delivery_type()
-    }
-
-    fn sink_canonical_destination(&self) -> Option<serde_json::Value> {
-        self.inner.sink_canonical_destination()
+    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+        self.inner.sink_delivery_declaration()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
@@ -2145,7 +2209,10 @@ pub fn validate_archive_sink_delivery_safety(
             continue;
         }
 
-        match descriptor.sink_delivery_safety() {
+        match descriptor
+            .sink_delivery_declaration()
+            .and_then(SinkDeliveryDeclaration::safety)
+        {
             Some(SinkDeliverySafety::IdempotentProjection) => {}
             Some(SinkDeliverySafety::NonIdempotentExternal) => {
                 if !allow_duplicate_sink_delivery {
@@ -2816,16 +2883,8 @@ impl StageDescriptor for DeterministicOrdererOverride {
         self.inner.stage_logic_version()
     }
 
-    fn sink_delivery_safety(&self) -> Option<obzenflow_runtime::effects::SinkDeliverySafety> {
-        self.inner.sink_delivery_safety()
-    }
-
-    fn sink_delivery_type(&self) -> Option<&'static str> {
-        self.inner.sink_delivery_type()
-    }
-
-    fn sink_canonical_destination(&self) -> Option<serde_json::Value> {
-        self.inner.sink_canonical_destination()
+    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+        self.inner.sink_delivery_declaration()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {

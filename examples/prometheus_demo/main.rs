@@ -30,17 +30,18 @@ use async_trait::async_trait;
 use obzenflow::env::env_var_or;
 use obzenflow::typed::{sources, stateful as typed_stateful, transforms as typed_transforms};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::SinkHandler;
-use obzenflow_runtime::stages::sink::SinkTyped;
+use obzenflow_runtime::stages::sink::{
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, SinkTyped,
+    TypedSinkConsumeReport, TypedSinkHandler,
+};
 use obzenflow_runtime::stages::transform::TryMapTyped;
-use obzenflow_runtime::typing::SinkTyping;
 use serde::{Deserialize, Serialize};
 const CONFIG_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -139,25 +140,22 @@ impl CompletionSink {
     }
 }
 
-impl SinkTyping for CompletionSink {
-    type Input = ProcessedEvent;
-}
-
 #[async_trait]
-impl SinkHandler for CompletionSink {
-    async fn consume(
-        &mut self,
-        _event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("InMemory".to_string()),
-            Some(1),
-        ))
+impl TypedSinkHandler for CompletionSink {
+    type Input = ProcessedEvent;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
     }
 
-    // Receipt-only completion probe: re-delivery under either archive verb is safe.
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+    async fn consume(
+        &mut self,
+        _event: ProcessedEvent,
+        _context: SinkInputContext,
+    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("InMemory".to_string()), Some(1)),
+        ))
     }
 }
 

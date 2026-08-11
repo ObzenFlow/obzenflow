@@ -7,12 +7,20 @@
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
+    use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
     use obzenflow_core::TypedPayload;
     use obzenflow_runtime::bootstrap::ReplayVerb;
     use obzenflow_runtime::effects::SinkDeliverySafety;
-    use obzenflow_runtime::stages::sink::SinkTyped;
+    use obzenflow_runtime::stages::common::handler_error::HandlerError;
+    use obzenflow_runtime::stages::sink::{
+        SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, SinkTyped,
+        TypedSinkConsumeReport, TypedSinkHandler,
+    };
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use crate::dsl::error::FlowBuildError;
     use crate::dsl::stage_descriptor::{SinkDescriptor, StageDescriptor};
@@ -30,6 +38,35 @@ mod tests {
         const SCHEMA_VERSION: u32 = 1;
     }
 
+    #[derive(Clone, Debug)]
+    struct CountingDeclaration {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl TypedSinkHandler for CountingDeclaration {
+        type Input = SinkInput;
+
+        fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            SinkDeliveryDeclaration::destination(
+                "counted_destination",
+                SinkDeliverySafety::IdempotentProjection,
+                Some(serde_json::json!({ "tenant": "stable" })),
+            )
+        }
+
+        async fn consume(
+            &mut self,
+            _input: Self::Input,
+            _context: SinkInputContext,
+        ) -> Result<TypedSinkConsumeReport, HandlerError> {
+            Ok(TypedSinkConsumeReport::terminal(
+                SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+            ))
+        }
+    }
+
     fn sink_descriptor(
         name: &str,
         delivery_safety: Option<SinkDeliverySafety>,
@@ -40,9 +77,11 @@ mod tests {
             Some(SinkDeliverySafety::NonIdempotentExternal) => handler.non_idempotent(),
             None => handler,
         };
+        let delivery_declaration = handler.delivery_declaration();
         Box::new(SinkDescriptor {
             name: name.to_string(),
             handler,
+            delivery_declaration,
             sink_policies: vec![],
             observers: vec![],
         })
@@ -158,20 +197,13 @@ mod tests {
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
-        // The refusal names all four declaration homes.
+        // The refusal names both supported declaration homes.
         assert!(
             message.contains("`delivery: idempotent` on its `sink!` row"),
             "{message}"
         );
-        assert!(
-            message.contains("`SinkHandler::delivery_safety()`"),
-            "{message}"
-        );
-        assert!(
-            message.contains("`SAFETY` on a typed `Delivery`"),
-            "{message}"
-        );
         assert!(message.contains("`.idempotent()`"), "{message}");
+        assert!(message.contains("`SinkDeliveryDeclaration::"), "{message}");
     }
 
     #[test]
@@ -198,7 +230,7 @@ mod tests {
         for verb in BOTH_VERBS {
             let transform =
                 crate::transform!(name: "shaper", SinkInput -> SinkInput => placeholder!());
-            assert_eq!(transform.sink_delivery_safety(), None);
+            assert!(transform.sink_delivery_declaration().is_none());
 
             let descriptors = descriptors(vec![("shaper", transform)]);
             validate_archive_sink_delivery_safety(&descriptors, verb, false)
@@ -215,7 +247,9 @@ mod tests {
             delivery: idempotent
         );
         assert_eq!(
-            idempotent.sink_delivery_safety(),
+            idempotent
+                .sink_delivery_declaration()
+                .and_then(|declaration| declaration.safety()),
             Some(SinkDeliverySafety::IdempotentProjection)
         );
 
@@ -226,7 +260,9 @@ mod tests {
             delivery: non_idempotent
         );
         assert_eq!(
-            non_idempotent.sink_delivery_safety(),
+            non_idempotent
+                .sink_delivery_declaration()
+                .and_then(|declaration| declaration.safety()),
             Some(SinkDeliverySafety::NonIdempotentExternal)
         );
 
@@ -237,7 +273,9 @@ mod tests {
             delivery: idempotent
         );
         assert_eq!(
-            adapter_form.sink_delivery_safety(),
+            adapter_form
+                .sink_delivery_declaration()
+                .and_then(|declaration| declaration.safety()),
             Some(SinkDeliverySafety::IdempotentProjection)
         );
 
@@ -246,6 +284,42 @@ mod tests {
             name: "undeclared",
             SinkInput => undeclared_sink
         );
-        assert_eq!(undeclared.sink_delivery_safety(), None);
+        assert_eq!(
+            undeclared
+                .sink_delivery_declaration()
+                .and_then(|declaration| declaration.safety()),
+            None
+        );
+    }
+
+    #[test]
+    fn typed_factory_snapshots_one_aggregate_and_wrappers_only_forward_it() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler = CountingDeclaration {
+            calls: Arc::clone(&calls),
+        };
+        let mut descriptor = crate::sink!(
+            name: "construction_name",
+            SinkInput => handler
+        );
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        for _ in 0..3 {
+            let declaration = descriptor
+                .sink_delivery_declaration()
+                .expect("typed sink declaration");
+            assert_eq!(declaration.delivery_type(), Some("counted_destination"));
+            assert_eq!(
+                declaration.safety(),
+                Some(SinkDeliverySafety::IdempotentProjection)
+            );
+            assert_eq!(
+                declaration.canonical_destination(),
+                Some(&serde_json::json!({ "tenant": "stable" }))
+            );
+        }
+        descriptor.set_name("final_binding_name".to_string());
+        assert_eq!(descriptor.name(), "final_binding_name");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

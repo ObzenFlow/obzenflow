@@ -29,15 +29,16 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::typed::sources;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, StatefulEmission, TypedStatefulHandler,
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, StatefulEmission,
+    TypedSinkConsumeReport, TypedSinkHandler, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::transform::MapTyped;
 use serde::{Deserialize, Serialize};
@@ -288,33 +289,32 @@ impl PrioritySink {
 }
 
 #[async_trait]
-impl SinkHandler for PrioritySink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        let payload = event.payload();
-        let route = payload["route"].as_str().unwrap_or("");
+impl TypedSinkHandler for PrioritySink {
+    type Input = RawDataEvent;
 
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    }
+
+    async fn consume(
+        &mut self,
+        event: RawDataEvent,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
         // Only process events matching our filter
-        if route == self.route_filter {
+        if event.route.as_deref().unwrap_or("") == self.route_filter {
             let new_total = self.event_count.fetch_add(1, Ordering::Relaxed) + 1;
-            let source = payload["source"].as_str().unwrap_or("unknown");
-            let value = payload["value"].as_i64().unwrap_or(0);
-            *self.per_source.entry(source.to_string()).or_insert(0) += 1;
+            *self.per_source.entry(event.source.clone()).or_insert(0) += 1;
 
             println!(
                 "[SINK:{}] Processed event from '{}' (value: {}) - total: {}",
-                self.name, source, value, new_total
+                self.name, event.source, event.value, new_total
             );
         }
 
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Processed".to_string()),
-            Some(1),
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Processed".to_string()), Some(1)),
         ))
-    }
-
-    // Console print plus local counters: re-delivery under either archive verb is safe.
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
     }
 }
 

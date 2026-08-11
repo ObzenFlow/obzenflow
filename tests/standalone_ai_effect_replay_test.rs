@@ -16,7 +16,7 @@ use obzenflow_core::ai::{
     AiClientError, ChatClient, ChatRequest, ChatTarget, EmbeddingClient, EmbeddingRequest,
     EmbeddingTarget, CHAT_CLIENT_PORT, EMBEDDING_CLIENT_PORT,
 };
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{
     ChainEvent, ChainEventContent, EffectAttemptStarted, EffectOutcomePayload, EffectRecord,
 };
@@ -32,7 +32,10 @@ use obzenflow_runtime::effects::{
     EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::SinkHandler;
+use obzenflow_runtime::stages::common::handlers::{
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedSinkConsumeReport,
+    TypedSinkHandler,
+};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -131,19 +134,25 @@ struct CollectEmbedded {
 }
 
 #[async_trait]
-impl SinkHandler for CollectEmbedded {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if let Some(output) = TicketEmbedded::from_event(&event) {
-            self.outputs.lock().expect("output lock").push(output);
-        }
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("CollectEmbedded".to_string()),
-            Some(1),
-        ))
+impl TypedSinkHandler for CollectEmbedded {
+    type Input = TicketEmbedded;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
     }
 
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+    async fn consume(
+        &mut self,
+        output: TicketEmbedded,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        self.outputs.lock().expect("output lock").push(output);
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(
+                DeliveryMethod::Custom("CollectEmbedded".to_string()),
+                Some(1),
+            ),
+        ))
     }
 }
 

@@ -33,8 +33,9 @@ fn archive_sink_refusal(verb: &ReplayVerb, stage: &str, undeclared: bool) -> Str
              (FLOWIP-120n F16, FLOWIP-120v). Bind the sink before `flow!`, then use \
              `delivery: idempotent` on its `sink!` row, `.idempotent()` / \
              `.non_idempotent()` while constructing a typed sink handler, \
-             `SinkHandler::delivery_safety()` on a custom handler type, or `SAFETY` \
-             on a typed `Delivery`. A non-idempotent external write belongs behind \
+             or return `SinkDeliveryDeclaration::safety_only(...)` / \
+             `SinkDeliveryDeclaration::destination(...)` from a custom \
+             `TypedSinkHandler`. A non-idempotent external write belongs behind \
              the effect boundary (effectful transform plus plain sink). Or pass \
              `allow_duplicate_sink_delivery`."
         )

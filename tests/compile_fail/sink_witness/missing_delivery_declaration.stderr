@@ -1,0 +1,7 @@
+error[E0046]: not all trait items implemented, missing: `delivery_declaration`
+  --> tests/compile_fail/sink_witness/missing_delivery_declaration.rs:18:1
+   |
+18 | impl TypedSinkHandler for MissingDeclaration {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `delivery_declaration` in implementation
+   |
+   = help: implement the missing item: `fn delivery_declaration(&self) -> SinkDeliveryDeclaration { todo!() }`

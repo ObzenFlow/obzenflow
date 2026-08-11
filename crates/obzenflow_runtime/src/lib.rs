@@ -43,6 +43,7 @@ pub mod __private {
     pub use crate::stages::common::handlers::join::{
         ErasedJoinInvocation, TypedJoinHandlerAdapter, UnifiedJoinHandler,
     };
+    pub use crate::stages::common::handlers::sink::TypedSinkHandlerAdapter;
     pub use crate::stages::common::handlers::source::typed::{
         TypedAsyncFiniteSourceHandlerAdapter, TypedAsyncInfiniteSourceHandlerAdapter,
         TypedFiniteSourceHandlerAdapter, TypedInfiniteSourceHandlerAdapter,
@@ -87,7 +88,7 @@ pub mod testing;
 /// [`TypedFiniteSourceHandler`](crate::stages::TypedFiniteSourceHandler),
 /// [`TypedInfiniteSourceHandler`](crate::stages::TypedInfiniteSourceHandler),
 /// [`TypedTransformHandler`](crate::stages::TypedTransformHandler),
-/// [`SinkHandler`](crate::stages::SinkHandler),
+/// [`TypedSinkHandler`](crate::stages::TypedSinkHandler),
 /// [`TypedStatefulHandler`](crate::stages::TypedStatefulHandler),
 /// [`TypedJoinHandler`](crate::stages::TypedJoinHandler),
 /// [`ObserverHandler`](crate::stages::ObserverHandler), and the
@@ -119,11 +120,11 @@ pub mod prelude {
     // Handlers
     pub use crate::stages::{
         EffectfulStatefulHandler, EffectfulTransformHandler, HostedIngressSource, ObserverHandler,
-        ResourceManaged, SinkHandler, SourceError, SourceObservationSink,
-        TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
-        TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
+        ResourceManaged, SourceError, SourceObservationSink, TypedAsyncFiniteSourceHandler,
+        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+        TypedJoinHandler, TypedSinkHandler, TypedStatefulHandler, TypedTransformHandler,
     };
-    pub use crate::typing::{SinkTyping, SourceTyping, TransformTyping};
+    pub use crate::typing::{SourceTyping, TransformTyping};
 
     // Event flow
     pub use crate::effects::{

@@ -17,8 +17,9 @@ use obzenflow_dsl::{join, sink, source, stateful, test_flow};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkHandler, StatefulEmission, TypedFiniteSourceHandler, TypedJoinHandler,
-    TypedStatefulHandler,
+    JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
+    StatefulEmission, TypedFiniteSourceHandler, TypedJoinHandler, TypedSinkConsumeReport,
+    TypedSinkHandler, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
@@ -179,12 +180,12 @@ impl TypedStatefulHandler for SlowAccumulator {
 }
 
 #[derive(Clone, Debug)]
-struct CollectingSink {
-    events: Arc<Mutex<Vec<ChainEvent>>>,
+struct CollectingSink<T> {
+    events: Arc<Mutex<Vec<T>>>,
 }
 
-impl CollectingSink {
-    fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
+impl<T> CollectingSink<T> {
+    fn new() -> (Self, Arc<Mutex<Vec<T>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
@@ -196,23 +197,30 @@ impl CollectingSink {
 }
 
 #[async_trait]
-impl SinkHandler for CollectingSink {
+impl<T> TypedSinkHandler for CollectingSink<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Input = T;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
     async fn consume(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<
-        obzenflow_core::event::payloads::delivery_payload::DeliveryPayload,
-        HandlerError,
-    > {
+        event: T,
+        _context: SinkInputContext,
+    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
         self.events.lock().unwrap().push(event);
-        Ok(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryPayload::success(
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(
                 obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
                     "collect".to_string(),
                 ),
                 None,
             ),
-        )
+        ))
     }
 }
 
@@ -278,7 +286,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let sleep_per_event = Duration::from_millis(5);
     let expected_processing_time_s = total_events as f64 * sleep_per_event.as_secs_f64();
 
-    let (sink_handler, sink_events) = CollectingSink::new();
+    let (sink_handler, sink_events) = CollectingSink::<AggregateMetricEvent>::new();
     let journal_dir = unique_journal_dir("stateful_metrics");
     let journal_dir_for_flow = journal_dir.clone();
     let source = BurstSource::<MetricEvent>::new(total_events);
@@ -381,37 +389,32 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     assert!(sum_s < 10.0, "expected sum < 10s, got {sum_s}");
 
     let events = sink_events.lock().unwrap();
-    let aggregate_events: Vec<&ChainEvent> = events
-        .iter()
-        .filter(|e| e.is_data() && AggregateMetricEvent::event_type_matches(&e.event_type()))
-        .collect();
     assert_eq!(
-        aggregate_events.len(),
+        events.len(),
         1,
         "expected sink to receive exactly one aggregate data event"
     );
-    let event = aggregate_events[0];
-    assert_eq!(
-        event.writer_id,
-        WriterId::from(event.flow_context.stage_id),
-        "expected stateful aggregate output to be authored by the stateful stage"
-    );
+    drop(events);
 
-    // Ensure happened-before is preserved: the persisted aggregate event should
-    // carry the upstream vector-clock entries via a parented append.
-    let parent_vc = event
-        .runtime_context
-        .as_ref()
-        .and_then(|ctx| ctx.last_consumed_vector_clock.clone())
-        .ok_or_else(|| anyhow!("aggregate event missing last_consumed_vector_clock"))?;
-
-    let stage_log = journal_dir
-        .join("flows")
-        .join(&event.flow_context.flow_id)
-        .join(format!(
-            "Stateful_counter_stage_{}.log",
-            event.flow_context.stage_id.as_ulid()
-        ));
+    // Envelope authorship and vector clocks are runtime-owned metadata, so the
+    // typed sink observes only the domain value and this proof reads metadata
+    // from its authoritative stage journal.
+    let flow_dir = std::fs::read_dir(journal_dir.join("flows"))?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .ok_or_else(|| anyhow!("missing flow journal directory"))?;
+    let stage_log = std::fs::read_dir(&flow_dir)?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("Stateful_counter_stage_") && name.ends_with(".log")
+                })
+        })
+        .ok_or_else(|| anyhow!("missing stateful counter journal in {}", flow_dir.display()))?;
 
     let file = std::fs::File::open(&stage_log)
         .map_err(|e| anyhow!("failed to open stage journal {}: {e}", stage_log.display()))?;
@@ -474,7 +477,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
                     )
                 })?;
 
-            if record.event.id == event.id {
+            if AggregateMetricEvent::from_event(&record.event).is_some() {
                 aggregate_record = Some(record);
                 break;
             }
@@ -484,13 +487,22 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
         }
     }
 
-    let aggregate_record = aggregate_record.ok_or_else(|| {
-        anyhow!(
-            "missing aggregate event {} in {}",
-            event.id,
-            stage_log.display()
-        )
-    })?;
+    let aggregate_record = aggregate_record
+        .ok_or_else(|| anyhow!("missing aggregate event in {}", stage_log.display()))?;
+    let event = &aggregate_record.event;
+    assert_eq!(
+        event.writer_id,
+        WriterId::from(event.flow_context.stage_id),
+        "expected stateful aggregate output to be authored by the stateful stage"
+    );
+
+    // Ensure happened-before is preserved: the persisted aggregate event should
+    // carry the upstream vector-clock entries via a parented append.
+    let parent_vc = event
+        .runtime_context
+        .as_ref()
+        .and_then(|ctx| ctx.last_consumed_vector_clock.clone())
+        .ok_or_else(|| anyhow!("aggregate event missing last_consumed_vector_clock"))?;
 
     for (writer_key, parent_seq) in parent_vc.clocks.iter() {
         let seq = aggregate_record.vector_clock.get(writer_key);
@@ -518,7 +530,7 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
     let reference_source = BurstSource::<RefMetricEvent>::new(reference_events);
     let stream_source = BurstSource::<StreamMetricEvent>::new(stream_events);
     let joiner = NoopJoin;
-    let (sink, _events) = CollectingSink::new();
+    let (sink, _events) = CollectingSink::<JoinedMetricEvent>::new();
 
     let test_handle = test_flow! {
         name: "stateful_join_metrics",

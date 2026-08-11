@@ -3,8 +3,8 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::{ChainEvent, SystemEvent, SystemEventType};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::{SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
@@ -14,7 +14,8 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
+    EffectfulTransformHandler, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
+    TypedFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler,
 };
 use obzenflow_runtime::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use obzenflow_runtime::stages::SourceError;
@@ -114,11 +115,20 @@ impl EffectfulTransformHandler for HungTransform {
 struct NoopSink;
 
 #[async_trait]
-impl SinkHandler for NoopSink {
-    async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Noop".to_string()),
-            None,
+impl TypedSinkHandler for NoopSink {
+    type Input = ProbeEvent;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
+    async fn consume(
+        &mut self,
+        _input: ProbeEvent,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Noop".to_string()), None),
         ))
     }
 }

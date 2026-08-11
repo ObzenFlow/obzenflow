@@ -28,7 +28,8 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkHandler, TypedFiniteSourceHandler, TypedJoinHandler,
+    JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
+    TypedFiniteSourceHandler, TypedJoinHandler, TypedSinkConsumeReport, TypedSinkHandler,
     TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
@@ -177,23 +178,24 @@ impl TypedTransformHandler for RefValidator {
 struct DropSink;
 
 #[async_trait]
-impl SinkHandler for DropSink {
+impl TypedSinkHandler for DropSink {
+    type Input = JoinedItem;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    }
+
     async fn consume(
         &mut self,
-        _event: ChainEvent,
-    ) -> Result<obzenflow_core::event::payloads::delivery_payload::DeliveryPayload, HandlerError>
-    {
-        Ok(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryPayload::success(
+        _event: JoinedItem,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(
                 obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
                 None,
             ),
-        )
-    }
-
-    // Deterministic local drop: re-delivery under either archive verb is safe.
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+        ))
     }
 }
 

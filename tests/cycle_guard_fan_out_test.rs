@@ -4,16 +4,15 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::StageOutputs;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
+    TypedSinkConsumeReport, TypedSinkHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 
@@ -238,26 +237,23 @@ impl DoneCounterSink {
 }
 
 #[async_trait]
-impl SinkHandler for DoneCounterSink {
+impl TypedSinkHandler for DoneCounterSink {
+    type Input = SeedEvent;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
     async fn consume(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        if let ChainEventContent::Data {
-            event_type,
-            payload,
-        } = &event.content
-        {
-            if SeedEvent::event_type_matches(event_type)
-                && payload.get("kind").and_then(|v| v.as_str()) == Some("done")
-            {
-                self.done_count.fetch_add(1, Ordering::Relaxed);
-            }
+        event: SeedEvent,
+        _context: SinkInputContext,
+    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        if event.kind == "done" {
+            self.done_count.fetch_add(1, Ordering::Relaxed);
         }
-
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Count".to_string()),
-            None,
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Count".to_string()), None),
         ))
     }
 }

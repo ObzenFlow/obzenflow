@@ -3,8 +3,8 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::{ChainEvent, SystemEvent, SystemEventType};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::{SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use obzenflow_core::TypedPayload;
@@ -14,7 +14,8 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkHandler, TypedAsyncFiniteSourceHandler, TypedJoinHandler,
+    JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
+    TypedAsyncFiniteSourceHandler, TypedJoinHandler, TypedSinkConsumeReport, TypedSinkHandler,
 };
 use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
@@ -149,11 +150,20 @@ impl TypedJoinHandler for SlowJoin {
 struct NoopSink;
 
 #[async_trait]
-impl SinkHandler for NoopSink {
-    async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Noop".to_string()),
-            None,
+impl TypedSinkHandler for NoopSink {
+    type Input = EnrichedRecord;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
+    async fn consume(
+        &mut self,
+        _input: EnrichedRecord,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Noop".to_string()), None),
         ))
     }
 }

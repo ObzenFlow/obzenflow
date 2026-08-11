@@ -1,0 +1,31 @@
+error[E0107]: missing generics for struct `CsvSink`
+ --> tests/compile_fail/sink_witness/csv_requires_type.rs:7:29
+  |
+7 | fn accepts_bare_sink(_sink: CsvSink) {}
+  |                             ^^^^^^^ expected 1 generic argument
+  |
+note: struct defined here, with 1 generic parameter: `T`
+ --> crates/obzenflow_adapters/src/sinks/csv.rs
+  |
+  | pub struct CsvSink<T> {
+  |            ^^^^^^^ -
+help: add missing generic argument
+  |
+7 | fn accepts_bare_sink(_sink: CsvSink<T>) {}
+  |                                    +++
+
+error[E0107]: missing generics for struct `CsvSinkBuilder`
+ --> tests/compile_fail/sink_witness/csv_requires_type.rs:8:35
+  |
+8 | fn accepts_bare_builder(_builder: CsvSinkBuilder) {}
+  |                                   ^^^^^^^^^^^^^^ expected 1 generic argument
+  |
+note: struct defined here, with 1 generic parameter: `T`
+ --> crates/obzenflow_adapters/src/sinks/csv.rs
+  |
+  | pub struct CsvSinkBuilder<T> {
+  |            ^^^^^^^^^^^^^^ -
+help: add missing generic argument
+  |
+8 | fn accepts_bare_builder(_builder: CsvSinkBuilder<T>) {}
+  |                                                 +++

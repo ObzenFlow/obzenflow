@@ -10,14 +10,15 @@ use obzenflow_adapters::middleware::{
     MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::SystemEventType;
-use obzenflow_core::TypedPayload;
+use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, SourceObservationSink, TypedAsyncFiniteSourceHandler,
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, SourceObservationSink,
+    TypedAsyncFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler,
 };
 use obzenflow_runtime::stages::observer::{
     ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
@@ -98,15 +99,24 @@ impl CollectSink {
 }
 
 #[async_trait]
-impl SinkHandler for CollectSink {
+impl TypedSinkHandler for CollectSink {
+    type Input = AsyncTestEvent;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
     async fn consume(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        self.events.lock().unwrap().push(event);
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Collect".to_string()),
-            None,
+        event: AsyncTestEvent,
+        _context: SinkInputContext,
+    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(event.to_event(WriterId::from(StageId::new())));
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Collect".to_string()), None),
         ))
     }
 }

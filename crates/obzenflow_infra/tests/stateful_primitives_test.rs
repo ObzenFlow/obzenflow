@@ -6,16 +6,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use obzenflow_core::TypedPayload;
 use obzenflow_core::{
-    event::chain_event::ChainEvent,
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
+    event::chain_event::ChainEvent, event::payloads::delivery_payload::DeliveryMethod,
 };
+use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
+    TypedSinkConsumeReport, TypedSinkHandler,
+};
 use obzenflow_runtime::stages::stateful::strategies::accumulators::{
     ConflateTyped, GroupByTyped, ReduceTyped,
 };
@@ -97,20 +99,42 @@ impl TypedFiniteSourceHandler for TransactionSource {
 }
 
 #[derive(Clone, Debug)]
-struct CollectingSink {
+struct CollectingSink<T> {
     events: Arc<Mutex<Vec<ChainEvent>>>,
+    _input: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> CollectingSink<T> {
+    fn new(events: Arc<Mutex<Vec<ChainEvent>>>) -> Self {
+        Self {
+            events,
+            _input: std::marker::PhantomData,
+        }
+    }
 }
 
 #[async_trait]
-impl SinkHandler for CollectingSink {
+impl<T> TypedSinkHandler for CollectingSink<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Input = T;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
     async fn consume(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        self.events.lock().unwrap().push(event.clone());
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("collect".to_string()),
-            None,
+        input: T,
+        _context: SinkInputContext,
+    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(input.to_event(WriterId::from(StageId::new())));
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("collect".to_string()), None),
         ))
     }
 }
@@ -134,9 +158,7 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
             },
         )
         .emit_on_eof();
-        let collecting_sink = CollectingSink {
-            events: events_for_flow,
-        };
+        let collecting_sink = CollectingSink::<ProductStatsUpdate>::new(events_for_flow);
 
         Ok(flow! {
             name: "stateful_primitives_groupby_test",
@@ -200,9 +222,7 @@ async fn reduce_with_on_eof_emits_single_total() {
             },
         )
         .emit_on_eof();
-        let collecting_sink = CollectingSink {
-            events: events_for_flow,
-        };
+        let collecting_sink = CollectingSink::<TotalStats>::new(events_for_flow);
 
         Ok(flow! {
             name: "stateful_primitives_reduce_test",
@@ -244,9 +264,7 @@ async fn conflate_emits_latest_value_per_key() {
         let latest_by_product =
             ConflateTyped::new(|event: &TransactionEvent| event.product_id.clone())
                 .emit_within(Duration::from_millis(1));
-        let collecting_sink = CollectingSink {
-            events: events_for_flow,
-        };
+        let collecting_sink = CollectingSink::<TransactionEvent>::new(events_for_flow);
 
         Ok(flow! {
             name: "stateful_primitives_conflate_test",

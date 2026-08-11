@@ -271,7 +271,7 @@ pub fn assemble_flow(
                     ]
                 );
 
-                // Paid-order sink, tier 3: a typed delivery. `ShippingHandoff`
+                // Paid-order sink: a named typed destination. `ShippingHandoff`
                 // carries its destination identity, duplicate-safety, and
                 // behaviour on the type; the receipt's journalled destination is
                 // its DELIVERY_TYPE ("shipping.handoff"), and resume needs no

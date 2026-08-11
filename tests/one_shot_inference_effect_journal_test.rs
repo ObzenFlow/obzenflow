@@ -13,7 +13,7 @@ use obzenflow_core::ai::{
     ChatTarget, HeuristicTokenEstimator, ResolvedTokenEstimator, TokenEstimatorFallbackReason,
     TokenEstimatorResolutionInfo, CHAT_CLIENT_PORT,
 };
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{
     ChainEvent, ChainEventContent, EffectAttemptStarted, EffectFactOwner, EffectOutcomePayload,
     EffectRecord, PipelineLifecycleEvent, SystemEvent, SystemEventType,
@@ -32,7 +32,10 @@ use obzenflow_runtime::effects::{
     EffectPortRegistry, EffectPortResolver, SinkDeliverySafety, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::SinkHandler;
+use obzenflow_runtime::stages::common::handlers::{
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedSinkConsumeReport,
+    TypedSinkHandler,
+};
 #[cfg(feature = "test-support")]
 use obzenflow_runtime::testing::BackpressureAckGate;
 use serde::{Deserialize, Serialize};
@@ -250,19 +253,25 @@ struct CollectBrief {
 }
 
 #[async_trait]
-impl SinkHandler for CollectBrief {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if let Some(output) = DecisionBrief::from_event(&event) {
-            self.outputs.lock().expect("brief output lock").push(output);
-        }
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("CollectBrief".to_string()),
-            Some(1),
-        ))
+impl TypedSinkHandler for CollectBrief {
+    type Input = DecisionBrief;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
     }
 
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+    async fn consume(
+        &mut self,
+        output: DecisionBrief,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        self.outputs.lock().expect("brief output lock").push(output);
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(
+                DeliveryMethod::Custom("CollectBrief".to_string()),
+                Some(1),
+            ),
+        ))
     }
 }
 

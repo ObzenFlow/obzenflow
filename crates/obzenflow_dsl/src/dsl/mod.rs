@@ -195,17 +195,19 @@
 //! let _ = sink!(Out => output, delivery: idempotent);
 //! ```
 //!
-//! A typed `Delivery` carries `SAFETY` on the type; the site adverb fails by
-//! the sealed `DeclareDeliverySafety` bound.
+//! A named `TypedSinkHandler` owns its aggregate delivery declaration; the
+//! site adverb fails by the sealed `DeclareDeliverySafety` bound.
 //!
 //! ```compile_fail
 //! use async_trait::async_trait;
 //! use obzenflow_core::event::schema::TypedPayload;
 //! use obzenflow_dsl::sink;
-//! use obzenflow_runtime::effects::SinkDeliverySafety;
 //! use obzenflow_runtime::stages::common::handler_error::HandlerError;
-//! use obzenflow_runtime::stages::common::handlers::{Delivered, Delivery};
-//! use obzenflow_runtime::stages::sink::DeliveryContext;
+//! use obzenflow_runtime::stages::common::handlers::{
+//!     SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
+//!     TypedSinkConsumeReport, TypedSinkHandler,
+//! };
+//! use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -218,20 +220,23 @@
 //! struct Typed;
 //!
 //! #[async_trait]
-//! impl Delivery for Typed {
+//! impl TypedSinkHandler for Typed {
 //!     type Input = Out;
-//!     const DELIVERY_TYPE: &'static str = "doc.typed";
-//!     const SAFETY: SinkDeliverySafety = SinkDeliverySafety::IdempotentProjection;
-//!     async fn deliver(
+//!     fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+//!         SinkDeliveryDeclaration::undeclared()
+//!     }
+//!     async fn consume(
 //!         &mut self,
 //!         _input: Out,
-//!         _ctx: &DeliveryContext,
-//!     ) -> Result<Delivered, HandlerError> {
-//!         Ok(Delivered::one())
+//!         _ctx: SinkInputContext,
+//!     ) -> Result<TypedSinkConsumeReport, HandlerError> {
+//!         Ok(TypedSinkConsumeReport::terminal(
+//!             SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+//!         ))
 //!     }
 //! }
 //!
-//! // The adverb has no home on the typed tier.
+//! // A named handler's declaration is authoritative.
 //! let _ = sink!(Out => Typed, delivery: idempotent);
 //! ```
 //!

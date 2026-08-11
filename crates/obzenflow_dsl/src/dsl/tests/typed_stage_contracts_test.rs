@@ -7,7 +7,7 @@
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
     use obzenflow_core::{ChainEvent, StageId, StageOutputFacts, TypedPayload};
     use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
     use obzenflow_runtime::effects::{Effects, StageCompletion};
@@ -16,12 +16,13 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
-        EffectfulTransformHandler, JoinReferenceView, SinkHandler, StatefulEmission,
-        TransformHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-        TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
-        TypedStatefulHandler, TypedTransformHandler,
+        EffectfulTransformHandler, JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext,
+        SinkTerminalOutcome, StatefulEmission, TransformHandler, TypedAsyncFiniteSourceHandler,
+        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+        TypedJoinHandler, TypedSinkConsumeReport, TypedSinkHandler, TypedStatefulHandler,
+        TypedTransformHandler,
     };
-    use obzenflow_runtime::typing::{SinkTyping, SourceTyping, TransformTyping};
+    use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
     use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder, TypeHintInfo};
     use serde::{Deserialize, Serialize};
     use std::any::type_name;
@@ -425,14 +426,22 @@ mod tests {
     #[derive(Clone, Debug)]
     struct ExactSink;
 
-    impl SinkTyping for ExactSink {
-        type Input = OutputEvent;
-    }
-
     #[async_trait]
-    impl SinkHandler for ExactSink {
-        async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-            Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
+    impl TypedSinkHandler for ExactSink {
+        type Input = OutputEvent;
+
+        fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+            SinkDeliveryDeclaration::undeclared()
+        }
+
+        async fn consume(
+            &mut self,
+            _input: OutputEvent,
+            _context: SinkInputContext,
+        ) -> Result<TypedSinkConsumeReport, HandlerError> {
+            Ok(TypedSinkConsumeReport::terminal(
+                SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+            ))
         }
     }
 

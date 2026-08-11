@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow::typed::stateful as typed_stateful;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent};
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
@@ -14,7 +14,8 @@ use obzenflow_dsl::{sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
+    TypedSinkConsumeReport, TypedSinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -176,18 +177,21 @@ impl AggregateSink {
 }
 
 #[async_trait]
-impl SinkHandler for AggregateSink {
+impl TypedSinkHandler for AggregateSink {
+    type Input = WindowAgg;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
     async fn consume(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        if let Some(agg) = WindowAgg::from_event(&event) {
-            let mut guard = self.seen.lock().unwrap();
-            guard.push(agg);
-        }
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Collect".to_string()),
-            None,
+        event: WindowAgg,
+        _context: SinkInputContext,
+    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        self.seen.lock().unwrap().push(event);
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Collect".to_string()), None),
         ))
     }
 }
@@ -196,14 +200,20 @@ impl SinkHandler for AggregateSink {
 struct AckSink;
 
 #[async_trait]
-impl SinkHandler for AckSink {
+impl TypedSinkHandler for AckSink {
+    type Input = GroupAggOutput;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
     async fn consume(
         &mut self,
-        _event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Ack".to_string()),
-            None,
+        _event: GroupAggOutput,
+        _context: SinkInputContext,
+    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Ack".to_string()), None),
         ))
     }
 }

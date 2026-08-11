@@ -22,7 +22,7 @@
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::observability_payload::{
     IndicatorSample, MiddlewareLifecycle, ObservabilityPayload,
 };
@@ -35,7 +35,10 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::journal::DiskJournal;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
+    TypedSinkConsumeReport, TypedSinkHandler,
+};
 use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -86,11 +89,20 @@ impl TypedFiniteSourceHandler for OrderSource {
 #[derive(Clone, Debug)]
 struct Handoff;
 #[async_trait]
-impl SinkHandler for Handoff {
-    async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("handoff".to_string()),
-            None,
+impl TypedSinkHandler for Handoff {
+    type Input = Processed;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
+    async fn consume(
+        &mut self,
+        _input: Processed,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("handoff".to_string()), None),
         ))
     }
 }

@@ -1,12 +1,13 @@
-error[E0046]: not all trait items implemented, missing: `name`, `stage_type`, `create_handle`
+error[E0046]: not all trait items implemented, missing: `name`, `stage_type`, `create_handle`, `sink_delivery_declaration`
  --> tests/compile_fail/synchronous_transform_witness/stage_descriptor_sealed.rs:9:1
   |
 9 | impl StageDescriptor for CounterfeitDescriptor {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `name`, `stage_type`, `create_handle` in implementation
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `name`, `stage_type`, `create_handle`, `sink_delivery_declaration` in implementation
   |
   = help: implement the missing item: `fn name(&self) -> &str { todo!() }`
   = help: implement the missing item: `fn stage_type(&self) -> obzenflow_core::event::context::stage_type::StageType { todo!() }`
   = help: implement the missing item: `fn create_handle<'async_trait>(self: Box<Self>, _: StageConfig, _: obzenflow_runtime::stages::resources_builder::StageResources, _: Arc<obzenflow_adapters::middleware::control::provider::ControlMiddlewareAggregator>) -> Pin<Box<(dyn Future<Output = Result<Box<(dyn obzenflow_runtime::stages::common::stage_handle::StageHandle + 'static)>, StageCreationError>> + Send + 'async_trait)>> { todo!() }`
+  = help: implement the missing item: `fn sink_delivery_declaration(&self) -> Option<&obzenflow_runtime::stages::common::handlers::sink::typed::SinkDeliveryDeclaration> { todo!() }`
 
 error[E0277]: the trait bound `CounterfeitDescriptor: stage_descriptor::sealed::Sealed` is not satisfied
  --> tests/compile_fail/synchronous_transform_witness/stage_descriptor_sealed.rs:9:26
@@ -19,12 +20,22 @@ help: the trait `stage_descriptor::sealed::Sealed` is not implemented for `Count
   |
 7 | struct CounterfeitDescriptor;
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  = help: the following other types implement trait `stage_descriptor::sealed::Sealed`:
-            DeterministicOrdererOverride
-            EffectfulStatefulDescriptor<H>
-            EffectfulTransformDescriptor<H>
-            SinkDescriptor<H>
-            TypedStageDescriptor
+help: the following other types implement trait `stage_descriptor::sealed::Sealed`
+ --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
+  |
+  | impl<H: EffectfulTransformHandler + 'static> sealed::Sealed for EffectfulTransformDescriptor<H> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EffectfulTransformDescriptor<H>`
+...
+  | impl<H: EffectfulStatefulHandler + 'static> sealed::Sealed for EffectfulStatefulDescriptor<H> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EffectfulStatefulDescriptor<H>`
+  |
+ ::: crates/obzenflow_dsl/src/dsl/typing.rs
+  |
+  | impl crate::dsl::stage_descriptor::sealed::Sealed for TypedStageDescriptor {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `TypedStageDescriptor`
+...
+  | impl crate::dsl::stage_descriptor::sealed::Sealed for DeterministicOrdererOverride {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `DeterministicOrdererOverride`
 note: required by a bound in `StageDescriptor`
  --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
   |

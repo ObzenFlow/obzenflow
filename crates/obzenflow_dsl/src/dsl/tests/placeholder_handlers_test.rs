@@ -9,7 +9,9 @@ use crate::dsl::typing::{
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
-use obzenflow_runtime::__private::{TypedJoinHandlerAdapter, UnifiedJoinHandler};
+use obzenflow_runtime::__private::{
+    TypedJoinHandlerAdapter, TypedSinkHandlerAdapter, UnifiedJoinHandler,
+};
 use obzenflow_runtime::stages::common::handlers::source::traits::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
     InfiniteSourceHandler,
@@ -103,12 +105,9 @@ fn placeholder_stateful_emits_nothing_and_drains() {
 
 #[tokio::test]
 async fn placeholder_sink_acks_and_flushes_safely() {
-    let mut handler = PlaceholderSink::<u8>::new(None);
-    let event = ChainEventFactory::data_event(
-        WriterId::from(StageId::new()),
-        "test.event",
-        json!({"hello": "world"}),
-    );
+    let handler = PlaceholderSink::<PlaceholderInput>::new(None);
+    let mut handler = TypedSinkHandlerAdapter::new(handler, StageId::new());
+    let event = PlaceholderInput.to_event(WriterId::from(StageId::new()));
 
     let payload = SinkHandler::consume(&mut handler, event)
         .await

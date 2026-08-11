@@ -9,14 +9,14 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
+    TypedSinkConsumeReport, TypedSinkHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 
@@ -95,29 +95,33 @@ impl TypedTransformHandler for UppercaseTransform {
 /// Sink that collects events
 #[derive(Clone, Debug)]
 struct CollectorSink {
-    events: Arc<Mutex<Vec<ChainEvent>>>,
+    events: Arc<Mutex<Vec<MetricEvent>>>,
 }
 
 impl CollectorSink {
-    fn new(events: Arc<Mutex<Vec<ChainEvent>>>) -> Self {
+    fn new(events: Arc<Mutex<Vec<MetricEvent>>>) -> Self {
         Self { events }
     }
 }
 
 #[async_trait]
-impl SinkHandler for CollectorSink {
+impl TypedSinkHandler for CollectorSink {
+    type Input = MetricEvent;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
     async fn consume(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
+        event: MetricEvent,
+        _context: SinkInputContext,
+    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
         if let Ok(mut events) = self.events.lock() {
-            if event.is_data() {
-                events.push(event);
-            }
+            events.push(event);
         }
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Collect".to_string()),
-            None,
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Collect".to_string()), None),
         ))
     }
 }
@@ -229,25 +233,6 @@ async fn test_stage_level_metrics_automatic() -> Result<()> {
     let events = collected_events.lock().unwrap();
     println!("\nEvents processed: {}", events.len());
     assert_eq!(events.len(), 3, "Should have processed 3 events");
-
-    // Check that flow context was populated correctly
-    println!("\n=== Verifying Flow Context ===");
-    for (i, event) in events.iter().enumerate() {
-        println!(
-            "Event {}: flow={}, stage={}",
-            i + 1,
-            event.flow_context.flow_name,
-            event.flow_context.stage_name
-        );
-        assert_ne!(
-            event.flow_context.flow_name, "unknown",
-            "Flow name must be populated"
-        );
-        assert_ne!(
-            event.flow_context.stage_name, "unknown",
-            "Stage name must be populated"
-        );
-    }
 
     println!("\n✅ Stage-Level Metrics Test PASSED!");
     println!("   - All stages automatically emit core stage metrics");

@@ -10,13 +10,13 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::CircuitBreaker;
-use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
+    TypedSinkConsumeReport, TypedSinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -70,18 +70,24 @@ impl TypedTransformHandler for SyncPassthrough {
 struct NullSink;
 
 #[async_trait]
-impl SinkHandler for NullSink {
+impl TypedSinkHandler for NullSink {
+    type Input = GuardEvent;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
     async fn consume(
         &mut self,
-        _event: ChainEvent,
-    ) -> Result<obzenflow_core::event::payloads::delivery_payload::DeliveryPayload, HandlerError>
-    {
-        Ok(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryPayload::success(
+        _event: GuardEvent,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(
                 obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
                 None,
             ),
-        )
+        ))
     }
 }
 

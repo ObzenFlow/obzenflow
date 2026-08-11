@@ -3,8 +3,8 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::{ChainEvent, EdgeLivenessState, SystemEventType};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::{EdgeLivenessState, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{async_source, effectful_transform, flow, sink, transform, FlowDefinition};
@@ -14,7 +14,8 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, SinkHandler, TypedAsyncFiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
+    TypedAsyncFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
@@ -140,14 +141,32 @@ impl TypedTransformHandler for FastTransform {
 }
 
 #[derive(Clone, Debug)]
-struct NoopSink;
+struct NoopSink<T>(std::marker::PhantomData<fn() -> T>);
+
+impl<T> NoopSink<T> {
+    fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
 
 #[async_trait]
-impl SinkHandler for NoopSink {
-    async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Noop".to_string()),
-            None,
+impl<T> TypedSinkHandler for NoopSink<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Input = T;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
+    async fn consume(
+        &mut self,
+        _input: T,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Noop".to_string()), None),
         ))
     }
 }
@@ -194,8 +213,8 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
         let numbers_handler = DelayedTwoEventSource::new();
         let slow_handler = SlowTransform::new();
         let fast_handler = FastTransform::new();
-        let slow_sink_handler = NoopSink;
-        let fast_sink_handler = NoopSink;
+        let slow_sink_handler = NoopSink::<SlowProbeEvent>::new();
+        let fast_sink_handler = NoopSink::<FastProbeEvent>::new();
 
         Ok(flow! {
             name: "liveness_fan_out",

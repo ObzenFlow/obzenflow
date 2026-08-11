@@ -17,9 +17,15 @@ pub(crate) use join::UnifiedJoinHandler;
 pub use join::{JoinReferenceView, TypedJoinHandler};
 pub use observer::ObserverHandler;
 pub use resource_managed::ResourceManaged;
+#[doc(hidden)]
 pub use sink::{
-    CommitReceipt, Delivered, Delivery, SinkConsumeReport, SinkHandler, SinkLifecycleReport,
+    CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport, TypedSinkHandlerAdapter,
     UnifiedSinkHandler,
+};
+pub use sink::{
+    DeliveryContext, DeliveryProvenance, PendingSinkInput, SinkAuditOutcome, SinkBufferedOutcome,
+    SinkDeliveryDeclaration, SinkInputContext, SinkPrimaryOutcome, SinkTerminalOutcome,
+    TypedCommitReceipt, TypedSinkConsumeReport, TypedSinkHandler, TypedSinkLifecycleReport,
 };
 pub use source::{
     HostedIngressSource, SourceError, SourceObservationSink, TypedAsyncFiniteSourceHandler,

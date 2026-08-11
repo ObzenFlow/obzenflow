@@ -20,6 +20,7 @@ use crate::stages::common::supervision::control_resolution::{
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
+use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::observer::dispatch::run_sink_delivery_observers;
 use crate::stages::observer::SinkDeliveryObserverOutcome;
 use crate::supervised_base::EventLoopDirective;
@@ -269,29 +270,10 @@ async fn dispatch_event<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send +
             dispatch_data_event(ctx, subscription, envelope, stage_input_position).await
         }
         _ => {
-            // For other content types, just consume without instrumentation.
-            let envelope_event = envelope.event.clone();
-            let event_id = envelope_event.id;
+            // Typed sink handlers are a Data-only authoring surface. Delivery
+            // and observability rows remain runtime transport/lifecycle input.
+            let event_id = envelope.event.id;
             let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
-            if let Err(e) = ctx
-                .handler
-                .consume_report(
-                    envelope_event,
-                    None,
-                    ctx.runtime_execution.dispatch_scope(
-                        ctx.stage_id,
-                        None,
-                        subscription.last_delivered_generation(),
-                    ),
-                )
-                .await
-            {
-                tracing::error!(
-                    stage_name = %ctx.stage_name,
-                    error = ?e,
-                    "Failed to consume control/system event"
-                );
-            }
             if let Some(state) = &heartbeat_state {
                 state.record_last_consumed(event_id);
             }
@@ -456,27 +438,6 @@ async fn dispatch_control_event<
             )
             .await?;
 
-            // For non-EOF control events, let handler consume if needed.
-            let envelope_event = envelope.event.clone();
-            if let Err(e) = ctx
-                .handler
-                .consume_report(
-                    envelope_event,
-                    None,
-                    ctx.runtime_execution.dispatch_scope(
-                        ctx.stage_id,
-                        None,
-                        subscription.last_delivered_generation(),
-                    ),
-                )
-                .await
-            {
-                tracing::error!(
-                    stage_name = %ctx.stage_name,
-                    error = ?e,
-                    "Failed to consume control event"
-                );
-            }
             Ok(EventLoopDirective::Continue)
         }
         ControlAction::ForwardAndDrain => {
@@ -665,6 +626,18 @@ async fn dispatch_data_event<
                 Vec::new(),
             )
         };
+
+        // A typed-settlement protocol failure contradicts a runtime invariant.
+        // Keep it above the ordinary per-record failure path so it cannot be
+        // normalised into a failed delivery receipt.
+        if let SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Err(
+            error,
+        ))) = &outcome
+        {
+            if error.is_fatal() {
+                return Err(Box::new(error.clone()) as Box<dyn std::error::Error + Send + Sync>);
+            }
+        }
 
         let observer_outcome = match &outcome {
             SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(
@@ -896,7 +869,36 @@ async fn dispatch_data_event<
             }
         }
         Err(e) => {
-            // Instrumentation-level or unexpected failure: treat as stage-fatal.
+            if let Some(fatal) = e
+                .downcast_ref::<crate::stages::common::handler_error::HandlerError>()
+                .and_then(|error| error.as_fatal())
+            {
+                let writer_id = ctx
+                    .writer_id
+                    .ok_or_else(|| "fatal sink input has no stage writer id".to_string())?;
+                record_stage_fatal(
+                    fatal,
+                    StageFatalCommit {
+                        error_journal: &ctx.error_journal,
+                        writer_id,
+                        stage_id: ctx.stage_id,
+                        stage_key: &ctx.stage_name,
+                        input_position: stage_input_position,
+                        parent: Some(envelope),
+                        lineage: ctx.lineage_policy,
+                    },
+                )
+                .await?;
+                if let Some(state) = &heartbeat_state {
+                    state.record_last_consumed(event_id);
+                }
+                return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
+                    fatal.detail.clone(),
+                )));
+            }
+
+            // Instrumentation-level or unexpected failure: preserve the
+            // existing failed-receipt policy.
             let mut fail_payload = DeliveryPayload::failed(
                 DeliveryMethod::Noop,
                 "sink_error",

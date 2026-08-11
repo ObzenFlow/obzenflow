@@ -2335,47 +2335,23 @@ macro_rules! effectful_transform {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_sink_untyped {
-    (name = $name:literal, handler = $handler:expr, sink_policies = [$($policy:expr),*], observers = [$($observer:expr),*]) => {{
-        use $crate::dsl::stage_descriptor::{SinkDescriptor, StageDescriptor};
-        Box::new(SinkDescriptor {
-            name: $name.to_string(),
-            handler: $handler,
-            sink_policies: vec![$(Box::new($policy)),*],
-            observers: vec![$(Box::new($observer)),*],
-        }) as Box<dyn StageDescriptor>
-    }};
-}
-
-#[doc(hidden)]
-#[macro_export]
 macro_rules! __obzenflow_sink_typed {
     // ── exact input, placeholder ──
     (input = exact($in:ty), name = $name:literal, handler = placeholder!(), sink_policies = [$($policy:expr),*], observers = [$($observer:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            true,
+        $crate::dsl::typing::placeholder_sink_descriptor::<$in>(
+            $name,
             None,
-        );
-        let __descriptor = $crate::__obzenflow_sink_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderSink::<$in>::new(None),
-            sink_policies = [$($policy),*], observers = [$($observer),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+            vec![$(Box::new($policy)),*],
+            vec![$(Box::new($observer)),*],
+        )
     }};
     (input = exact($in:ty), name = $name:literal, handler = placeholder!($msg:expr), sink_policies = [$($policy:expr),*], observers = [$($observer:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_sink_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderSink::<$in>::new(Some($msg)),
-            sink_policies = [$($policy),*], observers = [$($observer),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::dsl::typing::placeholder_sink_descriptor::<$in>(
+            $name,
+            Some($msg),
+            vec![$(Box::new($policy)),*],
+            vec![$(Box::new($observer)),*],
+        )
     }};
 
     // ── exact input, real handler (facade call anchoring) ──
@@ -2385,26 +2361,22 @@ macro_rules! __obzenflow_sink_typed {
 
     // ── exact input, real handler ──
     //
-    // FLOWIP-114c PR D: the previous `assert_sink_input::<_, $in>` check is dropped.
-    // Per the proposal's canonical-identity rationale, the declared input is a
-    // topology fingerprint, not a Rust type-system constraint, matching the
-    // a wrapper whose phantom arrow types would make the proof tautological.
     (input = exact($in:ty), name = $name:literal, handler = $handler:expr, sink_policies = [$($policy:expr),*], observers = [$($observer:expr),*]) => {{
         let __handler = $handler;
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_sink_untyped!(name = $name, handler = __handler, sink_policies = [$($policy),*], observers = [$($observer),*]);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::dsl::typing::typed_sink_descriptor::<_, $in>(
+            $name,
+            __handler,
+            vec![$(Box::new($policy)),*],
+            vec![$(Box::new($observer)),*],
+        )
     }};
 }
 
 /// Lower the optional `delivery:` clause of `sink!` (FLOWIP-120n F16,
 /// FLOWIP-120s). Routes through the sealed `DeclareDeliverySafety` trait so
-/// the clause is accepted only by the closure-tier typed sinks; a typed
-/// `Delivery` carries `SAFETY` on the type and fails here by trait bound.
+/// the clause is accepted only by the closure-tier typed sinks; a named
+/// `TypedSinkHandler` declares its aggregate metadata itself and fails here by
+/// trait bound.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_sink_delivery {

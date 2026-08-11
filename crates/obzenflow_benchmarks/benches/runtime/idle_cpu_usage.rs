@@ -10,14 +10,13 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use obzenflow_benchmarks::prelude::*;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
+    TypedSinkConsumeReport, TypedSinkHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -72,8 +71,8 @@ impl TypedFiniteSourceHandler for IdleSource {
 /// Sink that records latencies
 #[derive(Clone, Debug)]
 struct TimestampedSink {
-    received: Arc<AtomicU64>,
-    latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
+    _received: Arc<AtomicU64>,
+    _latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
 }
 
 impl TimestampedSink {
@@ -84,8 +83,8 @@ impl TimestampedSink {
         let received = Arc::new(AtomicU64::new(0));
         (
             Self {
-                received: received.clone(),
-                latencies: latencies.clone(),
+                _received: received.clone(),
+                _latencies: latencies.clone(),
             },
             latencies,
         )
@@ -93,33 +92,21 @@ impl TimestampedSink {
 }
 
 #[async_trait]
-impl SinkHandler for TimestampedSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if let ChainEventContent::Data { payload, .. } = &event.content {
-            if let (Some(emit_time_nanos), Some(index)) = (
-                payload.get("emit_time_nanos").and_then(|v| v.as_u64()),
-                payload.get("index").and_then(|v| v.as_u64()),
-            ) {
-                self.received.fetch_add(1, Ordering::Relaxed);
+impl TypedSinkHandler for TimestampedSink {
+    type Input = BenchEvent;
 
-                // Skip warmup events for latency calculation
-                if index >= 10 {
-                    // WARMUP_EVENT_COUNT
-                    // Calculate latency from embedded timestamp
-                    let receive_time_nanos = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos() as u64;
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
 
-                    if receive_time_nanos > emit_time_nanos {
-                        let latency = Duration::from_nanos(receive_time_nanos - emit_time_nanos);
-                        self.latencies.lock().await.push(latency);
-                    }
-                }
-            }
-        }
-
-        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
+    async fn consume(
+        &mut self,
+        _event: BenchEvent,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+        ))
     }
 }
 

@@ -25,8 +25,7 @@ use obzenflow_core::ai::{
     ChatTarget, HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenCount,
     TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent};
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
@@ -34,7 +33,8 @@ use obzenflow_runtime::effects::EffectPortRegistry;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkHandler, TypedFiniteSourceHandler, TypedJoinHandler,
+    JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
+    TypedFiniteSourceHandler, TypedJoinHandler, TypedSinkConsumeReport, TypedSinkHandler,
 };
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
@@ -235,13 +235,32 @@ impl TypedFiniteSourceHandler for NoEventSource {
 }
 
 #[derive(Clone, Debug)]
-struct NoopSink;
+struct NoopSink<T>(std::marker::PhantomData<fn() -> T>);
+
+impl<T> NoopSink<T> {
+    fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
 #[async_trait]
-impl SinkHandler for NoopSink {
-    async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Noop".to_string()),
-            None,
+impl<T> TypedSinkHandler for NoopSink<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Input = T;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
+    async fn consume(
+        &mut self,
+        _event: T,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Noop".to_string()), None),
         ))
     }
 }
@@ -259,27 +278,22 @@ impl CountingOutSink {
 }
 
 #[async_trait]
-impl SinkHandler for CountingOutSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if let ChainEventContent::Data {
-            event_type,
-            payload,
-        } = &event.content
-        {
-            if BuildOnlyOut::event_type_matches(event_type) {
-                let out: BuildOnlyOut = serde_json::from_value(payload.clone()).map_err(|err| {
-                    HandlerError::Deserialization(format!(
-                        "counting sink output decode failed: {err}"
-                    ))
-                })?;
-                self.delivered.fetch_add(1, Ordering::SeqCst);
-                self.total.store(out.total, Ordering::SeqCst);
-            }
-        }
+impl TypedSinkHandler for CountingOutSink {
+    type Input = BuildOnlyOut;
 
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("CountingOut".to_string()),
-            None,
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::undeclared()
+    }
+
+    async fn consume(
+        &mut self,
+        out: BuildOnlyOut,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        self.delivered.fetch_add(1, Ordering::SeqCst);
+        self.total.store(out.total, Ordering::SeqCst);
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("CountingOut".to_string()), None),
         ))
     }
 }
@@ -322,7 +336,7 @@ async fn ordinary_flow_builder_accepts_ai_map_reduce_with_subgraph_attached() {
     // validator runs and the three composite-internal edges are recognized.
     let result = FlowDefinition::materialize(|_runtime_config| {
         let seed_handler = NoEventSource;
-        let sink_handler = NoopSink;
+        let sink_handler = NoopSink::<BuildOnlyOut>::new();
 
         Ok(flow! {
             name: "amr_build_only",
@@ -366,7 +380,7 @@ async fn materializer_scope_remains_visible_to_ai_effects_and_effect_ports() {
         let bound_finalise_role = BuildFinaliseRole;
         let effect_ports = test_effect_ports();
         let seed_handler = NoEventSource;
-        let sink_handler = NoopSink;
+        let sink_handler = NoopSink::<BuildOnlyOut>::new();
 
         Ok(flow! {
             name: "amr_flow_materializer_hygiene",
@@ -426,7 +440,7 @@ async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
         let bound_finalise_role = BuildFinaliseRole;
         let effect_ports = test_effect_ports();
         let seed_handler = NoEventSource;
-        let sink_handler = NoopSink;
+        let sink_handler = NoopSink::<BuildOnlyOut>::new();
 
         obzenflow_dsl::test_flow! {
             name: "amr_test_flow_binding_hygiene",
@@ -512,7 +526,7 @@ fn estimator_mismatch_fails_before_journal_or_effect_port_evaluation() {
 async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
     let handle = FlowDefinition::materialize(|_runtime_config| {
         let seed_handler = NoEventSource;
-        let sink_handler = NoopSink;
+        let sink_handler = NoopSink::<BuildOnlyOut>::new();
 
         Ok(flow! {
             name: "amr_boundary_payload_contract",
@@ -682,7 +696,7 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
 async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
     let result = FlowDefinition::materialize(|_runtime_config| {
         let seed_handler = NoEventSource;
-        let sink_handler = NoopSink;
+        let sink_handler = NoopSink::<BuildOnlySeed>::new();
 
         Ok(flow! {
             name: "amr_boundary_mismatch",
@@ -786,7 +800,7 @@ async fn join_reference_resolves_through_composite_boundary_port() {
         let seed_handler = NoEventSource;
         let stream_handler = NoStreamSource;
         let join_handler = LocalNoopJoin;
-        let sink_handler = NoopSink;
+        let sink_handler = NoopSink::<JoinedP>::new();
 
         Ok(flow! {
             name: "amr_join_reference",

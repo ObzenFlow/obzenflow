@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, RateLimiterBuilder, Retry};
 use obzenflow_core::{
     event::chain_event::ChainEvent,
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
+    event::payloads::delivery_payload::DeliveryMethod,
     event::payloads::flow_control_payload::FlowControlPayload,
     event::payloads::observability_payload::{
         CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
@@ -31,7 +31,8 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulStatefulHandler, EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
+    EffectfulStatefulHandler, EffectfulTransformHandler, SinkDeliveryDeclaration, SinkInputContext,
+    SinkTerminalOutcome, TypedFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler,
     TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
@@ -860,24 +861,25 @@ struct CollectSink {
 }
 
 #[async_trait]
-impl SinkHandler for CollectSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if let Some(output) = ReplayOutput::from_event(&event) {
-            self.outputs
-                .lock()
-                .expect("outputs lock poisoned")
-                .push(output);
-        }
+impl TypedSinkHandler for CollectSink {
+    type Input = ReplayOutput;
 
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Memory".to_string()),
-            None,
-        ))
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
     }
 
-    // In-memory collector: re-delivery under either archive verb is safe.
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+    async fn consume(
+        &mut self,
+        output: ReplayOutput,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        self.outputs
+            .lock()
+            .expect("outputs lock poisoned")
+            .push(output);
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Memory".to_string()), None),
+        ))
     }
 }
 

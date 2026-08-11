@@ -22,11 +22,10 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_runtime::__private::UnifiedJoinHandler;
+use obzenflow_runtime::__private::{TypedSinkHandlerAdapter, UnifiedJoinHandler};
 use obzenflow_runtime::{
     effects::{
         EffectBoundary, EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
-        SinkDeliverySafety,
     },
     metrics::instrumentation::{InstrumentationConfig, StageInstrumentation},
     stages::StageResources,
@@ -38,10 +37,10 @@ use obzenflow_runtime::{
             control_strategies::{JonestownSignalStrategy, SignalGate},
             handlers::{
                 EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
-                EffectfulTransformHandler, EffectfulTransformHandlerAdapter, SinkHandler,
-                TransformHandler, UnifiedAsyncFiniteSourceHandler,
-                UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
-                UnifiedInfiniteSourceHandler, UnifiedStatefulHandler,
+                EffectfulTransformHandler, EffectfulTransformHandlerAdapter,
+                SinkDeliveryDeclaration, TransformHandler, TypedSinkHandler,
+                UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
+                UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler, UnifiedStatefulHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -533,27 +532,10 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
         "1".to_string()
     }
 
-    /// Snapshot of the sink handler's declared delivery safety, taken while
-    /// the descriptor still holds the concrete handler (FLOWIP-120n F16).
-    /// `None` for non-sink stages and undeclared sinks; read only by the
-    /// resume sink gate. Typed wrappers must forward to their inner descriptor.
-    fn sink_delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        None
-    }
-
-    /// Snapshot of the sink handler's declared destination family
-    /// (FLOWIP-120s). `None` for non-sink stages and handlers with no
-    /// declared destination. Typed wrappers must forward.
-    fn sink_delivery_type(&self) -> Option<&'static str> {
-        None
-    }
-
-    /// Snapshot of the sink handler's declared destination instance
-    /// coordinates (FLOWIP-095g compatibility gate). Typed wrappers must
-    /// forward.
-    fn sink_canonical_destination(&self) -> Option<serde_json::Value> {
-        None
-    }
+    /// The sink's one pre-erasure delivery declaration snapshot. Every
+    /// descriptor and wrapper must state whether it carries one so metadata
+    /// cannot silently attenuate while crossing a wrapper (FLOWIP-134h).
+    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration>;
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
         Vec::new()
@@ -662,6 +644,10 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 
     fn stage_type(&self) -> StageType {
         StageType::FiniteSource
+    }
+
+    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+        None
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -820,6 +806,10 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
         StageType::FiniteSource
     }
 
+    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+        None
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.stage_middleware_factories()
             .into_iter()
@@ -956,6 +946,10 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
 
     fn stage_type(&self) -> StageType {
         StageType::InfiniteSource
+    }
+
+    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+        None
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -1117,6 +1111,10 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
         StageType::InfiniteSource
     }
 
+    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+        None
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.stage_middleware_factories()
             .into_iter()
@@ -1254,6 +1252,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
 
     fn stage_type(&self) -> StageType {
         StageType::Transform
+    }
+
+    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+        None
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -1499,6 +1501,10 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 
     fn stage_type(&self) -> StageType {
         StageType::Transform
+    }
+
+    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+        None
     }
 
     fn is_effectful(&self) -> bool {
@@ -1761,15 +1767,16 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 }
 
 /// Descriptor for sink stages
-pub struct SinkDescriptor<H: SinkHandler + 'static> {
-    pub name: String,
-    pub handler: H,
-    pub sink_policies: Vec<Box<dyn MiddlewareFactory>>,
-    pub observers: Vec<Box<dyn MiddlewareFactory>>,
+pub(crate) struct SinkDescriptor<H: TypedSinkHandler + 'static> {
+    pub(crate) name: String,
+    pub(crate) handler: H,
+    pub(crate) delivery_declaration: SinkDeliveryDeclaration,
+    pub(crate) sink_policies: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
 }
 
 #[async_trait]
-impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+impl<H: TypedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for SinkDescriptor<H>
 {
     fn name(&self) -> &str {
@@ -1784,16 +1791,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         StageType::Sink
     }
 
-    fn sink_delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        self.handler.delivery_safety()
-    }
-
-    fn sink_delivery_type(&self) -> Option<&'static str> {
-        self.handler.delivery_type()
-    }
-
-    fn sink_canonical_destination(&self) -> Option<serde_json::Value> {
-        self.handler.canonical_destination()
+    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+        Some(&self.delivery_declaration)
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -1901,10 +1900,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Declarations are snapshotted from the raw handler before wrapping
-        // (FLOWIP-120s single-writer receipt identity): the runtime never
-        // queries the wrapped handler for declaration metadata.
-        let delivery_type = self.handler.delivery_type();
+        // The typed factory captured this exactly once before erasure and
+        // middleware wrapping. The binding-derived fallback is resolved only
+        // now, after the final stage name exists.
+        let delivery_type = self.delivery_declaration.delivery_type();
 
         // Create the stage configuration
         let sink_config = JournalSinkConfig {
@@ -1921,7 +1920,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         };
 
         // Use the builder to create the handle
-        let handle = JournalSinkBuilder::new(self.handler, sink_config, resources)
+        let handler = TypedSinkHandlerAdapter::new(self.handler, config.stage_id);
+        let handle = JournalSinkBuilder::new(handler, sink_config, resources)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -2088,6 +2088,10 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         StageType::Stateful
     }
 
+    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+        None
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.observers
             .iter()
@@ -2229,6 +2233,10 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 
     fn stage_type(&self) -> StageType {
         StageType::Stateful
+    }
+
+    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+        None
     }
 
     fn is_effectful(&self) -> bool {
@@ -2425,6 +2433,10 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
         StageType::Join
     }
 
+    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+        None
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.observers
             .iter()
@@ -2609,7 +2621,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + 'static> sealed::Sealed
 }
 impl<H: TransformHandler + 'static> sealed::Sealed for TransformDescriptor<H> {}
 impl<H: EffectfulTransformHandler + 'static> sealed::Sealed for EffectfulTransformDescriptor<H> {}
-impl<H: SinkHandler + 'static> sealed::Sealed for SinkDescriptor<H> {}
+impl<H: TypedSinkHandler + 'static> sealed::Sealed for SinkDescriptor<H> {}
 impl<H: UnifiedStatefulHandler + 'static> sealed::Sealed for StatefulDescriptor<H> {}
 impl<H: EffectfulStatefulHandler + 'static> sealed::Sealed for EffectfulStatefulDescriptor<H> {}
 impl<H: UnifiedJoinHandler + 'static> sealed::Sealed for JoinDescriptor<H> {}

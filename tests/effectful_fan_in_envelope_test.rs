@@ -15,7 +15,7 @@
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow_core::{event::chain_event::ChainEvent, event::ChainEventContent, TypedPayload};
+use obzenflow_core::{event::ChainEventContent, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -24,7 +24,8 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
+    EffectfulTransformHandler, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
+    TypedFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -182,23 +183,24 @@ impl EffectfulTransformHandler for EffectfulMerge {
 struct DropSink;
 
 #[async_trait]
-impl SinkHandler for DropSink {
+impl TypedSinkHandler for DropSink {
+    type Input = EnvelopeOutput;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    }
+
     async fn consume(
         &mut self,
-        _event: ChainEvent,
-    ) -> Result<obzenflow_core::event::payloads::delivery_payload::DeliveryPayload, HandlerError>
-    {
-        Ok(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryPayload::success(
+        _event: EnvelopeOutput,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(
                 obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
                 None,
             ),
-        )
-    }
-
-    // Deterministic local drop: re-delivery under either archive verb is safe.
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+        ))
     }
 }
 

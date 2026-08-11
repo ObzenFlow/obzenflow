@@ -7,15 +7,16 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::TypedPayload;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, StatefulEmission,
+    TypedFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler, TypedStatefulHandler,
     TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
@@ -123,14 +124,25 @@ struct CollectSink {
 }
 
 #[async_trait]
-impl SinkHandler for CollectSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        self.events.lock().expect("collector lock").push(event);
-        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
+impl TypedSinkHandler for CollectSink {
+    type Input = Aggregate;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
     }
 
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+    async fn consume(
+        &mut self,
+        event: Aggregate,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        self.events
+            .lock()
+            .expect("collector lock")
+            .push(event.to_event(WriterId::from(StageId::new())));
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+        ))
     }
 }
 

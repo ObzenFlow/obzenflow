@@ -12,13 +12,13 @@
 //! file is intentionally mechanical.
 
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
+    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, StatefulEmission,
+    TypedFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::transform::MapTyped;
 
@@ -153,21 +153,25 @@ impl TypedStatefulHandler for IngestAggregator {
 pub struct SummaryConsole;
 
 #[async_trait]
-impl SinkHandler for SummaryConsole {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+impl TypedSinkHandler for SummaryConsole {
+    type Input = IngestSummary;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    }
+
+    async fn consume(
+        &mut self,
+        event: IngestSummary,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
         println!("=== IngestSummary ===");
         println!(
             "{}",
-            serde_json::to_string_pretty(&event.payload()).unwrap_or_default()
+            serde_json::to_string_pretty(&event).unwrap_or_default()
         );
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Stdout".to_string()),
-            None,
+        Ok(TypedSinkConsumeReport::terminal(
+            SinkTerminalOutcome::success(DeliveryMethod::Custom("Stdout".to_string()), None),
         ))
-    }
-
-    // Console print: re-delivery under either archive verb is safe.
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
     }
 }
