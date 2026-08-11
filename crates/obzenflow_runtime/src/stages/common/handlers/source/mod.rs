@@ -4,9 +4,19 @@
 
 //! Source handler components
 
+mod erased;
+#[doc(hidden)]
 pub mod traits;
+pub(crate) mod typed;
 
-pub use traits::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler, SourceError,
+#[doc(hidden)]
+pub use erased::{
+    ErasedSourceCompletion, ErasedSourceInvocation, ErasedSourceOutcome,
+    UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
+    UnifiedInfiniteSourceHandler,
+};
+pub use traits::SourceError;
+pub use typed::{
+    HostedIngressSource, SourceObservationSink, TypedAsyncFiniteSourceHandler,
+    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };

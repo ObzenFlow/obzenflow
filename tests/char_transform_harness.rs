@@ -19,7 +19,7 @@ use obzenflow_core::{
 use obzenflow_dsl::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -50,7 +50,7 @@ impl TextCharSource {
     }
 }
 
-impl FiniteSourceHandler for TextCharSource {
+impl TypedFiniteSourceHandler for TextCharSource {
     fn next(
         &mut self,
     ) -> Result<

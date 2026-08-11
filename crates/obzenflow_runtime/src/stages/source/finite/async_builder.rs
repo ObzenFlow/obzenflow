@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::metrics::instrumentation::StageInstrumentation;
-use crate::stages::common::handlers::AsyncFiniteSourceHandler;
+use crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler;
 use crate::stages::resources_builder::StageResources;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::strategies::{CompletionGate, JonestownSourceStrategy};
@@ -25,7 +25,7 @@ use super::handle::FiniteSourceHandle;
 
 /// Builder for creating async finite source stages
 pub struct AsyncFiniteSourceBuilder<
-    H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 > {
     handler: H,
     config: FiniteSourceConfig,
@@ -34,7 +34,7 @@ pub struct AsyncFiniteSourceBuilder<
     poll_timeout: Option<Duration>,
 }
 
-impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     AsyncFiniteSourceBuilder<H>
 {
     pub fn new(handler: H, config: FiniteSourceConfig, resources: StageResources) -> Self {
@@ -64,7 +64,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 }
 
 #[async_trait::async_trait]
-impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     SupervisorBuilder for AsyncFiniteSourceBuilder<H>
 {
     type Handle = FiniteSourceHandle<H>;
@@ -102,7 +102,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 
         // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081).
         let mut handler = self.handler;
-        handler.bind_writer_id(WriterId::from(self.config.stage_id));
+        handler.install_writer_id(WriterId::from(self.config.stage_id));
 
         let supervisor = AsyncFiniteSourceSupervisor {
             name: format!("async_finite_source_{}", self.config.stage_name),
@@ -125,6 +125,8 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             pending_boundary_eof: false,
             pending_boundary_error: None,
             pending_boundary_rejected: false,
+            live_entered: false,
+            cleanup_attempted: false,
         };
 
         let supervisor_name = format!("async_finite_source_{}", self.config.stage_name);

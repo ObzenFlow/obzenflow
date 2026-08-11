@@ -373,6 +373,9 @@ impl ChainEvent {
                     MetricsLifecycle::Ready { .. } => "lifecycle.metrics.ready".into(),
                     MetricsLifecycle::StateSnapshot { .. } => "lifecycle.metrics.state".into(),
                     MetricsLifecycle::ResourceUsage { .. } => "lifecycle.metrics.resource".into(),
+                    MetricsLifecycle::HttpPullSnapshot { .. } => {
+                        "lifecycle.metrics.http_pull_snapshot".into()
+                    }
                     MetricsLifecycle::Custom { .. } => "lifecycle.metrics.custom".into(),
                     MetricsLifecycle::DrainRequested => "lifecycle.metrics.drain".into(),
                     MetricsLifecycle::Drained { .. } => "lifecycle.metrics.drained".into(),

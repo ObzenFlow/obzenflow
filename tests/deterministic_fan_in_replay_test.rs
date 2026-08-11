@@ -14,11 +14,7 @@
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
-    id::StageId,
-    TypedPayload, WriterId,
-};
+use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -27,7 +23,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, StatefulEmission,
+    EffectfulTransformHandler, SinkHandler, StatefulEmission, TypedFiniteSourceHandler,
     TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
@@ -87,7 +83,6 @@ struct ChannelSource {
     count: usize,
     jitter_ms: u64,
     delay_ms: u64,
-    writer_id: WriterId,
 }
 
 impl ChannelSource {
@@ -101,7 +96,6 @@ impl ChannelSource {
             count,
             jitter_ms,
             delay_ms: 0,
-            writer_id: WriterId::from(StageId::new()),
         }
     }
 
@@ -116,13 +110,14 @@ impl ChannelSource {
             count,
             jitter_ms: 0,
             delay_ms,
-            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
-impl FiniteSourceHandler for ChannelSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for ChannelSource {
+    type Output = FanInInput;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next_index >= self.count {
             return Ok(None);
         }
@@ -140,14 +135,10 @@ impl FiniteSourceHandler for ChannelSource {
                 hash % (self.jitter_ms + 1),
             ));
         }
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            FanInInput::EVENT_TYPE,
-            json!(FanInInput {
-                channel: self.channel.to_string(),
-                value: self.next_index as u64,
-            }),
-        )]))
+        Ok(Some(vec![FanInInput {
+            channel: self.channel.to_string(),
+            value: self.next_index as u64,
+        }]))
     }
 }
 

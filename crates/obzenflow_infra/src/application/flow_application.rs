@@ -66,13 +66,13 @@ mod tests {
     use crate::journal::disk_journals;
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-    use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::{ChainEvent, StageId, WriterId};
+
+    use obzenflow_core::ChainEvent;
     use obzenflow_dsl::{flow, infinite_source, sink, source};
     use obzenflow_runtime::pipeline::PipelineState;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::{
-        FiniteSourceHandler, InfiniteSourceHandler, SinkHandler,
+        SinkHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
     };
     use obzenflow_runtime::stages::SourceError;
     use std::net::TcpListener;
@@ -89,8 +89,10 @@ mod tests {
     #[derive(Clone, Debug)]
     struct IdleInfiniteSource;
 
-    impl InfiniteSourceHandler for IdleInfiniteSource {
-        fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+    impl TypedInfiniteSourceHandler for IdleInfiniteSource {
+        type Output = IdlePayload;
+
+        fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
             Ok(Vec::new())
         }
     }
@@ -98,29 +100,23 @@ mod tests {
     #[derive(Clone, Debug)]
     struct OneShotSource {
         emitted: bool,
-        writer_id: WriterId,
     }
 
     impl OneShotSource {
         fn new() -> Self {
-            Self {
-                emitted: false,
-                writer_id: WriterId::from(StageId::new()),
-            }
+            Self { emitted: false }
         }
     }
 
-    impl FiniteSourceHandler for OneShotSource {
-        fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    impl TypedFiniteSourceHandler for OneShotSource {
+        type Output = IdlePayload;
+
+        fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
             if self.emitted {
                 Ok(None)
             } else {
                 self.emitted = true;
-                Ok(Some(vec![ChainEventFactory::data_event(
-                    self.writer_id,
-                    IdlePayload::EVENT_TYPE,
-                    serde_json::json!({ "kind": "one-shot" }),
-                )]))
+                Ok(Some(vec![IdlePayload]))
             }
         }
     }

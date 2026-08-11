@@ -4,7 +4,7 @@
 
 //! Handle for finite source stages
 
-use crate::stages::common::handlers::FiniteSourceHandler;
+use crate::stages::common::handlers::source::traits::FiniteSourceHandler;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 
 use super::fsm::{FiniteSourceEvent, FiniteSourceState};

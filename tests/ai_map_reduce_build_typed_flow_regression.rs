@@ -25,20 +25,19 @@ use obzenflow_core::ai::{
     ChatTarget, HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenCount,
     TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{id::StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::EffectPortRegistry;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, JoinReferenceView, SinkHandler, TypedJoinHandler,
+    JoinReferenceView, SinkHandler, TypedFiniteSourceHandler, TypedJoinHandler,
 };
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -227,8 +226,10 @@ struct NoEventSource;
 impl SourceTyping for NoEventSource {
     type Output = BuildOnlySeed;
 }
-impl FiniteSourceHandler for NoEventSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for NoEventSource {
+    type Output = BuildOnlySeed;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         Ok(None)
     }
 }
@@ -286,15 +287,11 @@ impl SinkHandler for CountingOutSink {
 #[derive(Clone, Debug)]
 struct OneSeedSource {
     emitted: bool,
-    writer_id: WriterId,
 }
 
 impl OneSeedSource {
     fn new() -> Self {
-        Self {
-            emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { emitted: false }
     }
 }
 
@@ -302,17 +299,15 @@ impl SourceTyping for OneSeedSource {
     type Output = BuildOnlySeed;
 }
 
-impl FiniteSourceHandler for OneSeedSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for OneSeedSource {
+    type Output = BuildOnlySeed;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted {
             return Ok(None);
         }
         self.emitted = true;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            BuildOnlySeed::versioned_event_type(),
-            json!(BuildOnlySeed { n: 5 }),
-        )]))
+        Ok(Some(vec![BuildOnlySeed { n: 5 }]))
     }
 }
 
@@ -773,8 +768,10 @@ struct NoStreamSource;
 impl SourceTyping for NoStreamSource {
     type Output = JoinStreamP;
 }
-impl FiniteSourceHandler for NoStreamSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for NoStreamSource {
+    type Output = JoinStreamP;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         Ok(None)
     }
 }

@@ -5,21 +5,19 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow::typed::stateful as typed_stateful;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::CorrelationId;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -81,40 +79,32 @@ impl TypedPayload for GroupAggOutput {
 
 #[derive(Clone, Debug)]
 struct SequenceSource {
-    writer_id: WriterId,
     next: u64,
     max: u64,
 }
 
 impl SequenceSource {
     fn new(max: u64) -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-            next: 0,
-            max,
-        }
+        Self { next: 0, max }
     }
 }
 
-impl FiniteSourceHandler for SequenceSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for SequenceSource {
+    type Output = WindowInput;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next >= self.max {
             return Ok(None);
         }
 
         let idx = self.next;
         self.next += 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            WindowInput::EVENT_TYPE,
-            json!({ "index": idx }),
-        )]))
+        Ok(Some(vec![WindowInput { index: idx }]))
     }
 }
 
 #[derive(Clone, Debug)]
 struct DelayedSequenceSource {
-    writer_id: WriterId,
     next: u64,
     max: u64,
     per_event_delay: Duration,
@@ -123,7 +113,6 @@ struct DelayedSequenceSource {
 impl DelayedSequenceSource {
     fn new(max: u64, per_event_delay: Duration) -> Self {
         Self {
-            writer_id: WriterId::from(StageId::new()),
             next: 0,
             max,
             per_event_delay,
@@ -131,8 +120,10 @@ impl DelayedSequenceSource {
     }
 }
 
-impl FiniteSourceHandler for DelayedSequenceSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for DelayedSequenceSource {
+    type Output = WindowInput;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next >= self.max {
             return Ok(None);
         }
@@ -141,69 +132,26 @@ impl FiniteSourceHandler for DelayedSequenceSource {
 
         let idx = self.next;
         self.next += 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            WindowInput::EVENT_TYPE,
-            json!({ "index": idx }),
-        )]))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct CorrelatedSequenceSource {
-    writer_id: WriterId,
-    correlation_ids: Vec<CorrelationId>,
-    next: usize,
-}
-
-impl CorrelatedSequenceSource {
-    fn new(correlation_ids: Vec<CorrelationId>) -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-            correlation_ids,
-            next: 0,
-        }
-    }
-}
-
-impl FiniteSourceHandler for CorrelatedSequenceSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        if self.next >= self.correlation_ids.len() {
-            return Ok(None);
-        }
-
-        let correlation_id = self.correlation_ids[self.next];
-        self.next += 1;
-
-        let mut event = ChainEventFactory::data_event(
-            self.writer_id,
-            WindowInput::EVENT_TYPE,
-            json!({ "index": self.next as u64 - 1 }),
-        );
-        event.set_single_correlation(correlation_id, None);
-        Ok(Some(vec![event]))
+        Ok(Some(vec![WindowInput { index: idx }]))
     }
 }
 
 #[derive(Clone, Debug)]
 struct GroupedSequenceSource {
-    writer_id: WriterId,
     items: Vec<(String, u64)>,
     next: usize,
 }
 
 impl GroupedSequenceSource {
     fn new(items: Vec<(String, u64)>) -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-            items,
-            next: 0,
-        }
+        Self { items, next: 0 }
     }
 }
 
-impl FiniteSourceHandler for GroupedSequenceSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for GroupedSequenceSource {
+    type Output = GroupInput;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next >= self.items.len() {
             return Ok(None);
         }
@@ -211,11 +159,7 @@ impl FiniteSourceHandler for GroupedSequenceSource {
         let (group, index) = self.items[self.next].clone();
         self.next += 1;
 
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            GroupInput::EVENT_TYPE,
-            json!({ "group": group, "index": index }),
-        )]))
+        Ok(Some(vec![GroupInput { group, index }]))
     }
 }
 
@@ -491,20 +435,17 @@ async fn emit_within_final_aggregate_preserves_buffered_input_lineage() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn emit_within_final_aggregate_records_mixed_correlation_ids() -> Result<()> {
-    let correlation_a = CorrelationId::new();
-    let correlation_b = CorrelationId::new();
-
+async fn emit_within_final_aggregate_does_not_invent_source_correlations() -> Result<()> {
     let (sink, seen) = AggregateSink::new();
-    let source = CorrelatedSequenceSource::new(vec![correlation_a, correlation_b]);
+    let source = SequenceSource::new(2);
     let window = typed_stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
     )
     .emit_within(Duration::from_secs(60));
     let harness = test_flow! {
-        name: "emit_within_mixed_correlation",
-        journals: disk_journals(unique_journal_dir("emit_within_mixed_correlation")),
+        name: "emit_within_no_synthetic_correlation",
+        journals: disk_journals(unique_journal_dir("emit_within_no_synthetic_correlation")),
 
         stages: {
             src = source!(WindowInput => source);
@@ -538,18 +479,11 @@ async fn emit_within_final_aggregate_records_mixed_correlation_ids() -> Result<(
 
     assert!(
         aggregate_event.correlation_id().is_none(),
-        "mixed windows must not expose a scalar correlation_id on the aggregate event"
+        "the typed source adapter must not invent a scalar correlation"
     );
-    let recorded = aggregate_event
-        .correlation_ids()
-        .map(|ids| ids.to_vec())
-        .expect("expected correlation_ids to be present for mixed windows");
-    assert_eq!(recorded.len(), 2);
-    assert!(recorded.contains(&correlation_a));
-    assert!(recorded.contains(&correlation_b));
     assert!(
-        recorded.windows(2).all(|w| w[0] <= w[1]),
-        "expected deterministic sort"
+        aggregate_event.correlation_ids().is_none(),
+        "the typed source adapter must not invent a correlation set"
     );
 
     Ok(())

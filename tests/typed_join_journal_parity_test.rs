@@ -4,11 +4,9 @@
 
 //! FLOWIP-134f journal oracle for typed joins, contribution evidence, and replay.
 
-use obzenflow_core::event::context::CompositeActivationContext;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainEventContent, EventEnvelope};
-use obzenflow_core::id::CompositeId;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
@@ -17,7 +15,7 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, JoinReferenceView, TypedJoinHandler, TypedTransformHandler,
+    JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
@@ -63,7 +61,6 @@ impl TypedPayload for JoinedFact {
 struct ReferenceSource {
     rows: Vec<ReferenceItem>,
     next: usize,
-    writer_id: WriterId,
     reads: Arc<AtomicUsize>,
 }
 
@@ -85,34 +82,21 @@ impl ReferenceSource {
                 },
             ],
             next: 0,
-            writer_id: WriterId::from(StageId::new()),
             reads,
         }
     }
 }
 
-impl FiniteSourceHandler for ReferenceSource {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+impl TypedFiniteSourceHandler for ReferenceSource {
+    type Output = ReferenceItem;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         let Some(row) = self.rows.get(self.next).cloned() else {
             return Ok(None);
         };
         self.next += 1;
-        let label = format!("reference:{}:{}", row.key, row.version);
-        let event = row.to_event(self.writer_id);
-        let activation = CompositeActivationContext::new(
-            CompositeId::new("flowip-134f:reference"),
-            event.id,
-            label,
-            self.next as u64,
-        );
-        Ok(Some(vec![event
-            .try_with_composite_activations(vec![activation])
-            .expect("reference activation")]))
+        Ok(Some(vec![row]))
     }
 }
 
@@ -120,7 +104,6 @@ impl FiniteSourceHandler for ReferenceSource {
 struct StreamSource {
     rows: Vec<StreamItem>,
     next: usize,
-    writer_id: WriterId,
     reads: Arc<AtomicUsize>,
 }
 
@@ -142,34 +125,21 @@ impl StreamSource {
                 },
             ],
             next: 0,
-            writer_id: WriterId::from(StageId::new()),
             reads,
         }
     }
 }
 
-impl FiniteSourceHandler for StreamSource {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+impl TypedFiniteSourceHandler for StreamSource {
+    type Output = StreamItem;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         let Some(row) = self.rows.get(self.next).cloned() else {
             return Ok(None);
         };
         self.next += 1;
-        let label = format!("stream:{}", row.key);
-        let event = row.to_event(self.writer_id);
-        let activation = CompositeActivationContext::new(
-            CompositeId::new("flowip-134f:stream"),
-            event.id,
-            label,
-            self.next as u64,
-        );
-        Ok(Some(vec![event
-            .try_with_composite_activations(vec![activation])
-            .expect("stream activation")]))
+        Ok(Some(vec![row]))
     }
 }
 

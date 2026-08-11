@@ -10,22 +10,20 @@
 //! benchmark ordering, warmup effects, or genuine framework issues.
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::WriterId;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 // Monitoring removed per FLOWIP-056-666
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -53,7 +51,6 @@ impl TypedPayload for BenchEvent {
 struct TimestampedSource {
     total_events: u64,
     emitted: Arc<AtomicU64>,
-    writer_id: WriterId,
 }
 
 impl TimestampedSource {
@@ -61,26 +58,23 @@ impl TimestampedSource {
         Self {
             total_events,
             emitted: Arc::new(AtomicU64::new(0)),
-            writer_id: WriterId::from(obzenflow_core::StageId::new()),
         }
     }
 }
 
-impl FiniteSourceHandler for TimestampedSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for TimestampedSource {
+    type Output = BenchEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         let current = self.emitted.fetch_add(1, Ordering::Relaxed);
         if current < self.total_events {
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id,
-                BenchEvent::versioned_event_type(),
-                json!({
-                    "event_id": current,
-                    "emit_time_nanos": SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos() as u64,
-                }),
-            )]))
+            Ok(Some(vec![BenchEvent {
+                event_id: current,
+                emit_time_nanos: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            }]))
         } else {
             Ok(None)
         }

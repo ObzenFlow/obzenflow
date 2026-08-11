@@ -17,7 +17,7 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -58,8 +58,10 @@ impl IdleSource {
     }
 }
 
-impl FiniteSourceHandler for IdleSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for IdleSource {
+    type Output = BenchEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         // Intentionally emit nothing but also never complete (idle pipeline).
         // This is the runtime "idle spin" scenario that FLOWIP-086i targets.
         self.completed.fetch_add(1, Ordering::Relaxed);

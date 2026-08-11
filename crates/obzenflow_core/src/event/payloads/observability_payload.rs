@@ -12,6 +12,7 @@
 //! • Top‑level enum uses `observability_type` (mirrors `content_type` in ChainEvent).
 //! • Sub‑enums use `stage_state`, `metrics_event`, `middleware_event`, and `action`.
 
+use crate::event::observability::HttpPullTelemetry;
 use crate::event::payloads::effect_payload::EffectCursor;
 use crate::id::StageId;
 use serde::{Deserialize, Serialize};
@@ -91,6 +92,13 @@ pub enum MetricsLifecycle {
         memory_bytes: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_count: Option<u32>,
+    },
+    /// Runtime-authored snapshot for an HTTP pull source (FLOWIP-134g).
+    ///
+    /// Source handlers report this typed value through the closed source
+    /// observation capability. They never construct the surrounding event.
+    HttpPullSnapshot {
+        snapshot: HttpPullTelemetry,
     },
     Custom {
         name: String,

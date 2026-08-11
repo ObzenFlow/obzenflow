@@ -12,23 +12,22 @@
 //! matches under whole-run verification. A `Completed` archive still replays
 //! as `Natural` and finalizes.
 
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainEventContent, EventEnvelope};
-use obzenflow_core::{id::StageId, StageOutputs, TypedPayload, WriterId};
+use obzenflow_core::{StageOutputs, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, StatefulEmission, TypedStatefulHandler, TypedTransformHandler,
+    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -70,7 +69,6 @@ struct Ticks {
     next: u64,
     emit: u64,
     seal: bool,
-    writer_id: WriterId,
 }
 
 impl Ticks {
@@ -79,7 +77,6 @@ impl Ticks {
             next: 1,
             emit,
             seal: false,
-            writer_id: WriterId::from(StageId::new()),
         }
     }
 
@@ -91,8 +88,10 @@ impl Ticks {
     }
 }
 
-impl FiniteSourceHandler for Ticks {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for Ticks {
+    type Output = Tick;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next > self.emit {
             if self.seal {
                 return Ok(None);
@@ -102,15 +101,11 @@ impl FiniteSourceHandler for Ticks {
         }
         let n = self.next;
         self.next += 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            Tick::EVENT_TYPE,
-            json!(Tick {
-                n,
-                depth: 0,
-                kind: seed_kind(),
-            }),
-        )]))
+        Ok(Some(vec![Tick {
+            n,
+            depth: 0,
+            kind: seed_kind(),
+        }]))
     }
 }
 

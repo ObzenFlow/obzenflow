@@ -38,7 +38,7 @@ use obzenflow_core::ai::{
     TokenCount, TokenEstimate, TokenEstimator, TokenEstimatorFallbackReason,
     TokenEstimatorResolutionInfo, CHAT_CLIENT_PORT,
 };
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -61,7 +61,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
 use obzenflow_runtime::testing::BackpressureAckGate;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -475,7 +475,6 @@ fn internally_retrying_chat_port(
 struct OneSeed {
     emitted: bool,
     count: u64,
-    writer: WriterId,
 }
 
 impl OneSeed {
@@ -483,22 +482,19 @@ impl OneSeed {
         Self {
             emitted: false,
             count,
-            writer: WriterId::from(StageId::new()),
         }
     }
 }
 
-impl FiniteSourceHandler for OneSeed {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for OneSeed {
+    type Output = DigestSeed;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted {
             return Ok(None);
         }
         self.emitted = true;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer,
-            DigestSeed::versioned_event_type(),
-            json!(DigestSeed { n: self.count }),
-        )]))
+        Ok(Some(vec![DigestSeed { n: self.count }]))
     }
 }
 

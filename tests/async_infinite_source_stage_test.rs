@@ -9,22 +9,20 @@ use obzenflow_adapters::middleware::{
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
     MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
 };
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{async_infinite_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{AsyncInfiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedAsyncInfiniteSourceHandler};
 use obzenflow_runtime::stages::observer::{
     ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the async-infinite source stage test. The JSON
 /// shape matches what `TestAsyncInfiniteSource` emits; the type
@@ -69,7 +67,6 @@ async fn wait_for_running(handle: &FlowHandle) -> Result<()> {
 #[derive(Clone, Debug)]
 struct TestAsyncInfiniteSource {
     rx: Arc<TokioMutex<mpsc::UnboundedReceiver<u64>>>,
-    writer_id: WriterId,
     drain_calls: Arc<AtomicU64>,
     max_batch_size: usize,
 }
@@ -82,7 +79,6 @@ impl TestAsyncInfiniteSource {
     ) -> Self {
         Self {
             rx: Arc::new(TokioMutex::new(rx)),
-            writer_id: WriterId::from(StageId::new()),
             drain_calls,
             max_batch_size,
         }
@@ -90,8 +86,10 @@ impl TestAsyncInfiniteSource {
 }
 
 #[async_trait]
-impl AsyncInfiniteSourceHandler for TestAsyncInfiniteSource {
-    async fn next(&mut self) -> std::result::Result<Vec<ChainEvent>, SourceError> {
+impl TypedAsyncInfiniteSourceHandler for TestAsyncInfiniteSource {
+    type Output = AsyncInfiniteEvent;
+
+    async fn next(&mut self) -> std::result::Result<Vec<Self::Output>, SourceError> {
         let mut rx = self.rx.lock().await;
 
         let first = rx
@@ -99,19 +97,11 @@ impl AsyncInfiniteSourceHandler for TestAsyncInfiniteSource {
             .await
             .ok_or_else(|| SourceError::Transport("test channel closed".to_string()))?;
 
-        let mut out = vec![ChainEventFactory::data_event(
-            self.writer_id,
-            <AsyncInfiniteEvent as TypedPayload>::EVENT_TYPE,
-            json!({ "n": first }),
-        )];
+        let mut out = vec![AsyncInfiniteEvent { n: first }];
 
         while out.len() < self.max_batch_size {
             match rx.try_recv() {
-                Ok(n) => out.push(ChainEventFactory::data_event(
-                    self.writer_id,
-                    <AsyncInfiniteEvent as TypedPayload>::EVENT_TYPE,
-                    json!({ "n": n }),
-                )),
+                Ok(n) => out.push(AsyncInfiniteEvent { n }),
                 Err(_) => break,
             }
         }

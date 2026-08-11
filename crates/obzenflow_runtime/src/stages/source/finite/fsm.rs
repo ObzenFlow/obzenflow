@@ -785,7 +785,7 @@ mod tests {
     use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, Mutex};
 
-    use crate::stages::common::handlers::FiniteSourceHandler as TestFiniteSourceHandler;
+    use crate::stages::common::handlers::source::traits::FiniteSourceHandler as TestFiniteSourceHandler;
     use crate::stages::source::strategies::{
         CompletionContext, CompletionDecision, CompletionGate,
     };

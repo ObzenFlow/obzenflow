@@ -1,0 +1,13 @@
+# category|workspace-relative Rust source|raw trait|implementing type
+#
+# New, moved, or removed entries fail closed until the erasure role is reviewed.
+structural_adapter|crates/obzenflow_dsl/src/dsl/typing.rs|FiniteSourceHandler|PlaceholderFiniteSource
+structural_adapter|crates/obzenflow_dsl/src/dsl/typing.rs|AsyncFiniteSourceHandler|PlaceholderAsyncSource
+structural_adapter|crates/obzenflow_dsl/src/dsl/typing.rs|AsyncInfiniteSourceHandler|PlaceholderAsyncSource
+structural_adapter|crates/obzenflow_dsl/src/dsl/typing.rs|InfiniteSourceHandler|PlaceholderInfiniteSource
+test_harness|crates/obzenflow_dsl/src/dsl/stage_descriptor.rs|FiniteSourceHandler|DummyFiniteSource
+test_harness|crates/obzenflow_dsl/src/dsl/stage_descriptor.rs|AsyncFiniteSourceHandler|DummyAsyncFiniteSourceDefault
+test_harness|crates/obzenflow_dsl/src/dsl/stage_descriptor.rs|AsyncFiniteSourceHandler|DummyAsyncFiniteSourceConfigured
+test_harness|crates/obzenflow_dsl/src/dsl/stage_descriptor.rs|AsyncFiniteSourceHandler|DummyAsyncFiniteSourceDisabled
+test_harness|crates/obzenflow_dsl/src/dsl/stage_descriptor.rs|AsyncInfiniteSourceHandler|DummyAsyncInfiniteSourceDefault
+test_harness|crates/obzenflow_dsl/src/dsl/stage_descriptor.rs|AsyncInfiniteSourceHandler|DummyAsyncInfiniteSourceConfigured

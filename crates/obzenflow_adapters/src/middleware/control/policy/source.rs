@@ -15,7 +15,7 @@ use obzenflow_core::{ChainEvent, MiddlewareExecutionScope, WriterId};
 use obzenflow_runtime::prelude::SourceError;
 use obzenflow_runtime::stages::source::{
     SourceBoundary, SourceBoundaryFuture, SourceBoundaryOutcome, SourceBoundaryReport,
-    SourcePollCompletion, SourcePollExecution, SourcePollReport,
+    SourcePollCompletion, SourcePollExecution, SourcePollReport, SourcePollResult,
 };
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -219,7 +219,13 @@ impl SourceBoundary for PerSourcePolicyBoundary {
             }
 
             let poll = execute.await;
-            if let Ok(SourcePollCompletion::Batch(batch)) = &poll.result {
+            if matches!(poll.result, SourcePollResult::Fatal(_)) {
+                return SourceBoundaryReport {
+                    outcome: SourceBoundaryOutcome::Polled(poll),
+                    control_events: Vec::new(),
+                };
+            }
+            if let SourcePollResult::Completed(SourcePollCompletion::Batch(batch)) = &poll.result {
                 if !batch.is_empty() {
                     let batch = SourceBatchFacts::from_events(batch);
                     for (policy, _) in &admitted {
@@ -245,20 +251,25 @@ impl SourceBoundary for PerSourcePolicyBoundary {
 
 fn source_poll_outcome(report: &SourcePollReport) -> SourcePollOutcome<'_> {
     match &report.result {
-        Ok(SourcePollCompletion::Batch(batch)) if batch.is_empty() => SourcePollOutcome::Empty {
+        SourcePollResult::Completed(SourcePollCompletion::Batch(batch)) if batch.is_empty() => {
+            SourcePollOutcome::Empty {
+                poll_duration: report.poll_duration,
+            }
+        }
+        SourcePollResult::Completed(SourcePollCompletion::Batch(batch)) => {
+            SourcePollOutcome::Delivered {
+                batch: SourceBatchFacts::from_events(batch),
+                poll_duration: report.poll_duration,
+            }
+        }
+        SourcePollResult::Completed(SourcePollCompletion::Eof) => SourcePollOutcome::Eof {
             poll_duration: report.poll_duration,
         },
-        Ok(SourcePollCompletion::Batch(batch)) => SourcePollOutcome::Delivered {
-            batch: SourceBatchFacts::from_events(batch),
-            poll_duration: report.poll_duration,
-        },
-        Ok(SourcePollCompletion::Eof) => SourcePollOutcome::Eof {
-            poll_duration: report.poll_duration,
-        },
-        Err(err) => SourcePollOutcome::Failed {
+        SourcePollResult::HandlerError(err) => SourcePollOutcome::Failed {
             error: err,
             poll_duration: report.poll_duration,
         },
+        SourcePollResult::Fatal(_) => unreachable!("framework fatal bypasses policy observation"),
     }
 }
 
@@ -372,8 +383,11 @@ mod tests {
         boundary
             .around_poll(Box::pin(async move {
                 SourcePollReport {
-                    result: Ok(SourcePollCompletion::Batch(vec![error_event])),
+                    result: SourcePollResult::Completed(SourcePollCompletion::Batch(vec![
+                        error_event,
+                    ])),
                     poll_duration,
+                    operational_events: Vec::new(),
                 }
             }))
             .await;
@@ -411,8 +425,11 @@ mod tests {
         let report = boundary
             .around_poll(Box::pin(async {
                 SourcePollReport {
-                    result: Ok(SourcePollCompletion::Batch(vec![test_event()])),
+                    result: SourcePollResult::Completed(SourcePollCompletion::Batch(vec![
+                        test_event(),
+                    ])),
                     poll_duration: Duration::from_millis(1),
+                    operational_events: Vec::new(),
                 }
             }))
             .await;
@@ -502,8 +519,11 @@ mod tests {
             .around_poll(Box::pin(async move {
                 executed_in_future.fetch_add(1, Ordering::SeqCst);
                 SourcePollReport {
-                    result: Ok(SourcePollCompletion::Batch(vec![test_event()])),
+                    result: SourcePollResult::Completed(SourcePollCompletion::Batch(vec![
+                        test_event(),
+                    ])),
                     poll_duration: Duration::from_millis(1),
+                    operational_events: Vec::new(),
                 }
             }))
             .await;

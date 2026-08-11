@@ -6,11 +6,11 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, infinite_source, sink, source, FlowDefinition};
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +29,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, InfiniteSourceHandler, SinkHandler,
+    SinkHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use std::sync::Arc;
@@ -79,41 +79,33 @@ impl SinkHandler for SlowSink {
 
 #[derive(Clone, Debug)]
 struct SlowInfiniteSource {
-    writer_id: WriterId,
     counter: u64,
     sleep: Duration,
 }
 
 impl SlowInfiniteSource {
     fn new(sleep: Duration) -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-            counter: 0,
-            sleep,
-        }
+        Self { counter: 0, sleep }
     }
 }
 
-impl InfiniteSourceHandler for SlowInfiniteSource {
+impl TypedInfiniteSourceHandler for SlowInfiniteSource {
+    type Output = LifecycleEvent;
+
     fn next(
         &mut self,
     ) -> Result<
-        Vec<ChainEvent>,
+        Vec<Self::Output>,
         obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         std::thread::sleep(self.sleep);
         self.counter += 1;
-        Ok(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            "tick",
-            serde_json::json!({ "n": self.counter }),
-        )])
+        Ok(vec![LifecycleEvent { n: self.counter }])
     }
 }
 
 #[derive(Clone, Debug)]
 struct SlowFiniteSource {
-    writer_id: WriterId,
     emitted: usize,
     max: usize,
     sleep: Duration,
@@ -122,7 +114,6 @@ struct SlowFiniteSource {
 impl SlowFiniteSource {
     fn new(max: usize, sleep: Duration) -> Self {
         Self {
-            writer_id: WriterId::from(StageId::new()),
             emitted: 0,
             max,
             sleep,
@@ -130,11 +121,13 @@ impl SlowFiniteSource {
     }
 }
 
-impl FiniteSourceHandler for SlowFiniteSource {
+impl TypedFiniteSourceHandler for SlowFiniteSource {
+    type Output = LifecycleEvent;
+
     fn next(
         &mut self,
     ) -> Result<
-        Option<Vec<ChainEvent>>,
+        Option<Vec<Self::Output>>,
         obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.emitted >= self.max {
@@ -145,11 +138,7 @@ impl FiniteSourceHandler for SlowFiniteSource {
         let idx = self.emitted;
         self.emitted += 1;
 
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            "tick",
-            serde_json::json!({ "n": idx }),
-        )]))
+        Ok(Some(vec![LifecycleEvent { n: idx as u64 }]))
     }
 }
 

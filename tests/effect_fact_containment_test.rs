@@ -7,10 +7,9 @@
 
 use async_trait::async_trait;
 use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::chain_event::ChainEvent,
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    id::StageId,
-    TypedPayload, WriterId,
+    TypedPayload,
 };
 use obzenflow_dsl::dsl::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
 use obzenflow_dsl::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
@@ -22,7 +21,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler,
+    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -88,29 +87,23 @@ impl Effect for ValueEffect {
 #[derive(Clone, Debug)]
 struct OneShotSource {
     emitted: bool,
-    writer_id: WriterId,
 }
 
 impl OneShotSource {
     fn new() -> Self {
-        Self {
-            emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { emitted: false }
     }
 }
 
-impl FiniteSourceHandler for OneShotSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for OneShotSource {
+    type Output = ContainmentInput;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted {
             return Ok(None);
         }
         self.emitted = true;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            ContainmentInput::EVENT_TYPE,
-            json!(ContainmentInput { value: 1 }),
-        )]))
+        Ok(Some(vec![ContainmentInput { value: 1 }]))
     }
 }
 

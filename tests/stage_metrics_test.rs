@@ -9,18 +9,16 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the stage-metrics test. The JSON shape matches
 /// what `TestSource` emits; the type fingerprints the stage contract per
@@ -41,7 +39,6 @@ use std::sync::{Arc, Mutex};
 struct TestSource {
     events: Vec<String>,
     index: usize,
-    writer_id: WriterId,
 }
 
 impl TestSource {
@@ -53,30 +50,27 @@ impl TestSource {
                 "event3".to_string(),
             ],
             index: 0,
-            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
-impl FiniteSourceHandler for TestSource {
+impl TypedFiniteSourceHandler for TestSource {
+    type Output = MetricEvent;
+
     fn next(
         &mut self,
     ) -> Result<
-        Option<Vec<ChainEvent>>,
+        Option<Vec<Self::Output>>,
         obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.index >= self.events.len() {
             return Ok(None);
         }
 
-        let event = ChainEventFactory::data_event(
-            self.writer_id,
-            MetricEvent::versioned_event_type(),
-            json!({
-                "data": self.events[self.index].clone(),
-                "index": self.index
-            }),
-        );
+        let event = MetricEvent {
+            data: self.events[self.index].clone(),
+            index: self.index,
+        };
 
         self.index += 1;
         Ok(Some(vec![event]))

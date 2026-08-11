@@ -22,7 +22,7 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainEventContent, EventEnvelope};
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
@@ -32,7 +32,7 @@ use obzenflow_runtime::effects::{
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InfiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    EffectfulTransformHandler, SinkHandler, TypedInfiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -88,7 +88,6 @@ impl TypedPayload for FanInOutput {
 #[derive(Clone, Debug)]
 struct ChannelTicker {
     channel: &'static str,
-    writer_id: WriterId,
     next_value: u64,
     remaining: u64,
 }
@@ -97,15 +96,16 @@ impl ChannelTicker {
     fn new(channel: &'static str, first_value: u64, count: u64) -> Self {
         Self {
             channel,
-            writer_id: WriterId::from(StageId::new()),
             next_value: first_value,
             remaining: count,
         }
     }
 }
 
-impl InfiniteSourceHandler for ChannelTicker {
-    fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+impl TypedInfiniteSourceHandler for ChannelTicker {
+    type Output = ChannelTick;
+
+    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         if self.remaining == 0 {
             return Ok(Vec::new());
         }
@@ -115,8 +115,7 @@ impl InfiniteSourceHandler for ChannelTicker {
         Ok(vec![ChannelTick {
             channel: self.channel.to_string(),
             value,
-        }
-        .to_event(self.writer_id)])
+        }])
     }
 }
 

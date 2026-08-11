@@ -12,18 +12,16 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::chain_event::ChainEvent,
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    id::StageId,
-    TypedPayload, WriterId,
+    TypedPayload,
 };
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
 use obzenflow_runtime::stages::transform::TryMapTyped;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 const TOTAL_EVENTS: usize = 10_000;
 const ERROR_EVERY: usize = 100;
@@ -33,7 +31,6 @@ const EXPECTED_DOMAIN_ERRORS: u64 = (TOTAL_EVENTS / ERROR_EVERY) as u64;
 #[derive(Clone, Debug)]
 struct HighVolumeSource {
     count: usize,
-    writer_id: WriterId,
     total_events: usize,
 }
 
@@ -41,17 +38,18 @@ impl HighVolumeSource {
     fn new(total_events: usize) -> Self {
         Self {
             count: 0,
-            writer_id: WriterId::from(StageId::new()),
             total_events,
         }
     }
 }
 
-impl FiniteSourceHandler for HighVolumeSource {
+impl TypedFiniteSourceHandler for HighVolumeSource {
+    type Output = DataRequest;
+
     fn next(
         &mut self,
     ) -> Result<
-        Option<Vec<ChainEvent>>,
+        Option<Vec<Self::Output>>,
         obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.count >= self.total_events {
@@ -63,15 +61,11 @@ impl FiniteSourceHandler for HighVolumeSource {
 
         let should_fail = current_id.is_multiple_of(ERROR_EVERY);
 
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            DataRequest::versioned_event_type(),
-            json!({
-                "id": current_id,
-                "should_fail": should_fail,
-                "batch": current_id / 100,
-            }),
-        )]))
+        Ok(Some(vec![DataRequest {
+            id: current_id,
+            should_fail,
+            batch: current_id / 100,
+        }]))
     }
 }
 

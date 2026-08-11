@@ -4,14 +4,10 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::observability::{HttpPullState, HttpPullTelemetry, WaitReason};
-use obzenflow_core::event::payloads::observability_payload::{
-    MetricsLifecycle, ObservabilityPayload,
-};
-use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError};
-use obzenflow_core::{ChainEvent, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler,
+    SourceObservationSink, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::typing::SourceTyping;
@@ -61,7 +57,7 @@ impl From<serde_json::Error> for DecodeError {
 /// Decoder trait — owns event typing, request building, and response parsing (FLOWIP-084e OT-6/7).
 pub trait PullDecoder: Clone + Debug + Send + Sync + 'static {
     type Cursor: Clone + Debug + Send + Sync;
-    type Item: Serialize + Send;
+    type Item: TypedPayload + Debug + Send + Sync + 'static;
 
     /// Event type for all decoded items.
     /// MUST be stable for the lifetime of this decoder instance.
@@ -135,7 +131,7 @@ pub trait PullDecoder: Clone + Debug + Send + Sync + 'static {
 /// This avoids exposing cursor types in user code, since `type Cursor = ()` is extremely common
 /// but cannot be expressed as an associated type default on stable Rust.
 pub trait CursorlessPullDecoder: Clone + Debug + Send + Sync + 'static {
-    type Item: Serialize + Send;
+    type Item: TypedPayload + Debug + Send + Sync + 'static;
 
     fn event_type(&self) -> String;
     fn request_spec(&self) -> RequestSpec;
@@ -258,7 +254,7 @@ impl<C, T> Debug for FnPullDecoder<C, T> {
 impl<C, T> PullDecoder for FnPullDecoder<C, T>
 where
     C: Clone + Debug + Send + Sync + 'static,
-    T: Serialize + Send + 'static,
+    T: TypedPayload + Debug + Send + Sync + 'static,
 {
     type Cursor = C;
     type Item = T;
@@ -604,7 +600,7 @@ impl<K, T> Debug for ListDetailDecoder<K, T> {
 impl<K, T> PullDecoder for ListDetailDecoder<K, T>
 where
     K: Clone + Debug + Send + Sync + 'static,
-    T: Serialize + Send + 'static,
+    T: TypedPayload + Debug + Send + Sync + 'static,
 {
     type Cursor = ListDetailState<K>;
     type Item = T;
@@ -1040,19 +1036,19 @@ impl HttpPollConfig {
 pub struct HttpPullSource<D: PullDecoder> {
     inner: Arc<Mutex<HttpPullSourceInner<D>>>,
     decoder: D,
-    writer_id: Option<WriterId>,
+    observation_sink: Option<SourceObservationSink>,
     config: HttpPullConfig,
 }
 
 /// Infinite HTTP poll source (FLOWIP-084e).
 ///
-/// This source self-manages cadence via `poll_interval` and emits low-volume telemetry snapshots
-/// (`http_pull.snapshot`) on state changes (e.g., entering/leaving waits) for Prometheus visibility.
+/// This source self-manages cadence via `poll_interval` and reports low-volume typed telemetry
+/// snapshots on state changes (e.g., entering/leaving waits) for Prometheus visibility.
 #[derive(Debug, Clone)]
 pub struct HttpPollSource<D: PullDecoder> {
     inner: Arc<Mutex<HttpPollSourceInner<D>>>,
     decoder: D,
-    writer_id: Option<WriterId>,
+    observation_sink: Option<SourceObservationSink>,
     config: HttpPollConfig,
 }
 
@@ -1067,7 +1063,7 @@ impl<D: PullDecoder> SourceTyping for HttpPollSource<D> {
 #[derive(Debug)]
 struct HttpPullSourceInner<D: PullDecoder> {
     cursor: Option<D::Cursor>,
-    buffer: VecDeque<ChainEvent>,
+    buffer: VecDeque<D::Item>,
     exhausted: bool,
 
     telemetry: HttpPullTelemetry,
@@ -1075,13 +1071,12 @@ struct HttpPullSourceInner<D: PullDecoder> {
     transient_attempts: usize,
 
     poisoned: bool,
-    pending_error: Option<ChainEvent>,
 }
 
 #[derive(Debug)]
 struct HttpPollSourceInner<D: PullDecoder> {
     cursor: Option<D::Cursor>,
-    buffer: VecDeque<ChainEvent>,
+    buffer: VecDeque<D::Item>,
     first_fetch: bool,
 
     cycle_exhausted: bool,
@@ -1089,8 +1084,6 @@ struct HttpPollSourceInner<D: PullDecoder> {
     telemetry: HttpPullTelemetry,
     scheduled_wait: Option<ScheduledWait>,
     transient_attempts: usize,
-
-    poisoned: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1164,24 +1157,10 @@ fn set_terminal(telemetry: &mut HttpPullTelemetry) {
     telemetry.next_wake_unix_secs = None;
 }
 
-fn telemetry_to_observability_event(
-    writer_id: WriterId,
-    telemetry: &HttpPullTelemetry,
-) -> Result<ChainEvent, SourceError> {
-    let value = serde_json::to_value(telemetry).map_err(|e| {
-        SourceError::Other(format!(
-            "Failed to serialize HTTP pull telemetry snapshot: {e}"
-        ))
-    })?;
-
-    Ok(ChainEventFactory::observability_event(
-        writer_id,
-        ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
-            name: "http_pull.snapshot".to_string(),
-            value,
-            tags: None,
-        }),
-    ))
+fn report_http_pull_snapshot(sink: &Option<SourceObservationSink>, telemetry: &HttpPullTelemetry) {
+    if let Some(sink) = sink {
+        sink.report_http_pull(telemetry.clone());
+    }
 }
 
 impl<D: PullDecoder> HttpPullSource<D> {
@@ -1195,10 +1174,9 @@ impl<D: PullDecoder> HttpPullSource<D> {
                 scheduled_wait: None,
                 transient_attempts: 0,
                 poisoned: false,
-                pending_error: None,
             })),
             decoder,
-            writer_id: None,
+            observation_sink: None,
             config,
         }
     }
@@ -1215,10 +1193,9 @@ impl<D: PullDecoder> HttpPollSource<D> {
                 telemetry: HttpPullTelemetry::default(),
                 scheduled_wait: None,
                 transient_attempts: 0,
-                poisoned: false,
             })),
             decoder,
-            writer_id: None,
+            observation_sink: None,
             config,
         }
     }
@@ -1263,7 +1240,7 @@ impl FetchError {
                 ..
             } => SourceError::Other(msg),
             FetchError::Validation { status, message } => {
-                SourceError::Other(format!("validation_error (HTTP {status}): {message}"))
+                SourceError::Validation(format!("HTTP {status}: {message}"))
             }
         }
     }
@@ -1310,41 +1287,31 @@ async fn fetch_decode_once<D: PullDecoder>(
 }
 
 #[async_trait]
-impl<D: PullDecoder> AsyncFiniteSourceHandler for HttpPullSource<D> {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
+impl<D: PullDecoder> TypedAsyncFiniteSourceHandler for HttpPullSource<D> {
+    type Output = D::Item;
 
     fn poll_timeout(&self) -> Option<Duration> {
         self.config.poll_timeout
     }
 
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn install_source_observation_sink(&mut self, sink: SourceObservationSink) {
+        self.observation_sink = Some(sink);
+    }
+
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        let observation_sink = self.observation_sink.clone();
         let mut inner = self.inner.lock().await;
 
-        if let Some(error_event) = inner.pending_error.take() {
-            let mut out = vec![error_event];
-            if out.len() < self.config.max_batch_size && !inner.buffer.is_empty() {
-                out.extend(inner.drain_batch(self.config.max_batch_size - out.len()));
-            }
-            return Ok(Some(out));
-        }
-
         if !inner.buffer.is_empty() {
-            return Ok(Some(inner.drain_batch(self.config.max_batch_size)));
+            let batch = inner.drain_batch(self.config.max_batch_size);
+            report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+            return Ok(Some(batch));
         }
 
-        if inner.poisoned {
+        if inner.poisoned || inner.exhausted {
+            report_http_pull_snapshot(&observation_sink, &inner.telemetry);
             return Ok(None);
         }
-
-        if inner.exhausted {
-            return Ok(None);
-        }
-
-        let writer_id = self
-            .writer_id
-            .expect("bind_writer_id must be called before next()");
 
         if let Some(wait) = inner.scheduled_wait.as_ref() {
             let wake_at = wait.wake_at;
@@ -1353,9 +1320,8 @@ impl<D: PullDecoder> AsyncFiniteSourceHandler for HttpPullSource<D> {
             }
             inner.scheduled_wait = None;
             finish_wait(&mut inner.telemetry);
-            let telemetry_event = telemetry_to_observability_event(writer_id, &inner.telemetry)?;
-            inner.buffer.push_back(telemetry_event);
-            return Ok(Some(inner.drain_batch(self.config.max_batch_size)));
+            report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+            return Ok(Some(Vec::new()));
         }
 
         while inner.buffer.is_empty() && !inner.poisoned && !inner.exhausted {
@@ -1380,36 +1346,20 @@ impl<D: PullDecoder> AsyncFiniteSourceHandler for HttpPullSource<D> {
                         .events_decoded_total
                         .saturating_add(result.items.len() as u64);
 
-                    inner.apply_decode_result(writer_id, &self.decoder, result)?;
+                    inner.apply_decode_result(result);
 
                     if inner.exhausted {
                         set_terminal(&mut inner.telemetry);
-                        let telemetry_event =
-                            telemetry_to_observability_event(writer_id, &inner.telemetry)?;
-                        inner.buffer.push_back(telemetry_event);
                     }
                 }
 
                 Err(FetchError::Validation { status, message }) => {
                     observe_http_status(&mut inner.telemetry, status);
 
-                    let error_event = self.build_validation_error_event(status, &message);
                     inner.poisoned = true;
-                    inner.pending_error = Some(error_event);
-
                     set_terminal(&mut inner.telemetry);
-                    let telemetry_event =
-                        telemetry_to_observability_event(writer_id, &inner.telemetry)?;
-                    inner.buffer.push_back(telemetry_event);
-
-                    let mut out = Vec::new();
-                    if let Some(ev) = inner.pending_error.take() {
-                        out.push(ev);
-                    }
-                    if out.len() < self.config.max_batch_size && !inner.buffer.is_empty() {
-                        out.extend(inner.drain_batch(self.config.max_batch_size - out.len()));
-                    }
-                    return Ok(Some(out));
+                    report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+                    return Err(SourceError::Validation(format!("HTTP {status}: {message}")));
                 }
 
                 Err(FetchError::Decode {
@@ -1417,6 +1367,7 @@ impl<D: PullDecoder> AsyncFiniteSourceHandler for HttpPullSource<D> {
                     error: DecodeError::Parse(msg),
                 }) => {
                     observe_http_status(&mut inner.telemetry, status);
+                    report_http_pull_snapshot(&observation_sink, &inner.telemetry);
                     return Err(SourceError::Deserialization(msg));
                 }
 
@@ -1440,11 +1391,7 @@ impl<D: PullDecoder> AsyncFiniteSourceHandler for HttpPullSource<D> {
                             delay.as_millis(),
                             self.config.retry.rate_limit_max_wait.as_millis()
                         );
-                        self.handle_transient_error(
-                            &mut inner,
-                            writer_id,
-                            FetchError::Transport(msg),
-                        )?;
+                        self.handle_transient_error(&mut inner, FetchError::Transport(msg))?;
                         break;
                     }
 
@@ -1453,9 +1400,6 @@ impl<D: PullDecoder> AsyncFiniteSourceHandler for HttpPullSource<D> {
                         WaitReason::RateLimit,
                         delay,
                     ));
-                    let telemetry_event =
-                        telemetry_to_observability_event(writer_id, &inner.telemetry)?;
-                    inner.buffer.push_back(telemetry_event);
                     break;
                 }
 
@@ -1464,51 +1408,59 @@ impl<D: PullDecoder> AsyncFiniteSourceHandler for HttpPullSource<D> {
                     error: DecodeError::Transient(msg),
                 }) => {
                     observe_http_status(&mut inner.telemetry, status);
-                    self.handle_transient_error(&mut inner, writer_id, FetchError::Transport(msg))?;
+                    self.handle_transient_error(&mut inner, FetchError::Transport(msg))?;
                     break;
                 }
 
                 Err(err @ FetchError::Transport(_)) | Err(err @ FetchError::Timeout(_)) => {
-                    self.handle_transient_error(&mut inner, writer_id, err)?;
+                    self.handle_transient_error(&mut inner, err)?;
                     break;
                 }
 
-                Err(err) => return Err(err.into_source_error()),
+                Err(err) => {
+                    report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+                    return Err(err.into_source_error());
+                }
             }
         }
 
         if !inner.buffer.is_empty() {
-            return Ok(Some(inner.drain_batch(self.config.max_batch_size)));
+            let batch = inner.drain_batch(self.config.max_batch_size);
+            report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+            return Ok(Some(batch));
         }
 
         if inner.poisoned || inner.exhausted {
+            report_http_pull_snapshot(&observation_sink, &inner.telemetry);
             return Ok(None);
         }
 
+        report_http_pull_snapshot(&observation_sink, &inner.telemetry);
         Ok(Some(Vec::new()))
     }
 }
 
 #[async_trait]
-impl<D: PullDecoder> AsyncInfiniteSourceHandler for HttpPollSource<D> {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
+impl<D: PullDecoder> TypedAsyncInfiniteSourceHandler for HttpPollSource<D> {
+    type Output = D::Item;
 
     fn poll_timeout(&self) -> Option<Duration> {
         self.config.poll_timeout
     }
 
-    async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
-        let mut inner = self.inner.lock().await;
+    fn install_source_observation_sink(&mut self, sink: SourceObservationSink) {
+        self.observation_sink = Some(sink);
+    }
 
-        let writer_id = self
-            .writer_id
-            .expect("bind_writer_id must be called before next()");
+    async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
+        let observation_sink = self.observation_sink.clone();
+        let mut inner = self.inner.lock().await;
 
         loop {
             if !inner.buffer.is_empty() {
-                return Ok(inner.drain_batch(self.config.max_batch_size));
+                let batch = inner.drain_batch(self.config.max_batch_size);
+                report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+                return Ok(batch);
             }
 
             if let Some(wait) = inner.scheduled_wait.as_ref() {
@@ -1528,10 +1480,8 @@ impl<D: PullDecoder> AsyncInfiniteSourceHandler for HttpPollSource<D> {
                     WaitReason::RateLimit | WaitReason::Backoff => {}
                 }
                 finish_wait(&mut inner.telemetry);
-                let telemetry_event =
-                    telemetry_to_observability_event(writer_id, &inner.telemetry)?;
-                inner.buffer.push_back(telemetry_event);
-                continue;
+                report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+                return Ok(Vec::new());
             }
 
             if inner.cycle_exhausted && !inner.first_fetch {
@@ -1540,10 +1490,8 @@ impl<D: PullDecoder> AsyncInfiniteSourceHandler for HttpPollSource<D> {
                     WaitReason::PollInterval,
                     self.config.poll_interval,
                 ));
-                let telemetry_event =
-                    telemetry_to_observability_event(writer_id, &inner.telemetry)?;
-                inner.buffer.push_back(telemetry_event);
-                continue;
+                report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+                return Ok(Vec::new());
             }
 
             inner.first_fetch = false;
@@ -1568,27 +1516,22 @@ impl<D: PullDecoder> AsyncInfiniteSourceHandler for HttpPollSource<D> {
                         .events_decoded_total
                         .saturating_add(result.items.len() as u64);
 
-                    inner.apply_decode_result(writer_id, &self.decoder, result)?;
+                    inner.apply_decode_result(result);
                 }
 
                 Err(FetchError::Validation { status, message }) => {
                     observe_http_status(&mut inner.telemetry, status);
 
-                    let error_event = self.build_validation_error_event(status, &message);
-                    inner.buffer.push_back(error_event);
-
                     inner.cursor = None;
                     inner.cycle_exhausted = false;
-                    inner.poisoned = true;
 
                     inner.scheduled_wait = Some(start_wait(
                         &mut inner.telemetry,
                         WaitReason::PollInterval,
                         self.config.poll_interval,
                     ));
-                    let telemetry_event =
-                        telemetry_to_observability_event(writer_id, &inner.telemetry)?;
-                    inner.buffer.push_back(telemetry_event);
+                    report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+                    return Err(SourceError::Validation(format!("HTTP {status}: {message}")));
                 }
 
                 Err(FetchError::Decode {
@@ -1596,6 +1539,7 @@ impl<D: PullDecoder> AsyncInfiniteSourceHandler for HttpPollSource<D> {
                     error: DecodeError::Parse(msg),
                 }) => {
                     observe_http_status(&mut inner.telemetry, status);
+                    report_http_pull_snapshot(&observation_sink, &inner.telemetry);
                     return Err(SourceError::Deserialization(msg));
                 }
 
@@ -1619,12 +1563,9 @@ impl<D: PullDecoder> AsyncInfiniteSourceHandler for HttpPollSource<D> {
                             delay.as_millis(),
                             self.config.retry.rate_limit_max_wait.as_millis()
                         );
-                        self.handle_transient_error(
-                            &mut inner,
-                            writer_id,
-                            FetchError::Transport(msg),
-                        )?;
-                        continue;
+                        self.handle_transient_error(&mut inner, FetchError::Transport(msg))?;
+                        report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+                        return Ok(Vec::new());
                     }
 
                     inner.scheduled_wait = Some(start_wait(
@@ -1632,9 +1573,8 @@ impl<D: PullDecoder> AsyncInfiniteSourceHandler for HttpPollSource<D> {
                         WaitReason::RateLimit,
                         delay,
                     ));
-                    let telemetry_event =
-                        telemetry_to_observability_event(writer_id, &inner.telemetry)?;
-                    inner.buffer.push_back(telemetry_event);
+                    report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+                    return Ok(Vec::new());
                 }
 
                 Err(FetchError::Decode {
@@ -1642,41 +1582,30 @@ impl<D: PullDecoder> AsyncInfiniteSourceHandler for HttpPollSource<D> {
                     error: DecodeError::Transient(msg),
                 }) => {
                     observe_http_status(&mut inner.telemetry, status);
-                    self.handle_transient_error(&mut inner, writer_id, FetchError::Transport(msg))?;
+                    self.handle_transient_error(&mut inner, FetchError::Transport(msg))?;
+                    report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+                    return Ok(Vec::new());
                 }
 
                 Err(err @ FetchError::Transport(_)) | Err(err @ FetchError::Timeout(_)) => {
-                    self.handle_transient_error(&mut inner, writer_id, err)?;
+                    self.handle_transient_error(&mut inner, err)?;
+                    report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+                    return Ok(Vec::new());
                 }
 
-                Err(err) => return Err(err.into_source_error()),
+                Err(err) => {
+                    report_http_pull_snapshot(&observation_sink, &inner.telemetry);
+                    return Err(err.into_source_error());
+                }
             }
         }
     }
 }
 
 impl<D: PullDecoder> HttpPullSource<D> {
-    fn build_validation_error_event(&self, status: u16, message: &str) -> ChainEvent {
-        let writer_id = self
-            .writer_id
-            .expect("bind_writer_id must be called before next()");
-        let error_payload = serde_json::json!({
-            "http_status": status,
-            "message": message,
-        });
-        ChainEventFactory::data_event_from(
-            writer_id,
-            format!("{}.error", self.decoder.event_type()),
-            &error_payload,
-        )
-        .expect("error payload serialization")
-        .mark_as_validation_error(format!("HTTP {status}: {message}"))
-    }
-
     fn handle_transient_error(
         &self,
         inner: &mut HttpPullSourceInner<D>,
-        writer_id: WriterId,
         err: FetchError,
     ) -> Result<(), SourceError> {
         if inner.transient_attempts >= self.config.retry.transient_max_retries {
@@ -1694,34 +1623,14 @@ impl<D: PullDecoder> HttpPullSource<D> {
         inner.transient_attempts = inner.transient_attempts.saturating_add(1);
         inner.telemetry.retries_total = inner.telemetry.retries_total.saturating_add(1);
         inner.scheduled_wait = Some(start_wait(&mut inner.telemetry, WaitReason::Backoff, delay));
-        let telemetry_event = telemetry_to_observability_event(writer_id, &inner.telemetry)?;
-        inner.buffer.push_back(telemetry_event);
         Ok(())
     }
 }
 
 impl<D: PullDecoder> HttpPollSource<D> {
-    fn build_validation_error_event(&self, status: u16, message: &str) -> ChainEvent {
-        let writer_id = self
-            .writer_id
-            .expect("bind_writer_id must be called before next()");
-        let error_payload = serde_json::json!({
-            "http_status": status,
-            "message": message,
-        });
-        ChainEventFactory::data_event_from(
-            writer_id,
-            format!("{}.error", self.decoder.event_type()),
-            &error_payload,
-        )
-        .expect("error payload serialization")
-        .mark_as_validation_error(format!("HTTP {status}: {message}"))
-    }
-
     fn handle_transient_error(
         &self,
         inner: &mut HttpPollSourceInner<D>,
-        writer_id: WriterId,
         err: FetchError,
     ) -> Result<(), SourceError> {
         if inner.transient_attempts >= self.config.retry.transient_max_retries {
@@ -1739,14 +1648,12 @@ impl<D: PullDecoder> HttpPollSource<D> {
         inner.transient_attempts = inner.transient_attempts.saturating_add(1);
         inner.telemetry.retries_total = inner.telemetry.retries_total.saturating_add(1);
         inner.scheduled_wait = Some(start_wait(&mut inner.telemetry, WaitReason::Backoff, delay));
-        let telemetry_event = telemetry_to_observability_event(writer_id, &inner.telemetry)?;
-        inner.buffer.push_back(telemetry_event);
         Ok(())
     }
 }
 
 impl<D: PullDecoder> HttpPullSourceInner<D> {
-    fn drain_batch(&mut self, max_batch_size: usize) -> Vec<ChainEvent> {
+    fn drain_batch(&mut self, max_batch_size: usize) -> Vec<D::Item> {
         let max_batch_size = max_batch_size.max(1);
         let count = max_batch_size.min(self.buffer.len());
         let mut out = Vec::with_capacity(count);
@@ -1758,30 +1665,17 @@ impl<D: PullDecoder> HttpPullSourceInner<D> {
         out
     }
 
-    fn apply_decode_result(
-        &mut self,
-        writer_id: WriterId,
-        decoder: &D,
-        result: DecodeResult<D::Cursor, D::Item>,
-    ) -> Result<(), SourceError> {
-        let event_type = decoder.event_type();
-        let mut events = Vec::with_capacity(result.items.len());
-        for item in &result.items {
-            let event = ChainEventFactory::data_event_from(writer_id, &event_type, item)
-                .map_err(|e| SourceError::Deserialization(e.to_string()))?;
-            events.push(event);
-        }
-        self.buffer.extend(events);
+    fn apply_decode_result(&mut self, result: DecodeResult<D::Cursor, D::Item>) {
+        self.buffer.extend(result.items);
         self.cursor = result.next_cursor;
         if self.cursor.is_none() {
             self.exhausted = true;
         }
-        Ok(())
     }
 }
 
 impl<D: PullDecoder> HttpPollSourceInner<D> {
-    fn drain_batch(&mut self, max_batch_size: usize) -> Vec<ChainEvent> {
+    fn drain_batch(&mut self, max_batch_size: usize) -> Vec<D::Item> {
         let max_batch_size = max_batch_size.max(1);
         let count = max_batch_size.min(self.buffer.len());
         let mut out = Vec::with_capacity(count);
@@ -1793,34 +1687,28 @@ impl<D: PullDecoder> HttpPollSourceInner<D> {
         out
     }
 
-    fn apply_decode_result(
-        &mut self,
-        writer_id: WriterId,
-        decoder: &D,
-        result: DecodeResult<D::Cursor, D::Item>,
-    ) -> Result<(), SourceError> {
-        let event_type = decoder.event_type();
-        let mut events = Vec::with_capacity(result.items.len());
-        for item in &result.items {
-            let event = ChainEventFactory::data_event_from(writer_id, &event_type, item)
-                .map_err(|e| SourceError::Deserialization(e.to_string()))?;
-            events.push(event);
-        }
-        self.buffer.extend(events);
+    fn apply_decode_result(&mut self, result: DecodeResult<D::Cursor, D::Item>) {
+        self.buffer.extend(result.items);
         self.cursor = result.next_cursor;
         self.cycle_exhausted = self.cursor.is_none();
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
     use obzenflow_core::http_client::MockHttpClient;
     use obzenflow_core::web::HttpMethod;
-    use obzenflow_core::StageId;
+    use serde::{Deserialize, Serialize};
     use std::sync::Arc;
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    struct TestItem(serde_json::Value);
+
+    impl TypedPayload for TestItem {
+        const EVENT_TYPE: &'static str = "test.item";
+    }
 
     fn mock_client() -> (Arc<MockHttpClient>, Arc<dyn HttpClient>) {
         let client = Arc::new(MockHttpClient::new());
@@ -1828,7 +1716,7 @@ mod tests {
         (client, trait_object)
     }
 
-    fn test_list_detail_decoder() -> ListDetailDecoder<u32, serde_json::Value> {
+    fn test_list_detail_decoder() -> ListDetailDecoder<u32, TestItem> {
         ListDetailDecoder::builder("test.item.v1")
             .list_url("http://example.invalid/list".parse().unwrap())
             .parse_list(|response| Ok(response.json()?))
@@ -1838,7 +1726,7 @@ mod tests {
             .expect("decoder build ok")
     }
 
-    fn test_list_detail_path_decoder() -> ListDetailDecoder<u32, serde_json::Value> {
+    fn test_list_detail_path_decoder() -> ListDetailDecoder<u32, TestItem> {
         ListDetailDecoder::builder("test.item.v1")
             .base_url("http://example.invalid/api/".parse().unwrap())
             .list_path("list")
@@ -1862,7 +1750,7 @@ mod tests {
 
     impl PullDecoder for TestDecoder {
         type Cursor = u32;
-        type Item = serde_json::Value;
+        type Item = TestItem;
 
         fn event_type(&self) -> String {
             "test.item.v1".to_string()
@@ -1891,6 +1779,7 @@ mod tests {
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
+                .map(TestItem)
                 .collect::<Vec<_>>();
             let next_cursor = value.get("next").and_then(|v| v.as_u64()).map(|v| v as u32);
             Ok(DecodeResult { items, next_cursor })
@@ -1935,25 +1824,16 @@ mod tests {
         };
 
         let mut source = HttpPullSource::new(decoder, config);
-        source.bind_writer_id(WriterId::from(StageId::new()));
 
         let batch1 = source.next().await.unwrap().unwrap();
-        let items1: Vec<_> = batch1
-            .iter()
-            .filter(|e| e.event_type() == "test.item.v1")
-            .map(|e| e.payload())
-            .collect();
+        let items1: Vec<_> = batch1.into_iter().map(|item| item.0).collect();
         assert_eq!(
             items1,
             vec![serde_json::json!({"n": 1}), serde_json::json!({"n": 2})]
         );
 
         let batch2 = source.next().await.unwrap().unwrap();
-        let items2: Vec<_> = batch2
-            .iter()
-            .filter(|e| e.event_type() == "test.item.v1")
-            .map(|e| e.payload())
-            .collect();
+        let items2: Vec<_> = batch2.into_iter().map(|item| item.0).collect();
         assert_eq!(items2, vec![serde_json::json!({"n": 3})]);
 
         let done = source.next().await.unwrap();
@@ -1994,8 +1874,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_pull_pending_error_emits_once_then_eof() {
-        let (_mock, client) = mock_client();
+    async fn http_pull_validation_error_is_out_of_band_then_eof() {
+        let (mock, client) = mock_client();
+        mock.enqueue(HttpResponse::new(401, HeaderMap::new(), "unauthorized"));
         let decoder = TestDecoder::new("http://example.invalid/items".parse().unwrap());
         let config = HttpPullConfig {
             client,
@@ -2005,27 +1886,80 @@ mod tests {
             poll_timeout: Some(Duration::from_secs(120)),
         };
         let mut source = HttpPullSource::new(decoder, config);
-        source.bind_writer_id(WriterId::from(StageId::new()));
 
-        let error_event = source.build_validation_error_event(401, "unauthorized");
-        {
-            let mut inner = source.inner.lock().await;
-            inner.poisoned = true;
-            inner.pending_error = Some(error_event);
-        }
-
-        let first = source.next().await.unwrap().unwrap();
-        assert_eq!(first.len(), 1);
-        assert!(matches!(
-            first[0].processing_info.status,
-            ProcessingStatus::Error {
-                kind: Some(ErrorKind::Validation),
-                ..
-            }
-        ));
+        let error = source.next().await.expect_err("401 must be validation");
+        assert!(matches!(error, SourceError::Validation(message) if message.contains("401")));
 
         let done = source.next().await.unwrap();
         assert!(done.is_none());
+    }
+
+    #[tokio::test]
+    async fn http_poll_validation_waits_one_window_before_retrying() {
+        tokio::time::pause();
+
+        let (mock, client) = mock_client();
+        mock.enqueue(HttpResponse::new(
+            401,
+            HeaderMap::new(),
+            "first invalid window",
+        ));
+        mock.enqueue(HttpResponse::new(
+            401,
+            HeaderMap::new(),
+            "second invalid window",
+        ));
+        let decoder = TestDecoder::new("http://example.invalid/items".parse().unwrap());
+        let config = HttpPollConfig {
+            client,
+            default_headers: HeaderMap::new(),
+            max_batch_size: 1000,
+            retry: HttpRetryConfig::default(),
+            poll_timeout: None,
+            poll_interval: Duration::from_secs(10),
+        };
+        let mut source = HttpPollSource::new(decoder, config);
+
+        let first = source
+            .next()
+            .await
+            .expect_err("first invalid window is reported out of band");
+        assert!(matches!(first, SourceError::Validation(message) if message.contains("401")));
+        {
+            let inner = source.inner.lock().await;
+            assert_eq!(inner.telemetry.requests_total, 1);
+            assert_eq!(inner.telemetry.responses_4xx, 1);
+            assert!(matches!(inner.telemetry.state, HttpPullState::Waiting));
+            assert!(matches!(
+                inner.telemetry.wait_reason,
+                Some(WaitReason::PollInterval)
+            ));
+        }
+
+        let mut waiting_source = source.clone();
+        let waiting = tokio::spawn(async move { waiting_source.next().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "validation retry must honor poll cadence"
+        );
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert!(waiting
+            .await
+            .expect("wait task joins")
+            .expect("wait transition is not an error")
+            .is_empty());
+        assert_eq!(source.inner.lock().await.telemetry.requests_total, 1);
+
+        let second = source
+            .next()
+            .await
+            .expect_err("the next window is retried and reported once");
+        assert!(matches!(second, SourceError::Validation(message) if message.contains("401")));
+        let inner = source.inner.lock().await;
+        assert_eq!(inner.telemetry.requests_total, 2);
+        assert_eq!(inner.telemetry.responses_4xx, 2);
+        assert!(inner.scheduled_wait.is_some());
     }
 
     #[tokio::test]
@@ -2041,26 +1975,18 @@ mod tests {
             poll_interval: Duration::from_secs(1),
         };
         let mut source = HttpPollSource::new(decoder, config);
-        let writer_id = WriterId::from(StageId::new());
-        source.bind_writer_id(writer_id);
 
         {
             let mut inner = source.inner.lock().await;
-            inner.buffer.push_back(ChainEventFactory::data_event(
-                writer_id,
-                "test.item.v1",
-                serde_json::json!({"n": 1}),
-            ));
-            inner.buffer.push_back(ChainEventFactory::data_event(
-                writer_id,
-                "test.item.v1",
-                serde_json::json!({"n": 2}),
-            ));
-            inner.buffer.push_back(ChainEventFactory::data_event(
-                writer_id,
-                "test.item.v1",
-                serde_json::json!({"n": 3}),
-            ));
+            inner
+                .buffer
+                .push_back(TestItem(serde_json::json!({"n": 1})));
+            inner
+                .buffer
+                .push_back(TestItem(serde_json::json!({"n": 2})));
+            inner
+                .buffer
+                .push_back(TestItem(serde_json::json!({"n": 3})));
         }
 
         let batch1 = source.next().await.unwrap();
@@ -2089,7 +2015,6 @@ mod tests {
         };
 
         let mut source = HttpPollSource::new(decoder, config);
-        source.bind_writer_id(WriterId::from(StageId::new()));
         let mut source2 = source.clone();
 
         {
@@ -2099,7 +2024,7 @@ mod tests {
         }
 
         let waiting = source.next().await.unwrap();
-        assert_eq!(waiting.len(), 1);
+        assert!(waiting.is_empty());
 
         {
             let inner = source.inner.lock().await;
@@ -2120,7 +2045,7 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(10)).await;
         let after_wait = handle.await.expect("join handle").expect("next ok");
-        assert_eq!(after_wait.len(), 1);
+        assert!(after_wait.is_empty());
 
         {
             let inner = source.inner.lock().await;
@@ -2281,7 +2206,7 @@ mod tests {
 
     #[test]
     fn list_detail_decoder_new_with_list_request_uses_request_spec_from_fn() {
-        let decoder = ListDetailDecoder::<u32, serde_json::Value>::new_with_list_request(
+        let decoder = ListDetailDecoder::<u32, TestItem>::new_with_list_request(
             "test.item.v1",
             || RequestSpec::post("http://example.invalid/list".parse().unwrap()),
             |response| Ok(response.json()?),
@@ -2298,7 +2223,7 @@ mod tests {
 
     #[test]
     fn list_detail_decoder_builder_requires_parse_item() {
-        let result = ListDetailDecoder::<u32, serde_json::Value>::builder("test.item.v1")
+        let result = ListDetailDecoder::<u32, TestItem>::builder("test.item.v1")
             .base_url("http://example.invalid/".parse().unwrap())
             .list_path("list")
             .parse_list(|response| Ok(response.json()?))
@@ -2340,22 +2265,13 @@ mod tests {
             .expect("build ok");
 
         let mut source = HttpPullSource::new(decoder, config);
-        source.bind_writer_id(WriterId::from(StageId::new()));
 
         let batch1 = source.next().await.unwrap().unwrap();
-        let items1: Vec<_> = batch1
-            .iter()
-            .filter(|e| e.event_type() == "test.item.v1")
-            .map(|e| e.payload())
-            .collect();
+        let items1: Vec<_> = batch1.into_iter().map(|item| item.0).collect();
         assert_eq!(items1, vec![serde_json::json!({"n": 1})]);
 
         let batch2 = source.next().await.unwrap().unwrap();
-        let items2: Vec<_> = batch2
-            .iter()
-            .filter(|e| e.event_type() == "test.item.v1")
-            .map(|e| e.payload())
-            .collect();
+        let items2: Vec<_> = batch2.into_iter().map(|item| item.0).collect();
         assert_eq!(items2, vec![serde_json::json!({"n": 2})]);
 
         let done = source.next().await.unwrap();
@@ -2378,7 +2294,7 @@ mod tests {
         let out = decoder
             .decode_success(Some(&cursor), &item)
             .expect("decode ok");
-        assert_eq!(out.items, vec![serde_json::json!({"n": 1})]);
+        assert_eq!(out.items, vec![TestItem(serde_json::json!({"n": 1}))]);
         let cursor = out.next_cursor.expect("cursor expected");
 
         let req = decoder.request_spec(Some(&cursor));
@@ -2388,7 +2304,7 @@ mod tests {
         let out = decoder
             .decode_success(Some(&cursor), &item)
             .expect("decode ok");
-        assert_eq!(out.items, vec![serde_json::json!({"n": 2})]);
+        assert_eq!(out.items, vec![TestItem(serde_json::json!({"n": 2}))]);
         assert!(out.next_cursor.is_none());
     }
 
@@ -2397,7 +2313,7 @@ mod tests {
         let skips = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let skips_for_cb = skips.clone();
 
-        let decoder = ListDetailDecoder::<u32, serde_json::Value>::builder("test.item.v1")
+        let decoder = ListDetailDecoder::<u32, TestItem>::builder("test.item.v1")
             .list_url("http://example.invalid/list".parse().unwrap())
             .parse_list(|response| Ok(response.json()?))
             .detail_url(|id: &u32| format!("http://example.invalid/item/{id}").parse().unwrap())
@@ -2427,7 +2343,7 @@ mod tests {
 
     #[test]
     fn list_detail_decoder_caps_list_size_with_max_list_items() {
-        let decoder = ListDetailDecoder::<u32, serde_json::Value>::builder("test.item.v1")
+        let decoder = ListDetailDecoder::<u32, TestItem>::builder("test.item.v1")
             .list_url("http://example.invalid/list".parse().unwrap())
             .parse_list(|response| Ok(response.json()?))
             .detail_url(|id: &u32| format!("http://example.invalid/item/{id}").parse().unwrap())

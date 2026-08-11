@@ -1,0 +1,43 @@
+error[E0277]: this source handler does not witness its arrow contract
+ --> tests/compile_fail/source_witness/infinite_raw_handler.rs:6:13
+  |
+6 |     let _ = obzenflow_dsl::infinite_source!(First => RawInfinite);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this handler does not implement the typed synchronous infinite source contract
+  |
+help: the trait `TypedInfiniteSourceHandler` is not implemented for `support::RawInfinite`
+ --> tests/compile_fail/source_witness/../support/typed_source.rs
+  |
+  | pub struct RawInfinite;
+  | ^^^^^^^^^^^^^^^^^^^^^^
+  = note: implement TypedInfiniteSourceHandler with Output matching the infinite_source! arrow (FLOWIP-134g)
+help: the following other types implement trait `TypedInfiniteSourceHandler`
+ --> tests/compile_fail/source_witness/../support/typed_source.rs
+  |
+  |   impl TypedInfiniteSourceHandler for InfiniteFirst {
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `InfiniteFirst`
+...
+  |   impl TypedInfiniteSourceHandler for InfiniteBoth {
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `InfiniteBoth`
+  |
+ ::: crates/obzenflow_runtime/src/stages/source/typed.rs
+  |
+  | / impl<T, F> TypedInfiniteSourceHandler for InfiniteSourceTyped<T, F>
+  | | where
+  | |     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+  | |     F: FnMut(usize) -> Vec<T> + Send + Sync + Clone,
+  | |____________________________________________________^ `InfiniteSourceTyped<T, F>`
+...
+  | / impl<T, F> TypedInfiniteSourceHandler for FallibleInfiniteSourceTyped<T, F>
+  | | where
+  | |     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+  | |     F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+  | |_________________________________________________________________________^ `FallibleInfiniteSourceTyped<T, F>`
+note: required by a bound in `typed_infinite_source_descriptor`
+ --> crates/obzenflow_dsl/src/dsl/typing.rs
+  |
+  | pub fn typed_infinite_source_descriptor<
+  |        -------------------------------- required by a bound in this function
+...
+  |     H: TypedInfiniteSourceHandler + Clone + fmt::Debug + Send + Sync + 'static,
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `typed_infinite_source_descriptor`
+  = note: this error originates in the macro `$crate::__obzenflow_admit_typed_source` which comes from the expansion of the macro `obzenflow_dsl::infinite_source` (in Nightly builds, run with -Z macro-backtrace for more info)

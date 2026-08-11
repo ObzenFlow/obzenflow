@@ -5,7 +5,9 @@
 //! Types-first metadata and descriptor wrappers for the DSL layer.
 
 use crate::dsl::stage_descriptor::{
-    JoinDescriptor, StageDescriptor, StatefulDescriptor, TransformDescriptor,
+    AsyncFiniteSourceDescriptor, AsyncInfiniteSourceDescriptor, FiniteSourceDescriptor,
+    InfiniteSourceDescriptor, JoinDescriptor, StageDescriptor, StatefulDescriptor,
+    TransformDescriptor,
 };
 use crate::dsl::StageCreationResult;
 use async_trait::async_trait;
@@ -16,7 +18,10 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_core::{Member, OneFactStageOutput, StageFactSet, TypedFactType, TypedPayload};
-use obzenflow_runtime::__private::TypedJoinHandlerAdapter;
+use obzenflow_runtime::__private::{
+    TypedAsyncFiniteSourceHandlerAdapter, TypedAsyncInfiniteSourceHandlerAdapter,
+    TypedFiniteSourceHandlerAdapter, TypedInfiniteSourceHandlerAdapter, TypedJoinHandlerAdapter,
+};
 use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, PayloadTypeDescriptor,
     StageOutputContract,
@@ -24,12 +29,16 @@ use obzenflow_runtime::feed_plan::{
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::traits::{
+    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
+    InfiniteSourceHandler,
+};
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler, JoinReferenceView, SinkHandler, StatefulEmission, TransformHandler,
-    TypedJoinHandler, TypedStatefulHandler, TypedStatefulHandlerAdapter, TypedTransformHandler,
-    TypedTransformHandlerAdapter,
+    JoinReferenceView, SinkHandler, StatefulEmission, TransformHandler,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler,
+    TypedStatefulHandlerAdapter, TypedTransformHandler, TypedTransformHandlerAdapter,
 };
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
@@ -568,6 +577,295 @@ pub fn wrap_typed_descriptor(
         return inner;
     }
     Box::new(TypedStageDescriptor::new(inner, metadata))
+}
+
+fn source_metadata_from_contract<PrimaryOutput, ArrowOutputSet>(
+    is_placeholder: bool,
+    placeholder_message: Option<String>,
+) -> StageTypingMetadata
+where
+    PrimaryOutput: TypedPayload + 'static,
+    ArrowOutputSet: StageFactSet,
+{
+    let output_contract = ArrowOutputSet::member_fact_types()
+        .into_iter()
+        .map(TypeHint::exact_fact_type)
+        .collect();
+    StageTypingMetadata::source(
+        TypeHint::exact_payload::<PrimaryOutput>(),
+        is_placeholder,
+        placeholder_message,
+    )
+    .with_output_contract(output_contract)
+}
+
+/// Canonical admission factory for a real synchronous finite source.
+#[doc(hidden)]
+pub fn typed_finite_source_descriptor<
+    H,
+    PrimaryOutput,
+    ArrowOutputSet,
+    PrimaryOutputIndex,
+    ArrowToHandlerProof,
+    HandlerToArrowProof,
+>(
+    name: impl Into<String>,
+    handler: H,
+    source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    H: TypedFiniteSourceHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
+    <H::Output as StageFactSet>::Members:
+        HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
+{
+    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
+    let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
+        name: name.into(),
+        handler: TypedFiniteSourceHandlerAdapter::new(handler),
+        source_policies,
+        ingress_policy,
+        observers,
+        backpressure,
+    });
+    wrap_typed_descriptor(descriptor, metadata)
+}
+
+/// Canonical admission factory for a real asynchronous finite source.
+#[doc(hidden)]
+pub fn typed_async_finite_source_descriptor<
+    H,
+    PrimaryOutput,
+    ArrowOutputSet,
+    PrimaryOutputIndex,
+    ArrowToHandlerProof,
+    HandlerToArrowProof,
+>(
+    name: impl Into<String>,
+    handler: H,
+    source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    H: TypedAsyncFiniteSourceHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
+    <H::Output as StageFactSet>::Members:
+        HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
+{
+    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
+    let mut descriptor =
+        AsyncFiniteSourceDescriptor::new(name, TypedAsyncFiniteSourceHandlerAdapter::new(handler));
+    descriptor.source_policies = source_policies;
+    descriptor.ingress_policy = ingress_policy;
+    descriptor.observers = observers;
+    descriptor.backpressure = backpressure;
+    wrap_typed_descriptor(Box::new(descriptor), metadata)
+}
+
+/// Canonical admission factory for a real synchronous infinite source.
+#[doc(hidden)]
+pub fn typed_infinite_source_descriptor<
+    H,
+    PrimaryOutput,
+    ArrowOutputSet,
+    PrimaryOutputIndex,
+    ArrowToHandlerProof,
+    HandlerToArrowProof,
+>(
+    name: impl Into<String>,
+    handler: H,
+    source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    H: TypedInfiniteSourceHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
+    <H::Output as StageFactSet>::Members:
+        HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
+{
+    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
+    let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
+        name: name.into(),
+        handler: TypedInfiniteSourceHandlerAdapter::new(handler),
+        source_policies,
+        ingress_policy,
+        observers,
+        backpressure,
+    });
+    wrap_typed_descriptor(descriptor, metadata)
+}
+
+/// Canonical admission factory for a real asynchronous infinite source.
+#[doc(hidden)]
+pub fn typed_async_infinite_source_descriptor<
+    H,
+    PrimaryOutput,
+    ArrowOutputSet,
+    PrimaryOutputIndex,
+    ArrowToHandlerProof,
+    HandlerToArrowProof,
+>(
+    name: impl Into<String>,
+    handler: H,
+    source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    H: TypedAsyncInfiniteSourceHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+    ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
+        + ArrowOutputsAreDeclaredByHandler<<H::Output as StageFactSet>::Members, ArrowToHandlerProof>,
+    <H::Output as StageFactSet>::Members:
+        HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
+{
+    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
+    let mut descriptor = AsyncInfiniteSourceDescriptor::new(
+        name,
+        TypedAsyncInfiniteSourceHandlerAdapter::new(handler),
+    );
+    descriptor.source_policies = source_policies;
+    descriptor.ingress_policy = ingress_policy;
+    descriptor.observers = observers;
+    descriptor.backpressure = backpressure;
+    wrap_typed_descriptor(Box::new(descriptor), metadata)
+}
+
+/// Structural placeholder admission for a synchronous finite source.
+///
+/// Placeholders cannot author rows and deliberately remain on the raw
+/// substrate so brace arrows do not need a fabricated runtime sum value.
+#[doc(hidden)]
+pub fn placeholder_finite_source_descriptor<PrimaryOutput, ArrowOutputSet>(
+    name: impl Into<String>,
+    message: Option<&'static str>,
+    source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+{
+    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(
+        true,
+        message.map(str::to_string),
+    );
+    let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
+        name: name.into(),
+        handler: PlaceholderFiniteSource::<PrimaryOutput>::new(message),
+        source_policies,
+        ingress_policy,
+        observers,
+        backpressure,
+    });
+    wrap_typed_descriptor(descriptor, metadata)
+}
+
+/// Structural placeholder admission for an asynchronous finite source.
+#[doc(hidden)]
+pub fn placeholder_async_finite_source_descriptor<PrimaryOutput, ArrowOutputSet>(
+    name: impl Into<String>,
+    message: Option<&'static str>,
+    source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+{
+    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(
+        true,
+        message.map(str::to_string),
+    );
+    let mut descriptor = AsyncFiniteSourceDescriptor::new(
+        name,
+        PlaceholderAsyncSource::<PrimaryOutput>::new(message),
+    );
+    descriptor.source_policies = source_policies;
+    descriptor.ingress_policy = ingress_policy;
+    descriptor.observers = observers;
+    descriptor.backpressure = backpressure;
+    wrap_typed_descriptor(Box::new(descriptor), metadata)
+}
+
+/// Structural placeholder admission for a synchronous infinite source.
+#[doc(hidden)]
+pub fn placeholder_infinite_source_descriptor<PrimaryOutput, ArrowOutputSet>(
+    name: impl Into<String>,
+    message: Option<&'static str>,
+    source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+{
+    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(
+        true,
+        message.map(str::to_string),
+    );
+    let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
+        name: name.into(),
+        handler: PlaceholderInfiniteSource::<PrimaryOutput>::new(message),
+        source_policies,
+        ingress_policy,
+        observers,
+        backpressure,
+    });
+    wrap_typed_descriptor(descriptor, metadata)
+}
+
+/// Structural placeholder admission for an asynchronous infinite source.
+#[doc(hidden)]
+pub fn placeholder_async_infinite_source_descriptor<PrimaryOutput, ArrowOutputSet>(
+    name: impl Into<String>,
+    message: Option<&'static str>,
+    source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    observers: Vec<Box<dyn MiddlewareFactory>>,
+    backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
+) -> Box<dyn StageDescriptor>
+where
+    PrimaryOutput: TypedPayload + Send + Sync + 'static,
+    ArrowOutputSet: StageFactSet,
+{
+    let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(
+        true,
+        message.map(str::to_string),
+    );
+    let mut descriptor = AsyncInfiniteSourceDescriptor::new(
+        name,
+        PlaceholderAsyncSource::<PrimaryOutput>::new(message),
+    );
+    descriptor.source_policies = source_policies;
+    descriptor.ingress_policy = ingress_policy;
+    descriptor.observers = observers;
+    descriptor.backpressure = backpressure;
+    wrap_typed_descriptor(Box::new(descriptor), metadata)
 }
 
 fn transform_metadata_from_contract<ArrowInput, PrimaryOutput, ArrowOutputSet>(

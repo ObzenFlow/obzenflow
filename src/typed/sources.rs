@@ -5,7 +5,7 @@
 //! Typed source helper facades.
 
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::stages::common::handlers::FiniteSourceHandler;
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::source::{
     AsyncFiniteSourceTyped, AsyncInfiniteSourceTyped, FiniteSourceTyped, InfiniteSourceTyped,
 };
@@ -17,7 +17,7 @@ use std::future::Future;
 /// Create a finite typed source from an iterator (convenience wrapper).
 pub fn finite<T, I>(
     iter: I,
-) -> impl FiniteSourceHandler + SourceTyping<Output = T> + Clone + Debug + 'static
+) -> impl TypedFiniteSourceHandler<Output = T> + SourceTyping<Output = T> + Clone + Debug + 'static
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     I: IntoIterator<Item = T>,
@@ -39,7 +39,7 @@ where
 /// This is the facade equivalent of `FiniteSourceTyped::from_item_fn(...)`.
 pub fn finite_from_fn<T, F>(
     producer: F,
-) -> impl FiniteSourceHandler + SourceTyping<Output = T> + Clone + Debug + 'static
+) -> impl TypedFiniteSourceHandler<Output = T> + SourceTyping<Output = T> + Clone + Debug + 'static
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     F: FnMut(usize) -> Option<T> + Send + Sync + Clone + 'static,

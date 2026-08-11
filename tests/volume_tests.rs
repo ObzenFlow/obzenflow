@@ -18,7 +18,7 @@ use obzenflow_core::journal::writer_id::WriterId;
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::DiskJournal;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    SinkHandler, TransformHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
@@ -51,7 +51,7 @@ impl EventGenerator {
     }
 }
 
-impl FiniteSourceHandler for EventGenerator {
+impl TypedFiniteSourceHandler for EventGenerator {
     fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
         if self.generated < self.total {
             let index = self.generated;

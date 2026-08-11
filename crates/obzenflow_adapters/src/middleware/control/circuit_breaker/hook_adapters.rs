@@ -23,6 +23,7 @@ use obzenflow_runtime::control_plane::CircuitBreakerStateView;
 use obzenflow_runtime::stages::source::strategies::{
     CompletionContext, CompletionDecision, CompletionGate,
 };
+use obzenflow_runtime::stages::SourceError;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -132,6 +133,10 @@ impl SourcePolicy for CircuitBreakerSourcePolicy {
             | SourcePollOutcome::Eof { poll_duration } => SourceOutcome::Success {
                 poll_duration: *poll_duration,
             },
+            SourcePollOutcome::Failed {
+                error: SourceError::Validation(_),
+                ..
+            } => SourceOutcome::Inconclusive,
             SourcePollOutcome::Failed { poll_duration, .. } => SourceOutcome::Failure {
                 poll_duration: *poll_duration,
             },
@@ -514,5 +519,36 @@ impl CircuitBreakerMiddleware {
 
         // Check if we should emit a summary
         self.maybe_emit_summary(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_core::{StageId, WriterId};
+
+    #[test]
+    fn validation_source_failure_is_breaker_inconclusive() {
+        let breaker = Arc::new(CircuitBreakerMiddleware::new(1));
+        let policy = CircuitBreakerSourcePolicy {
+            breaker: breaker.clone(),
+        };
+        let mut ctx = SourcePolicyCtx::new(WriterId::from(StageId::new()));
+        let error = SourceError::Validation("domain row rejected".to_string());
+
+        policy.observe(
+            &SourcePollOutcome::Failed {
+                error: &error,
+                poll_duration: Duration::from_secs(30),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(breaker.current_state(), CircuitState::Closed);
+        assert_eq!(breaker.failure_count.load(Ordering::SeqCst), 0);
+        assert_eq!(breaker.requests_total.load(Ordering::Relaxed), 0);
+        assert_eq!(breaker.failures_total.load(Ordering::Relaxed), 0);
+        assert_eq!(breaker.slow_total.load(Ordering::Relaxed), 0);
+        assert!(ctx.take_control_events().is_empty());
     }
 }

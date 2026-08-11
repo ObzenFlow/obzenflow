@@ -11,11 +11,13 @@ use crate::backpressure::BackpressureWriter;
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
+use crate::stages::common::handler_error::StageFatal;
 use crate::stages::common::handlers::source::traits::SourceError;
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, drain_one_pending_resolve, DrainAttempt, DrainOutcome,
 };
+use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::observer::dispatch::run_source_poll_observers;
 use crate::stages::observer::{
     SourcePollObserverContext, SourcePollObserverOutcome, StageObserverBundle,
@@ -45,13 +47,15 @@ fn source_error_kind(error: &SourceError) -> ErrorKind {
         SourceError::Timeout(_) => ErrorKind::Timeout,
         SourceError::Transport(_) => ErrorKind::Remote,
         SourceError::Deserialization(_) => ErrorKind::Deserialization,
+        SourceError::Validation(_) => ErrorKind::Validation,
         SourceError::Other(_) => ErrorKind::Unknown,
     }
 }
 
 /// Normalise a source-owned poll failure into the existing routable lifecycle
-/// event. This runs inside `SourcePollExecution`, so source policies observe a
-/// delivered error-marked batch rather than an execution failure.
+/// event after source policies have observed the typed handler error. This keeps
+/// dependency-health classification on the error value while preserving the
+/// established error-journal representation.
 pub(crate) fn normalise_source_poll_error(
     writer_id: WriterId,
     source_type: &'static str,
@@ -77,6 +81,49 @@ pub(crate) fn normalise_source_poll_error(
         }),
     )
     .mark_as_error(error.to_string(), kind)
+}
+
+/// Record a source adapter/runtime invariant through the common fatal lane.
+/// Fatal polls contribute no source output, operational outbox, or policy
+/// settlement evidence.
+pub(crate) async fn record_source_stage_fatal(
+    fatal: &StageFatal,
+    stage_id: StageId,
+    stage_key: &str,
+    error_journal: &Arc<dyn Journal<ChainEvent>>,
+) -> Result<(), BoxError> {
+    record_stage_fatal(
+        fatal,
+        StageFatalCommit {
+            error_journal,
+            writer_id: WriterId::from(stage_id),
+            stage_id,
+            stage_key,
+            input_position: None,
+            parent: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn record_source_cleanup_failed(
+    stage_id: StageId,
+    stage_name: &str,
+    error: &SourceError,
+    system_journal: &Arc<dyn Journal<SystemEvent>>,
+) -> Result<(), BoxError> {
+    let event = SystemEvent::new(
+        WriterId::from(stage_id),
+        obzenflow_core::event::SystemEventType::SourceCleanupFailed {
+            stage_id,
+            stage_name: stage_name.to_string(),
+            error: error.to_string(),
+        },
+    );
+    system_journal.append(event, None).await?;
+    Ok(())
 }
 
 pub(crate) async fn around_source_boundary<'a>(
@@ -624,6 +671,10 @@ mod tests {
             (
                 SourceError::Deserialization("bad json".to_string()),
                 ErrorKind::Deserialization,
+            ),
+            (
+                SourceError::Validation("bad domain row".to_string()),
+                ErrorKind::Validation,
             ),
             (
                 SourceError::Other("unknown".to_string()),

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::metrics::instrumentation::StageInstrumentation;
-use crate::stages::common::handlers::FiniteSourceHandler;
+use crate::stages::common::handlers::UnifiedFiniteSourceHandler;
 use crate::stages::resources_builder::StageResources;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::strategies::{CompletionGate, JonestownSourceStrategy};
@@ -25,7 +25,7 @@ use super::supervisor::FiniteSourceSupervisor;
 
 /// Builder for creating finite source stages
 pub struct FiniteSourceBuilder<
-    H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 > {
     handler: H,
     config: FiniteSourceConfig,
@@ -33,7 +33,7 @@ pub struct FiniteSourceBuilder<
     instrumentation: Option<Arc<StageInstrumentation>>,
 }
 
-impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     FiniteSourceBuilder<H>
 {
     /// Create a new finite source builder
@@ -60,8 +60,8 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 }
 
 #[async_trait::async_trait]
-impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
-    for FiniteSourceBuilder<H>
+impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    SupervisorBuilder for FiniteSourceBuilder<H>
 {
     type Handle = FiniteSourceHandle<H>;
     type Error = BuilderError;
@@ -102,7 +102,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
 
         // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081).
         let mut handler = self.handler;
-        handler.bind_writer_id(WriterId::from(self.config.stage_id));
+        handler.install_writer_id(WriterId::from(self.config.stage_id));
 
         // Create supervisor (private - not exposed)
         let supervisor = FiniteSourceSupervisor {

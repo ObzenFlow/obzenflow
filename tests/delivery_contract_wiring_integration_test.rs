@@ -13,24 +13,23 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent};
 use obzenflow_core::event::SystemEventType;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{DeliveryContract, EventId, StageId, StageOutputs, SystemId, WriterId};
+use obzenflow_core::{DeliveryContract, EventId, StageOutputs, SystemId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    CommitReceipt, FiniteSourceHandler, SinkConsumeReport, SinkHandler, SinkLifecycleReport,
+    CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport, TypedFiniteSourceHandler,
     TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the delivery-contract wiring test. The JSON
 /// shape matches what `TestEventSource` / `CorrelatedTestEventSource`
@@ -63,21 +62,18 @@ use std::sync::{Arc, Mutex};
 struct TestEventSource {
     count: usize,
     emitted: usize,
-    writer_id: WriterId,
 }
 
 impl TestEventSource {
     fn new(count: usize) -> Self {
-        Self {
-            count,
-            emitted: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { count, emitted: 0 }
     }
 }
 
-impl FiniteSourceHandler for TestEventSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for TestEventSource {
+    type Output = DeliveryTestEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted >= self.count {
             return Ok(None);
         }
@@ -85,11 +81,9 @@ impl FiniteSourceHandler for TestEventSource {
         let index = self.emitted;
         self.emitted += 1;
 
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            DeliveryTestEvent::versioned_event_type(),
-            json!({ "index": index }),
-        )]))
+        Ok(Some(vec![DeliveryTestEvent {
+            index: index as u64,
+        }]))
     }
 }
 
@@ -98,21 +92,18 @@ impl FiniteSourceHandler for TestEventSource {
 struct CorrelatedTestEventSource {
     count: usize,
     emitted: usize,
-    writer_id: WriterId,
 }
 
 impl CorrelatedTestEventSource {
     fn new(count: usize) -> Self {
-        Self {
-            count,
-            emitted: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { count, emitted: 0 }
     }
 }
 
-impl FiniteSourceHandler for CorrelatedTestEventSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for CorrelatedTestEventSource {
+    type Output = DeliveryTestEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted >= self.count {
             return Ok(None);
         }
@@ -120,14 +111,9 @@ impl FiniteSourceHandler for CorrelatedTestEventSource {
         let index = self.emitted;
         self.emitted += 1;
 
-        let event = ChainEventFactory::data_event(
-            self.writer_id,
-            DeliveryTestEvent::versioned_event_type(),
-            json!({ "index": index }),
-        )
-        .with_new_correlation("correlated_source");
-
-        Ok(Some(vec![event]))
+        Ok(Some(vec![DeliveryTestEvent {
+            index: index as u64,
+        }]))
     }
 }
 

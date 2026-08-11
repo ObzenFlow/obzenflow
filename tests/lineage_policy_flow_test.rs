@@ -11,9 +11,9 @@
 
 mod replay_testkit;
 
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::run_context::FlowBuildContext;
@@ -21,7 +21,7 @@ use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
 use obzenflow_runtime::stages::transform::strategies::MapTyped;
 
 use async_trait::async_trait;
@@ -42,25 +42,19 @@ impl TypedPayload for Item {
 #[derive(Clone, Debug)]
 struct OneShotSource {
     emitted: bool,
-    writer_id: WriterId,
 }
 
-impl FiniteSourceHandler for OneShotSource {
+impl TypedFiniteSourceHandler for OneShotSource {
+    type Output = Item;
+
     fn next(
         &mut self,
-    ) -> Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
-    > {
+    ) -> Result<Option<Vec<Self::Output>>, obzenflow_runtime::stages::SourceError> {
         if self.emitted {
             Ok(None)
         } else {
             self.emitted = true;
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id,
-                <Item as TypedPayload>::EVENT_TYPE,
-                json!({ "index": 0 }),
-            )]))
+            Ok(Some(vec![Item { index: 0 }]))
         }
     }
 }
@@ -98,10 +92,7 @@ async fn file_configured_lineage_depth_caps_journalled_parent_ids() {
 
     let journal_base = base.clone();
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let source = OneShotSource {
-            emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-        };
+        let source = OneShotSource { emitted: false };
         let t1 = MapTyped::new(|i: Item| Item { index: i.index + 1 });
         let t2 = MapTyped::new(|i: Item| Item { index: i.index + 1 });
         let t3 = MapTyped::new(|i: Item| Item { index: i.index + 1 });

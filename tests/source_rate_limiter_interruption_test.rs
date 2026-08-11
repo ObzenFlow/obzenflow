@@ -16,23 +16,22 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit_with_burst;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::observability_payload::{
     MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
 };
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{AsyncFiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedAsyncFiniteSourceHandler};
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -59,33 +58,25 @@ fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
 #[derive(Clone, Debug)]
 struct DripSource {
     emitted: u64,
-    writer_id: WriterId,
 }
 
 impl DripSource {
     fn new() -> Self {
-        Self {
-            emitted: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { emitted: 0 }
     }
 }
 
 #[async_trait]
-impl AsyncFiniteSourceHandler for DripSource {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = id;
-    }
+impl TypedAsyncFiniteSourceHandler for DripSource {
+    type Output = DripEvent;
 
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted >= 10_000 {
             return Ok(None);
         }
-        let event = ChainEventFactory::data_event(
-            self.writer_id,
-            DripEvent::versioned_event_type(),
-            json!({ "index": self.emitted }),
-        );
+        let event = DripEvent {
+            index: self.emitted,
+        };
         self.emitted += 1;
         Ok(Some(vec![event]))
     }

@@ -3,22 +3,21 @@
 // https://obzenflow.dev
 
 // tests/basic_streaming.rs
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{StageId, StageOutputs, WriterId};
+use obzenflow_core::StageOutputs;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payloads for the basic-streaming tests. The two source
 /// shapes correspond to `TestEventSource` (`index`) and `NumberSource`
@@ -76,34 +75,29 @@ impl SinkHandler for EventCounterSink {
 struct TestEventSource {
     count: usize,
     emitted: usize,
-    writer_id: WriterId,
 }
 
 impl TestEventSource {
     fn new(count: usize) -> Self {
-        Self {
-            count,
-            emitted: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { count, emitted: 0 }
     }
 }
 
-impl FiniteSourceHandler for TestEventSource {
+impl TypedFiniteSourceHandler for TestEventSource {
+    type Output = StreamItem;
+
     fn next(
         &mut self,
     ) -> Result<
-        Option<Vec<ChainEvent>>,
+        Option<Vec<Self::Output>>,
         obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.emitted < self.count {
             let index = self.emitted;
             self.emitted += 1;
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id,
-                <StreamItem as TypedPayload>::EVENT_TYPE,
-                json!({ "index": index }),
-            )]))
+            Ok(Some(vec![StreamItem {
+                index: index as u64,
+            }]))
         } else {
             Ok(None)
         }
@@ -223,34 +217,29 @@ async fn test_multi_stage_flow() -> Result<()> {
 struct NumberSource {
     count: usize,
     emitted: usize,
-    writer_id: WriterId,
 }
 
 impl NumberSource {
     fn new(count: usize) -> Self {
-        Self {
-            count,
-            emitted: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { count, emitted: 0 }
     }
 }
 
-impl FiniteSourceHandler for NumberSource {
+impl TypedFiniteSourceHandler for NumberSource {
+    type Output = NumberItem;
+
     fn next(
         &mut self,
     ) -> Result<
-        Option<Vec<ChainEvent>>,
+        Option<Vec<Self::Output>>,
         obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.emitted < self.count {
             let value = self.emitted + 1;
             self.emitted += 1;
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id,
-                <NumberItem as TypedPayload>::EVENT_TYPE,
-                json!({ "value": value }),
-            )]))
+            Ok(Some(vec![NumberItem {
+                value: value as u64,
+            }]))
         } else {
             Ok(None)
         }

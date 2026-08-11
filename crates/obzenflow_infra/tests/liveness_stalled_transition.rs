@@ -4,12 +4,9 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::{
-    ChainEvent, ChainEventFactory, EdgeLivenessState, SystemEvent, SystemEventType,
-};
+use obzenflow_core::event::{ChainEvent, EdgeLivenessState, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
@@ -17,11 +14,10 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler,
+    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payloads for the stalled-transition test. The JSON shape is
 /// shared, but the source and transform author different fact identities.
@@ -49,29 +45,23 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 struct OneEventSource {
     emitted: bool,
-    writer_id: WriterId,
 }
 
 impl OneEventSource {
     fn new() -> Self {
-        Self {
-            emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { emitted: false }
     }
 }
 
-impl FiniteSourceHandler for OneEventSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for OneEventSource {
+    type Output = ProbeEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted {
             return Ok(None);
         }
         self.emitted = true;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            ProbeEvent::versioned_event_type(),
-            json!({ "value": 1 }),
-        )]))
+        Ok(Some(vec![ProbeEvent { value: 1 }]))
     }
 }
 

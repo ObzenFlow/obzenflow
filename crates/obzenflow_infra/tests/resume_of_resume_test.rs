@@ -26,7 +26,7 @@ use obzenflow_core::event::{
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::run_manifest::RunManifest;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{StageId, SystemId, TypedPayload, WriterId};
+use obzenflow_core::{SystemId, TypedPayload};
 use obzenflow_dsl::{flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
@@ -34,7 +34,7 @@ use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InfiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedInfiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -69,7 +69,6 @@ impl TypedPayload for Doubled {
 /// resumed run's instance produces exactly its live tail.
 #[derive(Clone, Debug)]
 struct BoundedTicker {
-    writer_id: WriterId,
     next_n: u64,
     remaining: u64,
 }
@@ -77,22 +76,23 @@ struct BoundedTicker {
 impl BoundedTicker {
     fn new(first_n: u64, count: u64) -> Self {
         Self {
-            writer_id: WriterId::from(StageId::new()),
             next_n: first_n,
             remaining: count,
         }
     }
 }
 
-impl InfiniteSourceHandler for BoundedTicker {
-    fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+impl TypedInfiniteSourceHandler for BoundedTicker {
+    type Output = Tick;
+
+    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         if self.remaining == 0 {
             return Ok(Vec::new());
         }
         self.remaining -= 1;
         let n = self.next_n;
         self.next_n += 1;
-        Ok(vec![Tick { n }.to_event(self.writer_id)])
+        Ok(vec![Tick { n }])
     }
 }
 

@@ -116,6 +116,15 @@ pub struct SystemEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "system_event_type", rename_all = "snake_case")]
 pub enum SystemEventType {
+    /// Best-effort async source cleanup failed after the stage entered live
+    /// execution (FLOWIP-134g). Cleanup never authors data and never delays a
+    /// terminal transition.
+    #[serde(rename = "source_cleanup_failed")]
+    SourceCleanupFailed {
+        stage_id: StageId,
+        stage_name: String,
+        error: String,
+    },
     /// Stage lifecycle events
     #[serde(rename = "stage_lifecycle")]
     StageLifecycle {
@@ -888,6 +897,7 @@ impl JournalEvent for SystemEvent {
 
     fn event_type_name(&self) -> &str {
         match &self.event {
+            SystemEventType::SourceCleanupFailed { .. } => "system.source.cleanup_failed",
             SystemEventType::StageLifecycle { event, .. } => match event {
                 StageLifecycleEvent::Running => "system.stage.running",
                 StageLifecycleEvent::Draining { .. } => "system.stage.draining",

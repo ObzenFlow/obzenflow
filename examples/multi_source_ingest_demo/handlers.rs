@@ -12,17 +12,15 @@
 //! file is intentionally mechanical.
 
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{TypedPayload, WriterId};
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulEmission, TypedStatefulHandler,
+    SinkHandler, StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::transform::MapTyped;
-use serde_json::json;
 
 use crate::domain::{FileLine, IngestSummary, IngestedEvent, KafkaRawEvent, WebhookEnvelope};
 
@@ -30,61 +28,59 @@ use crate::domain::{FileLine, IngestSummary, IngestedEvent, KafkaRawEvent, Webho
 
 #[derive(Clone, Debug)]
 pub struct KafkaSource {
-    pub writer_id: WriterId,
     pub remaining: u32,
 }
 
-impl FiniteSourceHandler for KafkaSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for KafkaSource {
+    type Output = KafkaRawEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.remaining == 0 {
             return Ok(None);
         }
         self.remaining -= 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            KafkaRawEvent::EVENT_TYPE,
-            json!({"topic": "orders", "value": self.remaining as i64}),
-        )]))
+        Ok(Some(vec![KafkaRawEvent {
+            topic: "orders".to_string(),
+            value: self.remaining as i64,
+        }]))
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct WebhookSource {
-    pub writer_id: WriterId,
     pub remaining: u32,
 }
 
-impl FiniteSourceHandler for WebhookSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for WebhookSource {
+    type Output = WebhookEnvelope;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.remaining == 0 {
             return Ok(None);
         }
         self.remaining -= 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            WebhookEnvelope::EVENT_TYPE,
-            json!({"source": "stripe"}),
-        )]))
+        Ok(Some(vec![WebhookEnvelope {
+            source: "stripe".to_string(),
+        }]))
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct FileSource {
-    pub writer_id: WriterId,
     pub remaining: u32,
 }
 
-impl FiniteSourceHandler for FileSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for FileSource {
+    type Output = FileLine;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.remaining == 0 {
             return Ok(None);
         }
         self.remaining -= 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            FileLine::EVENT_TYPE,
-            json!({"line_no": self.remaining as usize}),
-        )]))
+        Ok(Some(vec![FileLine {
+            line_no: self.remaining as usize,
+        }]))
     }
 }
 

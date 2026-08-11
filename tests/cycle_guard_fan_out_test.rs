@@ -4,20 +4,18 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::event::CorrelationId;
+use obzenflow_core::StageOutputs;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, StageOutputs, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the cycle-guard fan-out test. The JSON shape
 /// matches what the seed sources emit; the type fingerprints the stage
@@ -100,8 +98,6 @@ fn any_error_log_contains(run_dir: &Path, needle: &str) -> Result<bool> {
 #[derive(Clone, Debug)]
 struct SingleSeedFanOutSource {
     emitted: bool,
-    writer_id: WriterId,
-    correlation_id: CorrelationId,
     fan_out: u64,
     target: u64,
 }
@@ -110,19 +106,19 @@ impl SingleSeedFanOutSource {
     fn new(fan_out: u64, target: u64) -> Self {
         Self {
             emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-            correlation_id: CorrelationId::new(),
             fan_out,
             target,
         }
     }
 }
 
-impl FiniteSourceHandler for SingleSeedFanOutSource {
+impl TypedFiniteSourceHandler for SingleSeedFanOutSource {
+    type Output = SeedEvent;
+
     fn next(
         &mut self,
     ) -> std::result::Result<
-        Option<Vec<ChainEvent>>,
+        Option<Vec<Self::Output>>,
         obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.emitted {
@@ -130,13 +126,13 @@ impl FiniteSourceHandler for SingleSeedFanOutSource {
         }
         self.emitted = true;
 
-        let mut event = ChainEventFactory::data_event(
-            self.writer_id,
-            SeedEvent::EVENT_TYPE,
-            json!({ "kind": "seed", "fan_out": self.fan_out, "target": self.target }),
-        );
-        event.set_single_correlation(self.correlation_id, None);
-        Ok(Some(vec![event]))
+        Ok(Some(vec![SeedEvent {
+            kind: "seed".to_string(),
+            fan_out: self.fan_out,
+            item: 0,
+            iter: 0,
+            target: self.target,
+        }]))
     }
 }
 

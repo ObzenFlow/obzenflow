@@ -43,14 +43,14 @@ use super::handlers::Checkbook;
 use obzenflow::typed::{joins, sinks};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_adapters::sinks::SnapshotTableFormatter;
-use obzenflow_adapters::sources::http::HttpSourceTyped;
+use obzenflow_adapters::sources::http::HostedIngressSource;
 use obzenflow_dsl::{async_infinite_source, flow, join, sink, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use std::path::PathBuf;
 
 pub fn build_flow(
-    accounts_source: HttpSourceTyped<AccountOpened>,
-    tx_source: HttpSourceTyped<LedgerEntry>,
+    accounts_source: HostedIngressSource<AccountOpened>,
+    tx_source: HostedIngressSource<LedgerEntry>,
 ) -> FlowDefinition {
     // This function takes only typed sources, not `HttpIngress<T>` bundles.
     // The runner owns HTTP hosting; the flow owns pipeline topology.

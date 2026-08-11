@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, infinite_source, join, sink, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
@@ -30,7 +30,7 @@ use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InfiniteSourceHandler, JoinReferenceView, SinkHandler, StatefulEmission, TypedJoinHandler,
+    JoinReferenceView, SinkHandler, StatefulEmission, TypedInfiniteSourceHandler, TypedJoinHandler,
     TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::join::JoinReferenceMode;
@@ -85,35 +85,31 @@ impl TypedPayload for LedgerSnapshot {
 /// Emits `count` rows then idles forever (an infinite source that goes quiet).
 #[derive(Clone, Debug)]
 struct AccountSource {
-    writer_id: WriterId,
     remaining: u64,
 }
 
 impl AccountSource {
     fn new(count: u64) -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-            remaining: count,
-        }
+        Self { remaining: count }
     }
 }
 
-impl InfiniteSourceHandler for AccountSource {
-    fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+impl TypedInfiniteSourceHandler for AccountSource {
+    type Output = AccountRow;
+
+    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         if self.remaining == 0 {
             return Ok(Vec::new());
         }
         self.remaining -= 1;
         Ok(vec![AccountRow {
             account_id: "acct-1".to_string(),
-        }
-        .to_event(self.writer_id)])
+        }])
     }
 }
 
 #[derive(Clone, Debug)]
 struct TxSource {
-    writer_id: WriterId,
     next_value: u64,
     remaining: u64,
 }
@@ -121,22 +117,23 @@ struct TxSource {
 impl TxSource {
     fn new(first_value: u64, count: u64) -> Self {
         Self {
-            writer_id: WriterId::from(StageId::new()),
             next_value: first_value,
             remaining: count,
         }
     }
 }
 
-impl InfiniteSourceHandler for TxSource {
-    fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+impl TypedInfiniteSourceHandler for TxSource {
+    type Output = TxRow;
+
+    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         if self.remaining == 0 {
             return Ok(Vec::new());
         }
         self.remaining -= 1;
         let value = self.next_value;
         self.next_value += 1;
-        Ok(vec![TxRow { value }.to_event(self.writer_id)])
+        Ok(vec![TxRow { value }])
     }
 }
 

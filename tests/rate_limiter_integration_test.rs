@@ -5,21 +5,19 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{rate_limit_with_burst, RateLimiterBuilder};
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{async_source, join, sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, FiniteSourceHandler, JoinReferenceView, SinkHandler,
-    StatefulEmission, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
+    JoinReferenceView, SinkHandler, StatefulEmission, TypedAsyncFiniteSourceHandler,
+    TypedFiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the rate-limiter integration test. The JSON
 /// shape matches what `SequenceSource` / `BatchedSource` emit; the type
@@ -70,34 +68,25 @@ async fn rate_limiter_delayed_total_from_runtime_context(
 struct SequenceSource {
     total: usize,
     emitted: usize,
-    writer_id: WriterId,
 }
 
 impl SequenceSource {
     fn new(total: usize) -> Self {
-        Self {
-            total,
-            emitted: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { total, emitted: 0 }
     }
 }
 
-impl FiniteSourceHandler for SequenceSource {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = id;
-    }
+impl TypedFiniteSourceHandler for SequenceSource {
+    type Output = RateLimiterTestEvent;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted >= self.total {
             return Ok(None);
         }
 
-        let event = ChainEventFactory::data_event(
-            self.writer_id,
-            RateLimiterTestEvent::versioned_event_type(),
-            json!({ "index": self.emitted }),
-        );
+        let event = RateLimiterTestEvent {
+            index: self.emitted as u64,
+        };
         self.emitted += 1;
         Ok(Some(vec![event]))
     }
@@ -108,7 +97,6 @@ struct BatchedSource {
     batches: Vec<usize>,
     batch_index: usize,
     next_event_id: usize,
-    writer_id: WriterId,
 }
 
 impl BatchedSource {
@@ -117,17 +105,14 @@ impl BatchedSource {
             batches,
             batch_index: 0,
             next_event_id: 0,
-            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
-impl FiniteSourceHandler for BatchedSource {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = id;
-    }
+impl TypedFiniteSourceHandler for BatchedSource {
+    type Output = RateLimiterTestEvent;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         let Some(batch_size) = self.batches.get(self.batch_index).copied() else {
             return Ok(None);
         };
@@ -137,12 +122,8 @@ impl FiniteSourceHandler for BatchedSource {
         self.next_event_id += batch_size;
 
         let events = (start..start + batch_size)
-            .map(|index| {
-                ChainEventFactory::data_event(
-                    self.writer_id,
-                    RateLimiterTestEvent::versioned_event_type(),
-                    json!({ "index": index }),
-                )
+            .map(|index| RateLimiterTestEvent {
+                index: index as u64,
             })
             .collect();
 
@@ -358,7 +339,6 @@ struct ScriptedSyncSource {
     steps: Vec<SourceStep>,
     index: usize,
     next_event_id: usize,
-    writer_id: WriterId,
 }
 
 impl ScriptedSyncSource {
@@ -367,17 +347,14 @@ impl ScriptedSyncSource {
             steps,
             index: 0,
             next_event_id: 0,
-            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
-impl FiniteSourceHandler for ScriptedSyncSource {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = id;
-    }
+impl TypedFiniteSourceHandler for ScriptedSyncSource {
+    type Output = RateLimiterTestEvent;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         let step = self
             .steps
             .get(self.index)
@@ -388,11 +365,7 @@ impl FiniteSourceHandler for ScriptedSyncSource {
             SourceStep::Data => {
                 let id = self.next_event_id;
                 self.next_event_id += 1;
-                Ok(Some(vec![ChainEventFactory::data_event(
-                    self.writer_id,
-                    RateLimiterTestEvent::versioned_event_type(),
-                    json!({ "index": id }),
-                )]))
+                Ok(Some(vec![RateLimiterTestEvent { index: id as u64 }]))
             }
             SourceStep::Empty => Ok(Some(Vec::new())),
             SourceStep::Err => Err(SourceError::Other("scripted error".to_string())),
@@ -407,7 +380,6 @@ struct ScriptedAsyncSource {
     steps: Vec<SourceStep>,
     index: usize,
     next_event_id: usize,
-    writer_id: WriterId,
 }
 
 impl ScriptedAsyncSource {
@@ -416,18 +388,15 @@ impl ScriptedAsyncSource {
             steps,
             index: 0,
             next_event_id: 0,
-            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
 #[async_trait]
-impl AsyncFiniteSourceHandler for ScriptedAsyncSource {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = id;
-    }
+impl TypedAsyncFiniteSourceHandler for ScriptedAsyncSource {
+    type Output = RateLimiterTestEvent;
 
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         let step = self
             .steps
             .get(self.index)
@@ -439,11 +408,7 @@ impl AsyncFiniteSourceHandler for ScriptedAsyncSource {
             SourceStep::Data => {
                 let id = self.next_event_id;
                 self.next_event_id += 1;
-                Ok(Some(vec![ChainEventFactory::data_event(
-                    self.writer_id,
-                    RateLimiterTestEvent::versioned_event_type(),
-                    json!({ "index": id }),
-                )]))
+                Ok(Some(vec![RateLimiterTestEvent { index: id as u64 }]))
             }
             SourceStep::Empty => Ok(Some(Vec::new())),
             SourceStep::Err => Err(SourceError::Other("scripted error".to_string())),
@@ -816,72 +781,49 @@ impl TypedPayload for EnrichedPayload {
 #[derive(Clone, Debug)]
 struct SingleRefSource {
     emitted: bool,
-    writer_id: WriterId,
 }
 
 impl SingleRefSource {
     fn new() -> Self {
-        Self {
-            emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { emitted: false }
     }
 }
 
-impl FiniteSourceHandler for SingleRefSource {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = id;
-    }
+impl TypedFiniteSourceHandler for SingleRefSource {
+    type Output = RefPayload;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted {
             return Ok(None);
         }
         self.emitted = true;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            RefPayload::EVENT_TYPE,
-            json!({ "id": 1_u64 }),
-        )]))
+        Ok(Some(vec![RefPayload { id: 1 }]))
     }
 }
 
 #[derive(Clone, Debug)]
 struct TwoStreamEventsSource {
     emitted: usize,
-    writer_id: Option<WriterId>,
 }
 
 impl TwoStreamEventsSource {
     fn new() -> Self {
-        Self {
-            emitted: 0,
-            writer_id: None,
-        }
+        Self { emitted: 0 }
     }
 }
 
 #[async_trait]
-impl AsyncFiniteSourceHandler for TwoStreamEventsSource {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
+impl TypedAsyncFiniteSourceHandler for TwoStreamEventsSource {
+    type Output = StreamPayload;
 
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted >= 2 {
             return Ok(None);
         }
         let id = self.emitted as u64;
         self.emitted += 1;
         tokio::task::yield_now().await;
-        let writer_id = self
-            .writer_id
-            .expect("stream writer_id should be bound by runtime");
-        Ok(Some(vec![ChainEventFactory::data_event(
-            writer_id,
-            StreamPayload::EVENT_TYPE,
-            json!({ "id": id }),
-        )]))
+        Ok(Some(vec![StreamPayload { id }]))
     }
 }
 

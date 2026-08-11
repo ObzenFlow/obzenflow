@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::metrics::instrumentation::StageInstrumentation;
-use crate::stages::common::handlers::AsyncInfiniteSourceHandler;
+use crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler;
 use crate::stages::resources_builder::StageResources;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::strategies::{CompletionGate, JonestownSourceStrategy};
@@ -25,7 +25,7 @@ use super::handle::InfiniteSourceHandle;
 
 /// Builder for creating async infinite source stages.
 pub struct AsyncInfiniteSourceBuilder<
-    H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 > {
     handler: H,
     config: InfiniteSourceConfig,
@@ -34,7 +34,7 @@ pub struct AsyncInfiniteSourceBuilder<
     poll_timeout: Option<Duration>,
 }
 
-impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     AsyncInfiniteSourceBuilder<H>
 {
     pub fn new(handler: H, config: InfiniteSourceConfig, resources: StageResources) -> Self {
@@ -64,7 +64,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 }
 
 #[async_trait::async_trait]
-impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     SupervisorBuilder for AsyncInfiniteSourceBuilder<H>
 {
     type Handle = InfiniteSourceHandle<H>;
@@ -102,7 +102,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 
         // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081d).
         let mut handler = self.handler;
-        handler.bind_writer_id(WriterId::from(self.config.stage_id));
+        handler.install_writer_id(WriterId::from(self.config.stage_id));
 
         let supervisor = AsyncInfiniteSourceSupervisor {
             name: format!("async_infinite_source_{}", self.config.stage_name),
@@ -124,6 +124,8 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             source_boundary: self.config.source_boundary,
             pending_boundary_begin_drain: false,
             pending_boundary_error: None,
+            live_entered: false,
+            cleanup_attempted: false,
         };
 
         let supervisor_name = format!("async_infinite_source_{}", self.config.stage_name);

@@ -1100,6 +1100,41 @@ impl MetricsAggregatorContext {
 }
 
 impl MetricsStore {
+    fn fold_http_pull_snapshot(&mut self, stage_id: StageId, snapshot: &HttpPullTelemetry) {
+        let entry = self.http_pull_metrics.entry(stage_id).or_default();
+
+        entry.state = snapshot.state.clone();
+        entry.wait_reason = snapshot.wait_reason.clone();
+        entry.next_wake_unix_secs = snapshot.next_wake_unix_secs;
+        entry.last_success_unix_secs = match (
+            entry.last_success_unix_secs,
+            snapshot.last_success_unix_secs,
+        ) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        entry.requests_total = entry.requests_total.max(snapshot.requests_total);
+        entry.responses_2xx = entry.responses_2xx.max(snapshot.responses_2xx);
+        entry.responses_4xx = entry.responses_4xx.max(snapshot.responses_4xx);
+        entry.responses_5xx = entry.responses_5xx.max(snapshot.responses_5xx);
+        entry.rate_limited_total = entry.rate_limited_total.max(snapshot.rate_limited_total);
+        entry.retries_total = entry.retries_total.max(snapshot.retries_total);
+        entry.events_decoded_total = entry
+            .events_decoded_total
+            .max(snapshot.events_decoded_total);
+        entry.wait_seconds_rate_limit = entry
+            .wait_seconds_rate_limit
+            .max(snapshot.wait_seconds_rate_limit);
+        entry.wait_seconds_poll_interval = entry
+            .wait_seconds_poll_interval
+            .max(snapshot.wait_seconds_poll_interval);
+        entry.wait_seconds_backoff = entry
+            .wait_seconds_backoff
+            .max(snapshot.wait_seconds_backoff);
+    }
+
     /// Reconcile per-stage terminal state from the pipeline aggregate barrier.
     ///
     /// `PipelineLifecycle::AllStagesCompleted` is written only after the pipeline
@@ -1629,62 +1664,15 @@ impl FsmAction for MetricsAggregatorAction {
                 }
 
                 if let ChainEventContent::Observability(ObservabilityPayload::Metrics(
+                    MetricsLifecycle::HttpPullSnapshot { snapshot },
+                )) = &event.content
+                {
+                    store.fold_http_pull_snapshot(stage_id, snapshot);
+                } else if let ChainEventContent::Observability(ObservabilityPayload::Metrics(
                     MetricsLifecycle::Custom { name, value, .. },
                 )) = &event.content
                 {
-                    if name == "http_pull.snapshot" {
-                        match serde_json::from_value::<HttpPullTelemetry>(value.clone()) {
-                            Ok(snapshot) => {
-                                let entry = store.http_pull_metrics.entry(stage_id).or_default();
-
-                                // State/gauges: overwrite with latest.
-                                entry.state = snapshot.state.clone();
-                                entry.wait_reason = snapshot.wait_reason.clone();
-                                entry.next_wake_unix_secs = snapshot.next_wake_unix_secs;
-
-                                // Timestamps/counters: monotonic max to tolerate ordering.
-                                entry.last_success_unix_secs = match (
-                                    entry.last_success_unix_secs,
-                                    snapshot.last_success_unix_secs,
-                                ) {
-                                    (Some(a), Some(b)) => Some(a.max(b)),
-                                    (Some(a), None) => Some(a),
-                                    (None, Some(b)) => Some(b),
-                                    (None, None) => None,
-                                };
-
-                                entry.requests_total =
-                                    entry.requests_total.max(snapshot.requests_total);
-                                entry.responses_2xx =
-                                    entry.responses_2xx.max(snapshot.responses_2xx);
-                                entry.responses_4xx =
-                                    entry.responses_4xx.max(snapshot.responses_4xx);
-                                entry.responses_5xx =
-                                    entry.responses_5xx.max(snapshot.responses_5xx);
-                                entry.rate_limited_total =
-                                    entry.rate_limited_total.max(snapshot.rate_limited_total);
-                                entry.retries_total =
-                                    entry.retries_total.max(snapshot.retries_total);
-                                entry.events_decoded_total = entry
-                                    .events_decoded_total
-                                    .max(snapshot.events_decoded_total);
-
-                                entry.wait_seconds_rate_limit = entry
-                                    .wait_seconds_rate_limit
-                                    .max(snapshot.wait_seconds_rate_limit);
-                                entry.wait_seconds_poll_interval = entry
-                                    .wait_seconds_poll_interval
-                                    .max(snapshot.wait_seconds_poll_interval);
-                                entry.wait_seconds_backoff = entry
-                                    .wait_seconds_backoff
-                                    .max(snapshot.wait_seconds_backoff);
-                            }
-                            Err(e) => tracing::warn!(
-                                error = %e,
-                                "Failed to decode http_pull.snapshot payload; ignoring"
-                            ),
-                        }
-                    } else if name == "ai_chunking.snapshot" {
+                    if name == "ai_chunking.snapshot" {
                         match serde_json::from_value::<
                             obzenflow_core::event::observability::AiChunkingSnapshot,
                         >(value.clone())
@@ -2407,6 +2395,68 @@ mod tests {
     use obzenflow_core::{EventEnvelope, JournalId};
     use std::collections::VecDeque;
     use std::marker::PhantomData;
+
+    #[test]
+    fn typed_http_pull_snapshots_fold_latest_state_and_monotonic_totals() {
+        use obzenflow_core::event::observability::{HttpPullState, WaitReason};
+
+        let stage_id = StageId::new();
+        let mut store = MetricsStore::default();
+        let first = HttpPullTelemetry {
+            state: HttpPullState::Waiting,
+            wait_reason: Some(WaitReason::PollInterval),
+            next_wake_unix_secs: Some(500),
+            last_success_unix_secs: Some(400),
+            requests_total: 8,
+            responses_2xx: 5,
+            responses_4xx: 2,
+            responses_5xx: 1,
+            rate_limited_total: 2,
+            retries_total: 3,
+            events_decoded_total: 21,
+            wait_seconds_rate_limit: 4.0,
+            wait_seconds_poll_interval: 7.0,
+            wait_seconds_backoff: 2.0,
+        };
+        store.fold_http_pull_snapshot(stage_id, &first);
+
+        let latest = HttpPullTelemetry {
+            state: HttpPullState::Fetching,
+            wait_reason: None,
+            next_wake_unix_secs: None,
+            last_success_unix_secs: Some(399),
+            requests_total: 7,
+            responses_2xx: 4,
+            responses_4xx: 1,
+            responses_5xx: 0,
+            rate_limited_total: 1,
+            retries_total: 2,
+            events_decoded_total: 20,
+            wait_seconds_rate_limit: 3.0,
+            wait_seconds_poll_interval: 6.0,
+            wait_seconds_backoff: 1.0,
+        };
+        store.fold_http_pull_snapshot(stage_id, &latest);
+
+        let folded = store
+            .http_pull_metrics
+            .get(&stage_id)
+            .expect("typed snapshot is indexed by stage");
+        assert!(matches!(folded.state, HttpPullState::Fetching));
+        assert!(folded.wait_reason.is_none());
+        assert_eq!(folded.next_wake_unix_secs, None);
+        assert_eq!(folded.last_success_unix_secs, Some(400));
+        assert_eq!(folded.requests_total, 8);
+        assert_eq!(folded.responses_2xx, 5);
+        assert_eq!(folded.responses_4xx, 2);
+        assert_eq!(folded.responses_5xx, 1);
+        assert_eq!(folded.rate_limited_total, 2);
+        assert_eq!(folded.retries_total, 3);
+        assert_eq!(folded.events_decoded_total, 21);
+        assert_eq!(folded.wait_seconds_rate_limit, 4.0);
+        assert_eq!(folded.wait_seconds_poll_interval, 7.0);
+        assert_eq!(folded.wait_seconds_backoff, 2.0);
+    }
 
     #[test]
     fn all_stages_completed_reconciles_missing_stage_lifecycle_states() {

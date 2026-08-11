@@ -8,22 +8,19 @@ use std::time::Duration;
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::chain_event::ChainEvent,
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    id::StageId,
-    WriterId,
 };
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
 use obzenflow_runtime::stages::stateful::strategies::accumulators::{
     ConflateTyped, GroupByTyped, ReduceTyped,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the stateful-primitives test. The JSON shape
 /// matches what `TransactionSource` emits; the type fingerprints the
@@ -63,20 +60,18 @@ impl TypedPayload for ProductStatsUpdate {
 #[derive(Clone, Debug)]
 struct TransactionSource {
     count: usize,
-    writer_id: WriterId,
 }
 
 impl TransactionSource {
     fn new(count: usize) -> Self {
-        Self {
-            count,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { count }
     }
 }
 
-impl FiniteSourceHandler for TransactionSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for TransactionSource {
+    type Output = TransactionEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.count == 0 {
             Ok(None)
         } else {
@@ -92,15 +87,11 @@ impl FiniteSourceHandler for TransactionSource {
             };
             let revenue = base_price * quantity as f64;
 
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id,
-                TransactionEvent::versioned_event_type(),
-                json!({
-                    "product_id": product,
-                    "quantity": quantity,
-                    "revenue": revenue,
-                }),
-            )]))
+            Ok(Some(vec![TransactionEvent {
+                product_id: product.to_string(),
+                quantity: quantity as u64,
+                revenue,
+            }]))
         }
     }
 }

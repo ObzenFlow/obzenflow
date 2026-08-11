@@ -7,11 +7,7 @@
 use super::*;
 use obzenflow::ai::{ChatTransform, EmbeddingTransform};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::types::{JournalIndex, JournalPath, SeqNo};
-use obzenflow_core::event::WriterId;
-use obzenflow_core::event::{
-    ChainEventFactory, ConsumptionProgressEventParams, EffectAttemptStarted,
-};
+use obzenflow_core::event::EffectAttemptStarted;
 use obzenflow_dsl::infinite_source;
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_runtime::bootstrap::{
@@ -19,7 +15,9 @@ use obzenflow_runtime::bootstrap::{
 };
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::run_context::FlowBuildContext;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, InfiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+};
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use std::future::pending;
@@ -289,7 +287,6 @@ fn finite_flow(
 
 #[derive(Clone, Debug)]
 struct BoundedTicketSource {
-    writer_id: WriterId,
     next_id: u64,
     remaining: u64,
 }
@@ -297,19 +294,16 @@ struct BoundedTicketSource {
 impl BoundedTicketSource {
     fn new(first_id: u64, count: u64) -> Self {
         Self {
-            writer_id: WriterId::from(StageId::new()),
             next_id: first_id,
             remaining: count,
         }
     }
 }
 
-impl InfiniteSourceHandler for BoundedTicketSource {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = id;
-    }
+impl TypedInfiniteSourceHandler for BoundedTicketSource {
+    type Output = TicketRaised;
 
-    fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         if self.remaining == 0 {
             return Ok(Vec::new());
         }
@@ -319,8 +313,7 @@ impl InfiniteSourceHandler for BoundedTicketSource {
         Ok(vec![TicketRaised {
             id,
             description: format!("ticket {id}"),
-        }
-        .to_event(self.writer_id)])
+        }])
     }
 }
 
@@ -373,56 +366,33 @@ fn resumable_flow(
 }
 
 #[derive(Clone, Debug)]
-struct ControlInterleavingSource {
-    writer_id: WriterId,
+struct TwoTicketSource {
     step: u8,
 }
 
-impl Default for ControlInterleavingSource {
+impl Default for TwoTicketSource {
     fn default() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-            step: 0,
-        }
+        Self { step: 0 }
     }
 }
 
-impl FiniteSourceHandler for ControlInterleavingSource {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = id;
-    }
+impl TypedFiniteSourceHandler for TwoTicketSource {
+    type Output = TicketRaised;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        let event = match self.step {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        let ticket = match self.step {
             0 => TicketRaised {
                 id: 1,
                 description: "first".to_string(),
-            }
-            .to_event(self.writer_id),
-            1 => ChainEventFactory::consumption_progress_event(
-                self.writer_id,
-                ConsumptionProgressEventParams {
-                    reader_seq: SeqNo(1),
-                    last_event_id: None,
-                    vector_clock: None,
-                    eof_seen: false,
-                    reader_path: JournalPath("flowip-128b-t8".to_string()),
-                    reader_index: JournalIndex(0),
-                    advertised_writer_seq: None,
-                    advertised_vector_clock: None,
-                    stalled_since: None,
-                },
-            ),
-            2 => TicketRaised {
+            },
+            1 => TicketRaised {
                 id: 2,
                 description: "second".to_string(),
-            }
-            .to_event(self.writer_id),
-            3 => ChainEventFactory::drain_event(self.writer_id),
+            },
             _ => return Ok(None),
         };
         self.step += 1;
-        Ok(Some(vec![event]))
+        Ok(Some(vec![ticket]))
     }
 }
 
@@ -439,7 +409,7 @@ fn control_interleaving_flow(
             EmbeddingDimensions::try_from(3).unwrap(),
         )
         .map_err(|error| *error)?;
-        let input = ControlInterleavingSource::default();
+        let input = TwoTicketSource::default();
         let collected = CollectEmbedded {
             outputs: outputs.clone(),
         };
@@ -959,7 +929,7 @@ async fn deterministic_mapper_failures_round_trip_on_their_distinct_error_routes
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn held_provider_serialises_data_and_keeps_telemetry_drain_and_eof_out_of_mappers() {
+async fn held_provider_serialises_data_and_keeps_eof_out_of_mappers() {
     let temp = tempfile::tempdir().unwrap();
     let journal_base = temp.path().join("journals");
     let (chat_target, embedding_target) = fixture_targets();
@@ -1002,23 +972,17 @@ async fn held_provider_serialises_data_and_keeps_telemetry_drain_and_eof_out_of_
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let input_events = stage_events(&active_archive, "input").await;
-            let has_telemetry = input_events.iter().any(|event| {
-                matches!(&event.content, ChainEventContent::FlowControl(payload) if payload.is_reader_telemetry())
-            });
-            let has_drain = input_events.iter().any(|event| {
-                matches!(&event.content, ChainEventContent::FlowControl(obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Drain))
-            });
             let has_eof = input_events.iter().any(|event| {
                 matches!(&event.content, ChainEventContent::FlowControl(obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof { .. }))
             });
-            if has_telemetry && has_drain && has_eof {
+            if has_eof {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("data, telemetry, Drain, and EOF are injected while the provider is held");
+    .expect("both typed data rows and the runtime-owned EOF arrive while the provider is held");
 
     assert!(!run.is_finished());
     assert_eq!(chat_calls.load(Ordering::SeqCst), 1);

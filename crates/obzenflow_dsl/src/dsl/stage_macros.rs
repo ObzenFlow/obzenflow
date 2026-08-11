@@ -135,6 +135,112 @@ macro_rules! __obzenflow_stage_middleware_removed {
     };
 }
 
+/// Shared proof-carrying source admission used by all four source families.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_admit_typed_source {
+    (factory = $factory:ident, output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
+            ::obzenflow_core::stage_fact_set![$($member),+],
+        >();
+        let __source_policies: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($policy)),*];
+        let __ingress_policy: Option<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            None $(.or_else(|| Some(Box::new($ingress) as Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>)))?;
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($observer)),*];
+        #[allow(unused_mut)]
+        let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+        $($( __backpressure = Some($bp); )?)?
+        $crate::dsl::typing::$factory::<
+            _,
+            $out,
+            ::obzenflow_core::stage_fact_set![$($member),+],
+            _,
+            _,
+            _,
+        >(
+            $name,
+            $handler,
+            __source_policies,
+            __ingress_policy,
+            __observers,
+            __backpressure,
+        )
+    }};
+    (factory = $factory:ident, output = $out:ty, name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __source_policies: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($policy)),*];
+        let __ingress_policy: Option<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            None $(.or_else(|| Some(Box::new($ingress) as Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>)))?;
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($observer)),*];
+        #[allow(unused_mut)]
+        let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+        $($( __backpressure = Some($bp); )?)?
+        $crate::dsl::typing::$factory::<_, $out, $out, _, _, _>(
+            $name,
+            $handler,
+            __source_policies,
+            __ingress_policy,
+            __observers,
+            __backpressure,
+        )
+    }};
+}
+
+/// Shared structural admission for source placeholders. Placeholders never
+/// poll a domain dependency or author a row, so they use the classified raw
+/// substrate without exposing a raw-handler macro arm.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_admit_placeholder_source {
+    (factory = $factory:ident, output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, message = $message:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
+            ::obzenflow_core::stage_fact_set![$($member),+],
+        >();
+        let __source_policies: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($policy)),*];
+        let __ingress_policy: Option<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            None $(.or_else(|| Some(Box::new($ingress) as Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>)))?;
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($observer)),*];
+        #[allow(unused_mut)]
+        let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+        $($( __backpressure = Some($bp); )?)?
+        $crate::dsl::typing::$factory::<
+            $out,
+            ::obzenflow_core::stage_fact_set![$($member),+],
+        >(
+            $name,
+            $message,
+            __source_policies,
+            __ingress_policy,
+            __observers,
+            __backpressure,
+        )
+    }};
+    (factory = $factory:ident, output = $out:ty, name = $name:literal, message = $message:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let __source_policies: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($policy)),*];
+        let __ingress_policy: Option<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            None $(.or_else(|| Some(Box::new($ingress) as Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>)))?;
+        let __observers: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($observer)),*];
+        #[allow(unused_mut)]
+        let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+        $($( __backpressure = Some($bp); )?)?
+        $crate::dsl::typing::$factory::<$out, $out>(
+            $name,
+            $message,
+            __source_policies,
+            __ingress_policy,
+            __observers,
+            __backpressure,
+        )
+    }};
+}
+
 // ============================================================================
 // source!  +  __obzenflow_source_typed!
 // ============================================================================
@@ -155,116 +261,22 @@ macro_rules! __obzenflow_source_typed {
         compile_error!("source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
     };
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(None),
-            source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_finite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(Some($msg)),
-            source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_finite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_source_untyped!(
-            name = $name,
-            handler = __handler,
-            source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_typed_source!(factory = typed_finite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(None),
-            source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_finite_source_descriptor, output = $out, name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(Some($msg)),
-            source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_finite_source_descriptor, output = $out, name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_source_untyped!(
-            name = $name,
-            handler = __handler,
-            source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_source_untyped {
-    (name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        use $crate::dsl::stage_descriptor::{FiniteSourceDescriptor, StageDescriptor};
-        Box::new(FiniteSourceDescriptor {
-            name: $name.to_string(),
-            handler: $handler,
-            source_policies: vec![$(Box::new($policy)),*],
-            ingress_policy: None $(.or_else(|| Some(Box::new($ingress))))?,
-            observers: vec![$(Box::new($observer)),*],
-            backpressure: {
-                #[allow(unused_mut)]
-                let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
-                $($( __bp = Some($bp); )?)?
-                __bp
-            },
-        }) as Box<dyn StageDescriptor>
+        $crate::__obzenflow_admit_typed_source!(factory = typed_finite_source_descriptor, output = $out, name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
 }
 
@@ -529,27 +541,6 @@ macro_rules! source {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_async_source_untyped {
-    (name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let mut __desc = $crate::dsl::stage_descriptor::AsyncFiniteSourceDescriptor::new($name, $handler)
-            $(.with_source_policy($policy))*
-            $(.with_ingress_policy($ingress))?
-            $(.with_observer($observer))*;
-        {
-            #[allow(unused_mut)]
-            let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
-            $($( __bp = Some($bp); )?)?
-            __desc.backpressure = __bp;
-        }
-        __desc.build()
-    }};
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
-        compile_error!("async_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
 macro_rules! __obzenflow_async_source_typed {
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($legacy:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
         compile_error!("async_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
@@ -558,130 +549,22 @@ macro_rules! __obzenflow_async_source_typed {
         compile_error!("async_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
     };
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, None)
-            .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_async_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_finite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, Some(($msg).to_string()))
-            .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_async_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_finite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), false, None)
-            .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_async_source_untyped!(name = $name, handler = __handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_typed_source!(factory = typed_async_finite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, None);
-        let __descriptor = $crate::__obzenflow_async_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_finite_source_descriptor, output = $out, name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, Some(($msg).to_string()));
-        let __descriptor = $crate::__obzenflow_async_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_finite_source_descriptor, output = $out, name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), false, None);
-        let __descriptor = $crate::__obzenflow_async_source_untyped!(name = $name, handler = __handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_async_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_async_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_async_source_untyped!(
-            name = $name,
-            handler = __handler,
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_async_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_async_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_async_source_untyped!(
-            name = $name,
-            handler = __handler,
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_typed_source!(factory = typed_async_finite_source_descriptor, output = $out, name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
 }
 
@@ -891,30 +774,6 @@ macro_rules! async_source {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_infinite_source_untyped {
-    (name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        use $crate::dsl::stage_descriptor::{InfiniteSourceDescriptor, StageDescriptor};
-        Box::new(InfiniteSourceDescriptor {
-            name: $name.to_string(),
-            handler: $handler,
-            source_policies: vec![$(Box::new($policy)),*],
-            ingress_policy: None $(.or_else(|| Some(Box::new($ingress))))?,
-            observers: vec![$(Box::new($observer)),*],
-            backpressure: {
-                #[allow(unused_mut)]
-                let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
-                $($( __bp = Some($bp); )?)?
-                __bp
-            },
-        }) as Box<dyn StageDescriptor>
-    }};
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
-        compile_error!("infinite_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
 macro_rules! __obzenflow_infinite_source_typed {
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($legacy:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
         compile_error!("infinite_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
@@ -923,127 +782,22 @@ macro_rules! __obzenflow_infinite_source_typed {
         compile_error!("infinite_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
     };
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, None).with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(None), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_infinite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, Some(($msg).to_string())).with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(Some($msg)), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_infinite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), false, None).with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = __handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_typed_source!(factory = typed_infinite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, None);
-        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(None), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_infinite_source_descriptor, output = $out, name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, Some(($msg).to_string()));
-        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(Some($msg)), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_infinite_source_descriptor, output = $out, name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), false, None);
-        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = __handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(None),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(Some($msg)),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(
-            name = $name,
-            handler = __handler,
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(None),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(Some($msg)),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(
-            name = $name,
-            handler = __handler,
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_typed_source!(factory = typed_infinite_source_descriptor, output = $out, name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
 }
 
@@ -1361,27 +1115,6 @@ macro_rules! infinite_source {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_async_infinite_source_untyped {
-    (name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let mut __desc = $crate::dsl::stage_descriptor::AsyncInfiniteSourceDescriptor::new($name, $handler)
-            $(.with_source_policy($policy))*
-            $(.with_ingress_policy($ingress))?
-            $(.with_observer($observer))*;
-        {
-            #[allow(unused_mut)]
-            let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
-            $($( __bp = Some($bp); )?)?
-            __desc.backpressure = __bp;
-        }
-        __desc.build()
-    }};
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
-        compile_error!("async_infinite_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
 macro_rules! __obzenflow_async_infinite_source_typed {
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($legacy:expr),*] $(, backpressure = [$($bp:expr)?])?) => {
         compile_error!("async_infinite_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
@@ -1390,127 +1123,22 @@ macro_rules! __obzenflow_async_infinite_source_typed {
         compile_error!("async_infinite_source! takes control middleware in a 'with [...]' clause on the feed it protects (FLOWIP-115s)")
     };
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, None).with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_infinite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, Some(($msg).to_string())).with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_infinite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), false, None).with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = __handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_typed_source!(factory = typed_async_infinite_source_descriptor, output = $out, output_contract = [$($member),+], name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!(), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, None);
-        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_infinite_source_descriptor, output = $out, name = $name, message = None, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), true, Some(($msg).to_string()));
-        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_placeholder_source!(factory = placeholder_async_infinite_source_descriptor, output = $out, name = $name, message = Some($msg), source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
     (output = $out:ty, name = $name:literal, handler = $handler:expr, source_policies = [$($policy:expr),*], ingress_policy = [$($ingress:expr)?], observers = [$($observer:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source($crate::dsl::typing::TypeHint::exact_payload::<$out>(), false, None);
-        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = __handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(
-            name = $name,
-            handler = __handler,
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)),
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(
-            name = $name,
-            handler = __handler,
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        $crate::__obzenflow_admit_typed_source!(factory = typed_async_infinite_source_descriptor, output = $out, name = $name, handler = $handler, source_policies = [$($policy),*], ingress_policy = [$($ingress)?], observers = [$($observer),*] $(, backpressure = [$($bp)?])?)
     }};
 }
 
@@ -4756,7 +4384,7 @@ mod backpressure_clause_macro_tests {
 
     #[test]
     fn source_macro_accepts_backpressure_clause_end_to_end() {
-        // Full user-facing chain: source! -> typed -> untyped with the clause.
+        // Full user-facing chain: source! -> classified placeholder admission.
         let descriptor = crate::source!(
             name: "s",
             TestFact => placeholder!(),
@@ -4768,27 +4396,16 @@ mod backpressure_clause_macro_tests {
             descriptor.backpressure_clause().is_some(),
             "the clause survives the typing wrapper"
         );
-        let inner = crate::__obzenflow_source_untyped!(
-            name = "s_inner",
-            handler = crate::dsl::typing::PlaceholderFiniteSource::<TestFact>::new(None),
-            source_policies = [],
-            ingress_policy = [],
-            observers = [],
-            backpressure = [enforced(1000)]
-        );
-        assert!(inner.backpressure_clause().is_some());
     }
 
     #[test]
     fn source_macro_without_clause_leaves_backpressure_none() {
-        let inner = crate::__obzenflow_source_untyped!(
-            name = "s_none",
-            handler = crate::dsl::typing::PlaceholderFiniteSource::<TestFact>::new(None),
-            source_policies = [],
-            ingress_policy = [],
-            observers = []
+        let descriptor = crate::source!(
+            name: "s_none",
+            TestFact => placeholder!(),
+            observers: []
         );
-        assert!(inner.backpressure_clause().is_none());
+        assert!(descriptor.backpressure_clause().is_none());
     }
 
     // The syntax-section forms: transform! with a clause and no middleware

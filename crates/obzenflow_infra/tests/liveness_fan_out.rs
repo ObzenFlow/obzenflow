@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::{ChainEvent, ChainEventFactory, EdgeLivenessState, SystemEventType};
+use obzenflow_core::event::{ChainEvent, EdgeLivenessState, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{async_source, effectful_transform, flow, sink, transform, FlowDefinition};
@@ -14,12 +14,11 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, EffectfulTransformHandler, SinkHandler, TypedTransformHandler,
+    EffectfulTransformHandler, SinkHandler, TypedAsyncFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payloads for the fan-out test. The JSON shape is shared, but each
 /// stage authors a distinct fact type, so the stage contracts mirror the actual
@@ -59,45 +58,28 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 struct DelayedTwoEventSource {
     emitted: usize,
-    writer_id: Option<obzenflow_core::WriterId>,
 }
 
 impl DelayedTwoEventSource {
     fn new() -> Self {
-        Self {
-            emitted: 0,
-            writer_id: None,
-        }
+        Self { emitted: 0 }
     }
 }
 
 #[async_trait]
-impl AsyncFiniteSourceHandler for DelayedTwoEventSource {
-    fn bind_writer_id(&mut self, id: obzenflow_core::WriterId) {
-        self.writer_id = Some(id);
-    }
+impl TypedAsyncFiniteSourceHandler for DelayedTwoEventSource {
+    type Output = ProbeEvent;
 
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        let writer_id = self
-            .writer_id
-            .expect("source writer_id should be bound by runtime");
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         match self.emitted {
             0 => {
                 self.emitted = 1;
-                Ok(Some(vec![ChainEventFactory::data_event(
-                    writer_id,
-                    ProbeEvent::versioned_event_type(),
-                    json!({ "value": 1 }),
-                )]))
+                Ok(Some(vec![ProbeEvent { value: 1 }]))
             }
             1 => {
                 self.emitted = 2;
                 tokio::time::sleep(Duration::from_secs(10)).await;
-                Ok(Some(vec![ChainEventFactory::data_event(
-                    writer_id,
-                    ProbeEvent::versioned_event_type(),
-                    json!({ "value": 2 }),
-                )]))
+                Ok(Some(vec![ProbeEvent { value: 2 }]))
             }
             _ => Ok(None),
         }

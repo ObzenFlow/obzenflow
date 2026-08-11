@@ -6,20 +6,20 @@
 //! pre-error bypass.
 
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulEmission, TypedStatefulHandler, TypedTransformHandler,
+    SinkHandler, StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
+    TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -45,34 +45,24 @@ impl TypedPayload for Aggregate {
 #[derive(Clone, Debug)]
 struct ThreeRows {
     next: u64,
-    writer_id: WriterId,
 }
 
 impl ThreeRows {
     fn new() -> Self {
-        Self {
-            next: 1,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { next: 1 }
     }
 }
 
-impl FiniteSourceHandler for ThreeRows {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+impl TypedFiniteSourceHandler for ThreeRows {
+    type Output = Input;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next > 3 {
             return Ok(None);
         }
         let value = self.next;
         self.next += 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            Input::EVENT_TYPE,
-            json!(Input { value }),
-        )]))
+        Ok(Some(vec![Input { value }]))
     }
 }
 
