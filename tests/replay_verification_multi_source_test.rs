@@ -17,8 +17,7 @@
 //! arrival-dependent across independent live runs).
 
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::{id::StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -28,7 +27,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
@@ -62,30 +61,23 @@ impl TypedPayload for Charged {
 struct Channel {
     ids: Vec<u64>,
     cursor: usize,
-    writer_id: WriterId,
 }
 
 impl Channel {
     fn new(ids: Vec<u64>) -> Self {
-        Self {
-            ids,
-            cursor: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { ids, cursor: 0 }
     }
 }
 
-impl FiniteSourceHandler for Channel {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for Channel {
+    type Output = OrderPlaced;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         let Some(order_id) = self.ids.get(self.cursor).copied() else {
             return Ok(None);
         };
         self.cursor += 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            OrderPlaced::EVENT_TYPE,
-            json!(OrderPlaced { order_id }),
-        )]))
+        Ok(Some(vec![OrderPlaced { order_id }]))
     }
 }
 

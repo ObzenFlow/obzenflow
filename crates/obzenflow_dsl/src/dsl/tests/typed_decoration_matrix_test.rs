@@ -18,10 +18,10 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
-        AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulStatefulHandler,
-        EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinReferenceView,
-        SinkHandler, StatefulEmission, TransformHandler, TypedJoinHandler, TypedStatefulHandler,
-        TypedTransformHandler,
+        EffectfulStatefulHandler, EffectfulTransformHandler, JoinReferenceView, SinkHandler,
+        StatefulEmission, TransformHandler, TypedAsyncFiniteSourceHandler,
+        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::stages::sink::SinkTyped;
     use obzenflow_runtime::typing::{SinkTyping, SourceTyping, TransformTyping};
@@ -46,8 +46,10 @@ mod tests {
     impl SourceTyping for Src {
         type Output = Out;
     }
-    impl FiniteSourceHandler for Src {
-        fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    impl TypedFiniteSourceHandler for Src {
+        type Output = Out;
+
+        fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
             Ok(None)
         }
     }
@@ -62,8 +64,10 @@ mod tests {
             type Output = Out;
         }
 
-        impl FiniteSourceHandler for Source {
-            fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+        impl TypedFiniteSourceHandler for Source {
+            type Output = Out;
+
+            fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
                 Ok(None)
             }
         }
@@ -75,8 +79,10 @@ mod tests {
         type Output = Out;
     }
     #[async_trait]
-    impl AsyncFiniteSourceHandler for AsyncSrc {
-        async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    impl TypedAsyncFiniteSourceHandler for AsyncSrc {
+        type Output = Out;
+
+        async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
             Ok(None)
         }
     }
@@ -86,8 +92,10 @@ mod tests {
     impl SourceTyping for InfSrc {
         type Output = Out;
     }
-    impl InfiniteSourceHandler for InfSrc {
-        fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+    impl TypedInfiniteSourceHandler for InfSrc {
+        type Output = Out;
+
+        fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
             Ok(vec![])
         }
     }
@@ -98,8 +106,10 @@ mod tests {
         type Output = Out;
     }
     #[async_trait]
-    impl AsyncInfiniteSourceHandler for AsyncInfSrc {
-        async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+    impl TypedAsyncInfiniteSourceHandler for AsyncInfSrc {
+        type Output = Out;
+
+        async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
             Ok(vec![])
         }
     }

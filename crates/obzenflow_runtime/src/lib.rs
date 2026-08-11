@@ -43,6 +43,15 @@ pub mod __private {
     pub use crate::stages::common::handlers::join::{
         ErasedJoinInvocation, TypedJoinHandlerAdapter, UnifiedJoinHandler,
     };
+    pub use crate::stages::common::handlers::source::typed::{
+        TypedAsyncFiniteSourceHandlerAdapter, TypedAsyncInfiniteSourceHandlerAdapter,
+        TypedFiniteSourceHandlerAdapter, TypedInfiniteSourceHandlerAdapter,
+    };
+    pub use crate::stages::common::handlers::source::{
+        ErasedSourceCompletion, ErasedSourceInvocation, ErasedSourceOutcome,
+        UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
+        UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
+    };
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -75,8 +84,8 @@ pub mod testing;
 /// sent to individual stages).
 ///
 /// **Handlers** — the user-facing handler traits:
-/// [`FiniteSourceHandler`](crate::stages::FiniteSourceHandler),
-/// [`InfiniteSourceHandler`](crate::stages::InfiniteSourceHandler),
+/// [`TypedFiniteSourceHandler`](crate::stages::TypedFiniteSourceHandler),
+/// [`TypedInfiniteSourceHandler`](crate::stages::TypedInfiniteSourceHandler),
 /// [`TypedTransformHandler`](crate::stages::TypedTransformHandler),
 /// [`SinkHandler`](crate::stages::SinkHandler),
 /// [`TypedStatefulHandler`](crate::stages::TypedStatefulHandler),
@@ -109,9 +118,10 @@ pub mod prelude {
 
     // Handlers
     pub use crate::stages::{
-        EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler,
-        InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler, SourceError,
-        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
+        EffectfulStatefulHandler, EffectfulTransformHandler, HostedIngressSource, ObserverHandler,
+        ResourceManaged, SinkHandler, SourceError, SourceObservationSink,
+        TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+        TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     pub use crate::typing::{SinkTyping, SourceTyping, TransformTyping};
 

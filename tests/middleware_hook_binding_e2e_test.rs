@@ -25,13 +25,13 @@ use obzenflow_adapters::middleware::{
     SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome, SourcePollSurface,
     SourcePollUnitId,
 };
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent};
 use obzenflow_core::event::payloads::effect_payload::EFFECT_RECORD_EVENT_TYPE;
 use obzenflow_core::event::{
     EffectFailureCause, EffectFailureCode, EffectFailureSource, EffectOutcomePayload, EffectRecord,
     RetryDisposition,
 };
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -40,7 +40,9 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{EffectfulTransformHandler, FiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    EffectfulTransformHandler, TypedFiniteSourceHandler,
+};
 use obzenflow_runtime::stages::sink::{DeliveryContext, DeliveryProvenance, SinkTyped};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -343,30 +345,24 @@ impl TypedPayload for HookOutput {
 #[derive(Clone, Debug)]
 struct HookSource {
     next: u64,
-    writer_id: WriterId,
 }
 
 impl HookSource {
     fn new() -> Self {
-        Self {
-            next: 1,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { next: 1 }
     }
 }
 
-impl FiniteSourceHandler for HookSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for HookSource {
+    type Output = HookInput;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next > 2 {
             return Ok(None);
         }
         let value = self.next;
         self.next += 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            HookInput::EVENT_TYPE,
-            json!(HookInput { value }),
-        )]))
+        Ok(Some(vec![HookInput { value }]))
     }
 }
 

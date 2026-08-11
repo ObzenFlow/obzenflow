@@ -10,16 +10,14 @@
 //! uncertified verdicts are exercised in-process by the other verification
 //! suites; the contract mapping itself is unit-tested in `verdict`.)
 
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::{id::StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handlers::FiniteSourceHandler;
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -36,30 +34,24 @@ impl TypedPayload for Tick {
 #[derive(Clone, Debug)]
 struct Ticks {
     next: u64,
-    writer_id: WriterId,
 }
 
 impl Ticks {
     fn new() -> Self {
-        Self {
-            next: 1,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { next: 1 }
     }
 }
 
-impl FiniteSourceHandler for Ticks {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for Ticks {
+    type Output = Tick;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next > 3 {
             return Ok(None);
         }
         let n = self.next;
         self.next += 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            Tick::EVENT_TYPE,
-            json!(Tick { n }),
-        )]))
+        Ok(Some(vec![Tick { n }]))
     }
 }
 

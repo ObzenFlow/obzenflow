@@ -16,7 +16,7 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, StatefulEmission, TypedStatefulHandler, TypedTransformHandler,
+    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
@@ -134,7 +134,6 @@ impl TypedPayload for AggregateRanking {
 struct ValuesSource {
     values: Vec<Input>,
     next: usize,
-    writer_id: WriterId,
 }
 
 impl ValuesSource {
@@ -167,22 +166,19 @@ impl ValuesSource {
                 },
             ],
             next: 0,
-            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
-impl FiniteSourceHandler for ValuesSource {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+impl TypedFiniteSourceHandler for ValuesSource {
+    type Output = Input;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         let Some(value) = self.values.get(self.next).cloned() else {
             return Ok(None);
         };
         self.next += 1;
-        Ok(Some(vec![value.to_event(self.writer_id)]))
+        Ok(Some(vec![value]))
     }
 }
 

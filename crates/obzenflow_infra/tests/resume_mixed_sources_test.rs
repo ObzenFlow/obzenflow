@@ -21,7 +21,7 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainEventContent, EventEnvelope};
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{
     effectful_transform, flow, infinite_source, sink, source, transform, FlowDefinition,
 };
@@ -33,7 +33,7 @@ use obzenflow_runtime::effects::{
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, SinkHandler,
+    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
     TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
@@ -91,7 +91,6 @@ impl TypedPayload for MixedOutput {
 #[derive(Clone, Debug)]
 struct FiniteChannelSource {
     channel: &'static str,
-    writer_id: WriterId,
     next_value: u64,
     remaining: u64,
 }
@@ -100,15 +99,16 @@ impl FiniteChannelSource {
     fn new(channel: &'static str, first_value: u64, count: u64) -> Self {
         Self {
             channel,
-            writer_id: WriterId::from(StageId::new()),
             next_value: first_value,
             remaining: count,
         }
     }
 }
 
-impl FiniteSourceHandler for FiniteChannelSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for FiniteChannelSource {
+    type Output = ChannelTick;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.remaining == 0 {
             return Ok(None);
         }
@@ -118,8 +118,7 @@ impl FiniteSourceHandler for FiniteChannelSource {
         Ok(Some(vec![ChannelTick {
             channel: self.channel.to_string(),
             value,
-        }
-        .to_event(self.writer_id)]))
+        }]))
     }
 }
 
@@ -128,7 +127,6 @@ impl FiniteSourceHandler for FiniteChannelSource {
 #[derive(Clone, Debug)]
 struct InfiniteChannelSource {
     channel: &'static str,
-    writer_id: WriterId,
     next_value: u64,
     remaining: u64,
 }
@@ -137,15 +135,16 @@ impl InfiniteChannelSource {
     fn new(channel: &'static str, first_value: u64, count: u64) -> Self {
         Self {
             channel,
-            writer_id: WriterId::from(StageId::new()),
             next_value: first_value,
             remaining: count,
         }
     }
 }
 
-impl InfiniteSourceHandler for InfiniteChannelSource {
-    fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+impl TypedInfiniteSourceHandler for InfiniteChannelSource {
+    type Output = ChannelTick;
+
+    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         if self.remaining == 0 {
             return Ok(Vec::new());
         }
@@ -155,8 +154,7 @@ impl InfiniteSourceHandler for InfiniteChannelSource {
         Ok(vec![ChannelTick {
             channel: self.channel.to_string(),
             value,
-        }
-        .to_event(self.writer_id)])
+        }])
     }
 }
 

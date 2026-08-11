@@ -4,24 +4,22 @@
 
 //! Typed source helpers
 //!
-//! These helpers let sources emit domain types (`T: TypedPayload + Serialize`) instead of
-//! manually constructing `ChainEvent` values with stage `WriterId` boilerplate.
+//! These helpers return domain types and let the sealed source adapter own
+//! envelope construction and writer identity.
 //!
 //! Notes:
 //! - Finite sources: EOF is supervisor-owned. Typed sources signal completion via `Ok(None)`.
 //! - Infinite sources: never complete naturally; they run until external shutdown.
-//! - The runtime injects the stage `WriterId` via `bind_writer_id()` before the first `next()`.
 
 use crate::stages::common::handlers::source::SourceError;
 use crate::stages::common::handlers::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler,
 };
 use crate::typing::SourceTyping;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use serde::Serialize;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -47,7 +45,6 @@ where
 {
     producer: F,
     current_index: usize,
-    writer_id: Option<WriterId>,
     _phantom: PhantomData<T>,
 }
 
@@ -61,7 +58,6 @@ where
         Self {
             producer,
             current_index: 0,
-            writer_id: None,
             _phantom: PhantomData,
         }
     }
@@ -144,43 +140,24 @@ where
         f.debug_struct("FiniteSourceTyped")
             .field("item_type", &std::any::type_name::<T>())
             .field("current_index", &self.current_index)
-            .field("writer_id_bound", &self.writer_id.is_some())
             .finish()
     }
 }
 
-impl<T, F> FiniteSourceHandler for FiniteSourceTyped<T, F>
+impl<T, F> TypedFiniteSourceHandler for FiniteSourceTyped<T, F>
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     F: FnMut(usize) -> Option<Vec<T>> + Send + Sync + Clone,
 {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
+    type Output = T;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        let writer_id = self
-            .writer_id
-            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
-
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         match (self.producer)(self.current_index) {
             Some(items) if items.is_empty() => Ok(Some(Vec::new())),
             Some(items) => {
-                let event_type = T::versioned_event_type();
                 let item_count = items.len();
-                let mut events = Vec::with_capacity(item_count);
-                for item in items {
-                    let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
-                        .map_err(|e| {
-                        SourceError::Other(format!(
-                            "SourceTyped failed to serialize {}: {e}",
-                            std::any::type_name::<T>()
-                        ))
-                    })?;
-                    events.push(event);
-                }
                 self.current_index = self.current_index.saturating_add(item_count);
-                Ok(Some(events))
+                Ok(Some(items))
             }
             None => Ok(None),
         }
@@ -209,7 +186,6 @@ where
 {
     producer: F,
     current_index: usize,
-    writer_id: Option<WriterId>,
     _phantom: PhantomData<T>,
 }
 
@@ -234,7 +210,6 @@ where
         Self {
             producer,
             current_index: 0,
-            writer_id: None,
             _phantom: PhantomData,
         }
     }
@@ -271,44 +246,25 @@ where
         f.debug_struct("FallibleFiniteSourceTyped")
             .field("item_type", &std::any::type_name::<T>())
             .field("current_index", &self.current_index)
-            .field("writer_id_bound", &self.writer_id.is_some())
             .finish()
     }
 }
 
-impl<T, F> FiniteSourceHandler for FallibleFiniteSourceTyped<T, F>
+impl<T, F> TypedFiniteSourceHandler for FallibleFiniteSourceTyped<T, F>
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
 {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
+    type Output = T;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        let writer_id = self
-            .writer_id
-            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
-
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         // Propagate producer errors directly
         match (self.producer)(self.current_index)? {
             Some(items) if items.is_empty() => Ok(Some(Vec::new())),
             Some(items) => {
-                let event_type = T::versioned_event_type();
                 let item_count = items.len();
-                let mut events = Vec::with_capacity(item_count);
-                for item in items {
-                    let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
-                        .map_err(|e| {
-                        SourceError::Other(format!(
-                            "FallibleSourceTyped failed to serialize {}: {e}",
-                            std::any::type_name::<T>()
-                        ))
-                    })?;
-                    events.push(event);
-                }
                 self.current_index = self.current_index.saturating_add(item_count);
-                Ok(Some(events))
+                Ok(Some(items))
             }
             None => Ok(None),
         }
@@ -333,7 +289,6 @@ where
 {
     producer: F,
     current_index: usize,
-    writer_id: Option<WriterId>,
     _phantom: PhantomData<fn() -> (T, Fut)>,
 }
 
@@ -347,7 +302,6 @@ where
         Self {
             producer: self.producer.clone(),
             current_index: self.current_index,
-            writer_id: self.writer_id,
             _phantom: PhantomData,
         }
     }
@@ -372,7 +326,6 @@ where
         Self {
             producer,
             current_index: 0,
-            writer_id: None,
             _phantom: PhantomData,
         }
     }
@@ -388,45 +341,26 @@ where
         f.debug_struct("AsyncFiniteSourceTyped")
             .field("item_type", &std::any::type_name::<T>())
             .field("current_index", &self.current_index)
-            .field("writer_id_bound", &self.writer_id.is_some())
             .finish()
     }
 }
 
 #[async_trait]
-impl<T, F, Fut> AsyncFiniteSourceHandler for AsyncFiniteSourceTyped<T, F, Fut>
+impl<T, F, Fut> TypedAsyncFiniteSourceHandler for AsyncFiniteSourceTyped<T, F, Fut>
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     F: FnMut(usize) -> Fut + Send + Sync + Clone,
     Fut: Future<Output = Option<Vec<T>>> + Send,
 {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
+    type Output = T;
 
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        let writer_id = self
-            .writer_id
-            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
-
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         match (self.producer)(self.current_index).await {
             Some(items) if items.is_empty() => Ok(Some(Vec::new())),
             Some(items) => {
-                let event_type = T::versioned_event_type();
                 let item_count = items.len();
-                let mut events = Vec::with_capacity(item_count);
-                for item in items {
-                    let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
-                        .map_err(|e| {
-                        SourceError::Other(format!(
-                            "SourceTyped failed to serialize {}: {e}",
-                            std::any::type_name::<T>()
-                        ))
-                    })?;
-                    events.push(event);
-                }
                 self.current_index = self.current_index.saturating_add(item_count);
-                Ok(Some(events))
+                Ok(Some(items))
             }
             None => Ok(None),
         }
@@ -455,7 +389,6 @@ where
 {
     producer: F,
     current_index: usize,
-    writer_id: Option<WriterId>,
     _phantom: PhantomData<fn() -> (T, Fut)>,
 }
 
@@ -469,7 +402,6 @@ where
         Self {
             producer: self.producer.clone(),
             current_index: self.current_index,
-            writer_id: self.writer_id,
             _phantom: PhantomData,
         }
     }
@@ -497,7 +429,6 @@ where
         Self {
             producer,
             current_index: 0,
-            writer_id: None,
             _phantom: PhantomData,
         }
     }
@@ -581,46 +512,27 @@ where
         f.debug_struct("FallibleAsyncFiniteSourceTyped")
             .field("item_type", &std::any::type_name::<T>())
             .field("current_index", &self.current_index)
-            .field("writer_id_bound", &self.writer_id.is_some())
             .finish()
     }
 }
 
 #[async_trait]
-impl<T, F, Fut> AsyncFiniteSourceHandler for FallibleAsyncFiniteSourceTyped<T, F, Fut>
+impl<T, F, Fut> TypedAsyncFiniteSourceHandler for FallibleAsyncFiniteSourceTyped<T, F, Fut>
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     F: FnMut(usize) -> Fut + Send + Sync + Clone,
     Fut: Future<Output = Result<Option<Vec<T>>, SourceError>> + Send,
 {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
+    type Output = T;
 
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        let writer_id = self
-            .writer_id
-            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
-
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         // Propagate producer errors directly
         match (self.producer)(self.current_index).await? {
             Some(items) if items.is_empty() => Ok(Some(Vec::new())),
             Some(items) => {
-                let event_type = T::versioned_event_type();
                 let item_count = items.len();
-                let mut events = Vec::with_capacity(item_count);
-                for item in items {
-                    let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
-                        .map_err(|e| {
-                        SourceError::Other(format!(
-                            "FallibleAsyncSourceTyped failed to serialize {}: {e}",
-                            std::any::type_name::<T>()
-                        ))
-                    })?;
-                    events.push(event);
-                }
                 self.current_index = self.current_index.saturating_add(item_count);
-                Ok(Some(events))
+                Ok(Some(items))
             }
             None => Ok(None),
         }
@@ -646,7 +558,6 @@ where
 {
     producer: F,
     current_index: usize,
-    writer_id: Option<WriterId>,
     _phantom: PhantomData<T>,
 }
 
@@ -668,7 +579,6 @@ where
         Self {
             producer,
             current_index: 0,
-            writer_id: None,
             _phantom: PhantomData,
         }
     }
@@ -739,45 +649,26 @@ where
         f.debug_struct("InfiniteSourceTyped")
             .field("item_type", &std::any::type_name::<T>())
             .field("current_index", &self.current_index)
-            .field("writer_id_bound", &self.writer_id.is_some())
             .finish()
     }
 }
 
-impl<T, F> InfiniteSourceHandler for InfiniteSourceTyped<T, F>
+impl<T, F> TypedInfiniteSourceHandler for InfiniteSourceTyped<T, F>
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     F: FnMut(usize) -> Vec<T> + Send + Sync + Clone,
 {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
+    type Output = T;
 
-    fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
-        let writer_id = self
-            .writer_id
-            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
-
+    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         let items = (self.producer)(self.current_index);
         if items.is_empty() {
             return Ok(Vec::new());
         }
 
-        let event_type = T::versioned_event_type();
         let item_count = items.len();
-        let mut events = Vec::with_capacity(item_count);
-        for item in items {
-            let event =
-                ChainEventFactory::data_event_from(writer_id, &event_type, &item).map_err(|e| {
-                    SourceError::Other(format!(
-                        "InfiniteSourceTyped failed to serialize {}: {e}",
-                        std::any::type_name::<T>()
-                    ))
-                })?;
-            events.push(event);
-        }
         self.current_index = self.current_index.saturating_add(item_count);
-        Ok(events)
+        Ok(items)
     }
 }
 
@@ -802,7 +693,6 @@ where
 {
     producer: F,
     current_index: usize,
-    writer_id: Option<WriterId>,
     _phantom: PhantomData<T>,
 }
 
@@ -824,7 +714,6 @@ where
         Self {
             producer,
             current_index: 0,
-            writer_id: None,
             _phantom: PhantomData,
         }
     }
@@ -839,45 +728,26 @@ where
         f.debug_struct("FallibleInfiniteSourceTyped")
             .field("item_type", &std::any::type_name::<T>())
             .field("current_index", &self.current_index)
-            .field("writer_id_bound", &self.writer_id.is_some())
             .finish()
     }
 }
 
-impl<T, F> InfiniteSourceHandler for FallibleInfiniteSourceTyped<T, F>
+impl<T, F> TypedInfiniteSourceHandler for FallibleInfiniteSourceTyped<T, F>
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
 {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
+    type Output = T;
 
-    fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
-        let writer_id = self
-            .writer_id
-            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
-
+    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         let items = (self.producer)(self.current_index)?;
         if items.is_empty() {
             return Ok(Vec::new());
         }
 
-        let event_type = T::versioned_event_type();
         let item_count = items.len();
-        let mut events = Vec::with_capacity(item_count);
-        for item in items {
-            let event =
-                ChainEventFactory::data_event_from(writer_id, &event_type, &item).map_err(|e| {
-                    SourceError::Other(format!(
-                        "FallibleInfiniteSourceTyped failed to serialize {}: {e}",
-                        std::any::type_name::<T>()
-                    ))
-                })?;
-            events.push(event);
-        }
         self.current_index = self.current_index.saturating_add(item_count);
-        Ok(events)
+        Ok(items)
     }
 }
 
@@ -896,7 +766,6 @@ where
 {
     producer: F,
     current_index: usize,
-    writer_id: Option<WriterId>,
     _phantom: PhantomData<fn() -> (T, Fut)>,
 }
 
@@ -910,7 +779,6 @@ where
         Self {
             producer: self.producer.clone(),
             current_index: self.current_index,
-            writer_id: self.writer_id,
             _phantom: PhantomData,
         }
     }
@@ -935,7 +803,6 @@ where
         Self {
             producer,
             current_index: 0,
-            writer_id: None,
             _phantom: PhantomData,
         }
     }
@@ -1019,47 +886,28 @@ where
         f.debug_struct("AsyncInfiniteSourceTyped")
             .field("item_type", &std::any::type_name::<T>())
             .field("current_index", &self.current_index)
-            .field("writer_id_bound", &self.writer_id.is_some())
             .finish()
     }
 }
 
 #[async_trait]
-impl<T, F, Fut> AsyncInfiniteSourceHandler for AsyncInfiniteSourceTyped<T, F, Fut>
+impl<T, F, Fut> TypedAsyncInfiniteSourceHandler for AsyncInfiniteSourceTyped<T, F, Fut>
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     F: FnMut(usize) -> Fut + Send + Sync + Clone,
     Fut: Future<Output = Vec<T>> + Send,
 {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
+    type Output = T;
 
-    async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
-        let writer_id = self
-            .writer_id
-            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
-
+    async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         let items = (self.producer)(self.current_index).await;
         if items.is_empty() {
             return Ok(Vec::new());
         }
 
-        let event_type = T::versioned_event_type();
         let item_count = items.len();
-        let mut events = Vec::with_capacity(item_count);
-        for item in items {
-            let event =
-                ChainEventFactory::data_event_from(writer_id, &event_type, &item).map_err(|e| {
-                    SourceError::Other(format!(
-                        "AsyncInfiniteSourceTyped failed to serialize {}: {e}",
-                        std::any::type_name::<T>()
-                    ))
-                })?;
-            events.push(event);
-        }
         self.current_index = self.current_index.saturating_add(item_count);
-        Ok(events)
+        Ok(items)
     }
 
     async fn drain(&mut self) -> Result<(), SourceError> {
@@ -1088,7 +936,6 @@ where
 {
     producer: F,
     current_index: usize,
-    writer_id: Option<WriterId>,
     _phantom: PhantomData<fn() -> (T, Fut)>,
 }
 
@@ -1102,7 +949,6 @@ where
         Self {
             producer: self.producer.clone(),
             current_index: self.current_index,
-            writer_id: self.writer_id,
             _phantom: PhantomData,
         }
     }
@@ -1127,7 +973,6 @@ where
         Self {
             producer,
             current_index: 0,
-            writer_id: None,
             _phantom: PhantomData,
         }
     }
@@ -1143,47 +988,28 @@ where
         f.debug_struct("FallibleAsyncInfiniteSourceTyped")
             .field("item_type", &std::any::type_name::<T>())
             .field("current_index", &self.current_index)
-            .field("writer_id_bound", &self.writer_id.is_some())
             .finish()
     }
 }
 
 #[async_trait]
-impl<T, F, Fut> AsyncInfiniteSourceHandler for FallibleAsyncInfiniteSourceTyped<T, F, Fut>
+impl<T, F, Fut> TypedAsyncInfiniteSourceHandler for FallibleAsyncInfiniteSourceTyped<T, F, Fut>
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     F: FnMut(usize) -> Fut + Send + Sync + Clone,
     Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
 {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
+    type Output = T;
 
-    async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
-        let writer_id = self
-            .writer_id
-            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
-
+    async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         let items = (self.producer)(self.current_index).await?;
         if items.is_empty() {
             return Ok(Vec::new());
         }
 
-        let event_type = T::versioned_event_type();
         let item_count = items.len();
-        let mut events = Vec::with_capacity(item_count);
-        for item in items {
-            let event =
-                ChainEventFactory::data_event_from(writer_id, &event_type, &item).map_err(|e| {
-                    SourceError::Other(format!(
-                        "FallibleAsyncInfiniteSourceTyped failed to serialize {}: {e}",
-                        std::any::type_name::<T>()
-                    ))
-                })?;
-            events.push(event);
-        }
         self.current_index = self.current_index.saturating_add(item_count);
-        Ok(events)
+        Ok(items)
     }
 
     async fn drain(&mut self) -> Result<(), SourceError> {
@@ -1262,7 +1088,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::id::StageId;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1285,16 +1110,11 @@ mod tests {
             }
         });
 
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
-
         let first = src
             .next()
             .expect("next should succeed")
             .expect("not complete");
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].writer_id, writer_id);
-        assert_eq!(first[0].event_type(), TestPayload::versioned_event_type());
 
         let _ = src.next().expect("next should succeed");
         let _ = src.next().expect("next should succeed");
@@ -1313,17 +1133,12 @@ mod tests {
             }
         });
 
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
-
         let first = src
             .next()
             .await
             .expect("next should succeed")
             .expect("not complete");
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].writer_id, writer_id);
-        assert_eq!(first[0].event_type(), TestPayload::versioned_event_type());
 
         let _ = src.next().await.expect("next should succeed");
         let done = src.next().await.expect("next should succeed");
@@ -1345,16 +1160,11 @@ mod tests {
             }
         });
 
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
-
         let first = src
             .next()
             .expect("next should succeed")
             .expect("not complete");
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].writer_id, writer_id);
-        assert_eq!(first[0].event_type(), TestPayload::versioned_event_type());
 
         let _ = src.next().expect("next should succeed");
         let _ = src.next().expect("next should succeed");
@@ -1371,9 +1181,6 @@ mod tests {
                 Err(SourceError::Timeout("simulated timeout".to_string()))
             }
         });
-
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
 
         // First call succeeds
         let first = src
@@ -1409,9 +1216,6 @@ mod tests {
 
             Ok(Some(TestPayload { n: index }))
         });
-
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
 
         assert_eq!(src.current_index, 0);
 
@@ -1457,17 +1261,12 @@ mod tests {
             }
         });
 
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
-
         let first = src
             .next()
             .await
             .expect("next should succeed")
             .expect("not complete");
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].writer_id, writer_id);
-        assert_eq!(first[0].event_type(), TestPayload::versioned_event_type());
 
         let _ = src.next().await.expect("next should succeed");
         let done = src.next().await.expect("next should succeed");
@@ -1483,9 +1282,6 @@ mod tests {
                 Err(SourceError::Deserialization("bad data".to_string()))
             }
         });
-
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
 
         // First call succeeds
         let first = src
@@ -1515,17 +1311,12 @@ mod tests {
                 }
             });
 
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
-
         let first = src
             .next()
             .await
             .expect("next should succeed")
             .expect("not complete");
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].writer_id, writer_id);
-        assert_eq!(first[0].event_type(), TestPayload::versioned_event_type());
 
         let _ = src.next().await.expect("next should succeed");
         let done = src.next().await.expect("next should succeed");
@@ -1546,13 +1337,8 @@ mod tests {
             }
         });
 
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
-
         let first = src.next().expect("next should succeed");
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].writer_id, writer_id);
-        assert_eq!(first[0].event_type(), TestPayload::versioned_event_type());
         assert_eq!(src.current_index, 1);
 
         let second = src.next().expect("next should succeed");
@@ -1583,9 +1369,6 @@ mod tests {
             Ok(vec![TestPayload { n: index }])
         });
 
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
-
         assert_eq!(src.current_index, 0);
 
         // First: success (index advances)
@@ -1612,8 +1395,6 @@ mod tests {
         drop(tx);
 
         let mut src = InfiniteSourceTyped::from_receiver(rx, Some(100));
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
 
         let batch = src.next().expect("next should succeed");
         assert_eq!(batch.len(), 2);
@@ -1636,13 +1417,8 @@ mod tests {
             }
         });
 
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
-
         let first = src.next().await.expect("next should succeed");
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].writer_id, writer_id);
-        assert_eq!(first[0].event_type(), TestPayload::versioned_event_type());
         assert_eq!(src.current_index, 1);
 
         let second = src.next().await.expect("next should succeed");
@@ -1664,9 +1440,6 @@ mod tests {
             }
         });
 
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
-
         let first = src.next().await.expect("next should succeed");
         assert_eq!(first.len(), 1);
         assert_eq!(src.current_index, 1);
@@ -1684,8 +1457,6 @@ mod tests {
         drop(tx);
 
         let mut src = AsyncInfiniteSourceTyped::from_receiver(rx);
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
 
         let first = src.next().await.expect("next should succeed");
         assert_eq!(first.len(), 1);
@@ -1704,8 +1475,6 @@ mod tests {
     async fn async_infinite_source_from_stream_ends_as_error() {
         let stream = futures::stream::iter(vec![TestPayload { n: 1 }, TestPayload { n: 2 }]);
         let mut src = AsyncInfiniteSourceTyped::from_stream(stream);
-        let writer_id = WriterId::from(StageId::new());
-        src.bind_writer_id(writer_id);
 
         let first = src.next().await.expect("next should succeed");
         assert_eq!(first.len(), 1);
@@ -1724,23 +1493,15 @@ mod tests {
     async fn async_infinite_source_from_stream_clones_share_progress() {
         let stream = futures::stream::iter(vec![TestPayload { n: 1 }, TestPayload { n: 2 }]);
         let mut src1 = AsyncInfiniteSourceTyped::from_stream(stream);
-        let writer_id = WriterId::from(StageId::new());
-        src1.bind_writer_id(writer_id);
 
         let mut src2 = src1.clone();
 
         let first = src1.next().await.expect("next should succeed");
         assert_eq!(first.len(), 1);
-        assert_eq!(
-            TestPayload::from_event(&first[0]).expect("payload"),
-            TestPayload { n: 1 }
-        );
+        assert_eq!(first[0], TestPayload { n: 1 });
 
         let second = src2.next().await.expect("next should succeed");
         assert_eq!(second.len(), 1);
-        assert_eq!(
-            TestPayload::from_event(&second[0]).expect("payload"),
-            TestPayload { n: 2 }
-        );
+        assert_eq!(second[0], TestPayload { n: 2 });
     }
 }

@@ -1,0 +1,17 @@
+error[E0277]: the handler's `Output` declares a fact missing from the stage arrow
+  --> tests/compile_fail/source_witness/async_finite_handler_missing_arrow_member.rs:10:13
+   |
+10 |     let _ = obzenflow_dsl::async_source!(First => AsyncFiniteBoth);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the handler's `Output` set is not contained in this arrow output contract
+   |
+   = help: the trait `HandlerOutputsAreDeclaredByArrow<WithMember<support::First, EmptySet>, SubsetProofStep<MemberFound, SubsetProofStep<MemberAfter<_>, SubsetProofEnd>>>` is not implemented for `WithMember<support::First, WithMember<support::Second, EmptySet>>`
+   = note: the stage arrow is canonical: remove the extra fact from `Output`, or add it to the arrow first when it belongs in the stage contract and then update the handler's carrier or witness; use `stage_fact_set![...]` only for an effectful-transform witness, and a `StageOutputFacts` carrier where values are returned or applied (FLOWIP-120z B9)
+note: required by a bound in `typed_async_finite_source_descriptor`
+  --> crates/obzenflow_dsl/src/dsl/typing.rs
+   |
+   | pub fn typed_async_finite_source_descriptor<
+   |        ------------------------------------ required by a bound in this function
+...
+   |         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `typed_async_finite_source_descriptor`
+   = note: this error originates in the macro `obzenflow_dsl::async_source` (in Nightly builds, run with -Z macro-backtrace for more info)

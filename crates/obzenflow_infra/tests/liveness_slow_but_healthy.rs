@@ -4,12 +4,9 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::{
-    ChainEvent, ChainEventFactory, EdgeLivenessState, SystemEvent, SystemEventType,
-};
+use obzenflow_core::event::{ChainEvent, EdgeLivenessState, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
@@ -17,11 +14,10 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler,
+    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payloads for the slow-but-healthy test. The JSON shape is shared,
 /// but the source and transform author different fact identities.
@@ -51,7 +47,6 @@ use std::time::Duration;
 struct TwoEventSource {
     next_value: u64,
     remaining: usize,
-    writer_id: WriterId,
 }
 
 impl TwoEventSource {
@@ -59,13 +54,14 @@ impl TwoEventSource {
         Self {
             next_value: 1,
             remaining: 2,
-            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
-impl FiniteSourceHandler for TwoEventSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for TwoEventSource {
+    type Output = ProbeEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.remaining == 0 {
             return Ok(None);
         }
@@ -74,11 +70,7 @@ impl FiniteSourceHandler for TwoEventSource {
         let value = self.next_value;
         self.next_value = self.next_value.saturating_add(1);
 
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            ProbeEvent::versioned_event_type(),
-            json!({ "value": value }),
-        )]))
+        Ok(Some(vec![ProbeEvent { value }]))
     }
 }
 

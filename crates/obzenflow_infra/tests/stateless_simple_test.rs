@@ -5,20 +5,17 @@
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::chain_event::ChainEvent,
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    id::StageId,
-    WriterId,
 };
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
 use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the stateless-simple test. The JSON shape
 /// matches what `SimpleSource` emits; the type fingerprints the stage
@@ -46,32 +43,26 @@ impl TypedPayload for DoubledEvent {
 #[derive(Clone, Debug)]
 struct SimpleSource {
     count: usize,
-    writer_id: WriterId,
 }
 
 impl SimpleSource {
     fn new(count: usize) -> Self {
-        Self {
-            count,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { count }
     }
 }
 
-impl FiniteSourceHandler for SimpleSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for SimpleSource {
+    type Output = StatelessSimpleEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.count == 0 {
             Ok(None)
         } else {
             self.count -= 1;
 
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id,
-                StatelessSimpleEvent::versioned_event_type(),
-                json!({
-                    "value": self.count + 1,
-                }),
-            )]))
+            Ok(Some(vec![StatelessSimpleEvent {
+                value: (self.count + 1) as u64,
+            }]))
         }
     }
 }

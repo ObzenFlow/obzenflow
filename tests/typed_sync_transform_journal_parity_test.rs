@@ -22,7 +22,9 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, TypedTransformHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    TypedFiniteSourceHandler, TypedTransformHandler,
+};
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::transform::{ChunkByBudgetBuilder, FilterTyped, TryMapTyped};
 use serde::{Deserialize, Serialize};
@@ -63,38 +65,31 @@ impl TypedPayload for FilterRecord {
 struct TypedValuesSource<T> {
     values: Vec<T>,
     next: usize,
-    writer_id: WriterId,
 }
 
 impl<T> TypedValuesSource<T> {
     fn new(values: Vec<T>) -> Self {
-        Self {
-            values,
-            next: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { values, next: 0 }
     }
 }
 
-impl<T> FiniteSourceHandler for TypedValuesSource<T>
+impl<T> TypedFiniteSourceHandler for TypedValuesSource<T>
 where
     T: TypedPayload + Clone + Debug + Send + Sync + 'static,
 {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+    type Output = T;
 
     fn next(
         &mut self,
     ) -> Result<
-        Option<Vec<ChainEvent>>,
+        Option<Vec<Self::Output>>,
         obzenflow_runtime::stages::common::handlers::source::SourceError,
     > {
         let Some(value) = self.values.get(self.next).cloned() else {
             return Ok(None);
         };
         self.next += 1;
-        Ok(Some(vec![value.to_event(self.writer_id)]))
+        Ok(Some(vec![value]))
     }
 }
 

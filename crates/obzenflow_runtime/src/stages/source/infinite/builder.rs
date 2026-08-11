@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::metrics::instrumentation::StageInstrumentation;
-use crate::stages::common::handlers::InfiniteSourceHandler;
+use crate::stages::common::handlers::UnifiedInfiniteSourceHandler;
 use crate::stages::resources_builder::StageResources;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::strategies::{CompletionGate, JonestownSourceStrategy};
@@ -25,7 +25,7 @@ use super::supervisor::InfiniteSourceSupervisor;
 
 /// Builder for creating infinite source stages
 pub struct InfiniteSourceBuilder<
-    H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 > {
     handler: H,
     config: InfiniteSourceConfig,
@@ -33,7 +33,7 @@ pub struct InfiniteSourceBuilder<
     instrumentation: Option<Arc<StageInstrumentation>>,
 }
 
-impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     InfiniteSourceBuilder<H>
 {
     /// Create a new infinite source builder
@@ -60,8 +60,8 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 }
 
 #[async_trait::async_trait]
-impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
-    for InfiniteSourceBuilder<H>
+impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    SupervisorBuilder for InfiniteSourceBuilder<H>
 {
     type Handle = InfiniteSourceHandle<H>;
     type Error = BuilderError;
@@ -102,7 +102,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
         // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081d).
         let mut handler = self.handler;
-        handler.bind_writer_id(WriterId::from(self.config.stage_id));
+        handler.install_writer_id(WriterId::from(self.config.stage_id));
 
         // Create supervisor (private - not exposed)
         let supervisor = InfiniteSourceSupervisor {

@@ -11,8 +11,6 @@
 //! Every stage is typed; every edge is typed.
 
 use anyhow::Result;
-use obzenflow_core::id::StageId;
-use obzenflow_core::WriterId;
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -26,18 +24,9 @@ use crate::handlers::{
 /// Build and run the multi_source_ingest_demo flow.
 pub async fn run() -> Result<()> {
     let definition = FlowDefinition::materialize(move |_runtime_config| {
-        let kafka_handler = KafkaSource {
-            writer_id: WriterId::from(StageId::new()),
-            remaining: 3,
-        };
-        let webhook_handler = WebhookSource {
-            writer_id: WriterId::from(StageId::new()),
-            remaining: 3,
-        };
-        let file_handler = FileSource {
-            writer_id: WriterId::from(StageId::new()),
-            remaining: 3,
-        };
+        let kafka_handler = KafkaSource { remaining: 3 };
+        let webhook_handler = WebhookSource { remaining: 3 };
+        let file_handler = FileSource { remaining: 3 };
         let align_kafka_handler = align_kafka_fn();
         let align_webhook_handler = align_webhook_fn();
         let align_file_handler = align_file_fn();

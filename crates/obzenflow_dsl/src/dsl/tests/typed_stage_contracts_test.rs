@@ -16,10 +16,10 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
-        AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulTransformHandler,
-        FiniteSourceHandler, InfiniteSourceHandler, JoinReferenceView, SinkHandler,
-        StatefulEmission, TransformHandler, TypedJoinHandler, TypedStatefulHandler,
-        TypedTransformHandler,
+        EffectfulTransformHandler, JoinReferenceView, SinkHandler, StatefulEmission,
+        TransformHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+        TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
+        TypedStatefulHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::typing::{SinkTyping, SourceTyping, TransformTyping};
     use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder, TypeHintInfo};
@@ -113,8 +113,10 @@ mod tests {
         type Output = InputEvent;
     }
 
-    impl FiniteSourceHandler for SyncExactSource {
-        fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    impl TypedFiniteSourceHandler for SyncExactSource {
+        type Output = InputEvent;
+
+        fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
             Ok(None)
         }
     }
@@ -127,8 +129,10 @@ mod tests {
     }
 
     #[async_trait]
-    impl AsyncFiniteSourceHandler for AsyncExactSource {
-        async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    impl TypedAsyncFiniteSourceHandler for AsyncExactSource {
+        type Output = InputEvent;
+
+        async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
             Ok(None)
         }
     }
@@ -140,8 +144,10 @@ mod tests {
         type Output = InputEvent;
     }
 
-    impl InfiniteSourceHandler for InfiniteExactSource {
-        fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+    impl TypedInfiniteSourceHandler for InfiniteExactSource {
+        type Output = InputEvent;
+
+        fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
             Ok(vec![])
         }
     }
@@ -154,9 +160,54 @@ mod tests {
     }
 
     #[async_trait]
-    impl AsyncInfiniteSourceHandler for AsyncInfiniteExactSource {
-        async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+    impl TypedAsyncInfiniteSourceHandler for AsyncInfiniteExactSource {
+        type Output = InputEvent;
+
+        async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
             Ok(vec![])
+        }
+    }
+
+    #[derive(Clone, Debug, StageOutputFacts)]
+    enum ExactSourceOutput {
+        Input(InputEvent),
+        Alternate(AlternateEvent),
+    }
+
+    #[derive(Clone, Debug)]
+    struct MultiExactSource;
+
+    impl TypedFiniteSourceHandler for MultiExactSource {
+        type Output = ExactSourceOutput;
+
+        fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl TypedAsyncFiniteSourceHandler for MultiExactSource {
+        type Output = ExactSourceOutput;
+
+        async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+            Ok(None)
+        }
+    }
+
+    impl TypedInfiniteSourceHandler for MultiExactSource {
+        type Output = ExactSourceOutput;
+
+        fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl TypedAsyncInfiniteSourceHandler for MultiExactSource {
+        type Output = ExactSourceOutput;
+
+        async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
+            Ok(Vec::new())
         }
     }
 
@@ -580,7 +631,7 @@ mod tests {
     fn source_output_set_syntax_lowers_to_stage_output_contract() {
         let source = crate::source!(
             name: "multi_output_source",
-            { InputEvent, AlternateEvent } => SyncExactSource
+            { InputEvent, AlternateEvent } => MultiExactSource
         );
         let source_meta = source.typing_metadata().unwrap();
         assert_eq!(source_meta.output_type, exact::<InputEvent>());
@@ -591,7 +642,7 @@ mod tests {
 
         let async_source = crate::async_source!(
             name: "multi_output_async_source",
-            { InputEvent, AlternateEvent } => AsyncExactSource
+            { InputEvent, AlternateEvent } => MultiExactSource
         );
         let async_source_meta = async_source.typing_metadata().unwrap();
         assert_eq!(async_source_meta.output_type, exact::<InputEvent>());
@@ -602,7 +653,7 @@ mod tests {
 
         let infinite_source = crate::infinite_source!(
             name: "multi_output_infinite_source",
-            { InputEvent, AlternateEvent } => InfiniteExactSource
+            { InputEvent, AlternateEvent } => MultiExactSource
         );
         let infinite_source_meta = infinite_source.typing_metadata().unwrap();
         assert_eq!(infinite_source_meta.output_type, exact::<InputEvent>());
@@ -613,7 +664,7 @@ mod tests {
 
         let async_infinite_source = crate::async_infinite_source!(
             name: "multi_output_async_infinite_source",
-            { InputEvent, AlternateEvent } => AsyncInfiniteExactSource
+            { InputEvent, AlternateEvent } => MultiExactSource
         );
         let async_infinite_source_meta = async_infinite_source.typing_metadata().unwrap();
         assert_eq!(
@@ -766,7 +817,7 @@ mod tests {
             "source".to_string(),
             crate::source!(
                 name: "source",
-                { InputEvent, AlternateEvent } => SyncExactSource
+                { InputEvent, AlternateEvent } => MultiExactSource
             ),
         );
 
@@ -934,7 +985,7 @@ mod tests {
             "source".to_string(),
             crate::source!(
                 name: "source",
-                { InputEvent, AlternateEvent } => SyncExactSource
+                { InputEvent, AlternateEvent } => MultiExactSource
             ),
         );
         descriptors.insert(
@@ -2932,7 +2983,7 @@ mod tests {
             "source".to_string(),
             crate::source!(
                 name: "source",
-                { InputEvent, AlternateEvent } => SyncExactSource
+                { InputEvent, AlternateEvent } => MultiExactSource
             ),
         );
         descriptors.insert(

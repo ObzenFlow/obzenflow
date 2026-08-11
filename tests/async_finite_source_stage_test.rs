@@ -9,20 +9,21 @@ use obzenflow_adapters::middleware::{
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
     MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
 };
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::SystemEventType;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{AsyncFiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    SinkHandler, SourceObservationSink, TypedAsyncFiniteSourceHandler,
+};
 use obzenflow_runtime::stages::observer::{
     ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the async-finite source stage test. The JSON
 /// shape matches what `TestAsyncEventSource` emits; the type fingerprints
@@ -50,7 +51,6 @@ fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
 #[derive(Clone, Debug)]
 struct TestAsyncEventSource {
     emitted: usize,
-    writer_id: WriterId,
     drain_calls: Arc<AtomicU64>,
 }
 
@@ -58,24 +58,23 @@ impl TestAsyncEventSource {
     fn new(drain_calls: Arc<AtomicU64>) -> Self {
         Self {
             emitted: 0,
-            writer_id: WriterId::from(StageId::new()),
             drain_calls,
         }
     }
 }
 
 #[async_trait]
-impl AsyncFiniteSourceHandler for TestAsyncEventSource {
-    async fn next(&mut self) -> std::result::Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedAsyncFiniteSourceHandler for TestAsyncEventSource {
+    type Output = AsyncTestEvent;
+
+    async fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted < 2 {
             let index = self.emitted;
             self.emitted += 1;
             tokio::task::yield_now().await;
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id,
-                <AsyncTestEvent as TypedPayload>::EVENT_TYPE,
-                json!({ "index": index }),
-            )]))
+            Ok(Some(vec![AsyncTestEvent {
+                index: index as u64,
+            }]))
         } else {
             Ok(None)
         }
@@ -285,5 +284,147 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
         "the typed output-commit observer sees every data event without mutating it"
     );
 
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct CleanupFailureSource {
+    drain_calls: Arc<AtomicU64>,
+}
+
+#[async_trait]
+impl TypedAsyncFiniteSourceHandler for CleanupFailureSource {
+    type Output = AsyncTestEvent;
+
+    async fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
+        Ok(None)
+    }
+
+    async fn drain(&mut self) -> std::result::Result<(), SourceError> {
+        self.drain_calls.fetch_add(1, Ordering::Relaxed);
+        Err(SourceError::Other("cleanup exploded".to_string()))
+    }
+}
+
+#[tokio::test]
+async fn cleanup_failure_is_durable_and_does_not_block_eof_or_completion() -> Result<()> {
+    let drain_calls = Arc::new(AtomicU64::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal_root = unique_journal_dir("async_finite_source_cleanup_failure");
+    let drain_calls_for_flow = Arc::clone(&drain_calls);
+    let events_for_flow = Arc::clone(&events);
+
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source = CleanupFailureSource {
+            drain_calls: drain_calls_for_flow,
+        };
+        let sink = CollectSink::new(events_for_flow);
+        Ok(flow! {
+            name: "async_finite_source_cleanup_failure_test",
+            journals: disk_journals(journal_root),
+            stages: {
+                source = async_source!(AsyncTestEvent => source);
+                sink = sink!(AsyncTestEvent => sink);
+            },
+            topology: { source |> sink; }
+        })
+    })
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
+    let system_journal = handle
+        .system_journal()
+        .expect("cleanup evidence requires the system journal");
+
+    handle.run().await?;
+
+    assert_eq!(drain_calls.load(Ordering::Relaxed), 1);
+    assert!(events
+        .lock()
+        .expect("sink events lock")
+        .iter()
+        .all(|event| !event.is_data()));
+    let cleanup_failures = system_journal
+        .read_causally_ordered()
+        .await?
+        .into_iter()
+        .filter_map(|envelope| match envelope.event.event {
+            SystemEventType::SourceCleanupFailed {
+                stage_name, error, ..
+            } => Some((stage_name, error)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(cleanup_failures.len(), 1);
+    assert_eq!(cleanup_failures[0].0, "source");
+    assert!(cleanup_failures[0].1.contains("cleanup exploded"));
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct FatalObservationSource {
+    next_calls: Arc<AtomicU64>,
+    drain_calls: Arc<AtomicU64>,
+}
+
+#[async_trait]
+impl TypedAsyncFiniteSourceHandler for FatalObservationSource {
+    type Output = AsyncTestEvent;
+
+    async fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
+        self.next_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(vec![AsyncTestEvent { index: 1 }]))
+    }
+
+    async fn drain(&mut self) -> std::result::Result<(), SourceError> {
+        self.drain_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn install_source_observation_sink(&mut self, sink: SourceObservationSink) {
+        sink.report_http_pull(Default::default());
+    }
+}
+
+#[tokio::test]
+async fn fatal_poll_path_attempts_cleanup_once_without_authoring_data() -> Result<()> {
+    let next_calls = Arc::new(AtomicU64::new(0));
+    let drain_calls = Arc::new(AtomicU64::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal_root = unique_journal_dir("async_finite_source_fatal_cleanup");
+    let next_calls_for_flow = Arc::clone(&next_calls);
+    let drain_calls_for_flow = Arc::clone(&drain_calls);
+    let events_for_flow = Arc::clone(&events);
+
+    let handle = FlowDefinition::materialize(move |_runtime_config| {
+        let source = FatalObservationSource {
+            next_calls: next_calls_for_flow,
+            drain_calls: drain_calls_for_flow,
+        };
+        let sink = CollectSink::new(events_for_flow);
+        Ok(flow! {
+            name: "async_finite_source_fatal_cleanup_test",
+            journals: disk_journals(journal_root),
+            stages: {
+                source = async_source!(AsyncTestEvent => source);
+                sink = sink!(AsyncTestEvent => sink);
+            },
+            topology: { source |> sink; }
+        })
+    })
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
+
+    let _completion = tokio::time::timeout(Duration::from_secs(10), handle.run())
+        .await
+        .expect("fatal flow terminates without hanging");
+    assert_eq!(next_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(drain_calls.load(Ordering::Relaxed), 1);
+    assert!(events
+        .lock()
+        .expect("sink events lock")
+        .iter()
+        .all(|event| !event.is_data()));
     Ok(())
 }

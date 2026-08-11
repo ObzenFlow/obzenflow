@@ -5,17 +5,15 @@
 //! CSV file source
 //!
 //! Design notes (aligned with the FlowIP decisions):
-//! - Sync `FiniteSourceHandler` (blocking file IO inside `next()`)
-//! - WriterId injected via `bind_writer_id()`
-//! - Event types derived from `TypedPayload::versioned_event_type()`
+//! - Sync `TypedFiniteSourceHandler` (blocking file IO inside `next()`)
+//! - The runtime adapter owns writer identity and event construction
 //! - Malformed rows return `SourceError::Deserialization(..)`; middleware converts to error-marked events
 //! - Untyped mode preserves strings (no inference)
 
 use anyhow::{anyhow, bail, Context, Result};
 use csv::{Reader, ReaderBuilder, StringRecord};
-use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
-use obzenflow_runtime::stages::{FiniteSourceHandler, SourceError};
+use obzenflow_core::TypedPayload;
+use obzenflow_runtime::stages::{SourceError, TypedFiniteSourceHandler};
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -187,19 +185,17 @@ where
 
         Ok(CsvSource {
             state,
-            writer_id: None,
             _phantom: PhantomData,
         })
     }
 }
 
-/// CSV file source implementing `FiniteSourceHandler`.
+/// CSV file source implementing `TypedFiniteSourceHandler`.
 pub struct CsvSource<T = CsvRow>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
     state: Arc<Mutex<CsvReaderState>>,
-    writer_id: Option<WriterId>,
     _phantom: PhantomData<fn() -> T>,
 }
 
@@ -210,7 +206,6 @@ where
     fn clone(&self) -> Self {
         Self {
             state: Arc::clone(&self.state),
-            writer_id: self.writer_id,
             _phantom: PhantomData,
         }
     }
@@ -223,7 +218,6 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CsvSource")
             .field("payload_type", &std::any::type_name::<T>())
-            .field("writer_id_bound", &self.writer_id.is_some())
             .finish()
     }
 }
@@ -273,20 +267,13 @@ impl CsvSource<CsvRow> {
     }
 }
 
-impl<T> FiniteSourceHandler for CsvSource<T>
+impl<T> TypedFiniteSourceHandler for CsvSource<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
+    type Output = T;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        let writer_id = *self
-            .writer_id
-            .as_ref()
-            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
-
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         let items = {
             let mut locked = self
                 .state
@@ -299,24 +286,7 @@ where
             return Ok(None);
         };
 
-        if items.is_empty() {
-            return Ok(Some(Vec::new()));
-        }
-
-        let event_type = T::versioned_event_type();
-        let mut events = Vec::with_capacity(items.len());
-        for item in items {
-            let event =
-                ChainEventFactory::data_event_from(writer_id, &event_type, &item).map_err(|e| {
-                    SourceError::Other(format!(
-                        "CsvSource failed to serialize {}: {e}",
-                        std::any::type_name::<T>()
-                    ))
-                })?;
-            events.push(event);
-        }
-
-        Ok(Some(events))
+        Ok(Some(items))
     }
 }
 
@@ -463,7 +433,7 @@ impl CsvReaderState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_runtime::stages::FiniteSourceHandler;
+    use obzenflow_runtime::stages::TypedFiniteSourceHandler;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -474,14 +444,11 @@ mod tests {
         writeln!(tmp, "alice,007").unwrap();
 
         let mut src = CsvSource::from_file(tmp.path()).expect("source build");
-        src.bind_writer_id(WriterId::from(obzenflow_core::StageId::new()));
-
         let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
-        let payload = batch[0].payload();
-        assert_eq!(payload["name"], serde_json::json!("alice"));
-        assert_eq!(payload["age"], serde_json::json!("007"));
+        assert_eq!(batch[0].0["name"], "alice");
+        assert_eq!(batch[0].0["age"], "007");
     }
 
     #[test]
@@ -495,14 +462,11 @@ mod tests {
             .headers(["name", "age"])
             .build()
             .expect("source build");
-        src.bind_writer_id(WriterId::from(obzenflow_core::StageId::new()));
-
         let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
-        let payload = batch[0].payload();
-        assert_eq!(payload["name"], serde_json::json!("alice"));
-        assert_eq!(payload["age"], serde_json::json!("007"));
+        assert_eq!(batch[0].0["name"], "alice");
+        assert_eq!(batch[0].0["age"], "007");
     }
 
     #[test]
@@ -512,13 +476,10 @@ mod tests {
         writeln!(tmp, "alice\t007").unwrap();
 
         let mut src = CsvSource::tsv_from_file(tmp.path()).expect("source build");
-        src.bind_writer_id(WriterId::from(obzenflow_core::StageId::new()));
-
         let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
-        let payload = batch[0].payload();
-        assert_eq!(payload["name"], serde_json::json!("alice"));
-        assert_eq!(payload["age"], serde_json::json!("007"));
+        assert_eq!(batch[0].0["name"], "alice");
+        assert_eq!(batch[0].0["age"], "007");
     }
 }

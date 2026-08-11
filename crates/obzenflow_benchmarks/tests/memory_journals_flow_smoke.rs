@@ -3,18 +3,17 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the memory-journals smoke test. Matches the
 /// `{ "n": u64 }` shape emitted by `TestSource`; the type satisfies
@@ -35,7 +34,6 @@ use std::time::Duration;
 struct TestSource {
     total_events: u64,
     emitted: Arc<AtomicU64>,
-    writer_id: WriterId,
 }
 
 impl TestSource {
@@ -43,20 +41,17 @@ impl TestSource {
         Self {
             total_events,
             emitted: Arc::new(AtomicU64::new(0)),
-            writer_id: WriterId::from(obzenflow_core::StageId::new()),
         }
     }
 }
 
-impl FiniteSourceHandler for TestSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for TestSource {
+    type Output = SmokeEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         let current = self.emitted.fetch_add(1, Ordering::Relaxed);
         if current < self.total_events {
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id,
-                SmokeEvent::versioned_event_type(),
-                json!({ "n": current }),
-            )]))
+            Ok(Some(vec![SmokeEvent { n: current }]))
         } else {
             Ok(None)
         }

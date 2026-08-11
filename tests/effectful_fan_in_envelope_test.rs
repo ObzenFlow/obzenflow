@@ -15,12 +15,7 @@
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
-    event::ChainEventContent,
-    id::StageId,
-    TypedPayload, WriterId,
-};
+use obzenflow_core::{event::chain_event::ChainEvent, event::ChainEventContent, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -29,7 +24,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler,
+    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -76,7 +71,6 @@ struct ChannelSource {
     channel: &'static str,
     next_index: usize,
     count: usize,
-    writer_id: WriterId,
 }
 
 impl ChannelSource {
@@ -85,25 +79,22 @@ impl ChannelSource {
             channel,
             next_index: 0,
             count,
-            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
-impl FiniteSourceHandler for ChannelSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for ChannelSource {
+    type Output = EnvelopeInput;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next_index >= self.count {
             return Ok(None);
         }
         self.next_index += 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            EnvelopeInput::EVENT_TYPE,
-            json!(EnvelopeInput {
-                channel: self.channel.to_string(),
-                value: self.next_index as u64,
-            }),
-        )]))
+        Ok(Some(vec![EnvelopeInput {
+            channel: self.channel.to_string(),
+            value: self.next_index as u64,
+        }]))
     }
 }
 

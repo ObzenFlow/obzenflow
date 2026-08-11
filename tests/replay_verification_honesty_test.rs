@@ -12,18 +12,18 @@
 //! stage is named `not_order_certified`, per-type row counts are an advisory,
 //! and the run exits 2.
 
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::{id::StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome, MATCHED_LINE};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, TypedTransformHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    TypedFiniteSourceHandler, TypedTransformHandler,
+};
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -41,34 +41,27 @@ impl TypedPayload for Reading {
 struct Channel {
     name: &'static str,
     next: u64,
-    writer_id: WriterId,
 }
 
 impl Channel {
     fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            next: 1,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { name, next: 1 }
     }
 }
 
-impl FiniteSourceHandler for Channel {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for Channel {
+    type Output = Reading;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next > 3 {
             return Ok(None);
         }
         let n = self.next;
         self.next += 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            Reading::EVENT_TYPE,
-            json!(Reading {
-                channel: self.name.to_string(),
-                n
-            }),
-        )]))
+        Ok(Some(vec![Reading {
+            channel: self.name.to_string(),
+            n,
+        }]))
     }
 }
 

@@ -9,18 +9,17 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::StageOutputs;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, StageOutputs, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the dropped-events test. The JSON shape matches
 /// what `CorrelatedSource` emits; the type fingerprints the stage
@@ -41,7 +40,6 @@ use std::sync::{Arc, Mutex};
 struct CorrelatedSource {
     events_to_emit: usize,
     current: usize,
-    writer_id: WriterId,
 }
 
 impl CorrelatedSource {
@@ -49,16 +47,17 @@ impl CorrelatedSource {
         Self {
             events_to_emit: count,
             current: 0,
-            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
-impl FiniteSourceHandler for CorrelatedSource {
+impl TypedFiniteSourceHandler for CorrelatedSource {
+    type Output = CorrelatedTestEvent;
+
     fn next(
         &mut self,
     ) -> Result<
-        Option<Vec<ChainEvent>>,
+        Option<Vec<Self::Output>>,
         obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.current >= self.events_to_emit {
@@ -67,15 +66,10 @@ impl FiniteSourceHandler for CorrelatedSource {
 
         self.current += 1;
 
-        let event = ChainEventFactory::data_event(
-            self.writer_id,
-            CorrelatedTestEvent::versioned_event_type(),
-            json!({
-                "index": self.current,
-                "data": format!("event_{}", self.current)
-            }),
-        )
-        .with_new_correlation("correlated_source");
+        let event = CorrelatedTestEvent {
+            index: self.current as u64,
+            data: format!("event_{}", self.current),
+        };
 
         Ok(Some(vec![event]))
     }

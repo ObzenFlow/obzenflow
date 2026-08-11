@@ -19,7 +19,7 @@ use std::time::Duration;
 ///
 /// This is intentionally small for now; 082h will own any cross-stage
 /// unification with a broader StageError taxonomy.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceError {
     /// The underlying transport or dependency timed out.
     Timeout(String),
@@ -27,6 +27,9 @@ pub enum SourceError {
     Transport(String),
     /// The source encountered malformed data it could not deserialize.
     Deserialization(String),
+    /// The dependency responded successfully, but the decoded domain value
+    /// failed source validation. This is not dependency-health evidence.
+    Validation(String),
     /// Catch-all for other source-specific failures.
     Other(String),
 }
@@ -39,6 +42,7 @@ impl fmt::Display for SourceError {
             SourceError::Deserialization(msg) => {
                 write!(f, "source deserialization error: {msg}")
             }
+            SourceError::Validation(msg) => write!(f, "source validation error: {msg}"),
             SourceError::Other(msg) => write!(f, "source error: {msg}"),
         }
     }

@@ -14,19 +14,19 @@
 //! under the positional projection.
 
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::{id::StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::Effects;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{EffectfulTransformHandler, FiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    EffectfulTransformHandler, TypedFiniteSourceHandler,
+};
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -52,30 +52,24 @@ impl TypedPayload for Stamped {
 #[derive(Clone, Debug)]
 struct Numbers {
     next: u64,
-    writer_id: WriterId,
 }
 
 impl Numbers {
     fn new() -> Self {
-        Self {
-            next: 1,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { next: 1 }
     }
 }
 
-impl FiniteSourceHandler for Numbers {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for Numbers {
+    type Output = Input;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next > 3 {
             return Ok(None);
         }
         let id = self.next;
         self.next += 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            Input::EVENT_TYPE,
-            json!(Input { id }),
-        )]))
+        Ok(Some(vec![Input { id }]))
     }
 }
 

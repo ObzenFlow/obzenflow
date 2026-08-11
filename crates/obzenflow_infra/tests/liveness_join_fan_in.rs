@@ -4,22 +4,21 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::{ChainEvent, ChainEventFactory, SystemEvent, SystemEventType};
+use obzenflow_core::event::{ChainEvent, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
+use obzenflow_core::StageId;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{async_source, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, JoinReferenceView, SinkHandler, TypedJoinHandler,
+    JoinReferenceView, SinkHandler, TypedAsyncFiniteSourceHandler, TypedJoinHandler,
 };
 use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payloads for the join-fan-in test. The two legs (reference
 /// and stream) carry semantically different events; declaring them as
@@ -63,54 +62,45 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 struct OneRefEventSource {
     emitted: bool,
-    writer_id: WriterId,
 }
 
 impl OneRefEventSource {
     fn new() -> Self {
-        Self {
-            emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { emitted: false }
     }
 }
 
-impl obzenflow_runtime::stages::common::handlers::FiniteSourceHandler for OneRefEventSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler for OneRefEventSource {
+    type Output = CatalogRecord;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted {
             return Ok(None);
         }
         self.emitted = true;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            CatalogRecord::versioned_event_type(),
-            json!({ "kind": "ref", "value": 1 }),
-        )]))
+        Ok(Some(vec![CatalogRecord {
+            kind: "ref".to_string(),
+            value: 1,
+        }]))
     }
 }
 
 #[derive(Clone, Debug)]
 struct DelayedStreamSource {
     emitted: bool,
-    writer_id: Option<WriterId>,
 }
 
 impl DelayedStreamSource {
     fn new() -> Self {
-        Self {
-            emitted: false,
-            writer_id: None,
-        }
+        Self { emitted: false }
     }
 }
 
 #[async_trait]
-impl AsyncFiniteSourceHandler for DelayedStreamSource {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
+impl TypedAsyncFiniteSourceHandler for DelayedStreamSource {
+    type Output = LiveEvent;
 
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted {
             return Ok(None);
         }
@@ -118,14 +108,10 @@ impl AsyncFiniteSourceHandler for DelayedStreamSource {
         self.emitted = true;
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        let writer_id = self
-            .writer_id
-            .expect("stream writer_id should be bound by runtime");
-        Ok(Some(vec![ChainEventFactory::data_event(
-            writer_id,
-            LiveEvent::versioned_event_type(),
-            json!({ "kind": "stream", "value": 2 }),
-        )]))
+        Ok(Some(vec![LiveEvent {
+            kind: "stream".to_string(),
+            value: 2,
+        }]))
     }
 }
 

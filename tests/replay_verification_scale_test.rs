@@ -7,17 +7,15 @@
 //! row size rather than run size; this suite is the executable witness that
 //! the posture holds on real journals.
 
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::{id::StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
-use obzenflow_runtime::stages::common::handlers::FiniteSourceHandler;
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -36,27 +34,23 @@ impl TypedPayload for Tick {
 #[derive(Clone, Debug)]
 struct Ticks {
     next: u64,
-    writer_id: WriterId,
 }
 
 impl Ticks {
     fn new() -> Self {
-        Self {
-            next: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { next: 0 }
     }
 }
 
-impl FiniteSourceHandler for Ticks {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for Ticks {
+    type Output = Tick;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next >= EVENTS {
             return Ok(None);
         }
-        let batch: Vec<ChainEvent> = (self.next..(self.next + BATCH).min(EVENTS))
-            .map(|n| {
-                ChainEventFactory::data_event(self.writer_id, Tick::EVENT_TYPE, json!(Tick { n }))
-            })
+        let batch: Vec<Tick> = (self.next..(self.next + BATCH).min(EVENTS))
+            .map(|n| Tick { n })
             .collect();
         self.next += batch.len() as u64;
         Ok(Some(batch))

@@ -10,20 +10,20 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::WriterId;
 use obzenflow_dsl::{join, sink, source, stateful, test_flow};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, JoinReferenceView, SinkHandler, StatefulEmission, TypedJoinHandler,
+    JoinReferenceView, SinkHandler, StatefulEmission, TypedFiniteSourceHandler, TypedJoinHandler,
     TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use std::marker::PhantomData;
 
 /// File-local payload for the stateful-metrics flow. The JSON shape
 /// matches what `BurstSource` emits; the type fingerprints the stage
@@ -80,35 +80,52 @@ use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-#[derive(Clone, Debug)]
-struct BurstSource {
-    total: usize,
-    current: usize,
-    writer_id: WriterId,
-    event_type: String,
+trait IndexedMetric: TypedPayload {
+    fn from_index(index: u64) -> Self;
 }
 
-impl BurstSource {
-    fn new(total: usize) -> Self {
-        Self::with_event_type(total, MetricEvent::versioned_event_type())
+impl IndexedMetric for MetricEvent {
+    fn from_index(index: u64) -> Self {
+        Self { index }
     }
+}
 
-    fn with_event_type(total: usize, event_type: String) -> Self {
+impl IndexedMetric for RefMetricEvent {
+    fn from_index(index: u64) -> Self {
+        Self { index }
+    }
+}
+
+impl IndexedMetric for StreamMetricEvent {
+    fn from_index(index: u64) -> Self {
+        Self { index }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BurstSource<T> {
+    total: usize,
+    current: usize,
+    _output: PhantomData<fn() -> T>,
+}
+
+impl<T> BurstSource<T> {
+    fn new(total: usize) -> Self {
         Self {
             total,
             current: 0,
-            writer_id: WriterId::from(StageId::new()),
-            event_type,
+            _output: PhantomData,
         }
     }
 }
 
-impl FiniteSourceHandler for BurstSource {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = id;
-    }
+impl<T> TypedFiniteSourceHandler for BurstSource<T>
+where
+    T: IndexedMetric + Send + Sync + 'static,
+{
+    type Output = T;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.current >= self.total {
             return Ok(None);
         }
@@ -116,11 +133,7 @@ impl FiniteSourceHandler for BurstSource {
         let idx = self.current;
         self.current += 1;
 
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            self.event_type.clone(),
-            json!({ "index": idx }),
-        )]))
+        Ok(Some(vec![T::from_index(idx as u64)]))
     }
 }
 
@@ -268,7 +281,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let (sink_handler, sink_events) = CollectingSink::new();
     let journal_dir = unique_journal_dir("stateful_metrics");
     let journal_dir_for_flow = journal_dir.clone();
-    let source = BurstSource::new(total_events);
+    let source = BurstSource::<MetricEvent>::new(total_events);
     let accumulator = SlowAccumulator::new(sleep_per_event);
 
     let test_handle = test_flow! {
@@ -502,10 +515,8 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
 
     let reference_events: usize = 10;
     let stream_events: usize = 0;
-    let reference_source =
-        BurstSource::with_event_type(reference_events, RefMetricEvent::versioned_event_type());
-    let stream_source =
-        BurstSource::with_event_type(stream_events, StreamMetricEvent::versioned_event_type());
+    let reference_source = BurstSource::<RefMetricEvent>::new(reference_events);
+    let stream_source = BurstSource::<StreamMetricEvent>::new(stream_events);
     let joiner = NoopJoin;
     let (sink, _events) = CollectingSink::new();
 

@@ -19,8 +19,7 @@
 //! effect-lane namespace in the journals rather than from manifest chains.
 
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::{id::StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -29,7 +28,9 @@ use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{EffectfulTransformHandler, FiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    EffectfulTransformHandler, TypedFiniteSourceHandler,
+};
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -110,31 +111,25 @@ impl TypedPayload for OrderCancelled {
 #[derive(Clone, Debug)]
 struct OrderSource {
     next: u64,
-    writer_id: WriterId,
 }
 
 impl OrderSource {
     fn new() -> Self {
-        Self {
-            next: 1,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { next: 1 }
     }
 }
 
-impl FiniteSourceHandler for OrderSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for OrderSource {
+    type Output = OrderPlaced;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next > 6 {
             return Ok(None);
         }
         let order_id = self.next;
         self.next += 1;
         let amount = if order_id == 5 { 700 } else { 100 * order_id };
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            OrderPlaced::EVENT_TYPE,
-            json!(OrderPlaced { order_id, amount }),
-        )]))
+        Ok(Some(vec![OrderPlaced { order_id, amount }]))
     }
 }
 

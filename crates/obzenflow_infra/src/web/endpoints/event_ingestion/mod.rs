@@ -25,7 +25,7 @@ pub use validation::{
     validate_submission, SchemaValidator, TypedValidator, ValidationConfig, ValidationError,
 };
 
-use obzenflow_adapters::sources::http::{HttpSource, HttpSourceTyped};
+use obzenflow_adapters::sources::http::HostedIngressSource;
 use obzenflow_core::ingress::EventSubmission;
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
@@ -135,7 +135,7 @@ pub struct Ingress<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
-    source: HttpSourceTyped<T>,
+    source: HostedIngressSource<T>,
     handle: IngressHandle<T>,
 }
 
@@ -143,7 +143,7 @@ impl<T> Ingress<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
-    pub fn source(&self) -> HttpSourceTyped<T> {
+    pub fn source(&self) -> HostedIngressSource<T> {
         self.source.clone()
     }
 
@@ -158,7 +158,7 @@ where
     T: TypedPayload + Send + Sync + 'static,
 {
     surface: WebSurfaceAttachment,
-    source: HttpSourceTyped<T>,
+    source: HostedIngressSource<T>,
     handle: IngressHandle<T>,
 }
 
@@ -167,7 +167,7 @@ where
     T: TypedPayload + Send + Sync + 'static,
 {
     /// Clone the typed source that feeds accepted events into `flow!`.
-    pub fn source(&self) -> HttpSourceTyped<T> {
+    pub fn source(&self) -> HostedIngressSource<T> {
         self.source.clone()
     }
 
@@ -192,9 +192,7 @@ where
     T: TypedPayload + Send + Sync + std::fmt::Debug + 'static,
 {
     let (state, rx) = IngestionState::new(config);
-    let source = HttpSource::new(rx)
-        .with_ingress_slot(state.ingress_slot())
-        .typed::<T>();
+    let source = HostedIngressSource::<T>::new(rx, state.ingress_slot());
     let handle = IngressHandle {
         state,
         _phantom: PhantomData,
@@ -322,7 +320,7 @@ mod tests {
     use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::{
-        source::AsyncInfiniteSourceHandler, SinkHandler,
+        SinkHandler, TypedAsyncInfiniteSourceHandler,
     };
     use obzenflow_runtime::supervised_base::SupervisorHandle;
     use serde_json::json;
@@ -605,7 +603,7 @@ mod tests {
         use obzenflow_core::ingress::{
             IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext,
         };
-        use obzenflow_core::{TypedPayload, WriterId};
+        use obzenflow_core::TypedPayload;
         use serde::{Deserialize, Serialize};
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -678,13 +676,9 @@ mod tests {
             }
         ));
 
-        source.bind_writer_id(WriterId::from(StageId::new()));
-        let events = source.next().await.expect("accepted event reaches source");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type(), "order.created.v1");
-        let context = events[0].ingress_context.as_ref().expect("ingress context");
-        assert_eq!(context.ingress_key, "orders");
-        assert_eq!(context.attempt_seq, IngressAttemptSeq(0));
+        let values = source.next().await.expect("accepted event reaches source");
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].order_id, "1");
 
         let rejected = handle
             .submit(HandlePayload {
@@ -1608,8 +1602,6 @@ mod tests {
 
     #[tokio::test]
     async fn http_ingress_bundle_wires_surface_and_source() {
-        use obzenflow_core::event::ChainEventContent;
-        use obzenflow_core::{StageId, WriterId};
         use serde::{Deserialize, Serialize};
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1656,22 +1648,9 @@ mod tests {
         let response = unwrap_unary(events_endpoint.handle(request).await.unwrap());
         assert_eq!(response.status, 200);
 
-        source.bind_writer_id(WriterId::from(StageId::new()));
         let out = source.next().await.unwrap();
         assert_eq!(out.len(), 1);
-        match &out[0].content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } => {
-                assert_eq!(event_type, "order.created");
-                assert_eq!(payload, &serde_json::json!({ "order_id": "1" }));
-            }
-            other => panic!("expected data event, got {other:?}"),
-        }
-        let ingress_context = out[0].ingress_context.as_ref().expect("ingress context");
-        assert_eq!(ingress_context.ingress_key, "/api/ingest");
-        assert_eq!(ingress_context.batch_index, None);
+        assert_eq!(out[0].order_id, "1");
 
         for task in wired.tasks {
             task.abort();

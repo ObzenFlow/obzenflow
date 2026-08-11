@@ -13,18 +13,16 @@
 //! also pins the killed-run tail shape (torn trailing writes are skipped at
 //! the framed-record layer) that the FLOWIP flagged for fixture confirmation.
 
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::{id::StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
-use obzenflow_runtime::stages::common::handlers::FiniteSourceHandler;
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,31 +44,25 @@ impl TypedPayload for Tick {
 #[derive(Clone, Debug)]
 struct StallingTicks {
     next: u64,
-    writer_id: WriterId,
 }
 
 impl StallingTicks {
     fn new() -> Self {
-        Self {
-            next: 1,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { next: 1 }
     }
 }
 
-impl FiniteSourceHandler for StallingTicks {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for StallingTicks {
+    type Output = Tick;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next > 4 {
             std::thread::sleep(Duration::from_millis(10));
             return Ok(Some(vec![]));
         }
         let n = self.next;
         self.next += 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            Tick::EVENT_TYPE,
-            json!(Tick { n }),
-        )]))
+        Ok(Some(vec![Tick { n }]))
     }
 }
 

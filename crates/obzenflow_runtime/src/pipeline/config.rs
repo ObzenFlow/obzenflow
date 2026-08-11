@@ -4,9 +4,8 @@
 
 //! Pipeline and stage configuration types
 
-use crate::stages::common::handlers::{
-    FiniteSourceHandler, InfiniteSourceHandler, SinkHandler, TransformHandler,
-};
+use crate::stages::common::handlers::source::traits::{FiniteSourceHandler, InfiniteSourceHandler};
+use crate::stages::common::handlers::{SinkHandler, TransformHandler};
 use obzenflow_core::{SccId, StageId};
 use std::collections::HashSet;
 use std::sync::Arc;

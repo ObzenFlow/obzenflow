@@ -12,11 +12,11 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{rate_limit_with_burst, CircuitBreaker};
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, StageOutputs, WriterId};
+use obzenflow_core::{StageId, StageOutputs};
 use obzenflow_dsl::{sink, source, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 #[cfg(feature = "test-support")]
@@ -24,12 +24,11 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the metrics exporter integration test. The JSON
 /// shape matches what `BurstSource` emits; the type fingerprints the
@@ -50,21 +49,18 @@ use tokio::time::{sleep, Duration};
 struct BurstSource {
     total: usize,
     current: usize,
-    writer_id: WriterId,
 }
 
 impl BurstSource {
     fn new(total: usize) -> Self {
-        Self {
-            total,
-            current: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { total, current: 0 }
     }
 }
 
-impl FiniteSourceHandler for BurstSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for BurstSource {
+    type Output = MetricEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.current >= self.total {
             return Ok(None);
         }
@@ -72,39 +68,29 @@ impl FiniteSourceHandler for BurstSource {
         let idx = self.current;
         self.current += 1;
 
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            MetricEvent::versioned_event_type(),
-            json!({ "index": idx }),
-        )]))
+        Ok(Some(vec![MetricEvent { index: idx as u64 }]))
     }
 }
 
 #[derive(Clone, Debug)]
 struct ErrorAfterFirstSource {
     current: usize,
-    writer_id: WriterId,
 }
 
 impl ErrorAfterFirstSource {
     fn new() -> Self {
-        Self {
-            current: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { current: 0 }
     }
 }
 
-impl FiniteSourceHandler for ErrorAfterFirstSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for ErrorAfterFirstSource {
+    type Output = MetricEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         match self.current {
             0 => {
                 self.current = 1;
-                Ok(Some(vec![ChainEventFactory::data_event(
-                    self.writer_id,
-                    MetricEvent::versioned_event_type(),
-                    json!({ "index": 0 }),
-                )]))
+                Ok(Some(vec![MetricEvent { index: 0 }]))
             }
             1 => {
                 self.current = 2;

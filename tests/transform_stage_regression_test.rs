@@ -11,7 +11,7 @@ use obzenflow_adapters::middleware::{
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
     MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
 };
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
@@ -20,19 +20,17 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::WriterId;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::observer::{
     ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
 };
 use obzenflow_runtime::stages::transform::TryMapTyped;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the transform stage regression test. The JSON shape
 /// matches what `TestEventSource` emits; the type fingerprints the stage
@@ -61,33 +59,29 @@ fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
 #[derive(Clone, Debug)]
 struct TestEventSource {
     emitted: usize,
-    writer_id: WriterId,
 }
 
 impl TestEventSource {
     fn new() -> Self {
-        Self {
-            emitted: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { emitted: 0 }
     }
 }
 
-impl FiniteSourceHandler for TestEventSource {
+impl TypedFiniteSourceHandler for TestEventSource {
+    type Output = TransformStageEvent;
+
     fn next(
         &mut self,
     ) -> Result<
-        Option<Vec<ChainEvent>>,
+        Option<Vec<Self::Output>>,
         obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.emitted < 2 {
             let index = self.emitted;
             self.emitted += 1;
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id,
-                <TransformStageEvent as TypedPayload>::EVENT_TYPE,
-                json!({ "index": index }),
-            )]))
+            Ok(Some(vec![TransformStageEvent {
+                index: index as u64,
+            }]))
         } else {
             Ok(None)
         }

@@ -4,7 +4,7 @@
 
 //! Handle for infinite source stages
 
-use crate::stages::common::handlers::InfiniteSourceHandler;
+use crate::stages::common::handlers::source::traits::InfiniteSourceHandler;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 
 use super::fsm::{InfiniteSourceEvent, InfiniteSourceState};

@@ -20,11 +20,7 @@ mod replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow::typed::joins;
-use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
-    id::StageId,
-    TypedPayload, WriterId,
-};
+use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -33,7 +29,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler,
+    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -100,32 +96,26 @@ impl TypedPayload for FinalOutput {
 #[derive(Clone, Debug)]
 struct RefSource {
     next_index: usize,
-    writer_id: WriterId,
 }
 
 impl RefSource {
     fn new() -> Self {
-        Self {
-            next_index: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { next_index: 0 }
     }
 }
 
-impl FiniteSourceHandler for RefSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for RefSource {
+    type Output = RefItem;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next_index >= 3 {
             return Ok(None);
         }
         self.next_index += 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            RefItem::EVENT_TYPE,
-            json!(RefItem {
-                key: format!("r{}", self.next_index),
-                label: format!("label-{}", self.next_index),
-            }),
-        )]))
+        Ok(Some(vec![RefItem {
+            key: format!("r{}", self.next_index),
+            label: format!("label-{}", self.next_index),
+        }]))
     }
 }
 
@@ -136,33 +126,27 @@ impl FiniteSourceHandler for RefSource {
 #[derive(Clone, Debug)]
 struct StreamSource {
     next_index: usize,
-    writer_id: WriterId,
 }
 
 impl StreamSource {
     fn new() -> Self {
-        Self {
-            next_index: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { next_index: 0 }
     }
 }
 
-impl FiniteSourceHandler for StreamSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for StreamSource {
+    type Output = StreamItem;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next_index >= 5 {
             return Ok(None);
         }
         self.next_index += 1;
         let key = format!("r{}", ((self.next_index - 1) % 3) + 1);
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            StreamItem::EVENT_TYPE,
-            json!(StreamItem {
-                key,
-                value: self.next_index as u64,
-            }),
-        )]))
+        Ok(Some(vec![StreamItem {
+            key,
+            value: self.next_index as u64,
+        }]))
     }
 }
 

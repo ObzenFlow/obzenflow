@@ -5,23 +5,21 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::typed::stateful as typed_stateful;
-use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::CorrelationId;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{ChainEvent, CycleDepth, StageId, StageOutputs, WriterId};
+use obzenflow_core::{ChainEvent, CycleDepth, StageOutputs};
 use obzenflow_dsl::{
     async_source, flow, sink, source, stateful, test_flow, transform, FlowDefinition,
 };
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, FiniteSourceHandler, SinkHandler, StatefulEmission,
+    SinkHandler, StatefulEmission, TypedAsyncFiniteSourceHandler, TypedFiniteSourceHandler,
     TypedStatefulHandler, TypedTransformHandler,
 };
+use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::{JournalProbe, TestClock};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the cycle-guard test. The JSON shape matches
 /// what `TestEventSource` emits; the type fingerprints the stage
@@ -43,74 +41,52 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Debug)]
 struct TestEventSource {
     remaining: usize,
-    writer_id: WriterId,
 }
 
 impl TestEventSource {
     fn new(count: usize) -> Self {
-        Self {
-            remaining: count,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { remaining: count }
     }
 }
 
-impl FiniteSourceHandler for TestEventSource {
-    fn next(
-        &mut self,
-    ) -> std::result::Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
-    > {
+impl TypedFiniteSourceHandler for TestEventSource {
+    type Output = SeedEvent;
+
+    fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
         if self.remaining == 0 {
             return Ok(None);
         }
 
         self.remaining -= 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            SeedEvent::versioned_event_type(),
-            json!({ "n": self.remaining }),
-        )]))
+        Ok(Some(vec![SeedEvent {
+            n: self.remaining as u64,
+        }]))
     }
 }
 
 #[derive(Clone, Debug)]
-struct CorrelatedEventSource {
+struct DelayedEofEventSource {
     emitted: bool,
-    writer_id: WriterId,
-    correlation_id: CorrelationId,
     eof_delay: Duration,
 }
 
-impl CorrelatedEventSource {
+impl DelayedEofEventSource {
     fn new(eof_delay: Duration) -> Self {
         Self {
             emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-            correlation_id: CorrelationId::new(),
             eof_delay,
         }
     }
 }
 
 #[async_trait]
-impl AsyncFiniteSourceHandler for CorrelatedEventSource {
-    async fn next(
-        &mut self,
-    ) -> std::result::Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
-    > {
+impl TypedAsyncFiniteSourceHandler for DelayedEofEventSource {
+    type Output = SeedEvent;
+
+    async fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
         if !self.emitted {
             self.emitted = true;
-            let mut event = ChainEventFactory::data_event(
-                self.writer_id,
-                SeedEvent::versioned_event_type(),
-                json!({ "n": 0u64 }),
-            );
-            event.set_single_correlation(self.correlation_id, None);
-            return Ok(Some(vec![event]));
+            return Ok(Some(vec![SeedEvent { n: 0 }]));
         }
 
         tokio::time::sleep(self.eof_delay).await; // hang-guard: test-only EOF delay under paused time
@@ -407,7 +383,7 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
     let base_for_flow = base.clone();
 
     let (counter_sink, counter) = EventCounterSink::new();
-    let source = CorrelatedEventSource::new(Duration::from_millis(500));
+    let source = DelayedEofEventSource::new(Duration::from_millis(500));
     let transform_a = IdentityTransform::<SeedEvent>::new();
     let transform_b = IdentityTransform::<SeedEvent>::new();
 

@@ -23,8 +23,8 @@ fn lowering_retains_closed_positions_and_lane_local_indices() {
     let carrier = source(&root, "crates/obzenflow_adapters/src/middleware/carrier.rs");
 
     for field in [
-        "pub source_policies: Vec<Box<dyn MiddlewareFactory>>",
-        "pub ingress_policy: Option<Box<dyn MiddlewareFactory>>",
+        "pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>",
+        "pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>",
         "pub sink_policies: Vec<Box<dyn MiddlewareFactory>>",
         "pub observers: Vec<Box<dyn MiddlewareFactory>>",
     ] {

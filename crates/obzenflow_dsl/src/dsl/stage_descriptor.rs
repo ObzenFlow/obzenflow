@@ -37,10 +37,11 @@ use obzenflow_runtime::{
         common::{
             control_strategies::{JonestownSignalStrategy, SignalGate},
             handlers::{
-                AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, EffectfulStatefulHandler,
-                EffectfulStatefulHandlerAdapter, EffectfulTransformHandler,
-                EffectfulTransformHandlerAdapter, FiniteSourceHandler, InfiniteSourceHandler,
-                SinkHandler, TransformHandler, UnifiedStatefulHandler,
+                EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
+                EffectfulTransformHandler, EffectfulTransformHandlerAdapter, SinkHandler,
+                TransformHandler, UnifiedAsyncFiniteSourceHandler,
+                UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
+                UnifiedInfiniteSourceHandler, UnifiedStatefulHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -633,19 +634,19 @@ fn validate_effect_declarations(
     Ok(())
 }
 
-/// Descriptor for finite source stages
-pub struct FiniteSourceDescriptor<H: FiniteSourceHandler + 'static> {
-    pub name: String,
-    pub handler: H,
-    pub source_policies: Vec<Box<dyn MiddlewareFactory>>,
-    pub ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-    pub observers: Vec<Box<dyn MiddlewareFactory>>,
-    pub backpressure: Option<BackpressureClause>,
+/// Crate-private erased descriptor for finite source stages.
+pub(crate) struct FiniteSourceDescriptor<H: UnifiedFiniteSourceHandler + 'static> {
+    pub(crate) name: String,
+    pub(crate) handler: H,
+    pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
-impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
-    for FiniteSourceDescriptor<H>
+impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    StageDescriptor for FiniteSourceDescriptor<H>
 {
     fn name(&self) -> &str {
         &self.name
@@ -735,9 +736,9 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Inject the stage writer id before handing the raw source to runtime.
+        // Install the stage writer id at the erased runtime boundary.
         let mut handler = self.handler;
-        handler.bind_writer_id(writer_id);
+        handler.install_writer_id(writer_id);
 
         // Create the stage configuration
         let source_config = FiniteSourceConfig {
@@ -770,22 +771,22 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
     }
 }
 
-/// Descriptor for async finite source stages.
-pub struct AsyncFiniteSourceDescriptor<H: AsyncFiniteSourceHandler + 'static> {
-    pub name: String,
-    pub handler: H,
+/// Crate-private erased descriptor for async finite source stages.
+pub(crate) struct AsyncFiniteSourceDescriptor<H: UnifiedAsyncFiniteSourceHandler + 'static> {
+    pub(crate) name: String,
+    pub(crate) handler: H,
     poll_timeout: Option<Duration>,
-    pub source_policies: Vec<Box<dyn MiddlewareFactory>>,
-    pub ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-    pub observers: Vec<Box<dyn MiddlewareFactory>>,
-    pub backpressure: Option<BackpressureClause>,
+    pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) backpressure: Option<BackpressureClause>,
 }
 
-impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     AsyncFiniteSourceDescriptor<H>
 {
     /// Create a new async finite source descriptor carrying the handler's configured timeout.
-    pub fn new(name: impl Into<String>, handler: H) -> Self {
+    pub(crate) fn new(name: impl Into<String>, handler: H) -> Self {
         let poll_timeout = handler.poll_timeout();
         Self {
             name: name.into(),
@@ -797,31 +798,11 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             backpressure: None,
         }
     }
-
-    pub fn with_source_policy<M: MiddlewareFactory + 'static>(mut self, policy: M) -> Self {
-        self.source_policies.push(Box::new(policy));
-        self
-    }
-
-    pub fn with_ingress_policy<M: MiddlewareFactory + 'static>(mut self, policy: M) -> Self {
-        self.ingress_policy = Some(Box::new(policy));
-        self
-    }
-
-    pub fn with_observer<M: MiddlewareFactory + 'static>(mut self, observer: M) -> Self {
-        self.observers.push(Box::new(observer));
-        self
-    }
-
-    /// Build into a boxed StageDescriptor for DSL compatibility.
-    pub fn build(self) -> Box<dyn StageDescriptor> {
-        Box::new(self)
-    }
 }
 
 #[async_trait]
-impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
-    for AsyncFiniteSourceDescriptor<H>
+impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    StageDescriptor for AsyncFiniteSourceDescriptor<H>
 {
     fn name(&self) -> &str {
         &self.name
@@ -912,9 +893,9 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Inject the stage writer id before handing the raw source to runtime.
+        // Install the stage writer id at the erased runtime boundary.
         let mut handler = self.handler;
-        handler.bind_writer_id(writer_id);
+        handler.install_writer_id(writer_id);
 
         // Create the stage configuration
         let source_config = FiniteSourceConfig {
@@ -947,19 +928,19 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
     }
 }
 
-/// Descriptor for infinite source stages
-pub struct InfiniteSourceDescriptor<H: InfiniteSourceHandler + 'static> {
-    pub name: String,
-    pub handler: H,
-    pub source_policies: Vec<Box<dyn MiddlewareFactory>>,
-    pub ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-    pub observers: Vec<Box<dyn MiddlewareFactory>>,
-    pub backpressure: Option<BackpressureClause>,
+/// Crate-private erased descriptor for infinite source stages.
+pub(crate) struct InfiniteSourceDescriptor<H: UnifiedInfiniteSourceHandler + 'static> {
+    pub(crate) name: String,
+    pub(crate) handler: H,
+    pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
-impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
-    for InfiniteSourceDescriptor<H>
+impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    StageDescriptor for InfiniteSourceDescriptor<H>
 {
     fn name(&self) -> &str {
         &self.name
@@ -1049,9 +1030,9 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Inject the stage writer id before handing the raw source to runtime.
+        // Install the stage writer id at the erased runtime boundary.
         let mut handler = self.handler;
-        handler.bind_writer_id(writer_id);
+        handler.install_writer_id(writer_id);
 
         // Create the stage configuration
         let source_config = InfiniteSourceConfig {
@@ -1084,25 +1065,25 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     }
 }
 
-/// Descriptor for async infinite source stages.
-pub struct AsyncInfiniteSourceDescriptor<H: AsyncInfiniteSourceHandler + 'static> {
-    pub name: String,
-    pub handler: H,
+/// Crate-private erased descriptor for async infinite source stages.
+pub(crate) struct AsyncInfiniteSourceDescriptor<H: UnifiedAsyncInfiniteSourceHandler + 'static> {
+    pub(crate) name: String,
+    pub(crate) handler: H,
     poll_timeout: Option<Duration>,
-    pub source_policies: Vec<Box<dyn MiddlewareFactory>>,
-    pub ingress_policy: Option<Box<dyn MiddlewareFactory>>,
-    pub observers: Vec<Box<dyn MiddlewareFactory>>,
-    pub backpressure: Option<BackpressureClause>,
+    pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
+    pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
+    pub(crate) backpressure: Option<BackpressureClause>,
 }
 
-impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     AsyncInfiniteSourceDescriptor<H>
 {
     /// Create a new async infinite source descriptor.
     ///
     /// The handler contract defaults infinite sources to no poll timeout so push
     /// sources can block efficiently (e.g. `recv().await`).
-    pub fn new(name: impl Into<String>, handler: H) -> Self {
+    pub(crate) fn new(name: impl Into<String>, handler: H) -> Self {
         let poll_timeout = handler.poll_timeout();
         Self {
             name: name.into(),
@@ -1114,30 +1095,10 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             backpressure: None,
         }
     }
-
-    pub fn with_source_policy<M: MiddlewareFactory + 'static>(mut self, policy: M) -> Self {
-        self.source_policies.push(Box::new(policy));
-        self
-    }
-
-    pub fn with_ingress_policy<M: MiddlewareFactory + 'static>(mut self, policy: M) -> Self {
-        self.ingress_policy = Some(Box::new(policy));
-        self
-    }
-
-    pub fn with_observer<M: MiddlewareFactory + 'static>(mut self, observer: M) -> Self {
-        self.observers.push(Box::new(observer));
-        self
-    }
-
-    /// Build into a boxed StageDescriptor for DSL compatibility.
-    pub fn build(self) -> Box<dyn StageDescriptor> {
-        Box::new(self)
-    }
 }
 
 #[async_trait]
-impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     StageDescriptor for AsyncInfiniteSourceDescriptor<H>
 {
     fn name(&self) -> &str {
@@ -1234,9 +1195,9 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Inject the stage writer id before handing the raw source to runtime.
+        // Install the stage writer id at the erased runtime boundary.
         let mut handler = self.handler;
-        handler.bind_writer_id(writer_id);
+        handler.install_writer_id(writer_id);
 
         let source_config = InfiniteSourceConfig {
             stage_id: config.stage_id,
@@ -2636,10 +2597,16 @@ fn check_join_state<H>(state: &JoinState<H>) -> crate::stage_handle_adapter::Sta
     }
 }
 
-impl<H: FiniteSourceHandler + 'static> sealed::Sealed for FiniteSourceDescriptor<H> {}
-impl<H: AsyncFiniteSourceHandler + 'static> sealed::Sealed for AsyncFiniteSourceDescriptor<H> {}
-impl<H: InfiniteSourceHandler + 'static> sealed::Sealed for InfiniteSourceDescriptor<H> {}
-impl<H: AsyncInfiniteSourceHandler + 'static> sealed::Sealed for AsyncInfiniteSourceDescriptor<H> {}
+impl<H: UnifiedFiniteSourceHandler + 'static> sealed::Sealed for FiniteSourceDescriptor<H> {}
+impl<H: UnifiedAsyncFiniteSourceHandler + 'static> sealed::Sealed
+    for AsyncFiniteSourceDescriptor<H>
+{
+}
+impl<H: UnifiedInfiniteSourceHandler + 'static> sealed::Sealed for InfiniteSourceDescriptor<H> {}
+impl<H: UnifiedAsyncInfiniteSourceHandler + 'static> sealed::Sealed
+    for AsyncInfiniteSourceDescriptor<H>
+{
+}
 impl<H: TransformHandler + 'static> sealed::Sealed for TransformDescriptor<H> {}
 impl<H: EffectfulTransformHandler + 'static> sealed::Sealed for EffectfulTransformDescriptor<H> {}
 impl<H: SinkHandler + 'static> sealed::Sealed for SinkDescriptor<H> {}
@@ -2658,6 +2625,10 @@ mod tests {
         Effect, EffectCommitHandle, EffectContext, EffectError, TransactionalEffectPort,
     };
     use obzenflow_runtime::message_bus::FsmMessageBus;
+    use obzenflow_runtime::stages::common::handlers::source::traits::FiniteSourceHandler;
+    use obzenflow_runtime::stages::common::handlers::source::traits::{
+        AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler,
+    };
     use obzenflow_runtime::stages::resources_builder::SubscriptionFactory;
     use obzenflow_runtime::stages::LivenessSnapshots;
     use serde_json::json;

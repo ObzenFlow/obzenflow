@@ -3,21 +3,19 @@
 // https://obzenflow.dev
 
 // tests/advanced_tests.rs
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the advanced tests. The JSON shape matches
 /// what `EventGenerator` / `Doubler` emit; the type fingerprints the
@@ -42,50 +40,36 @@ async fn test_dsl_pipeline() -> Result<()> {
     // Define pipeline stages
     #[derive(Clone, Debug)]
     struct EventGenerator {
-        events: Vec<(String, serde_json::Value)>,
+        events: Vec<AdvancedTestEvent>,
         emitted: usize,
-        writer_id: WriterId,
     }
 
     impl EventGenerator {
         fn new() -> Self {
-            let events = vec![
-                (
-                    <AdvancedTestEvent as TypedPayload>::EVENT_TYPE.to_string(),
-                    json!({ "value": 10 }),
-                ),
-                (
-                    <AdvancedTestEvent as TypedPayload>::EVENT_TYPE.to_string(),
-                    json!({ "value": 20 }),
-                ),
-                (
-                    <AdvancedTestEvent as TypedPayload>::EVENT_TYPE.to_string(),
-                    json!({ "value": 30 }),
-                ),
-            ];
-            Self {
-                events,
-                emitted: 0,
-                writer_id: WriterId::from(StageId::new()),
-            }
+            let events = vec![10, 20, 30]
+                .into_iter()
+                .map(|value| AdvancedTestEvent {
+                    value,
+                    doubled: None,
+                })
+                .collect();
+            Self { events, emitted: 0 }
         }
     }
 
-    impl FiniteSourceHandler for EventGenerator {
+    impl TypedFiniteSourceHandler for EventGenerator {
+        type Output = AdvancedTestEvent;
+
         fn next(
             &mut self,
         ) -> Result<
-            Option<Vec<ChainEvent>>,
+            Option<Vec<Self::Output>>,
             obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
         > {
             if self.emitted < self.events.len() {
-                let (event_type, payload) = &self.events[self.emitted];
+                let event = self.events[self.emitted].clone();
                 self.emitted += 1;
-                Ok(Some(vec![ChainEventFactory::data_event(
-                    self.writer_id,
-                    event_type.clone(),
-                    payload.clone(),
-                )]))
+                Ok(Some(vec![event]))
             } else {
                 Ok(None)
             }

@@ -4,6 +4,11 @@
 
 //! FLOWIP-134f journal oracle for typed joins, contribution evidence, and replay.
 
+use obzenflow_adapters::middleware::{
+    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
+    MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+};
 use obzenflow_core::event::context::CompositeActivationContext;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
@@ -17,7 +22,10 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, JoinReferenceView, TypedJoinHandler, TypedTransformHandler,
+    JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
+};
+use obzenflow_runtime::stages::observer::{
+    HandlerObserver, HandlerObserverContext, ObserverReport,
 };
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
@@ -63,7 +71,6 @@ impl TypedPayload for JoinedFact {
 struct ReferenceSource {
     rows: Vec<ReferenceItem>,
     next: usize,
-    writer_id: WriterId,
     reads: Arc<AtomicUsize>,
 }
 
@@ -85,34 +92,21 @@ impl ReferenceSource {
                 },
             ],
             next: 0,
-            writer_id: WriterId::from(StageId::new()),
             reads,
         }
     }
 }
 
-impl FiniteSourceHandler for ReferenceSource {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+impl TypedFiniteSourceHandler for ReferenceSource {
+    type Output = ReferenceItem;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         let Some(row) = self.rows.get(self.next).cloned() else {
             return Ok(None);
         };
         self.next += 1;
-        let label = format!("reference:{}:{}", row.key, row.version);
-        let event = row.to_event(self.writer_id);
-        let activation = CompositeActivationContext::new(
-            CompositeId::new("flowip-134f:reference"),
-            event.id,
-            label,
-            self.next as u64,
-        );
-        Ok(Some(vec![event
-            .try_with_composite_activations(vec![activation])
-            .expect("reference activation")]))
+        Ok(Some(vec![row]))
     }
 }
 
@@ -120,7 +114,6 @@ impl FiniteSourceHandler for ReferenceSource {
 struct StreamSource {
     rows: Vec<StreamItem>,
     next: usize,
-    writer_id: WriterId,
     reads: Arc<AtomicUsize>,
 }
 
@@ -142,34 +135,21 @@ impl StreamSource {
                 },
             ],
             next: 0,
-            writer_id: WriterId::from(StageId::new()),
             reads,
         }
     }
 }
 
-impl FiniteSourceHandler for StreamSource {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+impl TypedFiniteSourceHandler for StreamSource {
+    type Output = StreamItem;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         let Some(row) = self.rows.get(self.next).cloned() else {
             return Ok(None);
         };
         self.next += 1;
-        let label = format!("stream:{}", row.key);
-        let event = row.to_event(self.writer_id);
-        let activation = CompositeActivationContext::new(
-            CompositeId::new("flowip-134f:stream"),
-            event.id,
-            label,
-            self.next as u64,
-        );
-        Ok(Some(vec![event
-            .try_with_composite_activations(vec![activation])
-            .expect("stream activation")]))
+        Ok(Some(vec![row]))
     }
 }
 
@@ -182,6 +162,81 @@ impl TypedTransformHandler for IdentityReference {
 
     fn process(&self, reference: ReferenceItem) -> Result<ReferenceItem, HandlerError> {
         Ok(reference)
+    }
+}
+
+/// Test-only observability middleware that restores the reference-entry
+/// evidence this join oracle needs without granting the typed source envelope
+/// authority.
+#[derive(Clone, Debug)]
+struct ReferenceActivationObserver;
+
+struct ReferenceActivationObserverFamily;
+
+const REFERENCE_ACTIVATION_OBSERVER_LABEL: &str = "typed_join_reference_activation";
+
+impl MiddlewareFactory for ReferenceActivationObserver {
+    fn label(&self) -> &'static str {
+        REFERENCE_ACTIVATION_OBSERVER_LABEL
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<ReferenceActivationObserverFamily>(
+            REFERENCE_ACTIVATION_OBSERVER_LABEL,
+        )
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::observer_with_family(
+            REFERENCE_ACTIVATION_OBSERVER_LABEL,
+            self.override_key().family_label(),
+            vec![MiddlewareSurfaceKind::Handler],
+        )
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> Result<MiddlewareSurfaceAttachment, MiddlewareFactoryError> {
+        validate_attachment_request(&self.declaration(), &request).map_err(|error| {
+            MiddlewareFactoryError::materialization_failed(
+                REFERENCE_ACTIVATION_OBSERVER_LABEL,
+                &context.config.name,
+                error,
+            )
+        })?;
+        Ok(MiddlewareSurfaceAttachment::handler_observer(Arc::new(
+            self.clone(),
+        )))
+    }
+}
+
+impl HandlerObserver for ReferenceActivationObserver {
+    fn label(&self) -> &'static str {
+        REFERENCE_ACTIVATION_OBSERVER_LABEL
+    }
+
+    fn after_handle(
+        &self,
+        ctx: &HandlerObserverContext<'_>,
+        outputs: &mut [ChainEvent],
+    ) -> ObserverReport {
+        for event in outputs {
+            let Some(reference) = ReferenceItem::from_event(event) else {
+                continue;
+            };
+            let activation = CompositeActivationContext::new(
+                CompositeId::new("flowip-134f:reference"),
+                ctx.input.id,
+                format!("reference:{}:{}", reference.key, reference.version),
+                ctx.input.processing_info.event_time,
+            );
+            event
+                .try_insert_composite_activation(activation)
+                .expect("reference activation is internally consistent");
+        }
+        ObserverReport::empty()
     }
 }
 
@@ -288,6 +343,7 @@ fn build_flow(
         let references = ReferenceSource::new(reference_reads.clone());
         let streams = StreamSource::new(stream_reads.clone());
         let reference_validate = IdentityReference;
+        let reference_activation = ReferenceActivationObserver;
         let stream_validate = RejectMarkedStream;
         let joined = ExactJoin {
             calls: join_calls.clone(),
@@ -300,7 +356,7 @@ fn build_flow(
 
             stages: {
                 references = source!(ReferenceItem => references);
-                reference_validate = transform!(ReferenceItem -> ReferenceItem => reference_validate);
+                reference_validate = transform!(ReferenceItem -> ReferenceItem => reference_validate, observers: [reference_activation]);
                 streams = source!(StreamItem => streams);
                 stream_validate = transform!(StreamItem -> StreamItem => stream_validate);
                 joined = join!(catalog reference_validate: ReferenceItem, StreamItem -> JoinedFact => joined);

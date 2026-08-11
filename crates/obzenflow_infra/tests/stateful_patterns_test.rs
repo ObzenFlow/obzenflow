@@ -5,22 +5,17 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
-    id::StageId,
-    WriterId,
-};
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulEmission, TypedStatefulHandler,
+    SinkHandler, StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the stateful-patterns test. The JSON shape
 /// matches what `NumberSource` emits; the type fingerprints the stage
@@ -74,29 +69,22 @@ impl TypedPayload for ProgressUpdate {
 struct NumberSource {
     current: u64,
     max: u64,
-    writer_id: WriterId,
 }
 
 impl NumberSource {
     fn new(max: u64) -> Self {
-        Self {
-            current: 1,
-            max,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { current: 1, max }
     }
 }
 
-impl FiniteSourceHandler for NumberSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for NumberSource {
+    type Output = NumberEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.current <= self.max {
             let num = self.current;
             self.current += 1;
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id,
-                NumberEvent::versioned_event_type(),
-                json!({ "value": num }),
-            )]))
+            Ok(Some(vec![NumberEvent { value: num }]))
         } else {
             Ok(None)
         }
@@ -112,8 +100,10 @@ impl EmptySource {
     }
 }
 
-impl FiniteSourceHandler for EmptySource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for EmptySource {
+    type Output = NumberEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         Ok(None)
     }
 }

@@ -22,15 +22,15 @@ use obzenflow_core::event::payloads::observability_payload::{
     MetricsLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::{TypedPayload, WriterId};
 use obzenflow_dsl::{
     async_infinite_source, async_source, infinite_source, sink, source, test_flow,
 };
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler, SinkHandler,
+    SinkHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -72,14 +72,6 @@ fn custom_metric(writer_id: WriterId, name: impl Into<String>) -> ChainEvent {
             value: json!({}),
             tags: None,
         }),
-    )
-}
-
-fn data_event(writer_id: WriterId, ordinal: usize) -> ChainEvent {
-    ChainEventFactory::data_event(
-        writer_id,
-        PollingEvent::versioned_event_type(),
-        json!(PollingEvent { ordinal }),
     )
 }
 
@@ -384,70 +376,58 @@ impl MiddlewareFactory for SourceContractObserverFactory {
 #[derive(Clone, Debug)]
 struct SyncFiniteOnce {
     emitted: bool,
-    writer_id: WriterId,
 }
 
 impl SyncFiniteOnce {
     fn new() -> Self {
-        Self {
-            emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { emitted: false }
     }
 }
 
-impl FiniteSourceHandler for SyncFiniteOnce {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+impl TypedFiniteSourceHandler for SyncFiniteOnce {
+    type Output = PollingEvent;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted {
             return Ok(None);
         }
         self.emitted = true;
-        Ok(Some(vec![data_event(self.writer_id, 0)]))
+        Ok(Some(vec![PollingEvent { ordinal: 0 }]))
     }
 }
 
 #[derive(Clone, Debug)]
 struct AsyncFiniteOnce {
     emitted: bool,
-    writer_id: WriterId,
     raw_delay: Duration,
 }
 
 #[async_trait]
-impl AsyncFiniteSourceHandler for AsyncFiniteOnce {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+impl TypedAsyncFiniteSourceHandler for AsyncFiniteOnce {
+    type Output = PollingEvent;
 
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted {
             return Ok(None);
         }
         self.emitted = true;
         tokio::time::sleep(self.raw_delay).await;
-        Ok(Some(vec![data_event(self.writer_id, 0)]))
+        Ok(Some(vec![PollingEvent { ordinal: 0 }]))
     }
 }
 
 #[derive(Clone, Debug)]
 struct SyncInfiniteOnce {
     calls: Arc<AtomicUsize>,
-    writer_id: WriterId,
 }
 
-impl InfiniteSourceHandler for SyncInfiniteOnce {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+impl TypedInfiniteSourceHandler for SyncInfiniteOnce {
+    type Output = PollingEvent;
 
-    fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+    fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call == 0 {
-            Ok(vec![data_event(self.writer_id, 0)])
+            Ok(vec![PollingEvent { ordinal: 0 }])
         } else {
             Ok(Vec::new())
         }
@@ -457,23 +437,20 @@ impl InfiniteSourceHandler for SyncInfiniteOnce {
 #[derive(Clone, Debug)]
 struct AsyncInfiniteOnce {
     calls: Arc<AtomicUsize>,
-    writer_id: WriterId,
     raw_delay: Duration,
 }
 
 #[async_trait]
-impl AsyncInfiniteSourceHandler for AsyncInfiniteOnce {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+impl TypedAsyncInfiniteSourceHandler for AsyncInfiniteOnce {
+    type Output = PollingEvent;
 
-    async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+    async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call == 0 {
             tokio::time::sleep(self.raw_delay).await;
-            Ok(vec![data_event(self.writer_id, 0)])
+            Ok(vec![PollingEvent { ordinal: 0 }])
         } else {
-            pending::<Result<Vec<ChainEvent>, SourceError>>().await
+            pending::<Result<Vec<Self::Output>, SourceError>>().await
         }
     }
 }
@@ -546,7 +523,6 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
     let async_finite_observer_for_flow = async_finite_observer_log.clone();
     let source = AsyncFiniteOnce {
         emitted: false,
-        writer_id: WriterId::from(StageId::new()),
         raw_delay: async_raw_delay,
     };
     let sink = NoopSink;
@@ -591,7 +567,6 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
     let sync_infinite_calls = Arc::new(AtomicUsize::new(0));
     let source = SyncInfiniteOnce {
         calls: sync_infinite_calls,
-        writer_id: WriterId::from(StageId::new()),
     };
     let sink = NoopSink;
     let sync_infinite = test_flow! {
@@ -631,7 +606,6 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
     let async_infinite_calls = Arc::new(AtomicUsize::new(0));
     let source = AsyncInfiniteOnce {
         calls: async_infinite_calls,
-        writer_id: WriterId::from(StageId::new()),
         raw_delay: async_raw_delay,
     };
     let sink = NoopSink;
@@ -677,14 +651,16 @@ struct TimeoutThenEof {
 }
 
 #[async_trait]
-impl AsyncFiniteSourceHandler for TimeoutThenEof {
+impl TypedAsyncFiniteSourceHandler for TimeoutThenEof {
+    type Output = PollingEvent;
+
     fn poll_timeout(&self) -> Option<Duration> {
         Some(self.timeout)
     }
 
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            pending::<Result<Option<Vec<ChainEvent>>, SourceError>>().await
+            pending::<Result<Option<Vec<Self::Output>>, SourceError>>().await
         } else {
             Ok(None)
         }
@@ -726,8 +702,7 @@ fn test_flow_handler_construction_stays_cold_inside_its_enclosing_async_future()
 }
 
 #[tokio::test(start_paused = true)]
-async fn timeout_duration_and_error_normalisation_are_inside_the_raw_poll_execution() -> Result<()>
-{
+async fn timeout_duration_precedes_boundary_settlement_and_error_normalisation() -> Result<()> {
     let timeout = Duration::from_secs(7);
     let policy_delay = Duration::from_secs(40);
     let policy_log = Arc::new(PolicyLog::default());
@@ -777,25 +752,25 @@ async fn timeout_duration_and_error_normalisation_are_inside_the_raw_poll_execut
     assert_eq!(
         policy_observations[0],
         PolicyObservation {
-            outcome: PolicyOutcomeKind::Delivered {
-                event_count: 1,
-                has_error_marked: true,
-            },
+            outcome: PolicyOutcomeKind::Failed,
             poll_duration: Some(timeout),
         },
-        "the timeout is normalized exactly once before policy settlement"
-    );
-    assert!(
-        policy_observations
-            .iter()
-            .all(|observation| observation.outcome != PolicyOutcomeKind::Failed),
-        "a normalized timeout must never surface as SourcePollOutcome::Failed"
+        "the typed timeout crosses the source boundary before supervisor normalization"
     );
     assert_eq!(
-        observer_log.snapshot()[0].poll_duration,
-        timeout,
-        "timeout measurement excludes normalization and the later policy delay"
+        policy_observations
+            .iter()
+            .filter(|observation| observation.outcome == PolicyOutcomeKind::Failed)
+            .count(),
+        1,
+        "the timed-out poll settles dependency policy exactly once"
     );
+    let observer_observations = observer_log.snapshot();
+    assert_eq!(observer_observations[0].poll_duration, timeout);
+    assert!(matches!(
+        &observer_observations[0].outcome,
+        SourcePollObserverOutcome::Error { message } if message.contains("poll timeout exceeded")
+    ));
     assert_eq!(
         calls.load(Ordering::SeqCst),
         2,
@@ -808,20 +783,21 @@ async fn timeout_duration_and_error_normalisation_are_inside_the_raw_poll_execut
 #[derive(Clone, Debug)]
 struct DisabledTimeoutThenEof {
     calls: Arc<AtomicUsize>,
-    writer_id: WriterId,
     raw_delay: Duration,
 }
 
 #[async_trait]
-impl AsyncFiniteSourceHandler for DisabledTimeoutThenEof {
+impl TypedAsyncFiniteSourceHandler for DisabledTimeoutThenEof {
+    type Output = PollingEvent;
+
     fn poll_timeout(&self) -> Option<Duration> {
         None
     }
 
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             tokio::time::sleep(self.raw_delay).await;
-            Ok(Some(vec![data_event(self.writer_id, 1)]))
+            Ok(Some(vec![PollingEvent { ordinal: 1 }]))
         } else {
             Ok(None)
         }
@@ -838,7 +814,6 @@ async fn configured_none_disables_the_finite_source_poll_timeout() -> Result<()>
     let calls = Arc::new(AtomicUsize::new(0));
     let source = DisabledTimeoutThenEof {
         calls: Arc::clone(&calls),
-        writer_id: WriterId::from(StageId::new()),
         raw_delay,
     };
     let sink = NoopSink;
@@ -895,17 +870,10 @@ enum ScriptStep {
     Eof,
 }
 
-fn scripted_result(
-    step: ScriptStep,
-    ordinal: usize,
-    writer_id: WriterId,
-) -> Option<Vec<ChainEvent>> {
+fn scripted_result(step: ScriptStep, ordinal: usize) -> Option<Vec<PollingEvent>> {
     match step {
-        ScriptStep::NonData => Some(vec![custom_metric(
-            writer_id,
-            format!("source.batch.{ordinal}"),
-        )]),
-        ScriptStep::Data => Some(vec![data_event(writer_id, ordinal)]),
+        ScriptStep::NonData => Some(Vec::new()),
+        ScriptStep::Data => Some(vec![PollingEvent { ordinal }]),
         ScriptStep::Eof => None,
     }
 }
@@ -914,16 +882,13 @@ fn scripted_result(
 struct SyncScriptedSource {
     steps: Vec<ScriptStep>,
     index: usize,
-    writer_id: WriterId,
     poll_times: Arc<Mutex<Vec<tokio::time::Instant>>>,
 }
 
-impl FiniteSourceHandler for SyncScriptedSource {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+impl TypedFiniteSourceHandler for SyncScriptedSource {
+    type Output = PollingEvent;
 
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         self.poll_times
             .lock()
             .expect("sync poll-times lock poisoned")
@@ -931,7 +896,7 @@ impl FiniteSourceHandler for SyncScriptedSource {
         let ordinal = self.index;
         let step = self.steps[self.index];
         self.index += 1;
-        Ok(scripted_result(step, ordinal, self.writer_id))
+        Ok(scripted_result(step, ordinal))
     }
 }
 
@@ -939,17 +904,14 @@ impl FiniteSourceHandler for SyncScriptedSource {
 struct AsyncScriptedSource {
     steps: Vec<ScriptStep>,
     index: usize,
-    writer_id: WriterId,
     poll_times: Arc<Mutex<Vec<tokio::time::Instant>>>,
 }
 
 #[async_trait]
-impl AsyncFiniteSourceHandler for AsyncScriptedSource {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+impl TypedAsyncFiniteSourceHandler for AsyncScriptedSource {
+    type Output = PollingEvent;
 
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         self.poll_times
             .lock()
             .expect("async poll-times lock poisoned")
@@ -957,7 +919,7 @@ impl AsyncFiniteSourceHandler for AsyncScriptedSource {
         let ordinal = self.index;
         let step = self.steps[self.index];
         self.index += 1;
-        Ok(scripted_result(step, ordinal, self.writer_id))
+        Ok(scripted_result(step, ordinal))
     }
 }
 
@@ -972,7 +934,10 @@ fn custom_metric_names(events: &[obzenflow_core::EventEnvelope<ChainEvent>]) -> 
         .filter_map(|envelope| match &envelope.event.content {
             ChainEventContent::Observability(ObservabilityPayload::Metrics(
                 MetricsLifecycle::Custom { name, .. },
-            )) if name.starts_with("source.batch.") || name.starts_with("policy.outbox.") => {
+            )) if name.starts_with("source.batch.")
+                || name.starts_with("policy.outbox.")
+                || name == "policy.observe_outbox" =>
+            {
                 Some(name.clone())
             }
             _ => None,
@@ -996,7 +961,6 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
             ScriptStep::Eof,
         ],
         index: 0,
-        writer_id: WriterId::from(StageId::new()),
         poll_times: sync_poll_times_for_flow,
     };
     let sink = NoopSink;
@@ -1065,7 +1029,6 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
             ScriptStep::Eof,
         ],
         index: 0,
-        writer_id: WriterId::from(StageId::new()),
         poll_times: async_poll_times_for_flow,
     };
     let sink = NoopSink;
@@ -1129,32 +1092,11 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
             .await
             .map_err(|error| anyhow!("source journal read failed: {error}"))?,
     );
-    for ordinal in 0..7 {
-        let source_name = format!("source.batch.{ordinal}");
-        let outbox_name = format!("policy.outbox.{ordinal}");
-        let source_position = names
-            .iter()
-            .position(|name| name == &source_name)
-            .expect("normalized source batch row is journaled");
-        let outbox_position = names
-            .iter()
-            .position(|name| name == &outbox_name)
-            .expect("policy outbox row is journaled");
-        assert_eq!(
-            outbox_position,
-            source_position + 1,
-            "source batch {ordinal} must be committed immediately before its policy outbox"
-        );
-    }
-    let reset_source_position = names
-        .iter()
-        .position(|name| name == "source.batch.8")
-        .expect("post-data non-data batch is journaled");
-    let reset_outbox_position = names
-        .iter()
-        .position(|name| name == "policy.outbox.8")
-        .expect("post-data policy outbox is journaled");
-    assert_eq!(reset_outbox_position, reset_source_position + 1);
+    assert_eq!(
+        names,
+        vec!["policy.outbox.0"],
+        "empty typed polls neither author source rows nor enter the successful-batch after-poll hook"
+    );
 
     Ok(())
 }
@@ -1162,21 +1104,15 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
 #[derive(Clone, Debug)]
 struct AsyncIdleInfiniteSource {
     calls: Arc<AtomicUsize>,
-    writer_id: WriterId,
 }
 
 #[async_trait]
-impl AsyncInfiniteSourceHandler for AsyncIdleInfiniteSource {
-    fn bind_writer_id(&mut self, writer_id: WriterId) {
-        self.writer_id = writer_id;
-    }
+impl TypedAsyncInfiniteSourceHandler for AsyncIdleInfiniteSource {
+    type Output = PollingEvent;
 
-    async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
-        let ordinal = self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(vec![custom_metric(
-            self.writer_id,
-            format!("source.batch.{ordinal}"),
-        )])
+    async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
     }
 }
 
@@ -1216,7 +1152,6 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
     let calls_for_flow = calls.clone();
     let source = AsyncIdleInfiniteSource {
         calls: calls_for_flow,
-        writer_id: WriterId::from(StageId::new()),
     };
     let sink = NoopSink;
     let harness = test_flow! {
@@ -1227,7 +1162,7 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
             src = async_infinite_source!(PollingEvent => source with [
                 SourceContractPolicyFactory::new(
                     PolicySettings {
-                        emit_after_poll: true,
+                        emit_on_observe: true,
                         ..PolicySettings::default()
                     },
                     Arc::new(PolicyLog::default()),
@@ -1254,7 +1189,7 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
         .map_err(|error| anyhow!("idle-interruption flow failed to start: {error}"))?;
 
     wait_for_counter(&calls, 1).await;
-    wait_for_custom_rows(&source_journal, 2).await;
+    wait_for_custom_rows(&source_journal, 1).await;
     for (expected, advance_by) in [
         (2, Duration::from_millis(1)),
         (3, Duration::from_millis(2)),
@@ -1265,16 +1200,17 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
     ] {
         tokio::time::advance(advance_by).await;
         wait_for_counter(&calls, expected).await;
-        wait_for_custom_rows(&source_journal, expected * 2).await;
+        wait_for_custom_rows(&source_journal, expected).await;
     }
 
-    let rows = wait_for_custom_rows(&source_journal, 14).await;
+    let rows = wait_for_custom_rows(&source_journal, 7).await;
     let names = custom_metric_names(&rows);
     assert_eq!(
         names.len(),
-        14,
-        "seven completed batches and seven policy outbox rows drain before the 50ms delay"
+        7,
+        "seven policy observation rows drain before the 50ms delay; empty typed polls author no rows"
     );
+    assert!(names.iter().all(|name| name == "policy.observe_outbox"));
     assert_eq!(
         calls.load(Ordering::SeqCst),
         7,
@@ -1313,8 +1249,10 @@ struct ImmediateEof {
     calls: Arc<AtomicUsize>,
 }
 
-impl FiniteSourceHandler for ImmediateEof {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for ImmediateEof {
+    type Output = PollingEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(None)
     }

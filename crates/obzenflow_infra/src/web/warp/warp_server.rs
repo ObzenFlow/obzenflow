@@ -2841,6 +2841,28 @@ fn map_system_event_to_sse(
     middleware_state.last_vector_clock = Some(envelope.vector_clock.clone());
 
     match &event.event {
+        SystemEventType::SourceCleanupFailed {
+            stage_id,
+            stage_name,
+            error,
+        } => {
+            let mut data = json!({
+                "system_event_type": "source_cleanup_failed",
+                "stage_id": stage_id.to_string(),
+                "stage_name": stage_name,
+                "error": error,
+                "timestamp_ms": event.timestamp,
+            });
+            if let Some(vc) = &vector_clock_value {
+                data["vector_clock"] = vc.clone();
+            }
+            Some(
+                SseEvent::default()
+                    .id(id_str)
+                    .event("source_cleanup_failed")
+                    .data(data.to_string()),
+            )
+        }
         SystemEventType::StageLifecycle {
             stage_id,
             event: lifecycle,

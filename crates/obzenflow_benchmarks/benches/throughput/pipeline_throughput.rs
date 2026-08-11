@@ -11,21 +11,19 @@
 use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use obzenflow_benchmarks::prelude::*;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::WriterId;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -56,7 +54,6 @@ impl TypedPayload for BenchEvent {
 struct TimestampedSource {
     total_events: u64,
     emitted: Arc<AtomicU64>,
-    writer_id: WriterId,
 }
 
 impl TimestampedSource {
@@ -64,13 +61,14 @@ impl TimestampedSource {
         Self {
             total_events,
             emitted: Arc::new(AtomicU64::new(0)),
-            writer_id: WriterId::from(obzenflow_core::StageId::new()),
         }
     }
 }
 
-impl FiniteSourceHandler for TimestampedSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for TimestampedSource {
+    type Output = BenchEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         let current = self.emitted.fetch_add(1, Ordering::Relaxed);
         if current < self.total_events {
             let emit_time_nanos = std::time::SystemTime::now()
@@ -78,14 +76,10 @@ impl FiniteSourceHandler for TimestampedSource {
                 .unwrap()
                 .as_nanos() as u64;
 
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id,
-                BenchEvent::versioned_event_type(),
-                json!({
-                    "index": current,
-                    "emit_time_nanos": emit_time_nanos,
-                }),
-            )]))
+            Ok(Some(vec![BenchEvent {
+                index: current,
+                emit_time_nanos,
+            }]))
         } else {
             Ok(None)
         }

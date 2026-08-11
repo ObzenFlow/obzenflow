@@ -8,10 +8,10 @@
 
 use obzenflow_adapters::middleware::{rate_limit, CircuitBreaker, EffectResilience};
 use obzenflow_core::config::{ConfigSubject, ResolvedForDoc};
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::journal::run_manifest::RunManifest;
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{Effect, EffectContext, EffectError, EffectSafety, Effects};
@@ -23,7 +23,7 @@ use obzenflow_runtime::runtime_config::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler,
+    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
 };
 
 use async_trait::async_trait;
@@ -43,25 +43,22 @@ impl TypedPayload for Item {
 #[derive(Clone, Debug)]
 struct OneShotSource {
     emitted: bool,
-    writer_id: WriterId,
 }
 
-impl FiniteSourceHandler for OneShotSource {
+impl TypedFiniteSourceHandler for OneShotSource {
+    type Output = Item;
+
     fn next(
         &mut self,
     ) -> Result<
-        Option<Vec<ChainEvent>>,
+        Option<Vec<Self::Output>>,
         obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.emitted {
             Ok(None)
         } else {
             self.emitted = true;
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id,
-                <Item as TypedPayload>::EVENT_TYPE,
-                json!({ "index": 0 }),
-            )]))
+            Ok(Some(vec![Item { index: 0 }]))
         }
     }
 }
@@ -177,10 +174,7 @@ fn build_flow_future(
     Output = Result<obzenflow_runtime::prelude::FlowHandle, obzenflow_dsl::dsl::FlowBuildFailure>,
 > {
     FlowDefinition::materialize(move |_runtime_config| {
-        let one_shot_source = OneShotSource {
-            emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-        };
+        let one_shot_source = OneShotSource { emitted: false };
         let null_sink = NullSink;
 
         Ok(flow! {
@@ -208,10 +202,7 @@ fn build_rate_limited_flow_future(
 > {
     FlowDefinition::materialize(move |_runtime_config| {
         let limiter = rate_limit(10.0);
-        let one_shot_source = OneShotSource {
-            emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-        };
+        let one_shot_source = OneShotSource { emitted: false };
         let null_sink = NullSink;
 
         Ok(flow! {
@@ -253,10 +244,7 @@ fn build_two_effect_flow_future(
     FlowDefinition::materialize(move |_runtime_config| {
         let authorize_resilience = payment_resilience();
         let refund_resilience = payment_resilience();
-        let one_shot_source = OneShotSource {
-            emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-        };
+        let one_shot_source = OneShotSource { emitted: false };
         let payment_effects = PaymentEffectsHandler;
         let null_sink = NullSink;
 

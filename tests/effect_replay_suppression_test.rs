@@ -8,7 +8,7 @@ mod exported_jsonl;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, RateLimiterBuilder, Retry};
 use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::chain_event::ChainEvent,
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     event::payloads::flow_control_payload::FlowControlPayload,
     event::payloads::observability_payload::{
@@ -17,7 +17,7 @@ use obzenflow_core::{
     event::{ChainEventContent, StageLifecycleEvent, SystemEvent, SystemEventType},
     id::{StageId, SystemId},
     journal::{journal_owner::JournalOwner, Journal},
-    StageOutputs, TypedPayload, WriterId,
+    StageOutputs, TypedPayload,
 };
 use obzenflow_dsl::{
     effectful_stateful, effectful_transform, flow, sink, source, transform, FlowDefinition,
@@ -31,7 +31,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler, SinkHandler,
+    EffectfulStatefulHandler, EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
     TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
@@ -82,20 +82,18 @@ impl TypedPayload for ReplayEffectValue {
 #[derive(Clone, Debug)]
 struct ReplaySource {
     next_value: u64,
-    writer_id: WriterId,
 }
 
 impl ReplaySource {
     fn new() -> Self {
-        Self {
-            next_value: 1,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { next_value: 1 }
     }
 }
 
-impl FiniteSourceHandler for ReplaySource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for ReplaySource {
+    type Output = ReplayInput;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next_value > 3 {
             return Ok(None);
         }
@@ -103,40 +101,30 @@ impl FiniteSourceHandler for ReplaySource {
         let value = self.next_value;
         self.next_value += 1;
 
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            ReplayInput::EVENT_TYPE,
-            json!(ReplayInput { value }),
-        )]))
+        Ok(Some(vec![ReplayInput { value }]))
     }
 }
 
 #[derive(Clone, Debug)]
 struct SingleReplaySource {
     emitted: bool,
-    writer_id: WriterId,
 }
 
 impl SingleReplaySource {
     fn new() -> Self {
-        Self {
-            emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { emitted: false }
     }
 }
 
-impl FiniteSourceHandler for SingleReplaySource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for SingleReplaySource {
+    type Output = ReplayInput;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted {
             return Ok(None);
         }
         self.emitted = true;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            ReplayInput::EVENT_TYPE,
-            json!(ReplayInput { value: 1 }),
-        )]))
+        Ok(Some(vec![ReplayInput { value: 1 }]))
     }
 }
 

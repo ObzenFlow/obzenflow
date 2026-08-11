@@ -33,7 +33,7 @@ use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulEmission, TypedStatefulHandler,
+    SinkHandler, StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
@@ -86,18 +86,24 @@ impl<P> OneShotSource<P> {
         Self(std::marker::PhantomData)
     }
 }
-impl FiniteSourceHandler for OneShotSource<KafkaRawEvent> {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for OneShotSource<KafkaRawEvent> {
+    type Output = KafkaRawEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         Ok(None)
     }
 }
-impl FiniteSourceHandler for OneShotSource<WebhookEnvelope> {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for OneShotSource<WebhookEnvelope> {
+    type Output = WebhookEnvelope;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         Ok(None)
     }
 }
-impl FiniteSourceHandler for OneShotSource<FileLine> {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for OneShotSource<FileLine> {
+    type Output = FileLine;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         Ok(None)
     }
 }

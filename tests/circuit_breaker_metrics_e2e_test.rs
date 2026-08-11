@@ -12,14 +12,13 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::CircuitBreaker;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::chain_event::ChainEvent,
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    StageId, WriterId,
 };
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -45,7 +44,6 @@ use tokio::time::{sleep, Duration};
 struct TimedEventSource {
     events: Vec<(String, Duration)>, // (event_type, delay_before)
     index: usize,
-    writer_id: WriterId,
 }
 
 impl TimedEventSource {
@@ -74,44 +72,35 @@ impl TimedEventSource {
             ("failure".to_string(), Duration::from_millis(100)),
         ];
 
-        Self {
-            events,
-            index: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { events, index: 0 }
     }
 }
 
-impl FiniteSourceHandler for TimedEventSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for TimedEventSource {
+    type Output = CircuitMetricEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.index >= self.events.len() {
             return Ok(None);
         }
 
-        let (event_type, delay) = &self.events[self.index];
+        let (event_type, delay) = self.events[self.index].clone();
 
         // Apply delay synchronously (simulating time between events)
         if delay.as_millis() > 0 {
-            std::thread::sleep(*delay);
+            std::thread::sleep(delay);
         }
 
-        let mut event = ChainEventFactory::data_event(
-            self.writer_id,
-            <CircuitMetricEvent as TypedPayload>::EVENT_TYPE,
-            json!({
-                "sequence": self.index,
-                "type": event_type
-            }),
-        );
-        if event_type == "failure" {
-            event.processing_info.status =
-                obzenflow_core::event::status::processing_status::ProcessingStatus::error(
-                    "controlled_failure",
-                );
-        }
-
+        let sequence = self.index as u64;
         self.index += 1;
-        Ok(Some(vec![event]))
+        if event_type == "failure" {
+            return Err(SourceError::Other("controlled_failure".to_string()));
+        }
+
+        Ok(Some(vec![CircuitMetricEvent {
+            sequence,
+            kind: event_type,
+        }]))
     }
 }
 
@@ -324,33 +313,27 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
     #[derive(Clone, Debug)]
     struct RapidSource {
         count: usize,
-        writer_id: WriterId,
     }
 
-    impl FiniteSourceHandler for RapidSource {
-        fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+    impl TypedFiniteSourceHandler for RapidSource {
+        type Output = CircuitMetricEvent;
+
+        fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
             if self.count >= 1100 {
                 // Trigger summary after 1000 events
                 return Ok(None);
             }
             self.count += 1;
 
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id,
-                <CircuitMetricEvent as TypedPayload>::EVENT_TYPE,
-                json!({
-                    "sequence": self.count,
-                    "type": "rapid"
-                }),
-            )]))
+            Ok(Some(vec![CircuitMetricEvent {
+                sequence: self.count as u64,
+                kind: "rapid".to_string(),
+            }]))
         }
     }
 
     let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
-        let rapid_source_handler = RapidSource {
-            count: 0,
-            writer_id: WriterId::from(StageId::new()),
-        };
+        let rapid_source_handler = RapidSource { count: 0 };
         let null_sink_handler = MetricsSink::new().0;
 
         Ok(flow! {

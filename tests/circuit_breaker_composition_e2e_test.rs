@@ -24,7 +24,7 @@
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, MiddlewareFactory, Retry};
 use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::chain_event::ChainEvent,
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     event::payloads::observability_payload::{
         CircuitBreakerEvent, CircuitBreakerHealthClassification, MiddlewareLifecycle,
@@ -33,7 +33,7 @@ use obzenflow_core::{
     event::ChainEventContent,
     id::StageId,
     journal::{journal_owner::JournalOwner, Journal},
-    StageOutputs, TypedPayload, WriterId,
+    StageOutputs, TypedPayload,
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -44,7 +44,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -88,7 +88,6 @@ impl TypedPayload for CompEffectValue {
 #[derive(Clone, Debug)]
 struct CompSource {
     next_value: u64,
-    writer_id: WriterId,
     calls: Arc<AtomicUsize>,
 }
 
@@ -96,25 +95,22 @@ impl CompSource {
     fn new(calls: Arc<AtomicUsize>) -> Self {
         Self {
             next_value: 1,
-            writer_id: WriterId::from(StageId::new()),
             calls,
         }
     }
 }
 
-impl FiniteSourceHandler for CompSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for CompSource {
+    type Output = CompInput;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.next_value > 3 {
             return Ok(None);
         }
         let value = self.next_value;
         self.next_value += 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            CompInput::EVENT_TYPE,
-            json!(CompInput { value }),
-        )]))
+        Ok(Some(vec![CompInput { value }]))
     }
 }
 
@@ -570,7 +566,7 @@ async fn retrying_breaker_composes_real_fan_out_fan_in_with_strict_replay() {
     assert_eq!(
         data_event_count(
             &read_stage_events(&live_run, "inputs").await,
-            CompInput::EVENT_TYPE
+            &CompInput::versioned_event_type(),
         ),
         3,
         "the finite source should journal exactly three inputs"

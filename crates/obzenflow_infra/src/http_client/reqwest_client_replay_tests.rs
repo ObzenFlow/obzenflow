@@ -16,7 +16,7 @@ use obzenflow_core::event::{ChainEvent, ChainEventContent};
 use obzenflow_core::http_client::Url;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{async_infinite_source, async_source, flow, sink, FlowDefinition};
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
@@ -24,7 +24,7 @@ use obzenflow_runtime::bootstrap::{
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{AsyncFiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedAsyncFiniteSourceHandler};
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -451,7 +451,6 @@ async fn source_retry_observes_one_cached_initialization_failure() {
         .expect("HTTP pull config");
     let url = Url::parse("http://127.0.0.1:9/never-sent").expect("test URL");
     let mut source = HttpPullSource::new(decoder(url), config);
-    source.bind_writer_id(WriterId::from(StageId::new()));
 
     let mut terminal_error = None;
     for _ in 0..12 {

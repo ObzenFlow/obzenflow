@@ -16,6 +16,16 @@ mod example {
         simple_poll, CursorlessPullDecoder, DecodeError, DecodeResult, HttpResponse, PullDecoder,
     };
     use obzenflow_core::http_client::{HeaderMap, RequestSpec, Url};
+    use obzenflow_core::TypedPayload;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    struct JsonItem(serde_json::Value);
+
+    impl TypedPayload for JsonItem {
+        const EVENT_TYPE: &'static str = "example.http_pull.item";
+    }
 
     #[derive(Debug, Clone)]
     struct OffsetPaginationDecoder {
@@ -25,7 +35,7 @@ mod example {
 
     impl PullDecoder for OffsetPaginationDecoder {
         type Cursor = usize;
-        type Item = serde_json::Value;
+        type Item = JsonItem;
 
         fn event_type(&self) -> String {
             "example.http_pull.offset.v1".to_string()
@@ -53,7 +63,10 @@ mod example {
                 .get("items")
                 .and_then(|v| v.as_array())
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_iter()
+                .map(JsonItem)
+                .collect();
 
             let next_cursor = value
                 .get("next_offset")
@@ -75,7 +88,7 @@ mod example {
     }
 
     impl CursorlessPullDecoder for CursorlessJsonArrayDecoder {
-        type Item = serde_json::Value;
+        type Item = JsonItem;
 
         fn event_type(&self) -> String {
             "example.http_pull.cursorless.v1".to_string()
@@ -92,7 +105,7 @@ mod example {
 
     impl PullDecoder for CursorPaginationDecoder {
         type Cursor = String;
-        type Item = serde_json::Value;
+        type Item = JsonItem;
 
         fn event_type(&self) -> String {
             "example.http_pull.cursor.v1".to_string()
@@ -117,7 +130,10 @@ mod example {
                 .get("items")
                 .and_then(|v| v.as_array())
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_iter()
+                .map(JsonItem)
+                .collect();
 
             let next_cursor = value
                 .get("next_cursor")
@@ -221,7 +237,7 @@ mod example {
             "http://example.invalid/items"
                 .parse()
                 .expect("simple_poll url"),
-            |response: &HttpResponse| Ok(response.json::<Vec<serde_json::Value>>()?),
+            |response: &HttpResponse| Ok(response.json::<Vec<JsonItem>>()?),
         );
 
         let request = poll.request_spec(None);

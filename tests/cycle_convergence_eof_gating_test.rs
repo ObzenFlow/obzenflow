@@ -4,21 +4,24 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::event::CorrelationId;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{CycleDepth, StageId, StageOutputs, WriterId};
-use obzenflow_dsl::{async_source, flow, sink, source, test_flow, transform, FlowDefinition};
+use obzenflow_core::{CycleDepth, StageOutputs};
+use obzenflow_dsl::{
+    async_infinite_source, async_source, flow, sink, source, test_flow, transform, FlowDefinition,
+};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
+use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::supervised_base::SupervisorHandle;
 use obzenflow_runtime::testing::{JournalProbe, TestClock};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the cycle-convergence test. The JSON shape
 /// fingerprints the stage contract per FLOWIP-114c. Individual cycle
@@ -101,8 +104,6 @@ fn any_error_log_contains(run_dir: &Path, needle: &str) -> Result<bool> {
 #[derive(Clone, Debug)]
 struct SingleSeedSource {
     emitted: bool,
-    writer_id: WriterId,
-    correlation_id: CorrelationId,
     target: u64,
 }
 
@@ -110,40 +111,31 @@ impl SingleSeedSource {
     fn new(target: u64) -> Self {
         Self {
             emitted: false,
-            writer_id: WriterId::from(StageId::new()),
-            correlation_id: CorrelationId::new(),
             target,
         }
     }
 }
 
-impl FiniteSourceHandler for SingleSeedSource {
-    fn next(
-        &mut self,
-    ) -> std::result::Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
-    > {
+impl TypedFiniteSourceHandler for SingleSeedSource {
+    type Output = SeedEvent;
+
+    fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted {
             return Ok(None);
         }
         self.emitted = true;
 
-        let mut event = ChainEventFactory::data_event(
-            self.writer_id,
-            SeedEvent::versioned_event_type(),
-            json!({ "kind": KIND_SEED, "depth": 0u64, "target": self.target }),
-        );
-        event.set_single_correlation(self.correlation_id, None);
-        Ok(Some(vec![event]))
+        Ok(Some(vec![SeedEvent {
+            kind: KIND_SEED.to_string(),
+            depth: 0,
+            target: self.target,
+        }]))
     }
 }
 
 #[derive(Clone, Debug)]
 struct SeedThenEofSource {
     state: u8,
-    writer_id: WriterId,
-    correlation_id: CorrelationId,
     target: u64,
     iteration_started: Arc<Notify>,
 }
@@ -152,8 +144,6 @@ impl SeedThenEofSource {
     fn new(target: u64, iteration_started: Arc<Notify>) -> Self {
         Self {
             state: 0,
-            writer_id: WriterId::from(StageId::new()),
-            correlation_id: CorrelationId::new(),
             target,
             iteration_started,
         }
@@ -161,23 +151,18 @@ impl SeedThenEofSource {
 }
 
 #[async_trait]
-impl AsyncFiniteSourceHandler for SeedThenEofSource {
-    async fn next(
-        &mut self,
-    ) -> std::result::Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
-    > {
+impl TypedAsyncFiniteSourceHandler for SeedThenEofSource {
+    type Output = SeedEvent;
+
+    async fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
         match self.state {
             0 => {
                 self.state = 1;
-                let mut event = ChainEventFactory::data_event(
-                    self.writer_id,
-                    SeedEvent::versioned_event_type(),
-                    json!({ "kind": KIND_SEED, "depth": 0u64, "target": self.target }),
-                );
-                event.set_single_correlation(self.correlation_id, None);
-                Ok(Some(vec![event]))
+                Ok(Some(vec![SeedEvent {
+                    kind: KIND_SEED.to_string(),
+                    depth: 0,
+                    target: self.target,
+                }]))
             }
             1 => {
                 self.iteration_started.notified().await;
@@ -395,49 +380,30 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
 #[derive(Clone, Debug)]
 struct SeedThenDrainSource {
     state: u8,
-    writer_id: WriterId,
-    correlation_id: CorrelationId,
     target: u64,
-    iteration_started: Arc<Notify>,
 }
 
 impl SeedThenDrainSource {
-    fn new(target: u64, iteration_started: Arc<Notify>) -> Self {
-        Self {
-            state: 0,
-            writer_id: WriterId::from(StageId::new()),
-            correlation_id: CorrelationId::new(),
-            target,
-            iteration_started,
-        }
+    fn new(target: u64) -> Self {
+        Self { state: 0, target }
     }
 }
 
 #[async_trait]
-impl AsyncFiniteSourceHandler for SeedThenDrainSource {
-    async fn next(
-        &mut self,
-    ) -> std::result::Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
-    > {
+impl TypedAsyncInfiniteSourceHandler for SeedThenDrainSource {
+    type Output = SeedEvent;
+
+    async fn next(&mut self) -> std::result::Result<Vec<Self::Output>, SourceError> {
         match self.state {
             0 => {
                 self.state = 1;
-                let mut event = ChainEventFactory::data_event(
-                    self.writer_id,
-                    SeedEvent::versioned_event_type(),
-                    json!({ "kind": KIND_SEED, "depth": 0u64, "target": self.target }),
-                );
-                event.set_single_correlation(self.correlation_id, None);
-                Ok(Some(vec![event]))
+                Ok(vec![SeedEvent {
+                    kind: KIND_SEED.to_string(),
+                    depth: 0,
+                    target: self.target,
+                }])
             }
-            1 => {
-                self.iteration_started.notified().await;
-                self.state = 2;
-                Ok(Some(vec![ChainEventFactory::drain_event(self.writer_id)]))
-            }
-            _ => Ok(None),
+            _ => std::future::pending::<Result<Vec<Self::Output>, SourceError>>().await,
         }
     }
 }
@@ -445,9 +411,6 @@ impl AsyncFiniteSourceHandler for SeedThenDrainSource {
 #[derive(Clone, Debug)]
 struct DualSeedSource {
     emitted: u8,
-    writer_id: WriterId,
-    converge_correlation_id: CorrelationId,
-    diverge_correlation_id: CorrelationId,
     converge_target: u64,
     diverge_target: u64,
 }
@@ -456,36 +419,28 @@ impl DualSeedSource {
     fn new(converge_target: u64, diverge_target: u64) -> Self {
         Self {
             emitted: 0,
-            writer_id: WriterId::from(StageId::new()),
-            converge_correlation_id: CorrelationId::new(),
-            diverge_correlation_id: CorrelationId::new(),
             converge_target,
             diverge_target,
         }
     }
 }
 
-impl FiniteSourceHandler for DualSeedSource {
-    fn next(
-        &mut self,
-    ) -> std::result::Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
-    > {
-        let (correlation_id, target) = match self.emitted {
-            0 => (self.converge_correlation_id, self.converge_target),
-            1 => (self.diverge_correlation_id, self.diverge_target),
+impl TypedFiniteSourceHandler for DualSeedSource {
+    type Output = SeedEvent;
+
+    fn next(&mut self) -> std::result::Result<Option<Vec<Self::Output>>, SourceError> {
+        let target = match self.emitted {
+            0 => self.converge_target,
+            1 => self.diverge_target,
             _ => return Ok(None),
         };
         self.emitted = self.emitted.saturating_add(1);
 
-        let mut event = ChainEventFactory::data_event(
-            self.writer_id,
-            SeedEvent::versioned_event_type(),
-            json!({ "kind": KIND_SEED, "depth": 0u64, "target": target }),
-        );
-        event.set_single_correlation(correlation_id, None);
-        Ok(Some(vec![event]))
+        Ok(Some(vec![SeedEvent {
+            kind: KIND_SEED.to_string(),
+            depth: 0,
+            target,
+        }]))
     }
 }
 
@@ -501,17 +456,16 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let entry_processed_for_flow = entry_processed.clone();
     let iter_processed_for_flow = iter_processed.clone();
     let (sink, done_count) = DoneCounterSink::new();
-    let iteration_started = Arc::new(Notify::new());
-    let source = SeedThenDrainSource::new(target_iterations, iteration_started.clone());
+    let source = SeedThenDrainSource::new(target_iterations);
     let entry = EntryConvergeTransform::new(entry_processed_for_flow);
-    let iter = IterationTransform::new(iter_processed_for_flow, Some(iteration_started));
+    let iter = IterationTransform::new(iter_processed_for_flow, None);
 
     let harness = test_flow! {
         name: "cycle_buffers_drain_until_scc_quiescent",
         journals: disk_journals(journal_root),
 
         stages: {
-            src = async_source!(SeedEvent => source);
+            src = async_infinite_source!(SeedEvent => source);
             entry = transform!(SeedEvent -> SeedEvent => entry);
             iter = transform!(SeedEvent -> SeedEvent => iter);
             snk = sink!(SeedEvent => sink);
@@ -529,27 +483,48 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
 
     let probe = JournalProbe::try_on_stage(&harness, "entry")?;
     let handle = harness.into_inner();
-    let run = tokio::spawn(handle.run());
+    handle
+        .start()
+        .await
+        .map_err(|e| anyhow::anyhow!("flow start failed: {e}"))?;
+
+    // Wait until the cycle is in flight, then request the runtime-owned drain.
+    for _ in 0..100 {
+        if iter_processed.load(Ordering::Relaxed) > 0 {
+            break;
+        }
+        clock.advance(Duration::from_millis(10)).await?;
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        iter_processed.load(Ordering::Relaxed) > 0,
+        "cycle did not enter its first iteration before drain"
+    );
+    handle
+        .stop_graceful(Duration::from_secs(5))
+        .await
+        .map_err(|e| anyhow::anyhow!("graceful stop failed: {e}"))?;
 
     // Drive paused time until the flow terminates.
     for _ in 0..400 {
-        if run.is_finished() {
+        if !handle.is_running() {
             break;
         }
         clock.advance(Duration::from_millis(50)).await?;
         for _ in 0..16 {
-            if run.is_finished() {
+            if !handle.is_running() {
                 break;
             }
             tokio::task::yield_now().await;
         }
     }
     assert!(
-        run.is_finished(),
+        !handle.is_running(),
         "flow did not terminate under paused time"
     );
-    run.await
-        .expect("join handle")
+    handle
+        .wait_for_completion()
+        .await
         .map_err(|e| anyhow::anyhow!("flow run failed: {e}"))?;
 
     assert_eq!(

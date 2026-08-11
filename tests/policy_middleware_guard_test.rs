@@ -10,18 +10,16 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::CircuitBreaker;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::WriterId;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TypedTransformHandler,
+    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 fn breaker(failures: u32) -> CircuitBreaker {
     CircuitBreaker::builder()
@@ -42,20 +40,17 @@ impl TypedPayload for GuardEvent {
 #[derive(Clone, Debug)]
 struct OneShotSource {
     emitted: bool,
-    writer_id: WriterId,
 }
 
-impl FiniteSourceHandler for OneShotSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for OneShotSource {
+    type Output = GuardEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.emitted {
             return Ok(None);
         }
         self.emitted = true;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            GuardEvent::EVENT_TYPE,
-            json!({ "sequence": 1 }),
-        )]))
+        Ok(Some(vec![GuardEvent { sequence: 1 }]))
     }
 }
 
@@ -93,10 +88,7 @@ impl SinkHandler for NullSink {
 #[tokio::test]
 async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
     let result = FlowDefinition::materialize(move |_runtime_config| {
-        let source_handler = OneShotSource {
-            emitted: false,
-            writer_id: WriterId::from(obzenflow_core::StageId::new()),
-        };
+        let source_handler = OneShotSource { emitted: false };
         let transform_handler = SyncPassthrough;
         let sink_handler = NullSink;
 

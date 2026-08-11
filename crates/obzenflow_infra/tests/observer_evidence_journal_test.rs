@@ -21,7 +21,7 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::observability_payload::{
     IndicatorSample, MiddlewareLifecycle, ObservabilityPayload,
@@ -29,17 +29,16 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::journal::DiskJournal;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
 use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -64,27 +63,23 @@ impl TypedPayload for Processed {
 #[derive(Clone, Debug)]
 struct OrderSource {
     remaining: usize,
-    writer_id: WriterId,
 }
 impl OrderSource {
     fn new(count: usize) -> Self {
-        Self {
-            remaining: count,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { remaining: count }
     }
 }
-impl FiniteSourceHandler for OrderSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for OrderSource {
+    type Output = Order;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.remaining == 0 {
             return Ok(None);
         }
         self.remaining -= 1;
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id,
-            Order::versioned_event_type(),
-            json!({ "id": self.remaining as u64 + 1 }),
-        )]))
+        Ok(Some(vec![Order {
+            id: self.remaining as u64 + 1,
+        }]))
     }
 }
 

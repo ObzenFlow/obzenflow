@@ -53,6 +53,9 @@ impl JournalEvent for ChainEvent {
                 ObservabilityPayload::Stage(_) => "lifecycle.stage",
                 ObservabilityPayload::Metrics(m) => match m {
                     MetricsLifecycle::Custom { .. } => "lifecycle.metrics.custom",
+                    MetricsLifecycle::HttpPullSnapshot { .. } => {
+                        "lifecycle.metrics.http_pull_snapshot"
+                    }
                     _ => "lifecycle.metrics",
                 },
                 ObservabilityPayload::Middleware(_) => "lifecycle.middleware",

@@ -20,7 +20,7 @@ use obzenflow_runtime::bootstrap::{
 };
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
@@ -57,8 +57,10 @@ impl IdleSource {
     }
 }
 
-impl FiniteSourceHandler for IdleSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for IdleSource {
+    type Output = BenchEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         self.polls.fetch_add(1, Ordering::Relaxed);
         Ok(Some(vec![]))
     }

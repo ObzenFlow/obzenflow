@@ -55,6 +55,7 @@ These examples don't have tutorials, but they demonstrate concrete framework con
 - **`product_catalog_enrichment`** — Multi-way enrichment across inner, left, and strict joins. Use this when you want the most realistic catalog-style dimension pipeline in the repo.
   - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it)
   - Run: `cargo run -p obzenflow --example product_catalog_enrichment`
+  - Run with the manual-start control plane: `cargo run -p obzenflow --example product_catalog_enrichment --features obzenflow_infra/warp-server -- --server`
   - Code: [`examples/product_catalog_enrichment/flow.rs`](product_catalog_enrichment/flow.rs)
 
 - **`csv_demo_support_sla`** — Offline CSV batch processing with typed joins, transforms, and CSV sink output. Good for ETL-style jobs that still need typed flows and replayable execution.

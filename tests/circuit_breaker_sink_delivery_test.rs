@@ -16,17 +16,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::CircuitBreaker;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
-use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
-    StageId, TypedPayload, WriterId,
-};
+use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -54,29 +50,24 @@ impl TypedPayload for SinkBreakerEvent {
 struct BurstSource {
     count: u64,
     index: u64,
-    writer_id: WriterId,
 }
 
 impl BurstSource {
     fn new(count: u64) -> Self {
-        Self {
-            count,
-            index: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self { count, index: 0 }
     }
 }
 
-impl FiniteSourceHandler for BurstSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+impl TypedFiniteSourceHandler for BurstSource {
+    type Output = SinkBreakerEvent;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.index >= self.count {
             return Ok(None);
         }
-        let event = ChainEventFactory::data_event(
-            self.writer_id,
-            <SinkBreakerEvent as TypedPayload>::EVENT_TYPE,
-            json!({ "sequence": self.index }),
-        );
+        let event = SinkBreakerEvent {
+            sequence: self.index,
+        };
         self.index += 1;
         Ok(Some(vec![event]))
     }
