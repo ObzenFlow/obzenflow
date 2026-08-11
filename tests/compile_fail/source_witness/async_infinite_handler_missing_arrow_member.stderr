@@ -1,7 +1,7 @@
 error[E0277]: the handler's `Output` declares a fact missing from the stage arrow
- --> tests/compile_fail/source_witness/async_infinite_handler_missing_arrow_member.rs:6:13
+ --> tests/compile_fail/source_witness/async_infinite_handler_missing_arrow_member.rs:10:13
   |
-6 |     let _ = obzenflow_dsl::async_infinite_source!(First => AsyncInfiniteBoth);
+10 |     let _ = obzenflow_dsl::async_infinite_source!(First => AsyncInfiniteBoth);
   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the handler's `Output` set is not contained in this arrow output contract
   |
   = help: the trait `HandlerOutputsAreDeclaredByArrow<WithMember<support::First, EmptySet>, SubsetProofStep<MemberFound, SubsetProofStep<MemberAfter<_>, SubsetProofEnd>>>` is not implemented for `WithMember<support::First, WithMember<support::Second, EmptySet>>`

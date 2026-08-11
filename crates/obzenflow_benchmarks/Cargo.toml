@@ -25,7 +25,6 @@ criterion = { workspace = true, features = ["async_tokio", "html_reports"] }
 
 # Data structures and serialization
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
 
 # Utilities
 tempfile = { workspace = true }

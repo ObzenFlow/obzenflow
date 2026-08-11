@@ -1,7 +1,7 @@
 error[E0277]: this source handler does not witness its arrow contract
- --> tests/compile_fail/source_witness/finite_raw_handler.rs:6:13
+ --> tests/compile_fail/source_witness/finite_raw_handler.rs:10:13
   |
-6 |     let _ = obzenflow_dsl::source!(First => RawFinite);
+10 |     let _ = obzenflow_dsl::source!(First => RawFinite);
   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this handler does not implement the typed synchronous finite source contract
   |
 help: the trait `TypedFiniteSourceHandler` is not implemented for `support::RawFinite`

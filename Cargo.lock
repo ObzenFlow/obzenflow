@@ -1641,7 +1641,6 @@ dependencies = [
  "obzenflow_infra",
  "obzenflow_runtime",
  "serde",
- "serde_json",
  "sysinfo",
  "tempfile",
  "tokio",

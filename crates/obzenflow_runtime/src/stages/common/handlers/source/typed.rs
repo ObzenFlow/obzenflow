@@ -886,8 +886,10 @@ mod tests {
         type Output = Row;
 
         async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-            let mut snapshot = HttpPullTelemetry::default();
-            snapshot.requests_total = 3;
+            let snapshot = HttpPullTelemetry {
+                requests_total: 3,
+                ..HttpPullTelemetry::default()
+            };
             self.sink
                 .as_ref()
                 .expect("runtime installs observation sink")

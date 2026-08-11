@@ -365,15 +365,9 @@ fn resumable_flow(
     })
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct TwoTicketSource {
     step: u8,
-}
-
-impl Default for TwoTicketSource {
-    fn default() -> Self {
-        Self { step: 0 }
-    }
 }
 
 impl TypedFiniteSourceHandler for TwoTicketSource {
