@@ -1,5 +1,5 @@
 error[E0599]: no method named `clone` found for struct `CsvSink<T>` in the current scope
-  --> tests/compile_fail/sink_witness/csv_sink_clone.rs:16:29
+  --> tests/compile_fail/sink_witness/csv_sink_clone.rs:20:29
    |
-16 |     let _other_stage = sink.clone();
+20 |     let _other_stage = sink.clone();
    |                             ^^^^^ method not found in `CsvSink<Input>`
