@@ -207,3 +207,31 @@ fn raw_sink_implementations_match_the_checked_in_allowlist() {
         "raw SinkHandler allowlist drifted\nunexpected: {unexpected:#?}\nstale: {stale:#?}"
     );
 }
+
+#[test]
+fn sink_delivery_event_factory_stays_behind_the_final_stamp_boundary() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let journal_sink = root.join("crates/obzenflow_runtime/src/stages/sink/journal_sink");
+    let mut sources = Vec::new();
+    rust_sources_under(&journal_sink, &mut sources);
+    let mut factory_sites = Vec::new();
+
+    for source_path in sources {
+        let source = fs::read_to_string(&source_path).expect("read journal sink source");
+        for _ in source.match_indices("ChainEventFactory::delivery_event(") {
+            factory_sites.push(
+                source_path
+                    .strip_prefix(&root)
+                    .expect("journal sink source has relative path")
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
+
+    assert_eq!(
+        factory_sites,
+        vec!["crates/obzenflow_runtime/src/stages/sink/journal_sink/mod.rs"],
+        "every sink delivery event must pass through journalled_delivery_event"
+    );
+}

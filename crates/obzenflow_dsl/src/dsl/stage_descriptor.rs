@@ -1776,7 +1776,7 @@ pub(crate) struct SinkDescriptor<H: TypedSinkHandler + 'static> {
 }
 
 #[async_trait]
-impl<H: TypedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+impl<H: TypedSinkHandler + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for SinkDescriptor<H>
 {
     fn name(&self) -> &str {

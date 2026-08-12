@@ -305,6 +305,11 @@ path = "tests/replay_truncated_eof_fidelity_test.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "csv_sink_termination_contract_test"
+path = "tests/csv_sink_termination_contract_test.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "lineage_policy_flow_test"
 path = "tests/lineage_policy_flow_test.rs"
 required-features = ["test-support"]

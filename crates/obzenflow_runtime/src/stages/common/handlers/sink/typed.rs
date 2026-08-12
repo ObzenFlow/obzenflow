@@ -14,7 +14,7 @@ use obzenflow_core::event::payloads::delivery_payload::{
 use obzenflow_core::event::{ChainEventContent, StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, EventId, StageId, TypedPayload};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -152,7 +152,13 @@ struct PendingRegistry {
     registry_id: u64,
     stage_id: StageId,
     next_nonce: u64,
-    outstanding: HashSet<u64>,
+    phases: HashMap<u64, PendingPhase>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingPhase {
+    Current,
+    Deferred,
 }
 
 fn lock_pending_registry(registry: &Mutex<PendingRegistry>) -> MutexGuard<'_, PendingRegistry> {
@@ -200,13 +206,15 @@ impl PendingRegistry {
             registry_id: NEXT_PENDING_REGISTRY_ID.fetch_add(1, Ordering::Relaxed),
             stage_id,
             next_nonce: 0,
-            outstanding: HashSet::new(),
+            phases: HashMap::new(),
         }
     }
 
     fn mint(&mut self, parent_event_id: EventId) -> PendingSinkInput {
         let nonce = self.next_nonce;
         self.next_nonce = self.next_nonce.wrapping_add(1);
+        let previous = self.phases.insert(nonce, PendingPhase::Current);
+        debug_assert!(previous.is_none());
         PendingSinkInput {
             identity: PendingIdentity {
                 registry_id: self.registry_id,
@@ -220,19 +228,50 @@ impl PendingRegistry {
     fn defer(&mut self, pending: &PendingSinkInput) {
         debug_assert_eq!(pending.identity.registry_id, self.registry_id);
         debug_assert_eq!(pending.identity.stage_id, self.stage_id);
-        let inserted = self.outstanding.insert(pending.identity.nonce);
-        debug_assert!(inserted);
+        if pending.identity.registry_id != self.registry_id
+            || pending.identity.stage_id != self.stage_id
+        {
+            return;
+        }
+
+        // `SinkInputContext::defer` is intentionally infallible. Once the
+        // adapter closes the current input, a retained context may still hand
+        // its caller an opaque token, but it can never recreate settlement
+        // authority in this registry.
+        if let Some(phase @ PendingPhase::Current) = self.phases.get_mut(&pending.identity.nonce) {
+            *phase = PendingPhase::Deferred;
+        }
     }
 
     fn is_outstanding(&self, identity: PendingIdentity) -> bool {
         identity.registry_id == self.registry_id
             && identity.stage_id == self.stage_id
-            && self.outstanding.contains(&identity.nonce)
+            && matches!(
+                self.phases.get(&identity.nonce),
+                Some(PendingPhase::Deferred)
+            )
+    }
+
+    fn close_terminal(&mut self, identity: PendingIdentity) -> Result<(), HandlerError> {
+        debug_assert_eq!(identity.registry_id, self.registry_id);
+        debug_assert_eq!(identity.stage_id, self.stage_id);
+        match self.phases.get(&identity.nonce) {
+            Some(PendingPhase::Current) => {
+                self.phases.remove(&identity.nonce);
+                Ok(())
+            }
+            Some(PendingPhase::Deferred) => Err(protocol_fatal(
+                "sink returned a terminal primary outcome after deferring the input",
+            )),
+            None => Err(protocol_fatal(
+                "sink terminal input capability was already closed",
+            )),
+        }
     }
 
     fn abandon(&mut self, identity: PendingIdentity) {
         if identity.registry_id == self.registry_id && identity.stage_id == self.stage_id {
-            self.outstanding.remove(&identity.nonce);
+            self.phases.remove(&identity.nonce);
         }
     }
 
@@ -249,10 +288,18 @@ impl PendingRegistry {
                 "stale sink settlement capability from another adapter instance",
             ));
         }
-        if !self.outstanding.remove(&identity.nonce) {
-            return Err(protocol_fatal(
-                "duplicate, stale, or non-deferred sink settlement capability",
-            ));
+        match self.phases.get(&identity.nonce) {
+            Some(PendingPhase::Deferred) => {
+                self.phases.remove(&identity.nonce);
+            }
+            Some(PendingPhase::Current) => {
+                return Err(protocol_fatal("non-deferred sink settlement capability"));
+            }
+            None => {
+                return Err(protocol_fatal(
+                    "duplicate, stale, or closed sink settlement capability",
+                ));
+            }
         }
         Ok(pending.parent_event_id)
     }
@@ -565,16 +612,6 @@ pub struct TypedSinkHandlerAdapter<H> {
     registry: Arc<Mutex<PendingRegistry>>,
 }
 
-impl<H: Clone> Clone for TypedSinkHandlerAdapter<H> {
-    fn clone(&self) -> Self {
-        Self {
-            handler: self.handler.clone(),
-            stage_id: self.stage_id,
-            registry: Arc::clone(&self.registry),
-        }
-    }
-}
-
 impl<H: std::fmt::Debug> std::fmt::Debug for TypedSinkHandlerAdapter<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TypedSinkHandlerAdapter")
@@ -606,19 +643,13 @@ impl<H> TypedSinkHandlerAdapter<H> {
         current: PendingIdentity,
         report: TypedSinkConsumeReport,
     ) -> Result<SinkConsumeReport, HandlerError> {
-        let current_is_outstanding = lock_pending_registry(&self.registry).is_outstanding(current);
-
         let primary = match report.primary {
             SinkPrimaryOutcome::Terminal(outcome) => {
-                if current_is_outstanding {
-                    return Err(protocol_fatal(
-                        "sink returned a terminal primary outcome after deferring the input",
-                    ));
-                }
+                lock_pending_registry(&self.registry).close_terminal(current)?;
                 Self::lower_terminal(outcome)
             }
             SinkPrimaryOutcome::Buffered(outcome) => {
-                if !current_is_outstanding {
+                if !lock_pending_registry(&self.registry).is_outstanding(current) {
                     return Err(protocol_fatal(
                         "sink returned a buffered primary outcome without deferring the input",
                     ));
@@ -966,6 +997,102 @@ mod tests {
         assert!(matches!(error, HandlerError::Fatal(_)));
     }
 
+    #[derive(Debug)]
+    struct RetainsContext {
+        retained: Arc<Mutex<Option<SinkInputContext>>>,
+        fail_consume: bool,
+    }
+
+    #[async_trait]
+    impl TypedSinkHandler for RetainsContext {
+        type Input = Input;
+
+        fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+            SinkDeliveryDeclaration::undeclared()
+        }
+
+        async fn consume(
+            &mut self,
+            _input: Input,
+            context: SinkInputContext,
+        ) -> Result<TypedSinkConsumeReport, HandlerError> {
+            *self
+                .retained
+                .lock()
+                .expect("retained context lock poisoned") = Some(context);
+            if self.fail_consume {
+                Err(HandlerError::Other(
+                    "intentional consume failure after retaining context".to_string(),
+                ))
+            } else {
+                Ok(TypedSinkConsumeReport::terminal(
+                    SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+                ))
+            }
+        }
+
+        async fn flush(&mut self) -> Result<TypedSinkLifecycleReport, HandlerError> {
+            let context = self
+                .retained
+                .lock()
+                .expect("retained context lock poisoned")
+                .take()
+                .expect("consume retained a context");
+            Ok(
+                TypedSinkLifecycleReport::default().with_commit_receipts(vec![
+                    TypedCommitReceipt::new(
+                        context.defer(),
+                        SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+                    ),
+                ]),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_context_cannot_defer_after_a_terminal_return() {
+        let mut adapter = TypedSinkHandlerAdapter::new(
+            RetainsContext {
+                retained: Arc::new(Mutex::new(None)),
+                fail_consume: false,
+            },
+            StageId::new(),
+        );
+
+        adapter
+            .consume_report(event(1))
+            .await
+            .expect("terminal consume succeeds");
+        let error = adapter
+            .flush_report()
+            .await
+            .expect_err("a retained context cannot recreate closed authority");
+        assert!(matches!(error, HandlerError::Fatal(_)));
+    }
+
+    #[tokio::test]
+    async fn retained_context_cannot_defer_after_a_handler_error() {
+        let mut adapter = TypedSinkHandlerAdapter::new(
+            RetainsContext {
+                retained: Arc::new(Mutex::new(None)),
+                fail_consume: true,
+            },
+            StageId::new(),
+        );
+
+        let error = adapter
+            .consume_report(event(1))
+            .await
+            .expect_err("consume intentionally fails");
+        assert!(matches!(error, HandlerError::Other(_)));
+
+        let error = adapter
+            .flush_report()
+            .await
+            .expect_err("a retained context cannot recreate revoked authority");
+        assert!(matches!(error, HandlerError::Fatal(_)));
+    }
+
     #[test]
     fn settlement_registry_rejects_foreign_stale_duplicate_and_nondeferred_tokens() {
         fn duplicate_for_test(pending: &PendingSinkInput) -> PendingSinkInput {
@@ -1086,24 +1213,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adapter_clones_share_one_stage_registry_but_independent_stages_do_not() {
+    async fn independent_stage_adapters_cannot_settle_each_others_capabilities() {
         let pending = Arc::new(Mutex::new(Vec::new()));
         let handler = Buffered {
             pending: Arc::clone(&pending),
         };
-        let mut first_clone = TypedSinkHandlerAdapter::new(handler.clone(), StageId::new());
-        let mut second_clone = first_clone.clone();
-        let input = event(1);
-        first_clone
-            .consume_report(input.clone())
-            .await
-            .expect("buffer through first adapter clone");
-        let report = second_clone
-            .flush_report()
-            .await
-            .expect("settle through second adapter clone");
-        assert_eq!(report.commit_receipts[0].parent_event_id, input.id);
-
         let mut first_stage = TypedSinkHandlerAdapter::new(handler.clone(), StageId::new());
         let mut second_stage = TypedSinkHandlerAdapter::new(handler, StageId::new());
         first_stage

@@ -1197,7 +1197,7 @@ pub fn typed_sink_descriptor<H, ArrowInput>(
     observers: Vec<Box<dyn MiddlewareFactory>>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: TypedSinkHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    H: TypedSinkHandler + fmt::Debug + Send + Sync + 'static,
     H::Input: SinkInputMatchesArrow<ArrowInput>,
     ArrowInput: TypedPayload + Send + Sync + 'static,
 {

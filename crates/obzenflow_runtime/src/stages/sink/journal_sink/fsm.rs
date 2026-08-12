@@ -26,7 +26,7 @@ use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::{ChainEventFactory, EventEnvelope, SystemEvent};
+use obzenflow_core::event::{EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
@@ -34,6 +34,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
+
+use super::journalled_delivery_event;
 
 // ============================================================================
 // FSM States
@@ -594,8 +596,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         // end-of-input completion statement; Truncated discards
                         // it while flush and receipt effects run for every kind.
                         let report = apply_terminal_eof_audit_gate(report, ctx.terminal_eof_kind);
-                        if let Some(mut payload) = report.audit_payload {
-                            payload.destination = ctx.receipt_destination.clone();
+                        if let Some(payload) = report.audit_payload {
                             tracing::trace!(
                                 target: "flowip-080o",
                                 stage_name = %ctx.stage_name,
@@ -615,9 +616,13 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                 stage_type: StageType::Sink,
                             };
 
-                            let evt = ChainEventFactory::delivery_event(writer_id, payload)
-                                .with_flow_context(flow_ctx)
-                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                            let evt = journalled_delivery_event(
+                                writer_id,
+                                &ctx.receipt_destination,
+                                payload,
+                            )
+                            .with_flow_context(flow_ctx)
+                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
                             ctx.data_journal.append(evt, None).await.map_err(|e| {
                                 obzenflow_fsm::FsmError::HandlerError(format!(
@@ -727,8 +732,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     // while the drain call and receipt effects run for every kind.
                     let drain_result =
                         apply_terminal_eof_audit_gate(drain_result, ctx.terminal_eof_kind);
-                    if let Some(mut payload) = drain_result.audit_payload {
-                        payload.destination = ctx.receipt_destination.clone();
+                    if let Some(payload) = drain_result.audit_payload {
                         tracing::trace!(
                             target: "flowip-080o",
                             stage_name = %ctx.stage_name,
@@ -748,9 +752,10 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                             stage_type: StageType::Sink,
                         };
 
-                        let evt = ChainEventFactory::delivery_event(writer_id, payload)
-                            .with_flow_context(flow_ctx)
-                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                        let evt =
+                            journalled_delivery_event(writer_id, &ctx.receipt_destination, payload)
+                                .with_flow_context(flow_ctx)
+                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
                         ctx.data_journal.append(evt, None).await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
@@ -856,7 +861,7 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         stage_type: StageType::Sink,
     };
 
-    let evt = ChainEventFactory::delivery_event(writer_id, payload)
+    let evt = journalled_delivery_event(writer_id, &ctx.receipt_destination, payload)
         .with_flow_context(flow_ctx)
         .with_causality(CausalityContext::with_parent(parent_envelope.event.id))
         .with_correlation_from(&parent_envelope.event)

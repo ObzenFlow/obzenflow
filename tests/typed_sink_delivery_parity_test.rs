@@ -327,16 +327,9 @@ async fn buffered_csv_and_named_sink_have_live_replay_journal_parity() {
             .collect::<Vec<_>>();
         assert_eq!(outcomes, vec!["buffered", "success"]);
     }
-    assert!(live_csv_evidence.iter().all(|evidence| {
-        if evidence.parent_record == Some(3) && evidence.result["result"] == "success" {
-            // Lifecycle commit receipts historically retain their authored
-            // empty destination; preserving that row is part of the migration
-            // oracle. Per-input and audit rows still prove final-name fallback.
-            evidence.destination.is_empty()
-        } else {
-            evidence.destination == "csv_out"
-        }
-    }));
+    assert!(live_csv_evidence
+        .iter()
+        .all(|evidence| evidence.destination == "csv_out"));
     assert!(live_csv_evidence
         .iter()
         .all(|evidence| evidence.bytes_processed.is_none()));
@@ -490,4 +483,83 @@ async fn invalid_settlement_records_stage_fatal_without_a_delivery_receipt() {
     assert!(fatals[0]
         .detail
         .contains("buffered primary outcome without deferring"));
+}
+
+#[derive(Debug)]
+struct FailingSink {
+    declared: bool,
+}
+
+#[async_trait]
+impl TypedSinkHandler for FailingSink {
+    type Input = SinkRecord;
+
+    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+        if self.declared {
+            SinkDeliveryDeclaration::destination(
+                "declared.failure",
+                SinkDeliverySafety::IdempotentProjection,
+                None,
+            )
+        } else {
+            SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+        }
+    }
+
+    async fn consume(
+        &mut self,
+        _input: Self::Input,
+        _context: SinkInputContext,
+    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        Err(HandlerError::Other("intentional sink failure".to_string()))
+    }
+}
+
+fn build_failure_destination_flow(journal_base: PathBuf) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let mut records = ValuesSource::new();
+        records.values.truncate(1);
+        let declared = FailingSink { declared: true };
+        let fallback = FailingSink { declared: false };
+        Ok(flow! {
+            name: "typed_sink_failure_destination",
+            journals: disk_journals(journal_base),
+
+            stages: {
+                records = source!(SinkRecord => records);
+                declared_failure = sink!(SinkRecord => declared);
+                fallback_failure = sink!(SinkRecord => fallback);
+            },
+
+            topology: {
+                records |> declared_failure;
+                records |> fallback_failure;
+            }
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_receipts_use_declared_and_final_bound_destinations() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_failure_destination_flow(journal_base.clone()))
+        .await
+        .expect("ordinary sink failures remain per-record outcomes");
+
+    let run = latest_run_dir(&journal_base);
+    let source = read_stage(&run, "records").await;
+    for (stage, destination) in [
+        ("declared_failure", "declared.failure"),
+        ("fallback_failure", "fallback_failure"),
+    ] {
+        let evidence = delivery_evidence(&source, &read_stage(&run, stage).await);
+        assert_eq!(evidence.len(), 1, "{stage}");
+        assert_eq!(evidence[0].destination, destination, "{stage}");
+        assert_eq!(evidence[0].result["result"], "failed", "{stage}");
+        assert_eq!(evidence[0].parent_record, Some(1), "{stage}");
+    }
 }

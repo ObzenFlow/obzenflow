@@ -21,9 +21,7 @@ use crate::supervised_base::{
 };
 
 /// Builder for creating journal sink stages
-pub struct JournalSinkBuilder<
-    H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-> {
+pub struct JournalSinkBuilder<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> {
     handler: H,
     config: JournalSinkConfig,
     resources: StageResources,
@@ -31,9 +29,7 @@ pub struct JournalSinkBuilder<
     heartbeat_config: HeartbeatConfig,
 }
 
-impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    JournalSinkBuilder<H>
-{
+impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> JournalSinkBuilder<H> {
     /// Create a new journal sink builder
     pub fn new(handler: H, config: JournalSinkConfig, resources: StageResources) -> Self {
         Self {
@@ -58,7 +54,7 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 }
 
 #[async_trait::async_trait]
-impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
+impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
     for JournalSinkBuilder<H>
 {
     type Handle = JournalSinkHandle<H>;

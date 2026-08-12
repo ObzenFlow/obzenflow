@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::marker::PhantomData;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// Builder for a CSV projection whose accepted event type is `T`.
 #[derive(Clone, Debug)]
@@ -170,7 +170,7 @@ impl<T> CsvSinkBuilder<T> {
         };
 
         Ok(CsvSink {
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Mutex::new(inner),
             _phantom: PhantomData,
         })
     }
@@ -181,17 +181,8 @@ impl<T> CsvSinkBuilder<T> {
 /// The type parameter is the handler-owned input witness used by `sink!`; the
 /// writer and row-shaping state remain schema-agnostic internally.
 pub struct CsvSink<T> {
-    inner: Arc<Mutex<CsvSinkInner>>,
+    inner: Mutex<CsvSinkInner>,
     _phantom: PhantomData<fn() -> T>,
-}
-
-impl<T> Clone for CsvSink<T> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            _phantom: PhantomData,
-        }
-    }
 }
 
 impl<T> std::fmt::Debug for CsvSink<T> {
@@ -727,13 +718,16 @@ mod tests {
     #[tokio::test]
     async fn failed_consume_flush_discards_only_the_current_settlement_capability() {
         let tmp = NamedTempFile::new().expect("temp file");
-        let sink = CsvSink::<TestRow>::builder()
+        let mut sink = CsvSink::<TestRow>::builder()
             .path(tmp.path())
             .buffer_size(2)
             .auto_flush(false)
             .build()
             .unwrap();
-        let control = sink.clone();
+        sink.inner
+            .get_mut()
+            .expect("CSV sink lock")
+            .fail_next_buffer_flush = true;
         let mut sink = adapted(sink);
         let first = event(1, 2);
         let failed = event(3, 4);
@@ -741,12 +735,6 @@ mod tests {
         sink.consume_report(first.clone())
             .await
             .expect("first row buffers");
-        control
-            .inner
-            .lock()
-            .expect("CSV sink lock")
-            .fail_next_buffer_flush = true;
-
         let error = sink
             .consume_report(failed)
             .await

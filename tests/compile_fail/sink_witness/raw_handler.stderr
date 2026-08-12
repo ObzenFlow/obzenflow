@@ -24,6 +24,6 @@ note: required by a bound in `typed_sink_descriptor`
    | pub fn typed_sink_descriptor<H, ArrowInput>(
    |        --------------------- required by a bound in this function
 ...
-   |     H: TypedSinkHandler + Clone + fmt::Debug + Send + Sync + 'static,
+   |     H: TypedSinkHandler + fmt::Debug + Send + Sync + 'static,
    |        ^^^^^^^^^^^^^^^^ required by this bound in `typed_sink_descriptor`
    = note: this error originates in the macro `$crate::__obzenflow_sink_typed` which comes from the expansion of the macro `obzenflow_dsl::sink` (in Nightly builds, run with -Z macro-backtrace for more info)
