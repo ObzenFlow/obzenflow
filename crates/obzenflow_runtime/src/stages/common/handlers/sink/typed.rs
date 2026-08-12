@@ -14,9 +14,9 @@ use obzenflow_core::event::payloads::delivery_payload::{
 use obzenflow_core::event::{ChainEventContent, StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, EventId, StageId, TypedPayload};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 static NEXT_PENDING_REGISTRY_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -42,18 +42,21 @@ enum SinkDeliveryDeclarationKind {
 }
 
 impl SinkDeliveryDeclaration {
+    /// Declare no archive-delivery safety or destination identity.
     pub fn undeclared() -> Self {
         Self {
             kind: SinkDeliveryDeclarationKind::Undeclared,
         }
     }
 
+    /// Declare archive-delivery safety without a named destination family.
     pub fn safety_only(safety: SinkDeliverySafety) -> Self {
         Self {
             kind: SinkDeliveryDeclarationKind::SafetyOnly(safety),
         }
     }
 
+    /// Declare a named destination family, its safety, and optional stable coordinates.
     pub fn destination(
         delivery_type: &'static str,
         safety: SinkDeliverySafety,
@@ -116,10 +119,12 @@ impl DeliveryContext {
         }
     }
 
+    /// Return whether this delivery is live or reconstructed from an archive.
     pub fn provenance(&self) -> DeliveryProvenance {
         self.provenance
     }
 
+    /// Return `true` when the input is being reconstructed from an archive.
     pub fn is_replayed(&self) -> bool {
         matches!(self.provenance, DeliveryProvenance::Replayed)
     }
@@ -129,7 +134,9 @@ impl DeliveryContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeliveryProvenance {
+    /// The input belongs to the current live run.
     Live,
+    /// The input was reconstructed from a recorded run.
     Replayed,
 }
 
@@ -145,8 +152,14 @@ struct PendingRegistry {
     registry_id: u64,
     stage_id: StageId,
     next_nonce: u64,
-    outstanding: HashMap<u64, EventId>,
-    settled: HashSet<u64>,
+    outstanding: HashSet<u64>,
+}
+
+fn lock_pending_registry(registry: &Mutex<PendingRegistry>) -> MutexGuard<'_, PendingRegistry> {
+    match registry.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 struct CurrentPendingGuard {
@@ -175,11 +188,9 @@ impl Drop for CurrentPendingGuard {
             return;
         }
 
-        // This guard also runs while unwinding a handler panic. Never panic a
-        // second time from Drop; a poisoned registry is already unrecoverable.
-        if let Ok(mut registry) = self.registry.lock() {
-            registry.abandon(self.identity);
-        }
+        // This guard also runs while unwinding a handler panic. Recover the
+        // small runtime-owned registry rather than panicking a second time.
+        lock_pending_registry(&self.registry).abandon(self.identity);
     }
 }
 
@@ -189,8 +200,7 @@ impl PendingRegistry {
             registry_id: NEXT_PENDING_REGISTRY_ID.fetch_add(1, Ordering::Relaxed),
             stage_id,
             next_nonce: 0,
-            outstanding: HashMap::new(),
-            settled: HashSet::new(),
+            outstanding: HashSet::new(),
         }
     }
 
@@ -210,16 +220,14 @@ impl PendingRegistry {
     fn defer(&mut self, pending: &PendingSinkInput) {
         debug_assert_eq!(pending.identity.registry_id, self.registry_id);
         debug_assert_eq!(pending.identity.stage_id, self.stage_id);
-        let previous = self
-            .outstanding
-            .insert(pending.identity.nonce, pending.parent_event_id);
-        debug_assert!(previous.is_none());
+        let inserted = self.outstanding.insert(pending.identity.nonce);
+        debug_assert!(inserted);
     }
 
     fn is_outstanding(&self, identity: PendingIdentity) -> bool {
         identity.registry_id == self.registry_id
             && identity.stage_id == self.stage_id
-            && self.outstanding.contains_key(&identity.nonce)
+            && self.outstanding.contains(&identity.nonce)
     }
 
     fn abandon(&mut self, identity: PendingIdentity) {
@@ -241,21 +249,12 @@ impl PendingRegistry {
                 "stale sink settlement capability from another adapter instance",
             ));
         }
-        if self.settled.contains(&identity.nonce) {
-            return Err(protocol_fatal("duplicate sink settlement capability"));
-        }
-        let Some(parent_event_id) = self.outstanding.remove(&identity.nonce) else {
+        if !self.outstanding.remove(&identity.nonce) {
             return Err(protocol_fatal(
-                "stale or non-deferred sink settlement capability",
-            ));
-        };
-        if parent_event_id != pending.parent_event_id {
-            return Err(protocol_fatal(
-                "sink settlement capability parent identity was corrupted",
+                "duplicate, stale, or non-deferred sink settlement capability",
             ));
         }
-        self.settled.insert(identity.nonce);
-        Ok(parent_event_id)
+        Ok(pending.parent_event_id)
     }
 }
 
@@ -288,7 +287,7 @@ impl std::fmt::Debug for PendingSinkInput {
 /// Per-input typed sink context.
 pub struct SinkInputContext {
     delivery: DeliveryContext,
-    pending: Option<PendingSinkInput>,
+    pending: PendingSinkInput,
     registry: Arc<Mutex<PendingRegistry>>,
 }
 
@@ -301,19 +300,20 @@ impl std::fmt::Debug for SinkInputContext {
 }
 
 impl SinkInputContext {
+    /// Borrow the read-only delivery provenance for this input.
     pub fn delivery(&self) -> &DeliveryContext {
         &self.delivery
     }
 
-    pub fn defer(mut self) -> PendingSinkInput {
-        let pending = self
-            .pending
-            .take()
-            .expect("sink input context settlement capability already consumed");
-        self.registry
-            .lock()
-            .expect("sink pending registry poisoned")
-            .defer(&pending);
+    /// Retain the single-use settlement authority for buffered work.
+    ///
+    /// A handler returning a buffered primary outcome must keep this value and
+    /// return it in a [`TypedCommitReceipt`] only after the destination commits.
+    pub fn defer(self) -> PendingSinkInput {
+        let Self {
+            pending, registry, ..
+        } = self;
+        lock_pending_registry(&registry).defer(&pending);
         pending
     }
 }
@@ -325,12 +325,14 @@ pub struct SinkTerminalOutcome {
 }
 
 impl SinkTerminalOutcome {
+    /// Describe successful terminal delivery evidence.
     pub fn success(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
         Self {
             payload: DeliveryPayload::success(method, bytes_processed),
         }
     }
 
+    /// Describe partially successful terminal delivery evidence.
     pub fn partial(
         method: DeliveryMethod,
         successful_count: u64,
@@ -349,11 +351,13 @@ impl SinkTerminalOutcome {
         }
     }
 
+    /// Attach the number of successfully delivered items.
     pub fn with_items(mut self, items: u64) -> Self {
         self.payload = self.payload.with_items(items);
         self
     }
 
+    /// Attach structured middleware context to the terminal evidence.
     pub fn with_middleware_context(mut self, context: Value) -> Self {
         self.payload = self.payload.with_middleware_context(context);
         self
@@ -367,12 +371,14 @@ pub struct SinkBufferedOutcome {
 }
 
 impl SinkBufferedOutcome {
+    /// Describe provisional evidence for an input accepted into a buffer.
     pub fn new(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
         Self {
             payload: DeliveryPayload::buffered(method, bytes_processed),
         }
     }
 
+    /// Attach structured middleware context to the provisional evidence.
     pub fn with_middleware_context(mut self, context: Value) -> Self {
         self.payload = self.payload.with_middleware_context(context);
         self
@@ -386,12 +392,14 @@ pub struct SinkAuditOutcome {
 }
 
 impl SinkAuditOutcome {
+    /// Describe a successful lifecycle action such as flush or drain.
     pub fn success(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
         Self {
             payload: DeliveryPayload::success(method, bytes_processed),
         }
     }
 
+    /// Describe a partially successful lifecycle action.
     pub fn partial(
         method: DeliveryMethod,
         successful_count: u64,
@@ -410,20 +418,25 @@ impl SinkAuditOutcome {
         }
     }
 
+    /// Attach the number of items handled by the lifecycle action.
     pub fn with_items(mut self, items: u64) -> Self {
         self.payload = self.payload.with_items(items);
         self
     }
 
+    /// Attach structured middleware context to the lifecycle evidence.
     pub fn with_middleware_context(mut self, context: Value) -> Self {
         self.payload = self.payload.with_middleware_context(context);
         self
     }
 }
 
+/// The primary per-input evidence returned by a typed sink.
 #[derive(Debug, Clone)]
 pub enum SinkPrimaryOutcome {
+    /// The input reached a terminal destination outcome during `consume`.
     Terminal(SinkTerminalOutcome),
+    /// The input remains pending and will be settled by a later commit receipt.
     Buffered(SinkBufferedOutcome),
 }
 
@@ -435,11 +448,13 @@ pub struct TypedCommitReceipt {
 }
 
 impl TypedCommitReceipt {
+    /// Pair a deferred input capability with its terminal delivery evidence.
     pub fn new(pending: PendingSinkInput, outcome: SinkTerminalOutcome) -> Self {
         Self { pending, outcome }
     }
 }
 
+/// Typed evidence returned after consuming one input.
 #[derive(Debug)]
 pub struct TypedSinkConsumeReport {
     primary: SinkPrimaryOutcome,
@@ -447,6 +462,7 @@ pub struct TypedSinkConsumeReport {
 }
 
 impl TypedSinkConsumeReport {
+    /// Build a report for an input that reached a terminal outcome immediately.
     pub fn terminal(outcome: SinkTerminalOutcome) -> Self {
         Self {
             primary: SinkPrimaryOutcome::Terminal(outcome),
@@ -454,6 +470,7 @@ impl TypedSinkConsumeReport {
         }
     }
 
+    /// Build a report for an input retained for later settlement.
     pub fn buffered(outcome: SinkBufferedOutcome) -> Self {
         Self {
             primary: SinkPrimaryOutcome::Buffered(outcome),
@@ -461,11 +478,13 @@ impl TypedSinkConsumeReport {
         }
     }
 
+    /// Add one terminal receipt for previously deferred work.
     pub fn with_commit_receipt(mut self, receipt: TypedCommitReceipt) -> Self {
         self.commit_receipts.push(receipt);
         self
     }
 
+    /// Add terminal receipts for previously deferred work.
     pub fn with_commit_receipts(
         mut self,
         receipts: impl IntoIterator<Item = TypedCommitReceipt>,
@@ -475,6 +494,7 @@ impl TypedSinkConsumeReport {
     }
 }
 
+/// Typed lifecycle evidence returned from `flush` or `drain`.
 #[derive(Debug, Default)]
 pub struct TypedSinkLifecycleReport {
     audit_outcome: Option<SinkAuditOutcome>,
@@ -482,6 +502,7 @@ pub struct TypedSinkLifecycleReport {
 }
 
 impl TypedSinkLifecycleReport {
+    /// Build a lifecycle report with audit-only evidence.
     pub fn audit(outcome: SinkAuditOutcome) -> Self {
         Self {
             audit_outcome: Some(outcome),
@@ -489,11 +510,13 @@ impl TypedSinkLifecycleReport {
         }
     }
 
+    /// Add one terminal receipt for previously deferred work.
     pub fn with_commit_receipt(mut self, receipt: TypedCommitReceipt) -> Self {
         self.commit_receipts.push(receipt);
         self
     }
 
+    /// Add terminal receipts for previously deferred work.
     pub fn with_commit_receipts(
         mut self,
         receipts: impl IntoIterator<Item = TypedCommitReceipt>,
@@ -510,20 +533,25 @@ impl TypedSinkLifecycleReport {
     note = "implement TypedSinkHandler with Input matching the sink! arrow (FLOWIP-134h)"
 )]
 pub trait TypedSinkHandler: Send + Sync + 'static {
+    /// The sole input type this handler accepts through `sink!`.
     type Input: TypedPayload + Send + Sync + 'static;
 
+    /// Return the complete delivery declaration captured before runtime erasure.
     fn delivery_declaration(&self) -> SinkDeliveryDeclaration;
 
+    /// Consume one decoded data input and return typed delivery evidence.
     async fn consume(
         &mut self,
         input: Self::Input,
         context: SinkInputContext,
     ) -> Result<TypedSinkConsumeReport, HandlerError>;
 
+    /// Flush buffered work and return lifecycle evidence and commit receipts.
     async fn flush(&mut self) -> Result<TypedSinkLifecycleReport, HandlerError> {
         Ok(TypedSinkLifecycleReport::default())
     }
 
+    /// Drain outstanding work before shutdown.
     async fn drain(&mut self) -> Result<TypedSinkLifecycleReport, HandlerError> {
         self.flush().await
     }
@@ -578,11 +606,7 @@ impl<H> TypedSinkHandlerAdapter<H> {
         current: PendingIdentity,
         report: TypedSinkConsumeReport,
     ) -> Result<SinkConsumeReport, HandlerError> {
-        let current_is_outstanding = self
-            .registry
-            .lock()
-            .expect("sink pending registry poisoned")
-            .is_outstanding(current);
+        let current_is_outstanding = lock_pending_registry(&self.registry).is_outstanding(current);
 
         let primary = match report.primary {
             SinkPrimaryOutcome::Terminal(outcome) => {
@@ -605,11 +629,7 @@ impl<H> TypedSinkHandlerAdapter<H> {
 
         let mut commit_receipts = Vec::with_capacity(report.commit_receipts.len());
         for receipt in report.commit_receipts {
-            let parent_event_id = self
-                .registry
-                .lock()
-                .expect("sink pending registry poisoned")
-                .settle(receipt.pending)?;
+            let parent_event_id = lock_pending_registry(&self.registry).settle(receipt.pending)?;
             commit_receipts.push(CommitReceipt {
                 parent_event_id,
                 payload: Self::lower_terminal(receipt.outcome),
@@ -628,11 +648,7 @@ impl<H> TypedSinkHandlerAdapter<H> {
     ) -> Result<SinkLifecycleReport, HandlerError> {
         let mut commit_receipts = Vec::with_capacity(report.commit_receipts.len());
         for receipt in report.commit_receipts {
-            let parent_event_id = self
-                .registry
-                .lock()
-                .expect("sink pending registry poisoned")
-                .settle(receipt.pending)?;
+            let parent_event_id = lock_pending_registry(&self.registry).settle(receipt.pending)?;
             commit_receipts.push(CommitReceipt {
                 parent_event_id,
                 payload: Self::lower_terminal(receipt.outcome),
@@ -687,15 +703,11 @@ where
             ))
         })?;
 
-        let pending = self
-            .registry
-            .lock()
-            .expect("sink pending registry poisoned")
-            .mint(event.id);
+        let pending = lock_pending_registry(&self.registry).mint(event.id);
         let current = pending.identity;
         let context = SinkInputContext {
             delivery: DeliveryContext::from_event(&event),
-            pending: Some(pending),
+            pending,
             registry: Arc::clone(&self.registry),
         };
         let mut guard = CurrentPendingGuard::new(Arc::clone(&self.registry), current);

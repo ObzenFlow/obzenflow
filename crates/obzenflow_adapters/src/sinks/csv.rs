@@ -22,6 +22,7 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// Builder for a CSV projection whose accepted event type is `T`.
 #[derive(Clone, Debug)]
 pub struct CsvSinkBuilder<T> {
     path: Option<PathBuf>,
@@ -175,6 +176,10 @@ impl<T> CsvSinkBuilder<T> {
     }
 }
 
+/// A type-indexed CSV projection sink.
+///
+/// The type parameter is the handler-owned input witness used by `sink!`; the
+/// writer and row-shaping state remain schema-agnostic internally.
 pub struct CsvSink<T> {
     inner: Arc<Mutex<CsvSinkInner>>,
     _phantom: PhantomData<fn() -> T>,

@@ -30,7 +30,9 @@ pub struct FallibleSinkMode;
 pub struct SinkTyped<T, F, Fut, Mode = InfallibleSinkMode> {
     handler: F,
     declaration: SinkDeliveryDeclaration,
-    _phantom: PhantomData<fn() -> (T, Fut, Mode)>,
+    _input: PhantomData<fn() -> T>,
+    _future: PhantomData<fn() -> Fut>,
+    _mode: PhantomData<fn() -> Mode>,
 }
 
 impl<T, F, Fut, Mode> Clone for SinkTyped<T, F, Fut, Mode>
@@ -41,7 +43,9 @@ where
         Self {
             handler: self.handler.clone(),
             declaration: self.declaration.clone(),
-            _phantom: PhantomData,
+            _input: PhantomData,
+            _future: PhantomData,
+            _mode: PhantomData,
         }
     }
 }
@@ -61,11 +65,14 @@ where
     F: FnMut(T) -> Fut + Send + Sync + Clone + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    /// Build an infallible closure sink over `T`.
     pub fn new(handler: F) -> Self {
         Self {
             handler,
             declaration: SinkDeliveryDeclaration::undeclared(),
-            _phantom: PhantomData,
+            _input: PhantomData,
+            _future: PhantomData,
+            _mode: PhantomData,
         }
     }
 }
@@ -74,6 +81,7 @@ impl<T> SinkTyped<T, fn(T) -> std::future::Ready<()>, std::future::Ready<()>, In
 where
     T: TypedPayload + Send + Sync + 'static,
 {
+    /// Build a fallible closure sink whose errors follow the sink error path.
     pub fn fallible<G, FutG>(handler: G) -> SinkTyped<T, G, FutG, FallibleSinkMode>
     where
         G: FnMut(T) -> FutG + Send + Sync + Clone + 'static,
@@ -82,10 +90,13 @@ where
         SinkTyped {
             handler,
             declaration: SinkDeliveryDeclaration::undeclared(),
-            _phantom: PhantomData,
+            _input: PhantomData,
+            _future: PhantomData,
+            _mode: PhantomData,
         }
     }
 
+    /// Build a closure sink that also receives read-only delivery provenance.
     pub fn with_delivery<G, FutG>(handler: G) -> SinkTyped<T, G, FutG, WithDeliverySinkMode>
     where
         G: FnMut(T, DeliveryContext) -> FutG + Send + Sync + Clone + 'static,
@@ -94,18 +105,22 @@ where
         SinkTyped {
             handler,
             declaration: SinkDeliveryDeclaration::undeclared(),
-            _phantom: PhantomData,
+            _input: PhantomData,
+            _future: PhantomData,
+            _mode: PhantomData,
         }
     }
 }
 
 impl<T, F, Fut, Mode> SinkTyped<T, F, Fut, Mode> {
+    /// Declare this projection safe to re-run during replay or resume.
     pub fn idempotent(mut self) -> Self {
         self.declaration =
             SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection);
         self
     }
 
+    /// Declare that duplicate external delivery requires archive-verb opt-in.
     pub fn non_idempotent(mut self) -> Self {
         self.declaration =
             SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::NonIdempotentExternal);
