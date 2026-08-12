@@ -319,8 +319,8 @@ mod tests {
     use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::{
-        SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-        TypedAsyncInfiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler,
+        InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+        TypedAsyncInfiniteSourceHandler,
     };
     use obzenflow_runtime::supervised_base::SupervisorHandle;
     use serde_json::json;
@@ -844,34 +844,45 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Debug)]
     struct NotifyingSink<T> {
         delivered: Arc<AtomicUsize>,
         notify: Arc<Notify>,
         _phantom: std::marker::PhantomData<fn() -> T>,
     }
 
+    impl<T> Clone for NotifyingSink<T> {
+        fn clone(&self) -> Self {
+            Self {
+                delivered: Arc::clone(&self.delivered),
+                notify: Arc::clone(&self.notify),
+                _phantom: std::marker::PhantomData,
+            }
+        }
+    }
+
     #[async_trait]
-    impl<T> TypedSinkHandler for NotifyingSink<T>
+    impl<T> InlineSink for NotifyingSink<T>
     where
         T: TypedPayload + Send + Sync + 'static,
     {
         type Input = T;
 
-        fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-            SinkDeliveryDeclaration::undeclared()
+        fn describe(&self) -> SinkDescription {
+            SinkDescription::unspecified()
         }
 
-        async fn consume(
+        async fn write(
             &mut self,
             _event: T,
-            _context: SinkInputContext,
-        ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+            _context: SinkWriteContext,
+        ) -> std::result::Result<SinkWriteReport, HandlerError> {
             self.delivered.fetch_add(1, Ordering::AcqRel);
             self.notify.notify_waiters();
-            Ok(TypedSinkConsumeReport::terminal(
-                SinkTerminalOutcome::success(DeliveryMethod::Custom("Collect".to_string()), None),
-            ))
+            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+                DeliveryMethod::Custom("Collect".to_string()),
+                None,
+            )))
         }
     }
 

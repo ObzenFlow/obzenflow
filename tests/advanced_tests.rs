@@ -8,8 +8,8 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
-    TypedSinkConsumeReport, TypedSinkHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use anyhow::Result;
@@ -112,24 +112,25 @@ async fn test_dsl_pipeline() -> Result<()> {
     }
 
     #[async_trait]
-    impl TypedSinkHandler for Summer {
+    impl InlineSink for Summer {
         type Input = AdvancedTestEvent;
 
-        fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-            SinkDeliveryDeclaration::undeclared()
+        fn describe(&self) -> SinkDescription {
+            SinkDescription::unspecified()
         }
 
-        async fn consume(
+        async fn write(
             &mut self,
             event: AdvancedTestEvent,
-            _context: SinkInputContext,
-        ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+            _context: SinkWriteContext,
+        ) -> std::result::Result<SinkWriteReport, HandlerError> {
             if let Some(doubled) = event.doubled {
                 self.total.fetch_add(doubled, Ordering::Relaxed);
             }
-            Ok(TypedSinkConsumeReport::terminal(
-                SinkTerminalOutcome::success(DeliveryMethod::Custom("Sum".to_string()), None),
-            ))
+            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+                DeliveryMethod::Custom("Sum".to_string()),
+                None,
+            )))
         }
     }
 

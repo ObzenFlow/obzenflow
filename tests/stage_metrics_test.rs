@@ -15,8 +15,8 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
-    TypedSinkConsumeReport, TypedSinkHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 
@@ -105,24 +105,25 @@ impl CollectorSink {
 }
 
 #[async_trait]
-impl TypedSinkHandler for CollectorSink {
+impl InlineSink for CollectorSink {
     type Input = MetricEvent;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         event: MetricEvent,
-        _context: SinkInputContext,
-    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
         if let Ok(mut events) = self.events.lock() {
             events.push(event);
         }
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Collect".to_string()), None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Collect".to_string()),
+            None,
+        )))
     }
 }
 

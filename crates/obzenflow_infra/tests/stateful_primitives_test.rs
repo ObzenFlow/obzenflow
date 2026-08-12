@@ -15,8 +15,8 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
-    TypedSinkConsumeReport, TypedSinkHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::stateful::strategies::accumulators::{
     ConflateTyped, GroupByTyped, ReduceTyped,
@@ -98,10 +98,19 @@ impl TypedFiniteSourceHandler for TransactionSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct CollectingSink<T> {
     events: Arc<Mutex<Vec<ChainEvent>>>,
     _input: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for CollectingSink<T> {
+    fn clone(&self) -> Self {
+        Self {
+            events: Arc::clone(&self.events),
+            _input: std::marker::PhantomData,
+        }
+    }
 }
 
 impl<T> CollectingSink<T> {
@@ -114,28 +123,29 @@ impl<T> CollectingSink<T> {
 }
 
 #[async_trait]
-impl<T> TypedSinkHandler for CollectingSink<T>
+impl<T> InlineSink for CollectingSink<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
     type Input = T;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         input: T,
-        _context: SinkInputContext,
-    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
         self.events
             .lock()
             .unwrap()
             .push(input.to_event(WriterId::from(StageId::new())));
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("collect".to_string()), None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("collect".to_string()),
+            None,
+        )))
     }
 }
 

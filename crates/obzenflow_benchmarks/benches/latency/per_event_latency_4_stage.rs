@@ -15,8 +15,8 @@ use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
-    TypedSinkConsumeReport, TypedSinkHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 // Monitoring removed per FLOWIP-056-666
@@ -107,18 +107,18 @@ struct LatencySink {
 }
 
 #[async_trait]
-impl TypedSinkHandler for LatencySink {
+impl InlineSink for LatencySink {
     type Input = BenchEvent;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         event: BenchEvent,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         self.received.fetch_add(1, Ordering::Relaxed);
 
         // Skip warmup events
@@ -135,9 +135,10 @@ impl TypedSinkHandler for LatencySink {
             }
         }
 
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Noop,
+            None,
+        )))
     }
 }
 

@@ -19,13 +19,14 @@ pub use observer::ObserverHandler;
 pub use resource_managed::ResourceManaged;
 #[doc(hidden)]
 pub use sink::{
-    CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport, TypedSinkHandlerAdapter,
+    CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport, SinkWriterAdapter,
     UnifiedSinkHandler,
 };
 pub use sink::{
-    DeliveryContext, DeliveryProvenance, PendingSinkInput, SinkAuditOutcome, SinkBufferedOutcome,
-    SinkDeliveryDeclaration, SinkInputContext, SinkPrimaryOutcome, SinkTerminalOutcome,
-    TypedCommitReceipt, TypedSinkConsumeReport, TypedSinkHandler, TypedSinkLifecycleReport,
+    DeliveryContext, DeliveryProvenance, InlineSink, PendingSinkInput, SinkAuditOutcome,
+    SinkBufferedOutcome, SinkCommitReceipt, SinkConnector, SinkDescription, SinkPrimaryOutcome,
+    SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, SinkWriter, SinkWriterInitContext,
+    SinkWriterLifecycleReport, WithRedeliverySafety,
 };
 pub use source::{
     HostedIngressSource, SourceError, SourceObservationSink, TypedAsyncFiniteSourceHandler,

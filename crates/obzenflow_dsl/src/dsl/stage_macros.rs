@@ -2373,10 +2373,9 @@ macro_rules! __obzenflow_sink_typed {
 }
 
 /// Lower the optional `delivery:` clause of `sink!` (FLOWIP-120n F16,
-/// FLOWIP-120s). Routes through the sealed `DeclareDeliverySafety` trait so
-/// the clause is accepted only by the closure-tier typed sinks; a named
-/// `TypedSinkHandler` declares its aggregate metadata itself and fails here by
-/// trait bound.
+/// FLOWIP-120s). Routes through the sealed `SetSinkRedeliverySafety` trait so
+/// the clause is accepted only for a `SinkConnector`, including the inline
+/// tier, and wraps its description before the DSL snapshots it.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_sink_delivery {
@@ -2384,10 +2383,10 @@ macro_rules! __obzenflow_sink_delivery {
         $handler
     };
     ($handler:expr, idempotent) => {
-        ::obzenflow_runtime::stages::sink::DeclareDeliverySafety::declare_idempotent($handler)
+        ::obzenflow_runtime::stages::sink::SetSinkRedeliverySafety::safe_to_repeat($handler)
     };
     ($handler:expr, non_idempotent) => {
-        ::obzenflow_runtime::stages::sink::DeclareDeliverySafety::declare_non_idempotent($handler)
+        ::obzenflow_runtime::stages::sink::SetSinkRedeliverySafety::duplicate_sensitive($handler)
     };
     ($handler:expr, $other:ident) => {
         compile_error!("sink!: `delivery:` accepts `idempotent` or `non_idempotent`")

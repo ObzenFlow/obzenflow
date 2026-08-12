@@ -35,10 +35,10 @@ use obzenflow_runtime::stages::common::handlers::source::traits::{
 };
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-    StatefulEmission, TransformHandler, TypedAsyncFiniteSourceHandler,
-    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-    TypedJoinHandler, TypedSinkConsumeReport, TypedSinkHandler, TypedStatefulHandler,
+    InlineSink, JoinReferenceView, SinkConnector, SinkDescription, SinkTerminalOutcome,
+    SinkWriteContext, SinkWriteReport, StatefulEmission, TransformHandler,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler,
     TypedStatefulHandlerAdapter, TypedTransformHandler, TypedTransformHandlerAdapter,
 };
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
@@ -107,13 +107,13 @@ pub trait StatefulInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput>
 #[diagnostic::do_not_recommend]
 impl<Input> StatefulInputMatchesArrow<Input> for Input {}
 
-/// Diagnostic facade for equality between a typed sink handler's authoritative
+/// Diagnostic facade for equality between a sink connector's authoritative
 /// input and the `sink!` arrow input.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "this sink handler does not witness its declared input",
-    label = "the handler's `Input` does not match the fact type declared before `=>`",
-    note = "implement TypedSinkHandler with Input matching the sink! arrow (FLOWIP-134h)"
+    message = "this sink connector does not witness its declared input",
+    label = "the connector's `Input` does not match the fact type declared before `=>`",
+    note = "implement SinkConnector or InlineSink with Input matching the sink! arrow (FLOWIP-134h)"
 )]
 pub trait SinkInputMatchesArrow<ArrowInput>: proof_sealed::Equal<ArrowInput> {}
 
@@ -1186,27 +1186,27 @@ where
 
 /// Canonical proof-carrying admission factory for a real typed sink.
 ///
-/// The delivery declaration is queried exactly once here, after the macro has
-/// applied any sealed site-level decoration and before the handler is erased
-/// or wrapped by runtime machinery.
+/// The connector description is snapshotted exactly once here, after the macro
+/// has applied any sealed site-level decoration and before the writer is opened,
+/// erased, or wrapped by runtime machinery.
 #[doc(hidden)]
-pub fn typed_sink_descriptor<H, ArrowInput>(
+pub fn typed_sink_descriptor<C, ArrowInput>(
     name: impl Into<String>,
-    handler: H,
+    connector: C,
     sink_policies: Vec<Box<dyn MiddlewareFactory>>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: TypedSinkHandler + fmt::Debug + Send + Sync + 'static,
-    H::Input: SinkInputMatchesArrow<ArrowInput>,
+    C: SinkConnector + fmt::Debug + Send + Sync + 'static,
+    C::Input: SinkInputMatchesArrow<ArrowInput>,
     ArrowInput: TypedPayload + Send + Sync + 'static,
 {
     let metadata = StageTypingMetadata::sink(TypeHint::exact_payload::<ArrowInput>(), false, None);
-    let delivery_declaration = handler.delivery_declaration();
+    let description = SinkConnector::describe(&connector);
     let descriptor: Box<dyn StageDescriptor> = Box::new(SinkDescriptor {
         name: name.into(),
-        handler,
-        delivery_declaration,
+        connector,
+        description,
         sink_policies,
         observers,
     });
@@ -1229,12 +1229,12 @@ where
         true,
         message.map(str::to_string),
     );
-    let handler = PlaceholderSink::<ArrowInput>::new(message);
-    let delivery_declaration = handler.delivery_declaration();
+    let connector = PlaceholderSink::<ArrowInput>::new(message);
+    let description = SinkConnector::describe(&connector);
     let descriptor: Box<dyn StageDescriptor> = Box::new(SinkDescriptor {
         name: name.into(),
-        handler,
-        delivery_declaration,
+        connector,
+        description,
         sink_policies,
         observers,
     });
@@ -1579,27 +1579,24 @@ impl<In> fmt::Debug for PlaceholderSink<In> {
 }
 
 #[async_trait]
-impl<In> TypedSinkHandler for PlaceholderSink<In>
+impl<In> InlineSink for PlaceholderSink<In>
 where
     In: TypedPayload + Send + Sync + 'static,
 {
     type Input = In;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
-    }
-
-    async fn consume(
+    async fn write(
         &mut self,
         _input: In,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("sink", self.message));
         }
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Noop,
+            None,
+        )))
     }
 }
 
@@ -1779,8 +1776,8 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.stage_logic_version()
     }
 
-    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
-        self.inner.sink_delivery_declaration()
+    fn sink_description(&self) -> Option<&SinkDescription> {
+        self.inner.sink_description()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
@@ -2179,8 +2176,8 @@ pub fn validate_stage_typing_metadata(
 /// FLOWIP-120n F16 archive sink delivery-safety gate, covering both archive
 /// verbs since FLOWIP-120v: deterministic replay re-consumes the recorded
 /// stream and resume re-delivers the recorded prefix during catch-up, so
-/// every sink must be classified. `IdempotentProjection` passes;
-/// `NonIdempotentExternal` and undeclared sinks refuse fail-loud unless the
+/// every sink must be classified. `SafeToRepeat` passes;
+/// `DuplicateSensitive` and undeclared sinks refuse fail-loud unless the
 /// operator passed `allow_duplicate_sink_delivery`, which lets both through
 /// with a warning naming the stage. Live runs never call this.
 #[allow(clippy::result_large_err)]
@@ -2191,7 +2188,7 @@ pub fn validate_archive_sink_delivery_safety(
 ) -> Result<(), crate::dsl::error::FlowBuildError> {
     use crate::dsl::error::FlowBuildError;
     use obzenflow_runtime::bootstrap::ReplayVerb;
-    use obzenflow_runtime::effects::SinkDeliverySafety;
+    use obzenflow_runtime::effects::SinkRedeliverySafety;
 
     let verb_phrase = match verb {
         ReplayVerb::Replay => "replay will re-perform",
@@ -2210,11 +2207,11 @@ pub fn validate_archive_sink_delivery_safety(
         }
 
         match descriptor
-            .sink_delivery_declaration()
-            .and_then(SinkDeliveryDeclaration::safety)
+            .sink_description()
+            .and_then(SinkDescription::redelivery_safety)
         {
-            Some(SinkDeliverySafety::IdempotentProjection) => {}
-            Some(SinkDeliverySafety::NonIdempotentExternal) => {
+            Some(SinkRedeliverySafety::SafeToRepeat) => {}
+            Some(SinkRedeliverySafety::DuplicateSensitive) => {
                 if !allow_duplicate_sink_delivery {
                     return Err(FlowBuildError::ArchiveRefusedNonIdempotentSink {
                         stage: name.clone(),
@@ -2883,8 +2880,8 @@ impl StageDescriptor for DeterministicOrdererOverride {
         self.inner.stage_logic_version()
     }
 
-    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
-        self.inner.sink_delivery_declaration()
+    fn sink_description(&self) -> Option<&SinkDescription> {
+        self.inner.sink_description()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {

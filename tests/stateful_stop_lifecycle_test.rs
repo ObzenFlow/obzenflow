@@ -28,8 +28,8 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
-    TypedInfiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use std::sync::Arc;
@@ -40,21 +40,22 @@ use tempfile::tempdir;
 struct NoopSink;
 
 #[async_trait]
-impl TypedSinkHandler for NoopSink {
+impl InlineSink for NoopSink {
     type Input = LifecycleEvent;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _event: LifecycleEvent,
-        _context: SinkInputContext,
-    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Noop".to_string()), None),
-        ))
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Noop".to_string()),
+            None,
+        )))
     }
 }
 
@@ -70,22 +71,23 @@ impl SlowSink {
 }
 
 #[async_trait]
-impl TypedSinkHandler for SlowSink {
+impl InlineSink for SlowSink {
     type Input = LifecycleEvent;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _event: LifecycleEvent,
-        _context: SinkInputContext,
-    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
         tokio::time::sleep(self.sleep).await;
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Noop".to_string()), None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Noop".to_string()),
+            None,
+        )))
     }
 }
 

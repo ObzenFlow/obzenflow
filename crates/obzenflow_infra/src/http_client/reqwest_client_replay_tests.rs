@@ -21,12 +21,12 @@ use obzenflow_dsl::{async_infinite_source, async_source, flow, sink, FlowDefinit
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
 };
-use obzenflow_runtime::effects::SinkDeliverySafety;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedAsyncFiniteSourceHandler,
-    TypedSinkConsumeReport, TypedSinkHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedAsyncFiniteSourceHandler,
 };
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
@@ -75,22 +75,23 @@ struct CountingSink {
 }
 
 #[async_trait]
-impl TypedSinkHandler for CountingSink {
+impl InlineSink for CountingSink {
     type Input = HttpFixtureEvent;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _input: HttpFixtureEvent,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         self.delivered.fetch_add(1, Ordering::SeqCst);
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Noop,
+            None,
+        )))
     }
 }
 

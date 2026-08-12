@@ -5,7 +5,6 @@
 //! Typed sink authoring and runtime erasure (FLOWIP-134h).
 
 use super::traits::{CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport};
-use crate::effects::SinkDeliverySafety;
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{
@@ -19,88 +18,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 static NEXT_PENDING_REGISTRY_ID: AtomicU64 = AtomicU64::new(1);
-
-/// The complete delivery declaration snapshotted before runtime adaptation.
-///
-/// Its representation is private so invalid combinations cannot be authored:
-/// canonical destination coordinates exist only alongside a destination
-/// family, and every destination-bearing declaration carries safety.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SinkDeliveryDeclaration {
-    kind: SinkDeliveryDeclarationKind,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum SinkDeliveryDeclarationKind {
-    Undeclared,
-    SafetyOnly(SinkDeliverySafety),
-    Destination {
-        delivery_type: &'static str,
-        safety: SinkDeliverySafety,
-        canonical_destination: Option<Value>,
-    },
-}
-
-impl SinkDeliveryDeclaration {
-    /// Declare no archive-delivery safety or destination identity.
-    pub fn undeclared() -> Self {
-        Self {
-            kind: SinkDeliveryDeclarationKind::Undeclared,
-        }
-    }
-
-    /// Declare archive-delivery safety without a named destination family.
-    pub fn safety_only(safety: SinkDeliverySafety) -> Self {
-        Self {
-            kind: SinkDeliveryDeclarationKind::SafetyOnly(safety),
-        }
-    }
-
-    /// Declare a named destination family, its safety, and optional stable coordinates.
-    pub fn destination(
-        delivery_type: &'static str,
-        safety: SinkDeliverySafety,
-        canonical_destination: Option<Value>,
-    ) -> Self {
-        Self {
-            kind: SinkDeliveryDeclarationKind::Destination {
-                delivery_type,
-                safety,
-                canonical_destination,
-            },
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn safety(&self) -> Option<SinkDeliverySafety> {
-        match self.kind {
-            SinkDeliveryDeclarationKind::Undeclared => None,
-            SinkDeliveryDeclarationKind::SafetyOnly(safety)
-            | SinkDeliveryDeclarationKind::Destination { safety, .. } => Some(safety),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn delivery_type(&self) -> Option<&'static str> {
-        match self.kind {
-            SinkDeliveryDeclarationKind::Destination { delivery_type, .. } => Some(delivery_type),
-            SinkDeliveryDeclarationKind::Undeclared
-            | SinkDeliveryDeclarationKind::SafetyOnly(_) => None,
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn canonical_destination(&self) -> Option<&Value> {
-        match &self.kind {
-            SinkDeliveryDeclarationKind::Destination {
-                canonical_destination,
-                ..
-            } => canonical_destination.as_ref(),
-            SinkDeliveryDeclarationKind::Undeclared
-            | SinkDeliveryDeclarationKind::SafetyOnly(_) => None,
-        }
-    }
-}
 
 /// FLOWIP-120i per-delivery provenance projection.
 #[derive(Debug, Clone)]
@@ -234,7 +151,7 @@ impl PendingRegistry {
             return;
         }
 
-        // `SinkInputContext::defer` is intentionally infallible. Once the
+        // `SinkWriteContext::defer` is intentionally infallible. Once the
         // adapter closes the current input, a retained context may still hand
         // its caller an opaque token, but it can never recreate settlement
         // authority in this registry.
@@ -332,21 +249,21 @@ impl std::fmt::Debug for PendingSinkInput {
 }
 
 /// Per-input typed sink context.
-pub struct SinkInputContext {
+pub struct SinkWriteContext {
     delivery: DeliveryContext,
     pending: PendingSinkInput,
     registry: Arc<Mutex<PendingRegistry>>,
 }
 
-impl std::fmt::Debug for SinkInputContext {
+impl std::fmt::Debug for SinkWriteContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SinkInputContext")
+        f.debug_struct("SinkWriteContext")
             .field("delivery", &self.delivery)
             .finish_non_exhaustive()
     }
 }
 
-impl SinkInputContext {
+impl SinkWriteContext {
     /// Borrow the read-only delivery provenance for this input.
     pub fn delivery(&self) -> &DeliveryContext {
         &self.delivery
@@ -355,7 +272,7 @@ impl SinkInputContext {
     /// Retain the single-use settlement authority for buffered work.
     ///
     /// A handler returning a buffered primary outcome must keep this value and
-    /// return it in a [`TypedCommitReceipt`] only after the destination commits.
+    /// return it in a [`SinkCommitReceipt`] only after the destination commits.
     pub fn defer(self) -> PendingSinkInput {
         let Self {
             pending, registry, ..
@@ -369,18 +286,49 @@ impl SinkInputContext {
 #[derive(Debug, Clone)]
 pub struct SinkTerminalOutcome {
     payload: DeliveryPayload,
+    method_override: Option<DeliveryMethod>,
 }
 
 impl SinkTerminalOutcome {
-    /// Describe successful terminal delivery evidence.
-    pub fn success(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
+    /// Describe successful terminal evidence using the connector's normal
+    /// receipt method.
+    pub fn success(bytes_processed: Option<u64>) -> Self {
         Self {
-            payload: DeliveryPayload::success(method, bytes_processed),
+            payload: DeliveryPayload::success(DeliveryMethod::Noop, bytes_processed),
+            method_override: None,
         }
     }
 
-    /// Describe partially successful terminal delivery evidence.
+    /// Describe successful terminal evidence using a per-attempt method.
+    pub fn success_via(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
+        Self {
+            payload: DeliveryPayload::success(method.clone(), bytes_processed),
+            method_override: Some(method),
+        }
+    }
+
+    /// Describe partially successful evidence using the connector's normal
+    /// receipt method.
     pub fn partial(
+        successful_count: u64,
+        failed_count: u64,
+        error_summary: impl Into<String>,
+        failed_items: Option<Vec<String>>,
+    ) -> Self {
+        Self {
+            payload: DeliveryPayload::partial(
+                DeliveryMethod::Noop,
+                successful_count,
+                failed_count,
+                error_summary,
+                failed_items,
+            ),
+            method_override: None,
+        }
+    }
+
+    /// Describe partially successful evidence using a per-attempt method.
+    pub fn partial_via(
         method: DeliveryMethod,
         successful_count: u64,
         failed_count: u64,
@@ -389,12 +337,13 @@ impl SinkTerminalOutcome {
     ) -> Self {
         Self {
             payload: DeliveryPayload::partial(
-                method,
+                method.clone(),
                 successful_count,
                 failed_count,
                 error_summary,
                 failed_items,
             ),
+            method_override: Some(method),
         }
     }
 
@@ -415,13 +364,24 @@ impl SinkTerminalOutcome {
 #[derive(Debug, Clone)]
 pub struct SinkBufferedOutcome {
     payload: DeliveryPayload,
+    method_override: Option<DeliveryMethod>,
 }
 
 impl SinkBufferedOutcome {
-    /// Describe provisional evidence for an input accepted into a buffer.
-    pub fn new(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
+    /// Describe provisional evidence using the connector's normal receipt
+    /// method.
+    pub fn accepted(bytes_processed: Option<u64>) -> Self {
         Self {
-            payload: DeliveryPayload::buffered(method, bytes_processed),
+            payload: DeliveryPayload::buffered(DeliveryMethod::Noop, bytes_processed),
+            method_override: None,
+        }
+    }
+
+    /// Describe provisional evidence using a per-attempt method.
+    pub fn accepted_via(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
+        Self {
+            payload: DeliveryPayload::buffered(method.clone(), bytes_processed),
+            method_override: Some(method),
         }
     }
 
@@ -436,18 +396,50 @@ impl SinkBufferedOutcome {
 #[derive(Debug, Clone)]
 pub struct SinkAuditOutcome {
     payload: DeliveryPayload,
+    method_override: Option<DeliveryMethod>,
 }
 
 impl SinkAuditOutcome {
-    /// Describe a successful lifecycle action such as flush or drain.
-    pub fn success(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
+    /// Describe a successful lifecycle action using the connector's normal
+    /// receipt method.
+    pub fn success(bytes_processed: Option<u64>) -> Self {
         Self {
-            payload: DeliveryPayload::success(method, bytes_processed),
+            payload: DeliveryPayload::success(DeliveryMethod::Noop, bytes_processed),
+            method_override: None,
         }
     }
 
-    /// Describe a partially successful lifecycle action.
+    /// Describe a successful lifecycle action using a per-attempt method.
+    pub fn success_via(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
+        Self {
+            payload: DeliveryPayload::success(method.clone(), bytes_processed),
+            method_override: Some(method),
+        }
+    }
+
+    /// Describe a partially successful lifecycle action using the connector's
+    /// normal receipt method.
     pub fn partial(
+        successful_count: u64,
+        failed_count: u64,
+        error_summary: impl Into<String>,
+        failed_items: Option<Vec<String>>,
+    ) -> Self {
+        Self {
+            payload: DeliveryPayload::partial(
+                DeliveryMethod::Noop,
+                successful_count,
+                failed_count,
+                error_summary,
+                failed_items,
+            ),
+            method_override: None,
+        }
+    }
+
+    /// Describe a partially successful lifecycle action using a per-attempt
+    /// method.
+    pub fn partial_via(
         method: DeliveryMethod,
         successful_count: u64,
         failed_count: u64,
@@ -456,12 +448,13 @@ impl SinkAuditOutcome {
     ) -> Self {
         Self {
             payload: DeliveryPayload::partial(
-                method,
+                method.clone(),
                 successful_count,
                 failed_count,
                 error_summary,
                 failed_items,
             ),
+            method_override: Some(method),
         }
     }
 
@@ -481,7 +474,7 @@ impl SinkAuditOutcome {
 /// The primary per-input evidence returned by a typed sink.
 #[derive(Debug, Clone)]
 pub enum SinkPrimaryOutcome {
-    /// The input reached a terminal destination outcome during `consume`.
+    /// The input reached a terminal destination outcome during `write`.
     Terminal(SinkTerminalOutcome),
     /// The input remains pending and will be settled by a later commit receipt.
     Buffered(SinkBufferedOutcome),
@@ -489,26 +482,26 @@ pub enum SinkPrimaryOutcome {
 
 /// A terminal receipt paired with the exact buffered input capability.
 #[derive(Debug)]
-pub struct TypedCommitReceipt {
+pub struct SinkCommitReceipt {
     pending: PendingSinkInput,
     outcome: SinkTerminalOutcome,
 }
 
-impl TypedCommitReceipt {
+impl SinkCommitReceipt {
     /// Pair a deferred input capability with its terminal delivery evidence.
     pub fn new(pending: PendingSinkInput, outcome: SinkTerminalOutcome) -> Self {
         Self { pending, outcome }
     }
 }
 
-/// Typed evidence returned after consuming one input.
+/// Typed evidence returned after writing one input.
 #[derive(Debug)]
-pub struct TypedSinkConsumeReport {
+pub struct SinkWriteReport {
     primary: SinkPrimaryOutcome,
-    commit_receipts: Vec<TypedCommitReceipt>,
+    commit_receipts: Vec<SinkCommitReceipt>,
 }
 
-impl TypedSinkConsumeReport {
+impl SinkWriteReport {
     /// Build a report for an input that reached a terminal outcome immediately.
     pub fn terminal(outcome: SinkTerminalOutcome) -> Self {
         Self {
@@ -526,7 +519,7 @@ impl TypedSinkConsumeReport {
     }
 
     /// Add one terminal receipt for previously deferred work.
-    pub fn with_commit_receipt(mut self, receipt: TypedCommitReceipt) -> Self {
+    pub fn with_commit_receipt(mut self, receipt: SinkCommitReceipt) -> Self {
         self.commit_receipts.push(receipt);
         self
     }
@@ -534,7 +527,7 @@ impl TypedSinkConsumeReport {
     /// Add terminal receipts for previously deferred work.
     pub fn with_commit_receipts(
         mut self,
-        receipts: impl IntoIterator<Item = TypedCommitReceipt>,
+        receipts: impl IntoIterator<Item = SinkCommitReceipt>,
     ) -> Self {
         self.commit_receipts.extend(receipts);
         self
@@ -543,12 +536,12 @@ impl TypedSinkConsumeReport {
 
 /// Typed lifecycle evidence returned from `flush` or `drain`.
 #[derive(Debug, Default)]
-pub struct TypedSinkLifecycleReport {
+pub struct SinkWriterLifecycleReport {
     audit_outcome: Option<SinkAuditOutcome>,
-    commit_receipts: Vec<TypedCommitReceipt>,
+    commit_receipts: Vec<SinkCommitReceipt>,
 }
 
-impl TypedSinkLifecycleReport {
+impl SinkWriterLifecycleReport {
     /// Build a lifecycle report with audit-only evidence.
     pub fn audit(outcome: SinkAuditOutcome) -> Self {
         Self {
@@ -558,7 +551,7 @@ impl TypedSinkLifecycleReport {
     }
 
     /// Add one terminal receipt for previously deferred work.
-    pub fn with_commit_receipt(mut self, receipt: TypedCommitReceipt) -> Self {
+    pub fn with_commit_receipt(mut self, receipt: SinkCommitReceipt) -> Self {
         self.commit_receipts.push(receipt);
         self
     }
@@ -566,87 +559,113 @@ impl TypedSinkLifecycleReport {
     /// Add terminal receipts for previously deferred work.
     pub fn with_commit_receipts(
         mut self,
-        receipts: impl IntoIterator<Item = TypedCommitReceipt>,
+        receipts: impl IntoIterator<Item = SinkCommitReceipt>,
     ) -> Self {
         self.commit_receipts.extend(receipts);
         self
     }
 }
 
-/// The sole public behavioural and input-authority trait for sink handlers.
+/// Mutable, stage-local execution role created by a [`SinkConnector`](super::connector::SinkConnector).
 #[async_trait]
 #[diagnostic::on_unimplemented(
-    message = "this sink handler does not witness its declared input",
-    note = "implement TypedSinkHandler with Input matching the sink! arrow (FLOWIP-134h)"
+    message = "this sink writer does not witness its connector input",
+    note = "implement SinkWriter with Input matching SinkConnector::Input (FLOWIP-134h)"
 )]
-pub trait TypedSinkHandler: Send + Sync + 'static {
-    /// The sole input type this handler accepts through `sink!`.
+pub trait SinkWriter: Send + Sync + 'static {
+    /// The sole input type this writer accepts.
     type Input: TypedPayload + Send + Sync + 'static;
 
-    /// Return the complete delivery declaration captured before runtime erasure.
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration;
-
-    /// Consume one decoded data input and return typed delivery evidence.
-    async fn consume(
+    /// Write one decoded data input and return typed delivery evidence.
+    async fn write(
         &mut self,
         input: Self::Input,
-        context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError>;
+        context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError>;
 
     /// Flush buffered work and return lifecycle evidence and commit receipts.
-    async fn flush(&mut self) -> Result<TypedSinkLifecycleReport, HandlerError> {
-        Ok(TypedSinkLifecycleReport::default())
+    async fn flush(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
+        Ok(SinkWriterLifecycleReport::default())
     }
 
     /// Drain outstanding work before shutdown.
-    async fn drain(&mut self) -> Result<TypedSinkLifecycleReport, HandlerError> {
+    async fn drain(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
         self.flush().await
     }
 }
 
-/// Sole bridge from typed sink authoring to the journal sink's erased input.
+/// Sole bridge from a typed sink writer to the journal sink's erased input.
 #[doc(hidden)]
-pub struct TypedSinkHandlerAdapter<H> {
-    handler: H,
+pub struct SinkWriterAdapter<W> {
+    writer: W,
     stage_id: StageId,
+    default_method: Option<DeliveryMethod>,
     registry: Arc<Mutex<PendingRegistry>>,
 }
 
-impl<H: std::fmt::Debug> std::fmt::Debug for TypedSinkHandlerAdapter<H> {
+impl<W> std::fmt::Debug for SinkWriterAdapter<W> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TypedSinkHandlerAdapter")
-            .field("handler", &self.handler)
+        f.debug_struct("SinkWriterAdapter")
+            .field("writer_type", &std::any::type_name::<W>())
             .field("stage_id", &self.stage_id)
             .finish_non_exhaustive()
     }
 }
 
-impl<H> TypedSinkHandlerAdapter<H> {
-    pub fn new(handler: H, stage_id: StageId) -> Self {
+impl<W> SinkWriterAdapter<W> {
+    pub fn new(writer: W, stage_id: StageId) -> Self {
+        Self::with_default_method(writer, stage_id, None)
+    }
+
+    pub fn with_default_method(
+        writer: W,
+        stage_id: StageId,
+        default_method: Option<DeliveryMethod>,
+    ) -> Self {
         Self {
-            handler,
+            writer,
             stage_id,
+            default_method,
             registry: Arc::new(Mutex::new(PendingRegistry::new(stage_id))),
         }
     }
 
-    fn lower_terminal(outcome: SinkTerminalOutcome) -> DeliveryPayload {
+    fn resolve_method(
+        &self,
+        mut payload: DeliveryPayload,
+        method_override: Option<DeliveryMethod>,
+    ) -> Result<DeliveryPayload, HandlerError> {
+        let method = method_override
+            .or_else(|| self.default_method.clone())
+            .ok_or_else(|| {
+                protocol_fatal(
+                    "sink outcome has no delivery method; configure a connector default or use a *_via outcome",
+                )
+            })?;
+        payload.delivery_method = method;
+        Ok(payload)
+    }
+
+    fn lower_terminal(
+        &self,
+        outcome: SinkTerminalOutcome,
+    ) -> Result<DeliveryPayload, HandlerError> {
         debug_assert!(matches!(
             outcome.payload.result,
             DeliveryResult::Success { .. } | DeliveryResult::Partial { .. }
         ));
-        outcome.payload
+        self.resolve_method(outcome.payload, outcome.method_override)
     }
 
-    fn lower_consume_report(
+    fn lower_write_report(
         &self,
         current: PendingIdentity,
-        report: TypedSinkConsumeReport,
+        report: SinkWriteReport,
     ) -> Result<SinkConsumeReport, HandlerError> {
         let primary = match report.primary {
             SinkPrimaryOutcome::Terminal(outcome) => {
                 lock_pending_registry(&self.registry).close_terminal(current)?;
-                Self::lower_terminal(outcome)
+                self.lower_terminal(outcome)?
             }
             SinkPrimaryOutcome::Buffered(outcome) => {
                 if !lock_pending_registry(&self.registry).is_outstanding(current) {
@@ -654,7 +673,7 @@ impl<H> TypedSinkHandlerAdapter<H> {
                         "sink returned a buffered primary outcome without deferring the input",
                     ));
                 }
-                outcome.payload
+                self.resolve_method(outcome.payload, outcome.method_override)?
             }
         };
 
@@ -663,7 +682,7 @@ impl<H> TypedSinkHandlerAdapter<H> {
             let parent_event_id = lock_pending_registry(&self.registry).settle(receipt.pending)?;
             commit_receipts.push(CommitReceipt {
                 parent_event_id,
-                payload: Self::lower_terminal(receipt.outcome),
+                payload: self.lower_terminal(receipt.outcome)?,
             });
         }
 
@@ -675,27 +694,30 @@ impl<H> TypedSinkHandlerAdapter<H> {
 
     fn lower_lifecycle_report(
         &self,
-        report: TypedSinkLifecycleReport,
+        report: SinkWriterLifecycleReport,
     ) -> Result<SinkLifecycleReport, HandlerError> {
         let mut commit_receipts = Vec::with_capacity(report.commit_receipts.len());
         for receipt in report.commit_receipts {
             let parent_event_id = lock_pending_registry(&self.registry).settle(receipt.pending)?;
             commit_receipts.push(CommitReceipt {
                 parent_event_id,
-                payload: Self::lower_terminal(receipt.outcome),
+                payload: self.lower_terminal(receipt.outcome)?,
             });
         }
         Ok(SinkLifecycleReport {
-            audit_payload: report.audit_outcome.map(|outcome| outcome.payload),
+            audit_payload: report
+                .audit_outcome
+                .map(|outcome| self.resolve_method(outcome.payload, outcome.method_override))
+                .transpose()?,
             commit_receipts,
         })
     }
 }
 
 #[async_trait]
-impl<H> SinkHandler for TypedSinkHandlerAdapter<H>
+impl<W> SinkHandler for SinkWriterAdapter<W>
 where
-    H: TypedSinkHandler,
+    W: SinkWriter,
 {
     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         Ok(self.consume_report(event).await?.primary)
@@ -718,33 +740,33 @@ where
             }
         };
 
-        if !H::Input::event_type_matches(event_type) {
+        if !W::Input::event_type_matches(event_type) {
             return Err(HandlerError::Validation(format!(
-                "TypedSinkHandler expected event type '{}' (or '{}'), got '{}'",
-                H::Input::EVENT_TYPE,
-                H::Input::versioned_event_type(),
+                "SinkWriter expected event type '{}' (or '{}'), got '{}'",
+                W::Input::EVENT_TYPE,
+                W::Input::versioned_event_type(),
                 event_type
             )));
         }
 
-        let input: H::Input = serde_json::from_value(payload.clone()).map_err(|error| {
+        let input: W::Input = serde_json::from_value(payload.clone()).map_err(|error| {
             HandlerError::Deserialization(format!(
-                "TypedSinkHandler failed to deserialize {}: {error}",
-                std::any::type_name::<H::Input>()
+                "SinkWriter failed to deserialize {}: {error}",
+                std::any::type_name::<W::Input>()
             ))
         })?;
 
         let pending = lock_pending_registry(&self.registry).mint(event.id);
         let current = pending.identity;
-        let context = SinkInputContext {
+        let context = SinkWriteContext {
             delivery: DeliveryContext::from_event(&event),
             pending,
             registry: Arc::clone(&self.registry),
         };
         let mut guard = CurrentPendingGuard::new(Arc::clone(&self.registry), current);
 
-        let report = self.handler.consume(input, context).await?;
-        let lowered = self.lower_consume_report(current, report)?;
+        let report = self.writer.write(input, context).await?;
+        let lowered = self.lower_write_report(current, report)?;
         guard.complete();
         Ok(lowered)
     }
@@ -754,7 +776,7 @@ where
     }
 
     async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
-        let report = self.handler.flush().await?;
+        let report = self.writer.flush().await?;
         self.lower_lifecycle_report(report)
     }
 
@@ -763,7 +785,7 @@ where
     }
 
     async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
-        let report = self.handler.drain().await?;
+        let report = self.writer.drain().await?;
         self.lower_lifecycle_report(report)
     }
 }
@@ -792,42 +814,37 @@ mod tests {
     }
 
     #[async_trait]
-    impl TypedSinkHandler for Buffered {
+    impl SinkWriter for Buffered {
         type Input = Input;
 
-        fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-            SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
-        }
-
-        async fn consume(
+        async fn write(
             &mut self,
             _input: Input,
-            context: SinkInputContext,
-        ) -> Result<TypedSinkConsumeReport, HandlerError> {
+            context: SinkWriteContext,
+        ) -> Result<SinkWriteReport, HandlerError> {
             self.pending
                 .lock()
                 .expect("pending lock poisoned")
                 .push(context.defer());
-            Ok(TypedSinkConsumeReport::buffered(SinkBufferedOutcome::new(
-                DeliveryMethod::Noop,
-                None,
-            )))
+            Ok(SinkWriteReport::buffered(
+                SinkBufferedOutcome::accepted_via(DeliveryMethod::Noop, None),
+            ))
         }
 
-        async fn flush(&mut self) -> Result<TypedSinkLifecycleReport, HandlerError> {
+        async fn flush(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
             let receipts = self
                 .pending
                 .lock()
                 .expect("pending lock poisoned")
                 .drain(..)
                 .map(|pending| {
-                    TypedCommitReceipt::new(
+                    SinkCommitReceipt::new(
                         pending,
-                        SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+                        SinkTerminalOutcome::success_via(DeliveryMethod::Noop, None),
                     )
                 })
                 .collect::<Vec<_>>();
-            Ok(TypedSinkLifecycleReport::default().with_commit_receipts(receipts))
+            Ok(SinkWriterLifecycleReport::default().with_commit_receipts(receipts))
         }
     }
 
@@ -839,10 +856,59 @@ mod tests {
         )
     }
 
+    #[derive(Clone, Debug)]
+    struct UsesConnectorMethod;
+
+    #[async_trait]
+    impl SinkWriter for UsesConnectorMethod {
+        type Input = Input;
+
+        async fn write(
+            &mut self,
+            _input: Input,
+            _context: SinkWriteContext,
+        ) -> Result<SinkWriteReport, HandlerError> {
+            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success(
+                Some(7),
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn connector_default_supplies_the_normal_receipt_method() {
+        let expected = DeliveryMethod::Custom("connector.default".to_string());
+        let mut adapter = SinkWriterAdapter::with_default_method(
+            UsesConnectorMethod,
+            StageId::new(),
+            Some(expected.clone()),
+        );
+
+        let report = adapter
+            .consume_report(event(1))
+            .await
+            .expect("connector default resolves the terminal method");
+
+        assert_eq!(report.primary.delivery_method, expected);
+        assert_eq!(report.primary.bytes_processed, Some(7));
+    }
+
+    #[tokio::test]
+    async fn missing_default_and_attempt_override_fail_loud() {
+        let mut adapter = SinkWriterAdapter::new(UsesConnectorMethod, StageId::new());
+
+        let error = adapter
+            .consume_report(event(1))
+            .await
+            .expect_err("an unresolved receipt method is a protocol error");
+
+        assert!(matches!(error, HandlerError::Fatal(_)));
+        assert!(error.to_string().contains("no delivery method"));
+    }
+
     #[tokio::test]
     async fn buffered_capability_lowers_to_the_original_parent() {
         let pending = Arc::new(Mutex::new(Vec::new()));
-        let mut adapter = TypedSinkHandlerAdapter::new(
+        let mut adapter = SinkWriterAdapter::new(
             Buffered {
                 pending: Arc::clone(&pending),
             },
@@ -874,26 +940,21 @@ mod tests {
         struct Invalid;
 
         #[async_trait]
-        impl TypedSinkHandler for Invalid {
+        impl SinkWriter for Invalid {
             type Input = Input;
 
-            fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-                SinkDeliveryDeclaration::undeclared()
-            }
-
-            async fn consume(
+            async fn write(
                 &mut self,
                 _input: Input,
-                _context: SinkInputContext,
-            ) -> Result<TypedSinkConsumeReport, HandlerError> {
-                Ok(TypedSinkConsumeReport::buffered(SinkBufferedOutcome::new(
-                    DeliveryMethod::Noop,
-                    None,
-                )))
+                _context: SinkWriteContext,
+            ) -> Result<SinkWriteReport, HandlerError> {
+                Ok(SinkWriteReport::buffered(
+                    SinkBufferedOutcome::accepted_via(DeliveryMethod::Noop, None),
+                ))
             }
         }
 
-        let mut adapter = TypedSinkHandlerAdapter::new(Invalid, StageId::new());
+        let mut adapter = SinkWriterAdapter::new(Invalid, StageId::new());
         let error = adapter
             .consume_report(event(1))
             .await
@@ -907,26 +968,23 @@ mod tests {
         struct Invalid;
 
         #[async_trait]
-        impl TypedSinkHandler for Invalid {
+        impl SinkWriter for Invalid {
             type Input = Input;
 
-            fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-                SinkDeliveryDeclaration::undeclared()
-            }
-
-            async fn consume(
+            async fn write(
                 &mut self,
                 _input: Input,
-                context: SinkInputContext,
-            ) -> Result<TypedSinkConsumeReport, HandlerError> {
+                context: SinkWriteContext,
+            ) -> Result<SinkWriteReport, HandlerError> {
                 drop(context.defer());
-                Ok(TypedSinkConsumeReport::terminal(
-                    SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
-                ))
+                Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+                    DeliveryMethod::Noop,
+                    None,
+                )))
             }
         }
 
-        let mut adapter = TypedSinkHandlerAdapter::new(Invalid, StageId::new());
+        let mut adapter = SinkWriterAdapter::new(Invalid, StageId::new());
         let error = adapter
             .consume_report(event(1))
             .await
@@ -942,18 +1000,14 @@ mod tests {
         }
 
         #[async_trait]
-        impl TypedSinkHandler for PanicsAfterDeferral {
+        impl SinkWriter for PanicsAfterDeferral {
             type Input = Input;
 
-            fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-                SinkDeliveryDeclaration::undeclared()
-            }
-
-            async fn consume(
+            async fn write(
                 &mut self,
                 _input: Input,
-                context: SinkInputContext,
-            ) -> Result<TypedSinkConsumeReport, HandlerError> {
+                context: SinkWriteContext,
+            ) -> Result<SinkWriteReport, HandlerError> {
                 self.pending
                     .lock()
                     .expect("pending lock poisoned")
@@ -961,24 +1015,24 @@ mod tests {
                 panic!("intentional typed sink panic after deferral");
             }
 
-            async fn flush(&mut self) -> Result<TypedSinkLifecycleReport, HandlerError> {
+            async fn flush(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
                 let receipts = self
                     .pending
                     .lock()
                     .expect("pending lock poisoned")
                     .drain(..)
                     .map(|pending| {
-                        TypedCommitReceipt::new(
+                        SinkCommitReceipt::new(
                             pending,
-                            SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+                            SinkTerminalOutcome::success_via(DeliveryMethod::Noop, None),
                         )
                     })
                     .collect::<Vec<_>>();
-                Ok(TypedSinkLifecycleReport::default().with_commit_receipts(receipts))
+                Ok(SinkWriterLifecycleReport::default().with_commit_receipts(receipts))
             }
         }
 
-        let mut adapter = TypedSinkHandlerAdapter::new(
+        let mut adapter = SinkWriterAdapter::new(
             PanicsAfterDeferral {
                 pending: Arc::new(Mutex::new(Vec::new())),
             },
@@ -999,23 +1053,19 @@ mod tests {
 
     #[derive(Debug)]
     struct RetainsContext {
-        retained: Arc<Mutex<Option<SinkInputContext>>>,
+        retained: Arc<Mutex<Option<SinkWriteContext>>>,
         fail_consume: bool,
     }
 
     #[async_trait]
-    impl TypedSinkHandler for RetainsContext {
+    impl SinkWriter for RetainsContext {
         type Input = Input;
 
-        fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-            SinkDeliveryDeclaration::undeclared()
-        }
-
-        async fn consume(
+        async fn write(
             &mut self,
             _input: Input,
-            context: SinkInputContext,
-        ) -> Result<TypedSinkConsumeReport, HandlerError> {
+            context: SinkWriteContext,
+        ) -> Result<SinkWriteReport, HandlerError> {
             *self
                 .retained
                 .lock()
@@ -1025,13 +1075,14 @@ mod tests {
                     "intentional consume failure after retaining context".to_string(),
                 ))
             } else {
-                Ok(TypedSinkConsumeReport::terminal(
-                    SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
-                ))
+                Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+                    DeliveryMethod::Noop,
+                    None,
+                )))
             }
         }
 
-        async fn flush(&mut self) -> Result<TypedSinkLifecycleReport, HandlerError> {
+        async fn flush(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
             let context = self
                 .retained
                 .lock()
@@ -1039,10 +1090,10 @@ mod tests {
                 .take()
                 .expect("consume retained a context");
             Ok(
-                TypedSinkLifecycleReport::default().with_commit_receipts(vec![
-                    TypedCommitReceipt::new(
+                SinkWriterLifecycleReport::default().with_commit_receipts(vec![
+                    SinkCommitReceipt::new(
                         context.defer(),
-                        SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+                        SinkTerminalOutcome::success_via(DeliveryMethod::Noop, None),
                     ),
                 ]),
             )
@@ -1051,7 +1102,7 @@ mod tests {
 
     #[tokio::test]
     async fn retained_context_cannot_defer_after_a_terminal_return() {
-        let mut adapter = TypedSinkHandlerAdapter::new(
+        let mut adapter = SinkWriterAdapter::new(
             RetainsContext {
                 retained: Arc::new(Mutex::new(None)),
                 fail_consume: false,
@@ -1072,7 +1123,7 @@ mod tests {
 
     #[tokio::test]
     async fn retained_context_cannot_defer_after_a_handler_error() {
-        let mut adapter = TypedSinkHandlerAdapter::new(
+        let mut adapter = SinkWriterAdapter::new(
             RetainsContext {
                 retained: Arc::new(Mutex::new(None)),
                 fail_consume: true,
@@ -1154,18 +1205,14 @@ mod tests {
         }
 
         #[async_trait]
-        impl TypedSinkHandler for ReverseSettlement {
+        impl SinkWriter for ReverseSettlement {
             type Input = Input;
 
-            fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-                SinkDeliveryDeclaration::undeclared()
-            }
-
-            async fn consume(
+            async fn write(
                 &mut self,
                 _input: Input,
-                context: SinkInputContext,
-            ) -> Result<TypedSinkConsumeReport, HandlerError> {
+                context: SinkWriteContext,
+            ) -> Result<SinkWriteReport, HandlerError> {
                 let mut pending = self.pending.lock().expect("pending lock poisoned");
                 pending.push(context.defer());
                 let receipts = if pending.len() == 2 {
@@ -1173,16 +1220,16 @@ mod tests {
                         .drain(..)
                         .rev()
                         .map(|pending| {
-                            TypedCommitReceipt::new(
+                            SinkCommitReceipt::new(
                                 pending,
-                                SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+                                SinkTerminalOutcome::success_via(DeliveryMethod::Noop, None),
                             )
                         })
                         .collect()
                 } else {
                     Vec::new()
                 };
-                Ok(TypedSinkConsumeReport::buffered(SinkBufferedOutcome::new(
+                Ok(SinkWriteReport::buffered(SinkBufferedOutcome::accepted_via(
                     DeliveryMethod::Noop,
                     None,
                 ))
@@ -1190,7 +1237,7 @@ mod tests {
             }
         }
 
-        let mut adapter = TypedSinkHandlerAdapter::new(
+        let mut adapter = SinkWriterAdapter::new(
             ReverseSettlement {
                 pending: Arc::new(Mutex::new(Vec::new())),
             },
@@ -1218,8 +1265,8 @@ mod tests {
         let handler = Buffered {
             pending: Arc::clone(&pending),
         };
-        let mut first_stage = TypedSinkHandlerAdapter::new(handler.clone(), StageId::new());
-        let mut second_stage = TypedSinkHandlerAdapter::new(handler, StageId::new());
+        let mut first_stage = SinkWriterAdapter::new(handler.clone(), StageId::new());
+        let mut second_stage = SinkWriterAdapter::new(handler, StageId::new());
         first_stage
             .consume_report(event(2))
             .await
@@ -1234,7 +1281,7 @@ mod tests {
     #[tokio::test]
     async fn decode_failures_stay_ordinary_handler_errors() {
         let pending = Arc::new(Mutex::new(Vec::new()));
-        let mut adapter = TypedSinkHandlerAdapter::new(Buffered { pending }, StageId::new());
+        let mut adapter = SinkWriterAdapter::new(Buffered { pending }, StageId::new());
         let malformed = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
             Input::versioned_event_type(),

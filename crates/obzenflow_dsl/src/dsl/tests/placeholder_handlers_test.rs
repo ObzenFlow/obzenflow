@@ -10,7 +10,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_runtime::__private::{
-    TypedJoinHandlerAdapter, TypedSinkHandlerAdapter, UnifiedJoinHandler,
+    SinkWriterAdapter, TypedJoinHandlerAdapter, UnifiedJoinHandler,
 };
 use obzenflow_runtime::stages::common::handlers::source::traits::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
@@ -106,7 +106,7 @@ fn placeholder_stateful_emits_nothing_and_drains() {
 #[tokio::test]
 async fn placeholder_sink_acks_and_flushes_safely() {
     let handler = PlaceholderSink::<PlaceholderInput>::new(None);
-    let mut handler = TypedSinkHandlerAdapter::new(handler, StageId::new());
+    let mut handler = SinkWriterAdapter::new(handler, StageId::new());
     let event = PlaceholderInput.to_event(WriterId::from(StageId::new()));
 
     let payload = SinkHandler::consume(&mut handler, event)

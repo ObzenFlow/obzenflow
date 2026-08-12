@@ -25,9 +25,9 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    PendingSinkInput, SinkAuditOutcome, SinkBufferedOutcome, SinkDeliveryDeclaration,
-    SinkInputContext, SinkTerminalOutcome, TypedCommitReceipt, TypedFiniteSourceHandler,
-    TypedSinkConsumeReport, TypedSinkHandler, TypedSinkLifecycleReport, TypedTransformHandler,
+    InlineSink, PendingSinkInput, SinkAuditOutcome, SinkBufferedOutcome, SinkCommitReceipt,
+    SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    SinkWriterLifecycleReport, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 
@@ -160,31 +160,42 @@ impl CountingSink {
 }
 
 #[async_trait]
-impl TypedSinkHandler for CountingSink {
+impl InlineSink for CountingSink {
     type Input = DeliveryTestEvent;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _event: DeliveryTestEvent,
-        _context: SinkInputContext,
-    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
         self.count.fetch_add(1, Ordering::Relaxed);
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Count".to_string()), None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Count".to_string()),
+            None,
+        )))
     }
 }
 
 /// Sink that buffers data-event acknowledgements until flush.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct BufferedCountingSink<T> {
     count: Arc<AtomicU64>,
     pending: Arc<Mutex<Vec<PendingSinkInput>>>,
     _input: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for BufferedCountingSink<T> {
+    fn clone(&self) -> Self {
+        Self {
+            count: Arc::clone(&self.count),
+            pending: Arc::new(Mutex::new(Vec::new())),
+            _input: std::marker::PhantomData,
+        }
+    }
 }
 
 impl<T> BufferedCountingSink<T> {
@@ -198,33 +209,35 @@ impl<T> BufferedCountingSink<T> {
 }
 
 #[async_trait]
-impl<T> TypedSinkHandler for BufferedCountingSink<T>
+impl<T> InlineSink for BufferedCountingSink<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
     type Input = T;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _event: T,
-        context: SinkInputContext,
-    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
         self.count.fetch_add(1, Ordering::Relaxed);
         self.pending
             .lock()
             .expect("pending receipt buffer poisoned")
             .push(context.defer());
-        Ok(TypedSinkConsumeReport::buffered(SinkBufferedOutcome::new(
-            DeliveryMethod::Custom("BufferedCount".to_string()),
-            None,
-        )))
+        Ok(SinkWriteReport::buffered(
+            SinkBufferedOutcome::accepted_via(
+                DeliveryMethod::Custom("BufferedCount".to_string()),
+                None,
+            ),
+        ))
     }
 
-    async fn flush(&mut self) -> std::result::Result<TypedSinkLifecycleReport, HandlerError> {
+    async fn flush(&mut self) -> std::result::Result<SinkWriterLifecycleReport, HandlerError> {
         let mut pending = self
             .pending
             .lock()
@@ -233,9 +246,9 @@ where
         let commit_receipts: Vec<_> = pending
             .drain(..)
             .map(|pending| {
-                TypedCommitReceipt::new(
+                SinkCommitReceipt::new(
                     pending,
-                    SinkTerminalOutcome::success(
+                    SinkTerminalOutcome::success_via(
                         DeliveryMethod::Custom("BufferedCount".to_string()),
                         None,
                     ),
@@ -243,11 +256,13 @@ where
             })
             .collect();
 
-        Ok(TypedSinkLifecycleReport::audit(SinkAuditOutcome::success(
-            DeliveryMethod::Custom("BufferedCount".to_string()),
-            None,
-        ))
-        .with_commit_receipts(commit_receipts))
+        Ok(
+            SinkWriterLifecycleReport::audit(SinkAuditOutcome::success_via(
+                DeliveryMethod::Custom("BufferedCount".to_string()),
+                None,
+            ))
+            .with_commit_receipts(commit_receipts),
+        )
     }
 }
 

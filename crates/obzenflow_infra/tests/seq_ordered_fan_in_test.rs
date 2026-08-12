@@ -25,13 +25,13 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, infinite_source, join, sink, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::SinkDeliverySafety;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-    StatefulEmission, TypedInfiniteSourceHandler, TypedJoinHandler, TypedSinkConsumeReport,
-    TypedSinkHandler, TypedStatefulHandler,
+    InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, StatefulEmission, TypedInfiniteSourceHandler, TypedJoinHandler,
+    TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::join::JoinReferenceMode;
 use obzenflow_runtime::stages::SourceError;
@@ -229,22 +229,23 @@ struct CountingSink {
 }
 
 #[async_trait]
-impl TypedSinkHandler for CountingSink {
+impl InlineSink for CountingSink {
     type Input = LedgerSnapshot;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _input: LedgerSnapshot,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         self.delivered.fetch_add(1, Ordering::SeqCst);
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Noop,
+            None,
+        )))
     }
 }
 

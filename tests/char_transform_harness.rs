@@ -21,8 +21,8 @@ use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
-    TypedSinkConsumeReport, TypedSinkHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -124,26 +124,27 @@ impl TextAccumulator {
 struct TextSink;
 
 #[async_trait]
-impl TypedSinkHandler for TextSink {
+impl InlineSink for TextSink {
     type Input = TextAccumulator;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _event: TextAccumulator,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         // In the current delivery model, the accumulated state would be encoded
         // directly in the delivery payload, so for this harness we simply log
         // that we received a delivery and return a success receipt.
         println!("TextSink received accumulated text");
 
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Print".to_string()), None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Print".to_string()),
+            None,
+        )))
     }
 }
 

@@ -18,11 +18,10 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
-        EffectfulStatefulHandler, EffectfulTransformHandler, JoinReferenceView,
-        SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, StatefulEmission,
-        TransformHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-        TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
-        TypedSinkConsumeReport, TypedSinkHandler, TypedStatefulHandler, TypedTransformHandler,
+        EffectfulStatefulHandler, EffectfulTransformHandler, InlineSink, JoinReferenceView,
+        SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, StatefulEmission, TransformHandler,
+        TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+        TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::stages::sink::SinkTyped;
     use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
@@ -230,21 +229,18 @@ mod tests {
     #[derive(Clone, Debug)]
     struct Sn;
     #[async_trait]
-    impl TypedSinkHandler for Sn {
+    impl InlineSink for Sn {
         type Input = Out;
 
-        fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-            SinkDeliveryDeclaration::undeclared()
-        }
-
-        async fn consume(
+        async fn write(
             &mut self,
             _input: Out,
-            _context: SinkInputContext,
-        ) -> Result<TypedSinkConsumeReport, HandlerError> {
-            Ok(TypedSinkConsumeReport::terminal(
-                SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
-            ))
+            _context: SinkWriteContext,
+        ) -> Result<SinkWriteReport, HandlerError> {
+            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+                DeliveryMethod::Noop,
+                None,
+            )))
         }
     }
 
@@ -573,7 +569,7 @@ mod tests {
     #[test]
     fn sink_typed_delivery_clause() {
         // The clause rides the sealed closure-tier structs; a custom handler
-        // returns its aggregate `SinkDeliveryDeclaration` directly instead.
+        // returns its aggregate `SinkDescription` directly instead.
         let idempotent_sink = SinkTyped::new(|_out: Out| async move {});
         let _ = crate::sink!(Out => idempotent_sink, delivery: idempotent);
         let non_idempotent_sink = SinkTyped::new(|_out: Out| async move {});

@@ -36,11 +36,11 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::SinkDeliverySafety;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedSinkConsumeReport,
-    TypedSinkHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 const CONFIG_FILE: &str = concat!(
@@ -90,18 +90,18 @@ impl CountingSink {
 }
 
 #[async_trait]
-impl TypedSinkHandler for CountingSink {
+impl InlineSink for CountingSink {
     type Input = CounterEvent;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         event: CounterEvent,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         self.received += 1;
 
         // Log progress every 20 events
@@ -112,9 +112,10 @@ impl TypedSinkHandler for CountingSink {
             );
         }
 
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("InMemory".to_string()), Some(1)),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("InMemory".to_string()),
+            Some(1),
+        )))
     }
 }
 

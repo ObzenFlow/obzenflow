@@ -22,7 +22,7 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_runtime::__private::{TypedSinkHandlerAdapter, UnifiedJoinHandler};
+use obzenflow_runtime::__private::{SinkWriterAdapter, UnifiedJoinHandler};
 use obzenflow_runtime::{
     effects::{
         EffectBoundary, EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
@@ -37,8 +37,8 @@ use obzenflow_runtime::{
             control_strategies::{JonestownSignalStrategy, SignalGate},
             handlers::{
                 EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
-                EffectfulTransformHandler, EffectfulTransformHandlerAdapter,
-                SinkDeliveryDeclaration, TransformHandler, TypedSinkHandler,
+                EffectfulTransformHandler, EffectfulTransformHandlerAdapter, SinkConnector,
+                SinkDescription, SinkWriterInitContext, TransformHandler,
                 UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
                 UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler, UnifiedStatefulHandler,
             },
@@ -532,10 +532,10 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
         "1".to_string()
     }
 
-    /// The sink's one pre-erasure delivery declaration snapshot. Every
+    /// The sink's one pre-erasure connector-description snapshot. Every
     /// descriptor and wrapper must state whether it carries one so metadata
     /// cannot silently attenuate while crossing a wrapper (FLOWIP-134h).
-    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration>;
+    fn sink_description(&self) -> Option<&SinkDescription>;
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
         Vec::new()
@@ -646,7 +646,7 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         StageType::FiniteSource
     }
 
-    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+    fn sink_description(&self) -> Option<&SinkDescription> {
         None
     }
 
@@ -806,7 +806,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
         StageType::FiniteSource
     }
 
-    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+    fn sink_description(&self) -> Option<&SinkDescription> {
         None
     }
 
@@ -948,7 +948,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
         StageType::InfiniteSource
     }
 
-    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+    fn sink_description(&self) -> Option<&SinkDescription> {
         None
     }
 
@@ -1111,7 +1111,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
         StageType::InfiniteSource
     }
 
-    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+    fn sink_description(&self) -> Option<&SinkDescription> {
         None
     }
 
@@ -1254,7 +1254,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         StageType::Transform
     }
 
-    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+    fn sink_description(&self) -> Option<&SinkDescription> {
         None
     }
 
@@ -1503,7 +1503,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         StageType::Transform
     }
 
-    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+    fn sink_description(&self) -> Option<&SinkDescription> {
         None
     }
 
@@ -1767,17 +1767,17 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 }
 
 /// Descriptor for sink stages
-pub(crate) struct SinkDescriptor<H: TypedSinkHandler + 'static> {
+pub(crate) struct SinkDescriptor<C: SinkConnector + 'static> {
     pub(crate) name: String,
-    pub(crate) handler: H,
-    pub(crate) delivery_declaration: SinkDeliveryDeclaration,
+    pub(crate) connector: C,
+    pub(crate) description: SinkDescription,
     pub(crate) sink_policies: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
 }
 
 #[async_trait]
-impl<H: TypedSinkHandler + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
-    for SinkDescriptor<H>
+impl<C: SinkConnector + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+    for SinkDescriptor<C>
 {
     fn name(&self) -> &str {
         &self.name
@@ -1791,8 +1791,8 @@ impl<H: TypedSinkHandler + std::fmt::Debug + Send + Sync + 'static> StageDescrip
         StageType::Sink
     }
 
-    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
-        Some(&self.delivery_declaration)
+    fn sink_description(&self) -> Option<&SinkDescription> {
+        Some(&self.description)
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -1903,7 +1903,8 @@ impl<H: TypedSinkHandler + std::fmt::Debug + Send + Sync + 'static> StageDescrip
         // The typed factory captured this exactly once before erasure and
         // middleware wrapping. The binding-derived fallback is resolved only
         // now, after the final stage name exists.
-        let delivery_type = self.delivery_declaration.delivery_type();
+        let receipt_destination = self.description.destination_name().map(str::to_owned);
+        let default_delivery_method = self.description.default_method().cloned();
 
         // Create the stage configuration
         let sink_config = JournalSinkConfig {
@@ -1916,11 +1917,27 @@ impl<H: TypedSinkHandler + std::fmt::Debug + Send + Sync + 'static> StageDescrip
             control_strategy: Some(control_strategy),
             sink_delivery_boundary,
             observers: observers.build(),
-            delivery_type,
+            receipt_destination,
+            default_delivery_method: default_delivery_method.clone(),
         };
 
-        // Use the builder to create the handle
-        let handler = TypedSinkHandlerAdapter::new(self.handler, config.stage_id);
+        // Open the configured connector only at stage materialisation, then
+        // erase its unique mutable writer behind the journal sink boundary.
+        let writer_context = SinkWriterInitContext::new(
+            config.stage_id,
+            config.name.clone(),
+            config.flow_name.clone(),
+        );
+        let writer = self
+            .connector
+            .open(writer_context)
+            .await
+            .map_err(|error| format!("Failed to open sink connector: {error}"))?;
+        let handler = SinkWriterAdapter::with_default_method(
+            writer,
+            config.stage_id,
+            default_delivery_method,
+        );
         let handle = JournalSinkBuilder::new(handler, sink_config, resources)
             .with_instrumentation(instrumentation)
             .build()
@@ -2088,7 +2105,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         StageType::Stateful
     }
 
-    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+    fn sink_description(&self) -> Option<&SinkDescription> {
         None
     }
 
@@ -2235,7 +2252,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         StageType::Stateful
     }
 
-    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+    fn sink_description(&self) -> Option<&SinkDescription> {
         None
     }
 
@@ -2433,7 +2450,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
         StageType::Join
     }
 
-    fn sink_delivery_declaration(&self) -> Option<&SinkDeliveryDeclaration> {
+    fn sink_description(&self) -> Option<&SinkDescription> {
         None
     }
 
@@ -2621,7 +2638,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + 'static> sealed::Sealed
 }
 impl<H: TransformHandler + 'static> sealed::Sealed for TransformDescriptor<H> {}
 impl<H: EffectfulTransformHandler + 'static> sealed::Sealed for EffectfulTransformDescriptor<H> {}
-impl<H: TypedSinkHandler + 'static> sealed::Sealed for SinkDescriptor<H> {}
+impl<C: SinkConnector + 'static> sealed::Sealed for SinkDescriptor<C> {}
 impl<H: UnifiedStatefulHandler + 'static> sealed::Sealed for StatefulDescriptor<H> {}
 impl<H: EffectfulStatefulHandler + 'static> sealed::Sealed for EffectfulStatefulDescriptor<H> {}
 impl<H: UnifiedJoinHandler + 'static> sealed::Sealed for JoinDescriptor<H> {}

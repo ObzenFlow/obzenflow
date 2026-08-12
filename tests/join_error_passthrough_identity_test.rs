@@ -25,12 +25,11 @@ use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::SinkDeliverySafety;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-    TypedFiniteSourceHandler, TypedJoinHandler, TypedSinkConsumeReport, TypedSinkHandler,
-    TypedTransformHandler,
+    InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -178,24 +177,22 @@ impl TypedTransformHandler for RefValidator {
 struct DropSink;
 
 #[async_trait]
-impl TypedSinkHandler for DropSink {
+impl InlineSink for DropSink {
     type Input = JoinedItem;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _event: JoinedItem,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(
-                obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-                None,
-            ),
-        ))
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+            None,
+        )))
     }
 }
 

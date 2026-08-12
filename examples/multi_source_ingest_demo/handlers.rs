@@ -13,12 +13,12 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_runtime::effects::SinkDeliverySafety;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, StatefulEmission,
-    TypedFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler, TypedStatefulHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::transform::MapTyped;
 
@@ -153,25 +153,26 @@ impl TypedStatefulHandler for IngestAggregator {
 pub struct SummaryConsole;
 
 #[async_trait]
-impl TypedSinkHandler for SummaryConsole {
+impl InlineSink for SummaryConsole {
     type Input = IngestSummary;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         event: IngestSummary,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         println!("=== IngestSummary ===");
         println!(
             "{}",
             serde_json::to_string_pretty(&event).unwrap_or_default()
         );
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Stdout".to_string()), None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Stdout".to_string()),
+            None,
+        )))
     }
 }

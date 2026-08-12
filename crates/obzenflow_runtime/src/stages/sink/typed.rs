@@ -4,11 +4,11 @@
 
 //! Closure conveniences for the canonical typed sink protocol.
 
-use crate::effects::SinkDeliverySafety;
+use crate::effects::SinkRedeliverySafety;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::{
-    DeliveryContext, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-    TypedSinkConsumeReport, TypedSinkHandler,
+    DeliveryContext, SinkConnector, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, SinkWriter, SinkWriterInitContext, WithRedeliverySafety,
 };
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
@@ -26,10 +26,10 @@ pub struct FallibleSinkMode;
 /// A typed closure sink.
 ///
 /// `new`, `with_delivery`, and `fallible` are sealed modes of this one
-/// convenience adapter; every mode implements [`TypedSinkHandler`].
+/// convenience connector; opening it creates a stage-local [`SinkWriter`].
 pub struct SinkTyped<T, F, Fut, Mode = InfallibleSinkMode> {
     handler: F,
-    declaration: SinkDeliveryDeclaration,
+    description: SinkDescription,
     _input: PhantomData<fn() -> T>,
     _future: PhantomData<fn() -> Fut>,
     _mode: PhantomData<fn() -> Mode>,
@@ -42,7 +42,7 @@ where
     fn clone(&self) -> Self {
         Self {
             handler: self.handler.clone(),
-            declaration: self.declaration.clone(),
+            description: self.description.clone(),
             _input: PhantomData,
             _future: PhantomData,
             _mode: PhantomData,
@@ -54,7 +54,7 @@ impl<T, F, Fut, Mode> std::fmt::Debug for SinkTyped<T, F, Fut, Mode> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SinkTyped")
             .field("payload_type", &std::any::type_name::<T>())
-            .field("declaration", &self.declaration)
+            .field("description", &self.description)
             .finish()
     }
 }
@@ -69,7 +69,9 @@ where
     pub fn new(handler: F) -> Self {
         Self {
             handler,
-            declaration: SinkDeliveryDeclaration::undeclared(),
+            description: SinkDescription::method(DeliveryMethod::Custom(
+                "typed_closure".to_string(),
+            )),
             _input: PhantomData,
             _future: PhantomData,
             _mode: PhantomData,
@@ -89,7 +91,9 @@ where
     {
         SinkTyped {
             handler,
-            declaration: SinkDeliveryDeclaration::undeclared(),
+            description: SinkDescription::method(DeliveryMethod::Custom(
+                "typed_closure".to_string(),
+            )),
             _input: PhantomData,
             _future: PhantomData,
             _mode: PhantomData,
@@ -104,7 +108,9 @@ where
     {
         SinkTyped {
             handler,
-            declaration: SinkDeliveryDeclaration::undeclared(),
+            description: SinkDescription::method(DeliveryMethod::Custom(
+                "typed_closure".to_string(),
+            )),
             _input: PhantomData,
             _future: PhantomData,
             _mode: PhantomData,
@@ -115,28 +121,91 @@ where
 impl<T, F, Fut, Mode> SinkTyped<T, F, Fut, Mode> {
     /// Declare this projection safe to re-run during replay or resume.
     pub fn idempotent(mut self) -> Self {
-        self.declaration =
-            SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection);
+        self.description = self
+            .description
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat);
         self
     }
 
     /// Declare that duplicate external delivery requires archive-verb opt-in.
     pub fn non_idempotent(mut self) -> Self {
-        self.declaration =
-            SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::NonIdempotentExternal);
+        self.description = self
+            .description
+            .with_redelivery_safety(SinkRedeliverySafety::DuplicateSensitive);
         self
     }
 }
 
-fn closure_success() -> TypedSinkConsumeReport {
-    TypedSinkConsumeReport::terminal(SinkTerminalOutcome::success(
-        DeliveryMethod::Custom("TypedSink".to_string()),
-        Some(1),
-    ))
+fn closure_success() -> SinkWriteReport {
+    SinkWriteReport::terminal(SinkTerminalOutcome::success(Some(1)))
 }
 
+/// Mutable execution half of a closure sink.
+pub struct ClosureSinkWriter<T, F, Fut, Mode> {
+    handler: F,
+    _input: PhantomData<fn() -> T>,
+    _future: PhantomData<fn() -> Fut>,
+    _mode: PhantomData<fn() -> Mode>,
+}
+
+impl<T, F, Fut, Mode> std::fmt::Debug for ClosureSinkWriter<T, F, Fut, Mode> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClosureSinkWriter")
+            .field("payload_type", &std::any::type_name::<T>())
+            .finish_non_exhaustive()
+    }
+}
+
+macro_rules! impl_closure_connector {
+    ($mode:ty, $($bound:tt)*) => {
+        #[async_trait]
+        impl<T, F, Fut> SinkConnector for SinkTyped<T, F, Fut, $mode>
+        where
+            T: TypedPayload + Send + Sync + 'static,
+            F: Send + Sync + Clone + 'static,
+            Fut: Future + Send + 'static,
+            $($bound)*
+        {
+            type Input = T;
+            type Writer = ClosureSinkWriter<T, F, Fut, $mode>;
+
+            fn describe(&self) -> SinkDescription {
+                self.description.clone()
+            }
+
+            async fn open(
+                &self,
+                _context: SinkWriterInitContext,
+            ) -> Result<Self::Writer, HandlerError> {
+                Ok(ClosureSinkWriter {
+                    handler: self.handler.clone(),
+                    _input: PhantomData,
+                    _future: PhantomData,
+                    _mode: PhantomData,
+                })
+            }
+        }
+    };
+}
+
+impl_closure_connector!(
+    InfallibleSinkMode,
+    F: FnMut(T) -> Fut,
+    Fut: Future<Output = ()>
+);
+impl_closure_connector!(
+    WithDeliverySinkMode,
+    F: FnMut(T, DeliveryContext) -> Fut,
+    Fut: Future<Output = ()>
+);
+impl_closure_connector!(
+    FallibleSinkMode,
+    F: FnMut(T) -> Fut,
+    Fut: Future<Output = Result<(), HandlerError>>
+);
+
 #[async_trait]
-impl<T, F, Fut> TypedSinkHandler for SinkTyped<T, F, Fut, InfallibleSinkMode>
+impl<T, F, Fut> SinkWriter for ClosureSinkWriter<T, F, Fut, InfallibleSinkMode>
 where
     T: TypedPayload + Send + Sync + 'static,
     F: FnMut(T) -> Fut + Send + Sync + Clone + 'static,
@@ -144,22 +213,18 @@ where
 {
     type Input = T;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        self.declaration.clone()
-    }
-
-    async fn consume(
+    async fn write(
         &mut self,
         input: T,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         (self.handler)(input).await;
         Ok(closure_success())
     }
 }
 
 #[async_trait]
-impl<T, F, Fut> TypedSinkHandler for SinkTyped<T, F, Fut, WithDeliverySinkMode>
+impl<T, F, Fut> SinkWriter for ClosureSinkWriter<T, F, Fut, WithDeliverySinkMode>
 where
     T: TypedPayload + Send + Sync + 'static,
     F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone + 'static,
@@ -167,22 +232,18 @@ where
 {
     type Input = T;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        self.declaration.clone()
-    }
-
-    async fn consume(
+    async fn write(
         &mut self,
         input: T,
-        context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         (self.handler)(input, context.delivery().clone()).await;
         Ok(closure_success())
     }
 }
 
 #[async_trait]
-impl<T, F, Fut> TypedSinkHandler for SinkTyped<T, F, Fut, FallibleSinkMode>
+impl<T, F, Fut> SinkWriter for ClosureSinkWriter<T, F, Fut, FallibleSinkMode>
 where
     T: TypedPayload + Send + Sync + 'static,
     F: FnMut(T) -> Fut + Send + Sync + Clone + 'static,
@@ -190,15 +251,11 @@ where
 {
     type Input = T;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        self.declaration.clone()
-    }
-
-    async fn consume(
+    async fn write(
         &mut self,
         input: T,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         (self.handler)(input).await?;
         Ok(closure_success())
     }
@@ -206,35 +263,40 @@ where
 
 mod sealed {
     pub trait Sealed {}
+
+    impl<C: super::SinkConnector> Sealed for C {}
 }
 
 /// Sealed lowering target for the `sink!` macro's site-level `delivery:`
-/// declaration.
+/// classification.
+#[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "the `delivery:` clause applies to SinkTyped closure sinks only",
-    note = "named TypedSinkHandler implementations own their declaration through delivery_declaration()"
+    message = "the `delivery:` clause requires a SinkConnector",
+    note = "configure redelivery safety on the connector or use the sink! clause"
 )]
-pub trait DeclareDeliverySafety: sealed::Sealed + Sized {
-    fn declare_idempotent(self) -> Self;
-    fn declare_non_idempotent(self) -> Self;
+pub trait SetSinkRedeliverySafety: sealed::Sealed + Sized {
+    type Output;
+
+    fn safe_to_repeat(self) -> Self::Output;
+    fn duplicate_sensitive(self) -> Self::Output;
 }
 
-impl<T, F, Fut, Mode> sealed::Sealed for SinkTyped<T, F, Fut, Mode> {}
+impl<C: SinkConnector> SetSinkRedeliverySafety for C {
+    type Output = WithRedeliverySafety<C>;
 
-impl<T, F, Fut, Mode> DeclareDeliverySafety for SinkTyped<T, F, Fut, Mode> {
-    fn declare_idempotent(self) -> Self {
-        self.idempotent()
+    fn safe_to_repeat(self) -> Self::Output {
+        WithRedeliverySafety::new(self, SinkRedeliverySafety::SafeToRepeat)
     }
 
-    fn declare_non_idempotent(self) -> Self {
-        self.non_idempotent()
+    fn duplicate_sensitive(self) -> Self::Output {
+        WithRedeliverySafety::new(self, SinkRedeliverySafety::DuplicateSensitive)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stages::common::handlers::{SinkHandler, TypedSinkHandlerAdapter};
+    use crate::stages::common::handlers::{SinkHandler, SinkWriterAdapter};
     use crate::stages::sink::DeliveryProvenance;
     use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
     use obzenflow_core::event::ChainEventFactory;
@@ -259,6 +321,27 @@ mod tests {
         )
     }
 
+    async fn adapted<C>(connector: C) -> SinkWriterAdapter<C::Writer>
+    where
+        C: SinkConnector<Input = TestPayload>,
+    {
+        let stage_id = StageId::new();
+        let description = connector.describe();
+        let writer = connector
+            .open(SinkWriterInitContext::new(
+                stage_id,
+                "closure".to_string(),
+                "test".to_string(),
+            ))
+            .await
+            .expect("closure connector opens");
+        SinkWriterAdapter::with_default_method(
+            writer,
+            stage_id,
+            description.default_method().cloned(),
+        )
+    }
+
     #[tokio::test]
     async fn every_closure_mode_uses_the_same_typed_adapter() {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -267,7 +350,7 @@ mod tests {
             let seen = Arc::clone(&seen_for_closure);
             async move { seen.lock().expect("seen lock poisoned").push(input) }
         });
-        let mut adapter = TypedSinkHandlerAdapter::new(handler, StageId::new());
+        let mut adapter = adapted(handler).await;
         let report = adapter
             .consume_report(event(4))
             .await
@@ -282,11 +365,11 @@ mod tests {
         );
     }
 
-    async fn assert_legacy_closure_receipt<H>(handler: H)
+    async fn assert_closure_receipt<C>(connector: C)
     where
-        H: TypedSinkHandler<Input = TestPayload>,
+        C: SinkConnector<Input = TestPayload>,
     {
-        let mut adapter = TypedSinkHandlerAdapter::new(handler, StageId::new());
+        let mut adapter = adapted(connector).await;
         let report = adapter
             .consume_report(event(9))
             .await
@@ -297,20 +380,20 @@ mod tests {
         ));
         assert!(matches!(
             report.primary.delivery_method,
-            DeliveryMethod::Custom(ref name) if name == "TypedSink"
+            DeliveryMethod::Custom(ref name) if name == "typed_closure"
         ));
         assert_eq!(report.primary.bytes_processed, Some(1));
         assert_eq!(report.primary.items_delivered, None);
     }
 
     #[tokio::test]
-    async fn every_closure_mode_preserves_the_legacy_receipt_fields() {
-        assert_legacy_closure_receipt(SinkTyped::new(|_input: TestPayload| async move {})).await;
-        assert_legacy_closure_receipt(SinkTyped::with_delivery(
+    async fn every_closure_mode_uses_the_connector_receipt_method() {
+        assert_closure_receipt(SinkTyped::new(|_input: TestPayload| async move {})).await;
+        assert_closure_receipt(SinkTyped::with_delivery(
             |_input: TestPayload, _delivery| async move {},
         ))
         .await;
-        assert_legacy_closure_receipt(SinkTyped::fallible(
+        assert_closure_receipt(SinkTyped::fallible(
             |_input: TestPayload| async move { Ok(()) },
         ))
         .await;
@@ -329,7 +412,7 @@ mod tests {
                         .push(delivery.provenance())
                 }
             });
-        let mut adapter = TypedSinkHandlerAdapter::new(handler, StageId::new());
+        let mut adapter = adapted(handler).await;
         let mut replayed = event(1);
         replayed.replay_context = Some(obzenflow_core::event::context::ReplayContext {
             original_event_id: obzenflow_core::EventId::new(),
@@ -349,14 +432,14 @@ mod tests {
     }
 
     #[test]
-    fn closure_declaration_is_explicit_and_replaceable() {
+    fn closure_redelivery_safety_is_explicit_and_replaceable() {
         let undeclared = SinkTyped::new(|_input: TestPayload| async move {});
-        assert_eq!(undeclared.delivery_declaration().safety(), None);
+        assert_eq!(undeclared.describe().redelivery_safety(), None);
 
         let declared = SinkTyped::new(|_input: TestPayload| async move {}).idempotent();
         assert_eq!(
-            declared.delivery_declaration().safety(),
-            Some(SinkDeliverySafety::IdempotentProjection)
+            declared.describe().redelivery_safety(),
+            Some(SinkRedeliverySafety::SafeToRepeat)
         );
     }
 }

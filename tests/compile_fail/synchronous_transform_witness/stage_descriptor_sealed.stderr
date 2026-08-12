@@ -1,13 +1,13 @@
-error[E0046]: not all trait items implemented, missing: `name`, `stage_type`, `create_handle`, `sink_delivery_declaration`
+error[E0046]: not all trait items implemented, missing: `name`, `stage_type`, `create_handle`, `sink_description`
  --> tests/compile_fail/synchronous_transform_witness/stage_descriptor_sealed.rs:9:1
   |
 9 | impl StageDescriptor for CounterfeitDescriptor {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `name`, `stage_type`, `create_handle`, `sink_delivery_declaration` in implementation
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `name`, `stage_type`, `create_handle`, `sink_description` in implementation
   |
   = help: implement the missing item: `fn name(&self) -> &str { todo!() }`
   = help: implement the missing item: `fn stage_type(&self) -> obzenflow_core::event::context::stage_type::StageType { todo!() }`
   = help: implement the missing item: `fn create_handle<'async_trait>(self: Box<Self>, _: StageConfig, _: obzenflow_runtime::stages::resources_builder::StageResources, _: Arc<obzenflow_adapters::middleware::control::provider::ControlMiddlewareAggregator>) -> Pin<Box<(dyn Future<Output = Result<Box<(dyn obzenflow_runtime::stages::common::stage_handle::StageHandle + 'static)>, StageCreationError>> + Send + 'async_trait)>> { todo!() }`
-  = help: implement the missing item: `fn sink_delivery_declaration(&self) -> Option<&obzenflow_runtime::stages::common::handlers::sink::typed::SinkDeliveryDeclaration> { todo!() }`
+  = help: implement the missing item: `fn sink_description(&self) -> Option<&SinkDescription> { todo!() }`
 
 error[E0277]: the trait bound `CounterfeitDescriptor: stage_descriptor::sealed::Sealed` is not satisfied
  --> tests/compile_fail/synchronous_transform_witness/stage_descriptor_sealed.rs:9:26
@@ -49,6 +49,6 @@ note: required by a bound in `StageDescriptor`
             obzenflow_dsl::stage_descriptor::AsyncInfiniteSourceDescriptor<H>
             obzenflow_dsl::stage_descriptor::TransformDescriptor<H>
             obzenflow_dsl::stage_descriptor::EffectfulTransformDescriptor<H>
-            obzenflow_dsl::stage_descriptor::SinkDescriptor<H>
+            obzenflow_dsl::stage_descriptor::SinkDescriptor<C>
             obzenflow_dsl::stage_descriptor::StatefulDescriptor<H>
           and $N others

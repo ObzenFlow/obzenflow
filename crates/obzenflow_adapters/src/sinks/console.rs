@@ -9,11 +9,11 @@
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::SinkDeliverySafety;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkAuditOutcome, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-    TypedSinkConsumeReport, TypedSinkHandler, TypedSinkLifecycleReport,
+    InlineSink, SinkAuditOutcome, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, SinkWriterLifecycleReport,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -40,6 +40,11 @@ impl OutputDestination {
             Self::Stdout => DeliveryMethod::Custom("console:stdout".to_string()),
             Self::Stderr => DeliveryMethod::Custom("console:stderr".to_string()),
         }
+    }
+
+    fn description(self) -> SinkDescription {
+        SinkDescription::method(self.delivery_method())
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 }
 
@@ -597,40 +602,39 @@ impl<T, F> ConsoleSink<T, F> {
 }
 
 #[async_trait]
-impl<T, F> TypedSinkHandler for ConsoleSink<T, F>
+impl<T, F> InlineSink for ConsoleSink<T, F>
 where
     T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
     F: Formatter<T> + 'static,
 {
     type Input = T;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    fn describe(&self) -> SinkDescription {
+        self.destination.description()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         input: T,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         if let Some(output) = self.formatter.format(&input) {
             self.destination.write_line(&output);
         }
 
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(self.destination.delivery_method(), None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success(
+            None,
+        )))
     }
 
-    async fn flush(&mut self) -> Result<TypedSinkLifecycleReport, HandlerError> {
+    async fn flush(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
         let Some(output) = self.formatter.flush() else {
-            return Ok(TypedSinkLifecycleReport::default());
+            return Ok(SinkWriterLifecycleReport::default());
         };
 
         self.destination.write_line(&output);
 
-        Ok(TypedSinkLifecycleReport::audit(SinkAuditOutcome::success(
-            self.destination.delivery_method(),
+        Ok(SinkWriterLifecycleReport::audit(SinkAuditOutcome::success(
             None,
         )))
     }
@@ -641,7 +645,9 @@ mod tests {
     use super::*;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::WriterId;
-    use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedSinkHandlerAdapter};
+    use obzenflow_runtime::stages::common::handlers::{
+        SinkConnector, SinkHandler, SinkWriterAdapter, SinkWriterInitContext,
+    };
     use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -657,12 +663,37 @@ mod tests {
         const SCHEMA_VERSION: u32 = 1;
     }
 
+    async fn adapted<C>(connector: C) -> SinkWriterAdapter<C::Writer>
+    where
+        C: SinkConnector<Input = TestEvent>,
+    {
+        let stage_id = obzenflow_core::StageId::new();
+        let description = connector.describe();
+        let writer = connector
+            .open(SinkWriterInitContext::new(
+                stage_id,
+                "console".to_string(),
+                "test".to_string(),
+            ))
+            .await
+            .expect("console connector opens");
+        SinkWriterAdapter::with_default_method(
+            writer,
+            stage_id,
+            description.default_method().cloned(),
+        )
+    }
+
     #[test]
-    fn console_sink_declares_idempotent_delivery() {
+    fn console_sink_describes_repeatable_redelivery() {
         let sink = ConsoleSink::<TestEvent>::json();
         assert_eq!(
-            sink.delivery_declaration().safety(),
-            Some(SinkDeliverySafety::IdempotentProjection)
+            InlineSink::describe(&sink).default_method(),
+            Some(&DeliveryMethod::Custom("console:stdout".to_string()))
+        );
+        assert_eq!(
+            InlineSink::describe(&sink).redelivery_safety(),
+            Some(SinkRedeliverySafety::SafeToRepeat)
         );
     }
 
@@ -796,7 +827,7 @@ mod tests {
     #[tokio::test]
     async fn console_sink_rejects_non_matching_event_types() {
         let sink = ConsoleSink::<TestEvent>::table(&["value"], |e| vec![e.value.clone()]);
-        let mut sink = TypedSinkHandlerAdapter::new(sink, obzenflow_core::StageId::new());
+        let mut sink = adapted(sink).await;
 
         let event = ChainEventFactory::data_event(
             WriterId::from(obzenflow_core::StageId::new()),
@@ -815,7 +846,7 @@ mod tests {
     async fn console_sink_to_stderr_sets_delivery_method() {
         let sink =
             ConsoleSink::<TestEvent>::table(&["value"], |e| vec![e.value.clone()]).to_stderr();
-        let mut sink = TypedSinkHandlerAdapter::new(sink, obzenflow_core::StageId::new());
+        let mut sink = adapted(sink).await;
 
         let event = ChainEventFactory::data_event(
             WriterId::from(obzenflow_core::StageId::new()),
@@ -839,7 +870,7 @@ mod tests {
             called_for_formatter.fetch_add(1, Ordering::SeqCst);
             format!("value={}", e.value)
         });
-        let mut sink = TypedSinkHandlerAdapter::new(sink, obzenflow_core::StageId::new());
+        let mut sink = adapted(sink).await;
 
         let event = ChainEventFactory::data_event(
             WriterId::from(obzenflow_core::StageId::new()),

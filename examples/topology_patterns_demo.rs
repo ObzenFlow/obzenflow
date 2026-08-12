@@ -34,11 +34,11 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::SinkDeliverySafety;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, StatefulEmission,
-    TypedSinkConsumeReport, TypedSinkHandler, TypedStatefulHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    StatefulEmission, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::transform::MapTyped;
 use serde::{Deserialize, Serialize};
@@ -289,18 +289,18 @@ impl PrioritySink {
 }
 
 #[async_trait]
-impl TypedSinkHandler for PrioritySink {
+impl InlineSink for PrioritySink {
     type Input = RawDataEvent;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         event: RawDataEvent,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         // Only process events matching our filter
         if event.route.as_deref().unwrap_or("") == self.route_filter {
             let new_total = self.event_count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -312,9 +312,10 @@ impl TypedSinkHandler for PrioritySink {
             );
         }
 
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Processed".to_string()), Some(1)),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Processed".to_string()),
+            Some(1),
+        )))
     }
 }
 

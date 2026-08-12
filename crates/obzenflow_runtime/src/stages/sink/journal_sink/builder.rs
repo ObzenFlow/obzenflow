@@ -101,12 +101,11 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             ))
         };
 
-        // FLOWIP-120s: single-writer receipt identity, resolved once from the
-        // descriptor snapshot (pre-wrap); never queried from the handler.
+        // Single-writer receipt identity, resolved once from the connector
+        // description (pre-wrap); never queried from the writer.
         let receipt_destination = self
             .config
-            .delivery_type
-            .map(str::to_owned)
+            .receipt_destination
             .unwrap_or_else(|| self.config.stage_name.clone());
 
         let context = JournalSinkContext {
@@ -114,6 +113,7 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
             receipt_destination,
+            default_delivery_method: self.config.default_delivery_method,
             flow_name: self.config.flow_name.clone(),
             flow_id: self.resources.flow_id,
             data_journal: self.resources.data_journal.clone(),

@@ -1,29 +1,33 @@
-error[E0277]: this sink handler does not witness its declared input
+error[E0277]: the trait bound `support::RawHandler: InlineSink` is not satisfied
   --> tests/compile_fail/sink_witness/raw_handler.rs:10:13
    |
 10 |     let _ = obzenflow_dsl::sink!(Input => RawHandler);
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
-help: the trait `TypedSinkHandler` is not implemented for `support::RawHandler`
+help: the trait `InlineSink` is not implemented for `support::RawHandler`
   --> tests/compile_fail/sink_witness/../support/typed_sink.rs
    |
    | pub struct RawHandler;
    | ^^^^^^^^^^^^^^^^^^^^^
-   = note: implement TypedSinkHandler with Input matching the sink! arrow (FLOWIP-134h)
-   = help: the following other types implement trait `TypedSinkHandler`:
-             PlaceholderSink<In>
-             SinkTyped<T, F, Fut, FallibleSinkMode>
-             SinkTyped<T, F, Fut, WithDeliverySinkMode>
-             SinkTyped<T, F, Fut>
-             WrongInputHandler
-             obzenflow_adapters::sinks::console::ConsoleSink<T, F>
-             obzenflow_adapters::sinks::csv::CsvSink<T>
-note: required by a bound in `typed_sink_descriptor`
-  --> crates/obzenflow_dsl/src/dsl/typing.rs
+help: the following other types implement trait `InlineSink`
+  --> tests/compile_fail/sink_witness/../support/typed_sink.rs
    |
-   | pub fn typed_sink_descriptor<H, ArrowInput>(
-   |        --------------------- required by a bound in this function
-...
-   |     H: TypedSinkHandler + fmt::Debug + Send + Sync + 'static,
-   |        ^^^^^^^^^^^^^^^^ required by this bound in `typed_sink_descriptor`
+   |   impl InlineSink for WrongInputHandler {
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `WrongInputHandler`
+   |
+  ::: crates/obzenflow_adapters/src/sinks/console.rs
+   |
+   | / impl<T, F> InlineSink for ConsoleSink<T, F>
+   | | where
+   | |     T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+   | |     F: Formatter<T> + 'static,
+   | |______________________________^ `obzenflow_adapters::sinks::console::ConsoleSink<T, F>`
+   |
+  ::: crates/obzenflow_dsl/src/dsl/typing.rs
+   |
+   | / impl<In> InlineSink for PlaceholderSink<In>
+   | | where
+   | |     In: TypedPayload + Send + Sync + 'static,
+   | |_____________________________________________^ `PlaceholderSink<In>`
+   = note: required for `support::RawHandler` to implement `SinkConnector`
    = note: this error originates in the macro `$crate::__obzenflow_sink_typed` which comes from the expansion of the macro `obzenflow_dsl::sink` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -57,13 +57,13 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::{
-    EffectPortRegistry, EffectPortResolver, SinkDeliverySafety, EFFECT_RECORD_EVENT_TYPE,
+    EffectPortRegistry, EffectPortResolver, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
-    TypedSinkConsumeReport, TypedSinkHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::testing::BackpressureAckGate;
 use serde::{Deserialize, Serialize};
@@ -507,28 +507,26 @@ struct CollectOut {
 }
 
 #[async_trait]
-impl TypedSinkHandler for CollectOut {
+impl InlineSink for CollectOut {
     type Input = DigestOut;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         output: DigestOut,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         self.outputs
             .lock()
             .expect("output collector lock")
             .push(output);
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(
-                DeliveryMethod::Custom("FLOWIP-128g fixture".to_string()),
-                None,
-            ),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("FLOWIP-128g fixture".to_string()),
+            None,
+        )))
     }
 }
 

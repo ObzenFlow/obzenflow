@@ -34,8 +34,8 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-    TypedFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler, TypedTransformHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::observer::{
     HandlerObserver, HandlerObserverContext, ObserverReport,
@@ -347,21 +347,22 @@ impl HandlerObserver for CycleDepthInjectionMiddleware {
 struct CountingSink;
 
 #[async_trait]
-impl TypedSinkHandler for CountingSink {
+impl InlineSink for CountingSink {
     type Input = SeedEvent;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _event: SeedEvent,
-        _context: SinkInputContext,
-    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Count".to_string()), None),
-        ))
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Count".to_string()),
+            None,
+        )))
     }
 }
 

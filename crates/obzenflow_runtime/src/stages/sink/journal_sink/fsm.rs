@@ -298,6 +298,10 @@ pub struct JournalSinkContext<H: UnifiedSinkHandler> {
     /// `DeliveryPayload`.
     pub receipt_destination: String,
 
+    /// Connector-described method used for runtime-authored failure receipts.
+    pub default_delivery_method:
+        Option<obzenflow_core::event::payloads::delivery_payload::DeliveryMethod>,
+
     /// Flow name for flow context
     pub flow_name: String,
 

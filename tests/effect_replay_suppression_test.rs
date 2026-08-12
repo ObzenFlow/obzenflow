@@ -27,12 +27,12 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
     is_framework_effect_event_type, Effect, EffectCommitHandle, EffectContext, EffectCursor,
     EffectError, EffectPortRegistry, EffectPortRequirement, EffectRecord, EffectSafety, Effects,
-    IdempotencyKey, SinkDeliverySafety, TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
+    IdempotencyKey, SinkRedeliverySafety, TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulStatefulHandler, EffectfulTransformHandler, SinkDeliveryDeclaration, SinkInputContext,
-    SinkTerminalOutcome, TypedFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler,
+    EffectfulStatefulHandler, EffectfulTransformHandler, InlineSink, SinkDescription,
+    SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, TypedFiniteSourceHandler,
     TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
@@ -861,25 +861,26 @@ struct CollectSink {
 }
 
 #[async_trait]
-impl TypedSinkHandler for CollectSink {
+impl InlineSink for CollectSink {
     type Input = ReplayOutput;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         output: ReplayOutput,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         self.outputs
             .lock()
             .expect("outputs lock poisoned")
             .push(output);
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Memory".to_string()), None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Memory".to_string()),
+            None,
+        )))
     }
 }
 

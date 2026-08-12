@@ -98,9 +98,9 @@ mod tests {
             obzenflow_core::event::context::StageType::Transform
         }
 
-        fn sink_delivery_declaration(
+        fn sink_description(
             &self,
-        ) -> Option<&obzenflow_runtime::stages::common::handlers::SinkDeliveryDeclaration> {
+        ) -> Option<&obzenflow_runtime::stages::common::handlers::SinkDescription> {
             None
         }
 

@@ -20,8 +20,7 @@ use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkDeliveryDeclaration, SinkInputContext, TypedFiniteSourceHandler, TypedSinkConsumeReport,
-    TypedSinkHandler,
+    InlineSink, SinkDescription, SinkWriteContext, SinkWriteReport, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -83,18 +82,18 @@ struct AlwaysFailingSink {
 }
 
 #[async_trait]
-impl TypedSinkHandler for AlwaysFailingSink {
+impl InlineSink for AlwaysFailingSink {
     type Input = SinkBreakerEvent;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _event: SinkBreakerEvent,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(HandlerError::Remote("sink delivery failed".to_string()))
     }

@@ -175,8 +175,8 @@
 //! let _ = sink!(Out => handler, delivery: sometimes);
 //! ```
 //!
-//! Facade helpers are constructed and bound before `sink!`. They self-declare
-//! their safety, so the `delivery:` clause is rejected on the bound facade.
+//! Connector descriptions and a site-level `delivery:` classification compose,
+//! but the connector's typed input remains authoritative for the arrow.
 //!
 //! ```compile_fail
 //! use obzenflow_adapters::sinks::{ConsoleSink, JsonFormatter};
@@ -190,22 +190,27 @@
 //!     const EVENT_TYPE: &'static str = "doc.out";
 //! }
 //!
+//! #[derive(Clone, Debug, Deserialize, Serialize)]
+//! struct Wrong;
+//! impl TypedPayload for Wrong {
+//!     const EVENT_TYPE: &'static str = "doc.wrong";
+//! }
+//!
 //! let output = ConsoleSink::<Out, JsonFormatter>::json();
-//! // Bound facade handlers take no `delivery:` clause.
-//! let _ = sink!(Out => output, delivery: idempotent);
+//! let _ = sink!(Wrong => output, delivery: idempotent);
 //! ```
 //!
-//! A named `TypedSinkHandler` owns its aggregate delivery declaration; the
-//! site adverb fails by the sealed `DeclareDeliverySafety` bound.
+//! A small named integration can implement `InlineSink` directly. It needs no
+//! separate connector or description method; a site-level clause can classify
+//! redelivery when archive replay matters.
 //!
-//! ```compile_fail
+//! ```
 //! use async_trait::async_trait;
 //! use obzenflow_core::event::schema::TypedPayload;
 //! use obzenflow_dsl::sink;
 //! use obzenflow_runtime::stages::common::handler_error::HandlerError;
 //! use obzenflow_runtime::stages::common::handlers::{
-//!     SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-//!     TypedSinkConsumeReport, TypedSinkHandler,
+//!     InlineSink, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
 //! };
 //! use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 //! use serde::{Deserialize, Serialize};
@@ -220,23 +225,20 @@
 //! struct Typed;
 //!
 //! #[async_trait]
-//! impl TypedSinkHandler for Typed {
+//! impl InlineSink for Typed {
 //!     type Input = Out;
-//!     fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-//!         SinkDeliveryDeclaration::undeclared()
-//!     }
-//!     async fn consume(
+//!     async fn write(
 //!         &mut self,
 //!         _input: Out,
-//!         _ctx: SinkInputContext,
-//!     ) -> Result<TypedSinkConsumeReport, HandlerError> {
-//!         Ok(TypedSinkConsumeReport::terminal(
-//!             SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+//!         _ctx: SinkWriteContext,
+//!     ) -> Result<SinkWriteReport, HandlerError> {
+//!         Ok(SinkWriteReport::terminal(
+//!             SinkTerminalOutcome::success_via(DeliveryMethod::Noop, None),
 //!         ))
 //!     }
 //! }
 //!
-//! // A named handler's declaration is authoritative.
+//! // The inline sink stays small; the flow row owns this deployment choice.
 //! let _ = sink!(Out => Typed, delivery: idempotent);
 //! ```
 //!

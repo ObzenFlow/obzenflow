@@ -17,8 +17,8 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-    TypedFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -160,8 +160,14 @@ impl EffectfulTransformHandler for EmitOnlyTransform {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct DropSink<T>(std::marker::PhantomData<fn() -> T>);
+
+impl<T> Clone for DropSink<T> {
+    fn clone(&self) -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
 
 impl<T> DropSink<T> {
     fn new() -> Self {
@@ -170,24 +176,25 @@ impl<T> DropSink<T> {
 }
 
 #[async_trait]
-impl<T> TypedSinkHandler for DropSink<T>
+impl<T> InlineSink for DropSink<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
     type Input = T;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _event: T,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Memory".to_string()), None),
-        ))
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Memory".to_string()),
+            None,
+        )))
     }
 }
 

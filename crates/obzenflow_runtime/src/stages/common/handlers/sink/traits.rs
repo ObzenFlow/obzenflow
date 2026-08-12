@@ -7,26 +7,27 @@
 //! ## The sink contract (FLOWIP-120f/120s)
 //!
 //! A sink is delivery-only: it consumes facts and emits receipts, and it is
-//! the surface for **idempotent, recompute-safe, receipt-governed** writes,
+//! the surface for **repeatable, recompute-safe, receipt-governed** writes,
 //! `view = f(facts)`: a materialized-view upsert, a keyed queue publish, a
 //! console projection. Replay and resume re-consume a sink's tape, so a
-//! non-idempotent external write whose outcome matters belongs behind the
+//! duplicate-sensitive external write whose outcome matters belongs behind the
 //! effect boundary instead: an effectful transform performs it through
 //! `fx.perform`, authors named outcome facts, and a plain sink projects
-//! those facts. A destination that absorbs duplicates itself may stay a
-//! sink, declared `NonIdempotentExternal`, governed by the archive-verb
-//! gates.
+//! those facts. A duplicate-sensitive sink requires the archive gate's
+//! explicit operator opt-in before replay or resume re-performs its writes.
 //!
 //! The runtime journals each `DeliveryPayload`, stamping its `destination`
-//! from the typed handler's snapshotted [`SinkDeliveryDeclaration`]
+//! from the connector's snapshotted [`SinkDescription`]
 //! (else the stage name), so delivery success, partials, and failures are
 //! durable and queryable.
 //!
 //! ## Quick start: typed sink authoring
 //!
-//! This trait is the erased runtime substrate. Authored sinks implement
-//! [`TypedSinkHandler`](super::typed::TypedSinkHandler); a quick projection can
-//! bind a `SinkTyped` adapter before its `sink!` declaration:
+//! This trait is the erased runtime substrate. Authored resource-owning sinks
+//! implement [`SinkConnector`](super::connector::SinkConnector) and return a
+//! stage-local [`SinkWriter`](super::typed::SinkWriter). A small integration
+//! can implement [`InlineSink`](super::connector::InlineSink), while a closure
+//! can bind `SinkTyped` before its `sink!` declaration:
 //!
 //! ```ignore
 //! // Bind typed adapters, optionally with declared safety and provenance.
@@ -42,13 +43,13 @@
 //! );
 //! let declared = sink!(PaymentAuthorized => declared_handler, delivery: idempotent);
 //!
-//! // A named destination implements TypedSinkHandler directly.
-//! let shipping = ShippingHandoff::new(queue);
+//! // A configured queue connector opens its writer at materialisation.
+//! let shipping = ShippingConnector::new(queue_config);
 //! let production = sink!(PaymentAuthorized => shipping);
 //! ```
 //!
-//! Buffered destinations use `SinkInputContext::defer` and return typed commit
-//! receipts from `consume`, `flush`, or `drain`; the sole runtime adapter lowers
+//! Buffered destinations use `SinkWriteContext::defer` and return typed commit
+//! receipts from `write`, `flush`, or `drain`; the sole runtime adapter lowers
 //! those capabilities onto this protocol.
 
 use crate::effects::EffectInvocationContext;
@@ -84,7 +85,10 @@ pub struct SinkLifecycleReport {
     pub commit_receipts: Vec<CommitReceipt>,
 }
 
-/// Trait every **sink stage** must implement.
+/// Erased protocol implemented by framework sink adapters.
+///
+/// Application integrations normally implement `SinkConnector`/`SinkWriter`
+/// or `InlineSink`; the runtime owns the bridge to this trait.
 #[async_trait]
 pub trait SinkHandler: Send + Sync {
     /// Consume a single event and return a `DeliveryPayload` describing
@@ -99,8 +103,8 @@ pub trait SinkHandler: Send + Sync {
     /// Extended consume hook for buffered sinks that may need to emit
     /// additional commit receipts after accepting the current event.
     ///
-    /// Default behaviour preserves the legacy `consume()` contract so existing
-    /// sinks do not need to change.
+    /// Default behaviour preserves the smaller raw `consume()` contract for
+    /// internal adapters that do not emit additional commit receipts.
     async fn consume_report(
         &mut self,
         event: ChainEvent,
@@ -168,9 +172,9 @@ pub trait UnifiedSinkHandler: Send + Sync {
         "1"
     }
 
-    // Delivery declarations deliberately do not exist on either erased
-    // runtime trait. The DSL snapshots the aggregate declaration from
-    // `TypedSinkHandler` before this boundary (FLOWIP-134h).
+    // Connector descriptions deliberately do not exist on either erased
+    // runtime trait. The DSL snapshots the description from `SinkConnector`
+    // before opening and erasing its writer (FLOWIP-134h).
 }
 
 #[async_trait]

@@ -28,13 +28,12 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::effects::{
-    EffectPortRegistry, EffectPortResolveFuture, EffectPortResolver, SinkDeliverySafety,
+    EffectPortRegistry, EffectPortResolveFuture, EffectPortResolver, SinkRedeliverySafety,
     EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedSinkConsumeReport,
-    TypedSinkHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -134,25 +133,23 @@ struct CollectEmbedded {
 }
 
 #[async_trait]
-impl TypedSinkHandler for CollectEmbedded {
+impl InlineSink for CollectEmbedded {
     type Input = TicketEmbedded;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         output: TicketEmbedded,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         self.outputs.lock().expect("output lock").push(output);
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(
-                DeliveryMethod::Custom("CollectEmbedded".to_string()),
-                Some(1),
-            ),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("CollectEmbedded".to_string()),
+            Some(1),
+        )))
     }
 }
 

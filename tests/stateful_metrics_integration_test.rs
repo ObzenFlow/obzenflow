@@ -17,9 +17,9 @@ use obzenflow_dsl::{join, sink, source, stateful, test_flow};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-    StatefulEmission, TypedFiniteSourceHandler, TypedJoinHandler, TypedSinkConsumeReport,
-    TypedSinkHandler, TypedStatefulHandler,
+    InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, StatefulEmission, TypedFiniteSourceHandler, TypedJoinHandler,
+    TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::testing::MetricsBarrier;
@@ -179,9 +179,17 @@ impl TypedStatefulHandler for SlowAccumulator {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct CollectingSink<T> {
     events: Arc<Mutex<Vec<T>>>,
+}
+
+impl<T> Clone for CollectingSink<T> {
+    fn clone(&self) -> Self {
+        Self {
+            events: Arc::clone(&self.events),
+        }
+    }
 }
 
 impl<T> CollectingSink<T> {
@@ -197,30 +205,28 @@ impl<T> CollectingSink<T> {
 }
 
 #[async_trait]
-impl<T> TypedSinkHandler for CollectingSink<T>
+impl<T> InlineSink for CollectingSink<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
     type Input = T;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         event: T,
-        _context: SinkInputContext,
-    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
         self.events.lock().unwrap().push(event);
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(
-                obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
-                    "collect".to_string(),
-                ),
-                None,
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                "collect".to_string(),
             ),
-        ))
+            None,
+        )))
     }
 }
 

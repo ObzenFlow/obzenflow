@@ -43,7 +43,7 @@ where
 // `assert_join_output`, `assert_join_reference_output`,
 // `assert_join_stream_output`) are removed. The DSL no longer has authoring
 // surfaces that need to bypass `TransformTyping`. Sink and join typing are
-// witnessed directly by `TypedSinkHandler` / `TypedJoinHandler` and their
+// witnessed directly by `SinkWriter` / `TypedJoinHandler` and their
 // macro expansions.
 // The remaining typed contract is established at the macro
 // expansion site by emitting `TypeHint::exact::<T>()` metadata; runtime

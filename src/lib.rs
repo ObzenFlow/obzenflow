@@ -54,7 +54,7 @@
 //! like [`crate::typed::transforms::map`] for simple one-to-one mappings.
 //!
 //! **Sinks** consume events at the end of a pipeline. Implement
-//! [`obzenflow_runtime::stages::TypedSinkHandler`], or construct a
+//! [`obzenflow_runtime::stages::SinkWriter`], or construct a
 //! [`obzenflow_runtime::stages::sink::SinkTyped`] adapter from a closure inside
 //! the deferred materialiser and pass its binding to `sink!`.
 //!

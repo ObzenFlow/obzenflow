@@ -8,41 +8,28 @@ use super::console;
 use super::domain::PaymentAuthorized;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::sink::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedSinkConsumeReport,
-    TypedSinkHandler,
+    InlineSink, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
 };
 
-/// The shipping-system handoff: in production a queue publish; in this demo
-/// a labelled console line stands in for the subscriber.
+/// Small in-process shipping handoff used by the demo.
 #[derive(Clone, Debug, Default)]
 pub struct ShippingHandoff;
 
 #[async_trait]
-impl TypedSinkHandler for ShippingHandoff {
+impl InlineSink for ShippingHandoff {
     type Input = PaymentAuthorized;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::destination(
-            "shipping.handoff",
-            SinkDeliverySafety::IdempotentProjection,
-            Some(serde_json::json!({ "queue": "shipping" })),
-        )
-    }
-
-    async fn consume(
+    async fn write(
         &mut self,
         authorized: PaymentAuthorized,
-        context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         console::send_to_shipping(authorized, context.delivery().provenance());
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(
-                DeliveryMethod::QueuePublish {
-                    queue_name: "shipping".to_string(),
-                },
+        Ok(SinkWriteReport::terminal(
+            SinkTerminalOutcome::success_via(
+                DeliveryMethod::Custom("console:stdout".to_string()),
                 None,
             )
             .with_items(1),
@@ -57,18 +44,10 @@ mod tests {
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{StageId, TypedPayload, WriterId};
-    use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedSinkHandlerAdapter};
+    use obzenflow_runtime::stages::common::handlers::{SinkHandler, SinkWriterAdapter};
 
     #[tokio::test]
-    async fn named_shipping_delivery_preserves_its_exact_receipt_fields() {
-        let handler = ShippingHandoff;
-        let declaration = handler.delivery_declaration();
-        assert_eq!(declaration.delivery_type(), Some("shipping.handoff"));
-        assert_eq!(
-            declaration.safety(),
-            Some(SinkDeliverySafety::IdempotentProjection)
-        );
-
+    async fn inline_shipping_sink_reports_its_real_console_write() {
         let authorized = PaymentAuthorized {
             order_id: "order-1".to_string(),
             customer_id: "customer-1".to_string(),
@@ -81,7 +60,8 @@ mod tests {
             PaymentAuthorized::versioned_event_type(),
             serde_json::to_value(authorized).expect("serialize payment"),
         );
-        let mut adapter = TypedSinkHandlerAdapter::new(handler, StageId::new());
+        let stage_id = StageId::new();
+        let mut adapter = SinkWriterAdapter::new(ShippingHandoff, stage_id);
         let report = adapter
             .consume_report(event)
             .await
@@ -93,7 +73,7 @@ mod tests {
         ));
         assert!(matches!(
             report.primary.delivery_method,
-            DeliveryMethod::QueuePublish { ref queue_name } if queue_name == "shipping"
+            DeliveryMethod::Custom(ref method) if method == "console:stdout"
         ));
         assert_eq!(report.primary.items_delivered, Some(1));
         assert_eq!(report.primary.bytes_processed, None);

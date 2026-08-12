@@ -11,11 +11,11 @@ mod tests {
     use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
     use obzenflow_core::TypedPayload;
     use obzenflow_runtime::bootstrap::ReplayVerb;
-    use obzenflow_runtime::effects::SinkDeliverySafety;
+    use obzenflow_runtime::effects::SinkRedeliverySafety;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::sink::{
-        SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, SinkTyped,
-        TypedSinkConsumeReport, TypedSinkHandler,
+        SinkConnector, SinkDescription, SinkTerminalOutcome, SinkTyped, SinkWriteContext,
+        SinkWriteReport, SinkWriter, SinkWriterInitContext,
     };
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
@@ -39,49 +39,62 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
-    struct CountingDeclaration {
+    struct CountingConnector {
         calls: Arc<AtomicUsize>,
     }
 
-    #[async_trait]
-    impl TypedSinkHandler for CountingDeclaration {
-        type Input = SinkInput;
+    #[derive(Debug)]
+    struct CountingWriter;
 
-        fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+    #[async_trait]
+    impl SinkConnector for CountingConnector {
+        type Input = SinkInput;
+        type Writer = CountingWriter;
+
+        fn describe(&self) -> SinkDescription {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            SinkDeliveryDeclaration::destination(
-                "counted_destination",
-                SinkDeliverySafety::IdempotentProjection,
-                Some(serde_json::json!({ "tenant": "stable" })),
-            )
+            SinkDescription::destination("counted_destination", DeliveryMethod::Noop)
+                .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
         }
 
-        async fn consume(
+        async fn open(
+            &self,
+            _context: SinkWriterInitContext,
+        ) -> Result<Self::Writer, HandlerError> {
+            Ok(CountingWriter)
+        }
+    }
+
+    #[async_trait]
+    impl SinkWriter for CountingWriter {
+        type Input = SinkInput;
+
+        async fn write(
             &mut self,
             _input: Self::Input,
-            _context: SinkInputContext,
-        ) -> Result<TypedSinkConsumeReport, HandlerError> {
-            Ok(TypedSinkConsumeReport::terminal(
-                SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
-            ))
+            _context: SinkWriteContext,
+        ) -> Result<SinkWriteReport, HandlerError> {
+            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success(
+                None,
+            )))
         }
     }
 
     fn sink_descriptor(
         name: &str,
-        delivery_safety: Option<SinkDeliverySafety>,
+        delivery_safety: Option<SinkRedeliverySafety>,
     ) -> Box<dyn StageDescriptor> {
-        let handler = SinkTyped::new(|_value: SinkInput| async move {});
-        let handler = match delivery_safety {
-            Some(SinkDeliverySafety::IdempotentProjection) => handler.idempotent(),
-            Some(SinkDeliverySafety::NonIdempotentExternal) => handler.non_idempotent(),
-            None => handler,
+        let connector = SinkTyped::new(|_value: SinkInput| async move {});
+        let connector = match delivery_safety {
+            Some(SinkRedeliverySafety::SafeToRepeat) => connector.idempotent(),
+            Some(SinkRedeliverySafety::DuplicateSensitive) => connector.non_idempotent(),
+            None => connector,
         };
-        let delivery_declaration = handler.delivery_declaration();
+        let description = connector.describe();
         Box::new(SinkDescriptor {
             name: name.to_string(),
-            handler,
-            delivery_declaration,
+            connector,
+            description,
             sink_policies: vec![],
             observers: vec![],
         })
@@ -101,7 +114,7 @@ mod tests {
         for verb in BOTH_VERBS {
             let descriptors = descriptors(vec![(
                 "projection",
-                sink_descriptor("projection", Some(SinkDeliverySafety::IdempotentProjection)),
+                sink_descriptor("projection", Some(SinkRedeliverySafety::SafeToRepeat)),
             )]);
 
             validate_archive_sink_delivery_safety(&descriptors, verb, false)
@@ -115,7 +128,7 @@ mod tests {
             "external_writer",
             sink_descriptor(
                 "external_writer",
-                Some(SinkDeliverySafety::NonIdempotentExternal),
+                Some(SinkRedeliverySafety::DuplicateSensitive),
             ),
         )]);
 
@@ -142,7 +155,7 @@ mod tests {
             "external_writer",
             sink_descriptor(
                 "external_writer",
-                Some(SinkDeliverySafety::NonIdempotentExternal),
+                Some(SinkRedeliverySafety::DuplicateSensitive),
             ),
         )]);
 
@@ -197,13 +210,20 @@ mod tests {
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
-        // The refusal names both supported declaration homes.
+        // The refusal names both supported classification homes.
         assert!(
             message.contains("`delivery: idempotent` on its `sink!` row"),
             "{message}"
         );
         assert!(message.contains("`.idempotent()`"), "{message}");
-        assert!(message.contains("`SinkDeliveryDeclaration::"), "{message}");
+        assert!(
+            message.contains("classified `SinkDescription`"),
+            "{message}"
+        );
+        assert!(
+            message.contains("`SinkConnector` or `InlineSink`"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -214,7 +234,7 @@ mod tests {
                     "external_writer",
                     sink_descriptor(
                         "external_writer",
-                        Some(SinkDeliverySafety::NonIdempotentExternal),
+                        Some(SinkRedeliverySafety::DuplicateSensitive),
                     ),
                 ),
                 ("mystery", sink_descriptor("mystery", None)),
@@ -230,7 +250,7 @@ mod tests {
         for verb in BOTH_VERBS {
             let transform =
                 crate::transform!(name: "shaper", SinkInput -> SinkInput => placeholder!());
-            assert!(transform.sink_delivery_declaration().is_none());
+            assert!(transform.sink_description().is_none());
 
             let descriptors = descriptors(vec![("shaper", transform)]);
             validate_archive_sink_delivery_safety(&descriptors, verb, false)
@@ -248,9 +268,9 @@ mod tests {
         );
         assert_eq!(
             idempotent
-                .sink_delivery_declaration()
-                .and_then(|declaration| declaration.safety()),
-            Some(SinkDeliverySafety::IdempotentProjection)
+                .sink_description()
+                .and_then(SinkDescription::redelivery_safety),
+            Some(SinkRedeliverySafety::SafeToRepeat)
         );
 
         let non_idempotent_sink = SinkTyped::new(|_value: SinkInput| async move {});
@@ -261,9 +281,9 @@ mod tests {
         );
         assert_eq!(
             non_idempotent
-                .sink_delivery_declaration()
-                .and_then(|declaration| declaration.safety()),
-            Some(SinkDeliverySafety::NonIdempotentExternal)
+                .sink_description()
+                .and_then(SinkDescription::redelivery_safety),
+            Some(SinkRedeliverySafety::DuplicateSensitive)
         );
 
         let adapter_sink = SinkTyped::new(|_value: SinkInput| async move {});
@@ -274,9 +294,9 @@ mod tests {
         );
         assert_eq!(
             adapter_form
-                .sink_delivery_declaration()
-                .and_then(|declaration| declaration.safety()),
-            Some(SinkDeliverySafety::IdempotentProjection)
+                .sink_description()
+                .and_then(SinkDescription::redelivery_safety),
+            Some(SinkRedeliverySafety::SafeToRepeat)
         );
 
         let undeclared_sink = SinkTyped::new(|_value: SinkInput| async move {});
@@ -286,37 +306,34 @@ mod tests {
         );
         assert_eq!(
             undeclared
-                .sink_delivery_declaration()
-                .and_then(|declaration| declaration.safety()),
+                .sink_description()
+                .and_then(SinkDescription::redelivery_safety),
             None
         );
     }
 
     #[test]
-    fn typed_factory_snapshots_one_aggregate_and_wrappers_only_forward_it() {
+    fn typed_factory_snapshots_one_connector_description_and_wrappers_only_forward_it() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let handler = CountingDeclaration {
+        let connector = CountingConnector {
             calls: Arc::clone(&calls),
         };
         let mut descriptor = crate::sink!(
             name: "construction_name",
-            SinkInput => handler
+            SinkInput => connector
         );
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         for _ in 0..3 {
-            let declaration = descriptor
-                .sink_delivery_declaration()
-                .expect("typed sink declaration");
-            assert_eq!(declaration.delivery_type(), Some("counted_destination"));
+            let description = descriptor
+                .sink_description()
+                .expect("typed sink description");
+            assert_eq!(description.destination_name(), Some("counted_destination"));
             assert_eq!(
-                declaration.safety(),
-                Some(SinkDeliverySafety::IdempotentProjection)
+                description.redelivery_safety(),
+                Some(SinkRedeliverySafety::SafeToRepeat)
             );
-            assert_eq!(
-                declaration.canonical_destination(),
-                Some(&serde_json::json!({ "tenant": "stable" }))
-            );
+            assert_eq!(description.default_method(), Some(&DeliveryMethod::Noop));
         }
         descriptor.set_name("final_binding_name".to_string());
         assert_eq!(descriptor.name(), "final_binding_name");

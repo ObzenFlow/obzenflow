@@ -8,8 +8,8 @@ use obzenflow_core::{ChainEvent, TypedPayload};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::sink::traits::SinkHandler;
 use obzenflow_runtime::stages::sink::{
-    SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedSinkConsumeReport,
-    TypedSinkHandler,
+    SinkDescription, SinkWriteContext, SinkTerminalOutcome, SinkWriteReport,
+    InlineSink,
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,20 +41,20 @@ impl SinkHandler for RawHandler {
 pub struct WrongInputHandler;
 
 #[async_trait]
-impl TypedSinkHandler for WrongInputHandler {
+impl InlineSink for WrongInputHandler {
     type Input = OtherInput;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _input: Self::Input,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(
+            SinkTerminalOutcome::success_via(DeliveryMethod::Noop, None),
         ))
     }
 }

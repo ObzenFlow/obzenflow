@@ -28,20 +28,19 @@ fn archive_sink_refusal(verb: &ReplayVerb, stage: &str, undeclared: bool) -> Str
     };
     if undeclared {
         format!(
-            "{flag} refused: sink '{stage}' has no declared delivery safety; \
+            "{flag} refused: sink '{stage}' has no redelivery-safety classification; \
              {re_execution}, and the gate fails closed on undeclared sinks \
              (FLOWIP-120n F16, FLOWIP-120v). Bind the sink before `flow!`, then use \
              `delivery: idempotent` on its `sink!` row, `.idempotent()` / \
-             `.non_idempotent()` while constructing a typed sink handler, \
-             or return `SinkDeliveryDeclaration::safety_only(...)` / \
-             `SinkDeliveryDeclaration::destination(...)` from a custom \
-             `TypedSinkHandler`. A non-idempotent external write belongs behind \
+             `.non_idempotent()` while constructing a closure sink, or return a \
+             classified `SinkDescription` from a custom `SinkConnector` or \
+             `InlineSink`. A duplicate-sensitive external write belongs behind \
              the effect boundary (effectful transform plus plain sink). Or pass \
              `allow_duplicate_sink_delivery`."
         )
     } else {
         format!(
-            "{flag} refused: sink '{stage}' declares a non-idempotent external \
+            "{flag} refused: sink '{stage}' declares a duplicate-sensitive external \
              delivery path; {re_execution} (FLOWIP-120n F16, FLOWIP-120v). Declare \
              `delivery: idempotent` if the destination absorbs duplicates, route the \
              write through the effect boundary (effectful transform plus plain sink), \

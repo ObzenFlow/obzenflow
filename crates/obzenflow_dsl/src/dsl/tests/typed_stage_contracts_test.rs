@@ -16,11 +16,10 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
-        EffectfulTransformHandler, JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext,
-        SinkTerminalOutcome, StatefulEmission, TransformHandler, TypedAsyncFiniteSourceHandler,
-        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-        TypedJoinHandler, TypedSinkConsumeReport, TypedSinkHandler, TypedStatefulHandler,
-        TypedTransformHandler,
+        EffectfulTransformHandler, InlineSink, JoinReferenceView, SinkTerminalOutcome,
+        SinkWriteContext, SinkWriteReport, StatefulEmission, TransformHandler,
+        TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+        TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
     use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder, TypeHintInfo};
@@ -427,21 +426,18 @@ mod tests {
     struct ExactSink;
 
     #[async_trait]
-    impl TypedSinkHandler for ExactSink {
+    impl InlineSink for ExactSink {
         type Input = OutputEvent;
 
-        fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-            SinkDeliveryDeclaration::undeclared()
-        }
-
-        async fn consume(
+        async fn write(
             &mut self,
             _input: OutputEvent,
-            _context: SinkInputContext,
-        ) -> Result<TypedSinkConsumeReport, HandlerError> {
-            Ok(TypedSinkConsumeReport::terminal(
-                SinkTerminalOutcome::success(DeliveryMethod::Noop, None),
-            ))
+            _context: SinkWriteContext,
+        ) -> Result<SinkWriteReport, HandlerError> {
+            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+                DeliveryMethod::Noop,
+                None,
+            )))
         }
     }
 

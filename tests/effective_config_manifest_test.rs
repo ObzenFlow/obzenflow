@@ -22,8 +22,8 @@ use obzenflow_runtime::runtime_config::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-    TypedFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, TypedFiniteSourceHandler,
 };
 
 use async_trait::async_trait;
@@ -63,8 +63,14 @@ impl TypedFiniteSourceHandler for OneShotSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct NullSink<T>(std::marker::PhantomData<fn() -> T>);
+
+impl<T> Clone for NullSink<T> {
+    fn clone(&self) -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
 
 impl<T> NullSink<T> {
     fn new() -> Self {
@@ -73,24 +79,25 @@ impl<T> NullSink<T> {
 }
 
 #[async_trait]
-impl<T> TypedSinkHandler for NullSink<T>
+impl<T> InlineSink for NullSink<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
     type Input = T;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _event: T,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Null".to_string()), None),
-        ))
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Null".to_string()),
+            None,
+        )))
     }
 }
 

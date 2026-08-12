@@ -18,11 +18,11 @@ use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
-use obzenflow_runtime::effects::SinkDeliverySafety;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkBufferedOutcome, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-    TypedFiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler,
+    InlineSink, SinkBufferedOutcome, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -115,30 +115,26 @@ impl TypedFiniteSourceHandler for ValuesSource {
 struct NamedDestination;
 
 #[async_trait]
-impl TypedSinkHandler for NamedDestination {
+impl InlineSink for NamedDestination {
     type Input = SinkRecord;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::destination(
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::destination(
             "named.destination",
-            SinkDeliverySafety::IdempotentProjection,
-            Some(serde_json::json!({ "table": "sink_records" })),
+            DeliveryMethod::DatabaseInsert {
+                table: "sink_records".to_string(),
+            },
         )
+        .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _input: Self::Input,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(
-                DeliveryMethod::DatabaseInsert {
-                    table: "sink_records".to_string(),
-                },
-                None,
-            )
-            .with_items(1),
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(
+            SinkTerminalOutcome::success(None).with_items(1),
         ))
     }
 }
@@ -412,22 +408,21 @@ async fn buffered_csv_and_named_sink_have_live_replay_journal_parity() {
 struct InvalidBufferedSink;
 
 #[async_trait]
-impl TypedSinkHandler for InvalidBufferedSink {
+impl InlineSink for InvalidBufferedSink {
     type Input = SinkRecord;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _input: Self::Input,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
-        Ok(TypedSinkConsumeReport::buffered(SinkBufferedOutcome::new(
-            DeliveryMethod::Noop,
-            None,
-        )))
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::buffered(
+            SinkBufferedOutcome::accepted_via(DeliveryMethod::Noop, None),
+        ))
     }
 }
 
@@ -485,32 +480,33 @@ async fn invalid_settlement_records_stage_fatal_without_a_delivery_receipt() {
         .contains("buffered primary outcome without deferring"));
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct FailingSink {
     declared: bool,
 }
 
 #[async_trait]
-impl TypedSinkHandler for FailingSink {
+impl InlineSink for FailingSink {
     type Input = SinkRecord;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
+    fn describe(&self) -> SinkDescription {
         if self.declared {
-            SinkDeliveryDeclaration::destination(
+            SinkDescription::destination(
                 "declared.failure",
-                SinkDeliverySafety::IdempotentProjection,
-                None,
+                DeliveryMethod::Custom("declared_failure".to_string()),
             )
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
         } else {
-            SinkDeliveryDeclaration::safety_only(SinkDeliverySafety::IdempotentProjection)
+            SinkDescription::unspecified()
+                .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
         }
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _input: Self::Input,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         Err(HandlerError::Other("intentional sink failure".to_string()))
     }
 }

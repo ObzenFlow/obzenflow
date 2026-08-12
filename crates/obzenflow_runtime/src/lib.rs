@@ -43,7 +43,7 @@ pub mod __private {
     pub use crate::stages::common::handlers::join::{
         ErasedJoinInvocation, TypedJoinHandlerAdapter, UnifiedJoinHandler,
     };
-    pub use crate::stages::common::handlers::sink::TypedSinkHandlerAdapter;
+    pub use crate::stages::common::handlers::sink::SinkWriterAdapter;
     pub use crate::stages::common::handlers::source::typed::{
         TypedAsyncFiniteSourceHandlerAdapter, TypedAsyncInfiniteSourceHandlerAdapter,
         TypedFiniteSourceHandlerAdapter, TypedInfiniteSourceHandlerAdapter,
@@ -88,7 +88,7 @@ pub mod testing;
 /// [`TypedFiniteSourceHandler`](crate::stages::TypedFiniteSourceHandler),
 /// [`TypedInfiniteSourceHandler`](crate::stages::TypedInfiniteSourceHandler),
 /// [`TypedTransformHandler`](crate::stages::TypedTransformHandler),
-/// [`TypedSinkHandler`](crate::stages::TypedSinkHandler),
+/// [`SinkWriter`](crate::stages::SinkWriter),
 /// [`TypedStatefulHandler`](crate::stages::TypedStatefulHandler),
 /// [`TypedJoinHandler`](crate::stages::TypedJoinHandler),
 /// [`ObserverHandler`](crate::stages::ObserverHandler), and the
@@ -119,10 +119,11 @@ pub mod prelude {
 
     // Handlers
     pub use crate::stages::{
-        EffectfulStatefulHandler, EffectfulTransformHandler, HostedIngressSource, ObserverHandler,
-        ResourceManaged, SourceError, SourceObservationSink, TypedAsyncFiniteSourceHandler,
-        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-        TypedJoinHandler, TypedSinkHandler, TypedStatefulHandler, TypedTransformHandler,
+        EffectfulStatefulHandler, EffectfulTransformHandler, HostedIngressSource, InlineSink,
+        ObserverHandler, ResourceManaged, SinkConnector, SinkDescription, SinkWriter, SourceError,
+        SourceObservationSink, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+        TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler,
+        TypedStatefulHandler, TypedTransformHandler,
     };
     pub use crate::typing::{SourceTyping, TransformTyping};
 
@@ -130,7 +131,7 @@ pub mod prelude {
     pub use crate::effects::{
         DomainFacts, Effect, EffectCommitHandle, EffectContext, EffectDeclaration, EffectError,
         EffectOutcomeKind, EffectOutcomePayload, EffectSafety, Effects, IdempotencyKey,
-        RecordedReply, SinkDeliverySafety, TransactionalEffectPort,
+        RecordedReply, SinkRedeliverySafety, TransactionalEffectPort,
     };
     pub use crate::messaging::UpstreamSubscription;
 

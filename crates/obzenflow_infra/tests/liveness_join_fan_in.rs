@@ -14,8 +14,8 @@ use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-    TypedAsyncFiniteSourceHandler, TypedJoinHandler, TypedSinkConsumeReport, TypedSinkHandler,
+    InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, TypedAsyncFiniteSourceHandler, TypedJoinHandler,
 };
 use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
@@ -150,21 +150,22 @@ impl TypedJoinHandler for SlowJoin {
 struct NoopSink;
 
 #[async_trait]
-impl TypedSinkHandler for NoopSink {
+impl InlineSink for NoopSink {
     type Input = EnrichedRecord;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _input: EnrichedRecord,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Noop".to_string()), None),
-        ))
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Noop".to_string()),
+            None,
+        )))
     }
 }
 

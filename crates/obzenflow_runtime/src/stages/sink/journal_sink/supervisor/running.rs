@@ -271,7 +271,7 @@ async fn dispatch_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 
             dispatch_data_event(ctx, subscription, envelope, stage_input_position).await
         }
         _ => {
-            // Typed sink handlers are a Data-only authoring surface. Delivery
+            // Typed sink writers are a Data-only authoring surface. Delivery
             // and observability rows remain runtime transport/lifecycle input.
             let event_id = envelope.event.id;
             let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
@@ -684,7 +684,9 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
                 err,
             ))) => {
                 let fail_payload = DeliveryPayload::failed(
-                    DeliveryMethod::Noop,
+                    ctx.default_delivery_method
+                        .clone()
+                        .unwrap_or(DeliveryMethod::Noop),
                     "sink_error",
                     err.to_string(),
                     /* final_attempt */ false,
@@ -704,7 +706,9 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
                     "SinkHandler::consume() panicked"
                 );
                 let fail_payload = DeliveryPayload::failed(
-                    DeliveryMethod::Noop,
+                    ctx.default_delivery_method
+                        .clone()
+                        .unwrap_or(DeliveryMethod::Noop),
                     "handler_panic",
                     message,
                     /* final_attempt */ true,
@@ -727,7 +731,9 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
                     "Sink delivery rejected by policy (FLOWIP-115b)"
                 );
                 let fail_payload = DeliveryPayload::failed(
-                    DeliveryMethod::Noop,
+                    ctx.default_delivery_method
+                        .clone()
+                        .unwrap_or(DeliveryMethod::Noop),
                     "sink_policy_rejected",
                     format!("{}: {}", rejection.policy, rejection.reason),
                     /* final_attempt */ false,
@@ -885,7 +891,9 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             // Instrumentation-level or unexpected failure: preserve the
             // existing failed-receipt policy.
             let fail_payload = DeliveryPayload::failed(
-                DeliveryMethod::Noop,
+                ctx.default_delivery_method
+                    .clone()
+                    .unwrap_or(DeliveryMethod::Noop),
                 "sink_error",
                 e.to_string(),
                 /* final_attempt */ false,

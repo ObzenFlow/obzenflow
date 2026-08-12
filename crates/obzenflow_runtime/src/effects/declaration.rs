@@ -19,16 +19,15 @@ pub enum EffectSafety {
     Transactional,
 }
 
-/// Declared replay/resume safety of a sink's delivery path (FLOWIP-120n F16).
-/// Read only by the resume sink gate; live behaviour never consults it.
+/// Replay/resume safety of a configured sink (FLOWIP-120n F16).
+/// Read only by the archive sink gate; live behaviour never consults it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SinkDeliverySafety {
-    /// Deterministic, local, or destination-idempotent delivery: re-consuming
-    /// the recorded prefix is absorbed. Resume proceeds.
-    IdempotentProjection,
-    /// Non-idempotent external write: catch-up re-delivery duplicates.
-    /// Resume refuses without `allow_duplicate_sink_delivery`.
-    NonIdempotentExternal,
+pub enum SinkRedeliverySafety {
+    /// Repeating a recorded write is acceptable for this configured sink.
+    SafeToRepeat,
+    /// Repeating a recorded write can create externally visible duplicates.
+    /// Archive execution refuses without `allow_duplicate_sink_delivery`.
+    DuplicateSensitive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

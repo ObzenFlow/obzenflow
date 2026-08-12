@@ -33,8 +33,8 @@ use obzenflow_runtime::effects::EffectPortRegistry;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-    TypedFiniteSourceHandler, TypedJoinHandler, TypedSinkConsumeReport, TypedSinkHandler,
+    InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, TypedFiniteSourceHandler, TypedJoinHandler,
 };
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
@@ -234,8 +234,14 @@ impl TypedFiniteSourceHandler for NoEventSource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct NoopSink<T>(std::marker::PhantomData<fn() -> T>);
+
+impl<T> Clone for NoopSink<T> {
+    fn clone(&self) -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
 
 impl<T> NoopSink<T> {
     fn new() -> Self {
@@ -244,24 +250,25 @@ impl<T> NoopSink<T> {
 }
 
 #[async_trait]
-impl<T> TypedSinkHandler for NoopSink<T>
+impl<T> InlineSink for NoopSink<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
     type Input = T;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _event: T,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Noop".to_string()), None),
-        ))
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Noop".to_string()),
+            None,
+        )))
     }
 }
 
@@ -278,23 +285,24 @@ impl CountingOutSink {
 }
 
 #[async_trait]
-impl TypedSinkHandler for CountingOutSink {
+impl InlineSink for CountingOutSink {
     type Input = BuildOnlyOut;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         out: BuildOnlyOut,
-        _context: SinkInputContext,
-    ) -> Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         self.delivered.fetch_add(1, Ordering::SeqCst);
         self.total.store(out.total, Ordering::SeqCst);
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("CountingOut".to_string()), None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("CountingOut".to_string()),
+            None,
+        )))
     }
 }
 

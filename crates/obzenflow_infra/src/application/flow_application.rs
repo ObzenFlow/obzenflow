@@ -71,8 +71,8 @@ mod tests {
     use obzenflow_runtime::pipeline::PipelineState;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::{
-        SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome, TypedFiniteSourceHandler,
-        TypedInfiniteSourceHandler, TypedSinkConsumeReport, TypedSinkHandler,
+        InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+        TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
     };
     use obzenflow_runtime::stages::SourceError;
     use std::net::TcpListener;
@@ -125,21 +125,22 @@ mod tests {
     struct NoopSink;
 
     #[async_trait]
-    impl TypedSinkHandler for NoopSink {
+    impl InlineSink for NoopSink {
         type Input = IdlePayload;
 
-        fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-            SinkDeliveryDeclaration::undeclared()
+        fn describe(&self) -> SinkDescription {
+            SinkDescription::unspecified()
         }
 
-        async fn consume(
+        async fn write(
             &mut self,
             _input: IdlePayload,
-            _context: SinkInputContext,
-        ) -> Result<TypedSinkConsumeReport, HandlerError> {
-            Ok(TypedSinkConsumeReport::terminal(
-                SinkTerminalOutcome::success(DeliveryMethod::Custom("test".to_string()), None),
-            ))
+            _context: SinkWriteContext,
+        ) -> Result<SinkWriteReport, HandlerError> {
+            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+                DeliveryMethod::Custom("test".to_string()),
+                None,
+            )))
         }
     }
 

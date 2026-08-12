@@ -12,9 +12,9 @@ use obzenflow_dsl::{async_source, join, sink, source, stateful, test_flow, trans
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkDeliveryDeclaration, SinkInputContext, SinkTerminalOutcome,
-    StatefulEmission, TypedAsyncFiniteSourceHandler, TypedFiniteSourceHandler, TypedJoinHandler,
-    TypedSinkConsumeReport, TypedSinkHandler, TypedStatefulHandler, TypedTransformHandler,
+    InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, StatefulEmission, TypedAsyncFiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -170,10 +170,19 @@ impl TypedStatefulHandler for PassthroughStateful {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct CountingSink<T> {
     count: Arc<AtomicUsize>,
     _input: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for CountingSink<T> {
+    fn clone(&self) -> Self {
+        Self {
+            count: Arc::clone(&self.count),
+            _input: std::marker::PhantomData,
+        }
+    }
 }
 
 impl<T> CountingSink<T> {
@@ -190,25 +199,26 @@ impl<T> CountingSink<T> {
 }
 
 #[async_trait]
-impl<T> TypedSinkHandler for CountingSink<T>
+impl<T> InlineSink for CountingSink<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
     type Input = T;
 
-    fn delivery_declaration(&self) -> SinkDeliveryDeclaration {
-        SinkDeliveryDeclaration::undeclared()
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
     }
 
-    async fn consume(
+    async fn write(
         &mut self,
         _event: T,
-        _context: SinkInputContext,
-    ) -> std::result::Result<TypedSinkConsumeReport, HandlerError> {
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
         self.count.fetch_add(1, Ordering::Relaxed);
-        Ok(TypedSinkConsumeReport::terminal(
-            SinkTerminalOutcome::success(DeliveryMethod::Custom("Count".to_string()), None),
-        ))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Count".to_string()),
+            None,
+        )))
     }
 }
 
