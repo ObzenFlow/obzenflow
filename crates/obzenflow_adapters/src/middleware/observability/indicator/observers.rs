@@ -41,7 +41,7 @@ impl HandlerObserver for IndicatorMiddleware {
         _outputs: &[ChainEvent],
     ) -> ObserverReport {
         // One sample per execution, recording the raw measured duration. The
-        // objective/threshold is applied read-side (FLOWIP-115l), not here.
+        // Objective/threshold evaluation is a FLOWIP-135 read-side concern.
         let value = self.duration_for_input(ctx.input);
         ObserverReport::empty().with_diagnostic(ObserverDiagnostic::new(
             ObserverEvidence::Indicator(self.sample(value)),

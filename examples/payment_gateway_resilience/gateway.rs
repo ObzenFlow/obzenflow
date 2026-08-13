@@ -100,7 +100,7 @@ impl Effect for AuthorizePayment {
             // latency. The breaker attempt row records raw dependency time, while
             // the handler indicator records the wider operation duration; whether
             // either counts as "slow" against an objective is a read-side question
-            // (FLOWIP-115l), not baked into the wide event.
+            // (FLOWIP-135), not baked into the measurement.
             let timeout_ms: u64 = ctx.rng("gateway_outage_hang").u64(2_000..=3_000);
             ctx.sleep(std::time::Duration::from_millis(timeout_ms))
                 .await;

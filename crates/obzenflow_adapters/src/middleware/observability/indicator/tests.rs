@@ -26,7 +26,7 @@ fn configured() -> IndicatorMiddleware {
 #[test]
 fn sample_records_raw_value_with_operation_indicator_kind_and_tags() {
     // The sample carries the raw measurement and identity only: no objective,
-    // threshold, or met flag is embedded (those are read-side, FLOWIP-115l).
+    // threshold, or met flag is embedded (those are FLOWIP-135 read-side concerns).
     let sample = configured().sample(MetricsDuration::from_millis(6_120));
     assert_eq!(sample.kind, IndicatorKind::Latency);
     assert_eq!(sample.operation, "payment.authorization");

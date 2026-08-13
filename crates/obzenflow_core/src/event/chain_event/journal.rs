@@ -25,9 +25,7 @@ fn is_observer_evidence(content: &ChainEventContent) -> bool {
                 MiddlewareLifecycle::CircuitBreaker(_) | MiddlewareLifecycle::RateLimiter(_) => {
                     false
                 }
-                MiddlewareLifecycle::Indicator(_)
-                | MiddlewareLifecycle::Logging(_)
-                | MiddlewareLifecycle::User(_) => true,
+                MiddlewareLifecycle::Indicator(_) => true,
             },
         },
     }

@@ -11,16 +11,15 @@
 //!
 //! Attachments bind at named stage join points and split by capability:
 //!
-//! - **Observers** publish journalled evidence (logging and service-level
-//!   indicator samples) and structurally cannot steer control
-//!   flow: their return type only carries evidence. This is the tool for custom
-//!   observability and auditability aspects.
+//! - **Observers** publish quantitative execution measurements and
+//!   structurally cannot steer control flow: their return type only carries
+//!   observation content.
 //! - **Control** middleware (circuit breaker, rate limiter, and effect
 //!   resilience) admits, paces, or rejects at a live-I/O boundary. Retry exists
 //!   only inside effect resilience; it is not a standalone attachment.
 //!
-//! Built-in observers are constructed with `indicator()` / `latency()` and
-//! `log_event()`; built-in control middleware with the checked
+//! Built-in observers are constructed with `indicator()` / `latency()`;
+//! built-in control middleware with the checked
 //! `CircuitBreaker::builder()` and `rate_limit()`. In the DSL, middleware is
 //! attached per stage as an array.
 //!
@@ -46,7 +45,7 @@
 //! ## Common Middleware Utilities
 //!
 //! The `common` module provides pre-built middleware for rate limiting, circuit breaking,
-//! and logging; refer to the current control/observability modules for up-to-date builders.
+//! and observation; refer to the current control/observability modules for up-to-date builders.
 //!
 //! ## Custom observers
 //!
@@ -84,8 +83,8 @@
 //! // attachment, then attach `count_inputs()` to a stage in the DSL.
 //! ```
 //!
-//! The built-in `observability::indicator` and `observability::logging` modules
-//! are complete worked examples of this factory + observer-hook shape, and
+//! The built-in `observability::indicator` module is the worked example of
+//! this factory + observer-hook shape, and
 //! FLOWIP-115f documents the authoring contract. To affect control flow instead,
 //! implement a control hook rather than an observer.
 
@@ -158,8 +157,6 @@ pub use control::{
     EffectResilienceConfigError, FailureHealth, RateLimiter, RateLimiterBuilder,
     RateLimiterFactory, RateLimiterMiddleware, Retry,
 };
-
-pub use observability::{log_event, LoggingLevel, LoggingMiddleware, LoggingMiddlewareFactory};
 
 // Middleware validation helpers
 pub use validation::{validate_middleware_safety, ValidationResult};

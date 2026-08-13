@@ -183,28 +183,6 @@ fn data_event_count(jsonl: &str, event_type: &str) -> usize {
         .count()
 }
 
-fn logging_event_count(jsonl: &str, event_name: &str) -> usize {
-    exported_events(jsonl)
-        .filter(|row| {
-            row.pointer("/event/content/content_type")
-                .and_then(serde_json::Value::as_str)
-                == Some("lifecycle")
-                && row
-                    .pointer("/event/content/observability_type")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("middleware")
-                && row
-                    .pointer("/event/content/middleware_event")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("logging")
-                && row
-                    .pointer("/event/content/details/event")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(event_name)
-        })
-        .count()
-}
-
 fn payment_effect_outcome_group_count(jsonl: &str) -> usize {
     exported_events(jsonl)
         .filter_map(|row| {
@@ -598,10 +576,6 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&healthy), 5);
-    assert_eq!(
-        logging_event_count(&healthy, "payment.authorization.manual_review_handoff"),
-        0
-    );
     assert_eq!(payment_terminal_group_counters(&healthy), (5, 0));
     assert_eq!(
         last_payment_breaker_counts(&healthy),
@@ -659,13 +633,6 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         5
     );
     assert_eq!(
-        logging_event_count(
-            &healthy_replay,
-            "payment.authorization.manual_review_handoff"
-        ),
-        0
-    );
-    assert_eq!(
         attempt_settlements(&healthy_replay),
         healthy_attempts,
         "strict replay must rematerialise archived attempt settlements unchanged"
@@ -698,11 +665,6 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
     );
     assert_eq!(data_event_count(&breaker_only, "payment.authorized.v1"), 0);
     assert_eq!(payment_effect_outcome_group_count(&breaker_only), 1);
-    assert_eq!(
-        logging_event_count(&breaker_only, "payment.authorization.manual_review_handoff"),
-        1,
-        "the payment manual-review delivery must author the locked logging occurrence"
-    );
     assert_eq!(payment_terminal_group_counters(&breaker_only), (1, 0));
     assert_eq!(
         last_payment_breaker_counts(&breaker_only),
@@ -755,10 +717,6 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&treatment), 1);
-    assert_eq!(
-        logging_event_count(&treatment, "payment.authorization.manual_review_handoff"),
-        0
-    );
     assert_eq!(payment_terminal_group_counters(&treatment), (1, 0));
     assert_eq!(
         last_payment_breaker_counts(&treatment),
@@ -851,11 +809,6 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&replay), 1);
-    assert_eq!(
-        logging_event_count(&replay, "payment.authorization.manual_review_handoff"),
-        0,
-        "strict replay must not author fresh payment logging evidence"
-    );
     assert_eq!(payment_terminal_group_counters(&replay), (1, 0));
     assert_eq!(retry_schedules(&replay), retry_schedules(&treatment));
     assert_eq!(retry_successes(&replay), retry_successes(&treatment));
@@ -890,10 +843,6 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         6
     );
     assert_eq!(data_event_count(&open, "payment.authorized.v1"), 0);
-    assert_eq!(
-        logging_event_count(&open, "payment.authorization.manual_review_handoff"),
-        6
-    );
     assert_eq!(payment_terminal_group_counters(&open), (6, 0));
     assert_eq!(
         last_payment_breaker_counts(&open),
@@ -996,11 +945,6 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         6
     );
     assert_eq!(payment_terminal_group_counters(&open_replay), (6, 0));
-    assert_eq!(
-        logging_event_count(&open_replay, "payment.authorization.manual_review_handoff"),
-        0,
-        "strict replay suppresses all six live-only handoff occurrences"
-    );
     assert!(retry_schedules(&open_replay).is_empty());
     assert!(retry_successes(&open_replay).is_empty());
     assert_eq!(retry_terminal_failure_count(&open_replay), 0);

@@ -19,11 +19,11 @@ pub use obzenflow_runtime::stages::observer::{
     DiagnosticProvenance, EffectObserver, EffectObserverContext, HandlerObserver,
     HandlerObserverContext, JoinObserver, JoinObserverContext, ObserverCommitError,
     ObserverCommitResult, ObserverDeterminism, ObserverDiagnostic, ObserverEvidence,
-    ObserverLocalTrace, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
-    SinkDeliveryAttemptResult, SinkDeliveryObserver, SinkDeliveryObserverContext,
-    SinkDeliveryObserverOutcome, SourcePollObserver, SourcePollObserverContext,
-    SourcePollObserverOutcome, StageLifecycleObserver, StageLifecycleObserverContext,
-    StageLifecyclePhase, StatefulObserver, StatefulObserverContext,
+    ObserverReport, OutputCommitObserver, OutputCommitObserverContext, SinkDeliveryAttemptResult,
+    SinkDeliveryObserver, SinkDeliveryObserverContext, SinkDeliveryObserverOutcome,
+    SourcePollObserver, SourcePollObserverContext, SourcePollObserverOutcome,
+    StageLifecycleObserver, StageLifecycleObserverContext, StageLifecyclePhase, StatefulObserver,
+    StatefulObserverContext,
 };
 
 use crate::middleware::{

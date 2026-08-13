@@ -21,10 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - (FLOWIP-115n) Circuit-open and probe-busy effect outcomes are stable recorded framework failures; health classification is independent from retry eligibility and delay.
 - (FLOWIP-120m) The payment-gateway example records `payment.authorized.v1`/`payment.declined.v1` directly as the effect outcome group through an `AuthorizePaymentOutcome` carrier; the persisted `payment.gateway_decision.v1` bridge fact is gone.
 - (FLOWIP-114p/115n) Middleware control flow no longer keys off string middleware names. `MiddlewareFactory` declares typed surfaces and materialises exact attachments; configuration defaults use runtime-owned descriptors with durable provenance.
-- (FLOWIP-114p) `MiddlewareContext` is now typed and encapsulated: removed the legacy string `MiddlewareEvent` APIs and string-keyed baggage, added typed per-pass slots via `MiddlewareContextKey`, and added typed user middleware events via `TypedMiddlewareEvent`.
+- (FLOWIP-114p) `MiddlewareContext` is now typed and encapsulated: removed the legacy string `MiddlewareEvent` APIs and string-keyed baggage, and added typed per-pass slots via `MiddlewareContextKey`.
 - (FLOWIP-114p) DSL middleware resolution is now fallible on same-scope duplicate override families, and topology/backpressure extraction uses the resolved middleware list plus typed factory contributions/slots instead of label matching.
 
 ### Removed
+- (FLOWIP-115m) The built-in observer logger, its durable logging schema, and the generic user-middleware event authoring escape hatch. Application logging now uses standard Rust `tracing`; `indicator()` remains the only public ordinary-observation producer while the separate observation rail is designed and implemented.
 - (FLOWIP-120m) String-only `EffectDeclaration` constructors (`idempotent`, `non_idempotent_with_key`, string `transactional`): their empty fact sets bypassed containment validation; use `EffectDeclaration::of::<E>()`.
 - (FLOWIP-115n) Breaker-authored branch facts, typed wrappers, outcome synthesis, time windows, and sentence-shaped opening criteria.
 

@@ -12,7 +12,7 @@
 //! and it never steers control flow.
 //!
 //! Aggregation into ratios, percentiles, windows, and error budgets is the job
-//! of FLOWIP-115l, which reads these rows; this module only publishes them.
+//! of the FLOWIP-135 read side; this module only publishes measurements.
 //! `latency()` is the convenience constructor for the only implemented kind.
 
 mod factory;

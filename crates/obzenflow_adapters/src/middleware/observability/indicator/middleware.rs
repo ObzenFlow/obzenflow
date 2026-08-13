@@ -85,7 +85,7 @@ impl IndicatorMiddleware {
 
     /// Build the per-execution sample for a measured value. Records the raw
     /// measurement only: the objective and good/bad classification are read-side
-    /// (FLOWIP-115l), never baked into the sample.
+    /// (FLOWIP-135), never baked into the sample.
     pub(super) fn sample(&self, value: MetricsDuration) -> IndicatorSample {
         IndicatorSample {
             kind: self.config.kind,

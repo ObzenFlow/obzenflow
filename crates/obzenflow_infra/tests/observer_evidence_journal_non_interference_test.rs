@@ -4,13 +4,12 @@
 
 use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::payloads::observability_payload::{
-    LoggingEventName, LoggingEvidence, LoggingInputReference, LoggingLevel, LoggingOccurrence,
-    MiddlewareLifecycle, ObservabilityPayload,
+    IndicatorKind, IndicatorSample, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::{ChainEventContent, ChainEventFactory};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, EventEnvelope, EventId, StageId, WriterId};
+use obzenflow_core::{ChainEvent, EventEnvelope, StageId, WriterId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use serde_json::json;
 use std::path::PathBuf;
@@ -18,45 +17,29 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use uuid::Uuid;
 
-fn root_logging_event(writer: WriterId) -> ChainEvent {
-    let evidence = LoggingEvidence::new(
-        LoggingEventName::new("test.observer.evidence").unwrap(),
-        LoggingLevel::Info,
-        LoggingOccurrence::HandlerInputObserved {
-            input: LoggingInputReference {
-                event_id: EventId::new(),
-                event_type: "test.input.v1".to_string(),
-                stage_input_position: 1,
-            },
-        },
-        Vec::new(),
-    )
-    .unwrap();
+fn indicator_sample() -> IndicatorSample {
+    IndicatorSample {
+        kind: IndicatorKind::Latency,
+        operation: "test.observer".to_string(),
+        indicator: "observer.latency".to_string(),
+        value_ms: 1,
+        tags: Vec::new(),
+    }
+}
+
+fn root_indicator_record(writer: WriterId) -> ChainEvent {
     ChainEventFactory::observability_event(
         writer,
-        ObservabilityPayload::Middleware(MiddlewareLifecycle::Logging(evidence)),
+        ObservabilityPayload::Middleware(MiddlewareLifecycle::Indicator(indicator_sample())),
     )
 }
 
-fn derived_logging_event(writer: WriterId, parent: &ChainEvent) -> ChainEvent {
-    let evidence = LoggingEvidence::new(
-        LoggingEventName::new("test.observer.evidence").unwrap(),
-        LoggingLevel::Info,
-        LoggingOccurrence::HandlerInputObserved {
-            input: LoggingInputReference {
-                event_id: parent.id,
-                event_type: parent.event_type(),
-                stage_input_position: 1,
-            },
-        },
-        Vec::new(),
-    )
-    .unwrap();
+fn derived_indicator_record(writer: WriterId, parent: &ChainEvent) -> ChainEvent {
     ChainEventFactory::derived_event(
         writer,
         parent,
         ChainEventContent::Observability(ObservabilityPayload::Middleware(
-            MiddlewareLifecycle::Logging(evidence),
+            MiddlewareLifecycle::Indicator(indicator_sample()),
         )),
         LineagePolicy::default(),
     )
@@ -77,7 +60,7 @@ async fn assert_single_append_non_interference(
         .unwrap();
     let evidence = treatment
         .append(
-            derived_logging_event(writer, &treatment_first.event),
+            derived_indicator_record(writer, &treatment_first.event),
             Some(&treatment_first),
         )
         .await
@@ -146,7 +129,7 @@ async fn assert_group_classification(
             "mixed-flow-and-observer-evidence",
             vec![
                 ChainEventFactory::data_event(writer, "test.data.v1", json!({ "n": 1 })),
-                root_logging_event(writer),
+                root_indicator_record(writer),
                 ChainEventFactory::data_event(writer, "test.data.v1", json!({ "n": 2 })),
             ],
             None,
@@ -233,7 +216,7 @@ async fn disk_reopen_reconstructs_both_causal_lanes_without_advancing_flow() {
             .await
             .unwrap();
         journal
-            .append(derived_logging_event(writer, &first.event), Some(&first))
+            .append(derived_indicator_record(writer, &first.event), Some(&first))
             .await
             .unwrap();
     }
@@ -255,7 +238,10 @@ async fn disk_reopen_reconstructs_both_causal_lanes_without_advancing_flow() {
         .await
         .unwrap();
     let second_evidence = reopened
-        .append(derived_logging_event(writer, &second.event), Some(&second))
+        .append(
+            derived_indicator_record(writer, &second.event),
+            Some(&second),
+        )
         .await
         .unwrap();
 

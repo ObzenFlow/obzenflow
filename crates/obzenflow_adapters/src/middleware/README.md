@@ -96,5 +96,6 @@ impl MiddlewareFactory for MyObserverFactory {
 }
 ```
 
-The built-in indicator, logging, rate-limiter, circuit-breaker, and effect
-resilience factories are complete production examples.
+The built-in indicator, rate-limiter, circuit-breaker, and effect resilience
+factories are complete production examples. Application logging uses standard
+Rust `tracing` rather than observer middleware.

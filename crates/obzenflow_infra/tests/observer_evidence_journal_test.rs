@@ -5,29 +5,24 @@
 //! FLOWIP-115f canonical observer-evidence proof (AC 33, proof item 19).
 //!
 //! This is the automated counterpart to the `payment_gateway_resilience`
-//! example: it runs a real flow with a latency `indicator()` on a handler stage
-//! and a `log_event(..)` observer on a sink, then inspects the stage data journals to
-//! prove that
+//! example: it runs a real flow with a latency `indicator()` on a handler stage,
+//! then inspects the stage data journals to prove that
 //!
 //! * a typed `IndicatorSample` is published once per handler execution, carrying
 //!   the raw `value_ms` measurement and its identity, with no objective embedded;
-//! * a typed logging evidence row is published per sink delivery;
-//! * neither indicator nor logging evidence is mirrored into `system.log`;
+//! * indicator measurements are not mirrored into `system.log`;
 //! * enabling the observers does not change the domain output count.
 //!
 //! The objective (threshold) and the good/bad evaluation are deliberately not in
-//! the wide event: applying a threshold and computing SLOs is a read-side concern
-//! (FLOWIP-115l) over these raw samples.
+//! each sample: applying a threshold and computing SLOs is a FLOWIP-135
+//! read-side concern over these raw measurements.
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::observability::{
-    indicator, log_event, IndicatorKind, LoggingLevel,
-};
+use obzenflow_adapters::middleware::observability::{indicator, IndicatorKind};
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::observability_payload::{
-    IndicatorSample, LoggingEvidence, LoggingOccurrence, LoggingSinkAttemptResult,
-    LoggingSinkOutcome, MiddlewareLifecycle, ObservabilityPayload,
+    IndicatorSample, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -158,18 +153,6 @@ fn indicator_samples(events: &[ChainEvent]) -> Vec<IndicatorSample> {
         .collect()
 }
 
-fn logging_rows(events: &[ChainEvent]) -> Vec<&LoggingEvidence> {
-    events
-        .iter()
-        .filter_map(|event| match &event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::Logging(evidence),
-            )) => Some(evidence),
-            _ => None,
-        })
-        .collect()
-}
-
 fn data_output_count(events: &[ChainEvent], event_type: &str) -> usize {
     events
         .iter()
@@ -199,11 +182,7 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
                         .indicator("process.latency")
                         .tag("dependency", "ledger")
                 ]);
-                handoff = sink!(Processed => handoff, observers: [
-                    log_event("checkout.processed.handoff")
-                        .level(LoggingLevel::Info)
-                        .tag("operation", "checkout.process")
-                ]);
+                handoff = sink!(Processed => handoff);
             },
 
             topology: {
@@ -221,7 +200,6 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
 
     let flow_dir = flow_dir(&base);
     let process_events = read_events(&stage_log(&flow_dir, "Transform_process_stage_")).await;
-    let handoff_events = read_events(&stage_log(&flow_dir, "Sink_handoff_stage_")).await;
     // `system.log` is a SystemEvent journal, so inspect it as raw text for the
     // markers unique to these observers rather than decoding it as ChainEvent.
     let system_log = std::fs::read_to_string(flow_dir.join("system.log")).unwrap_or_default();
@@ -241,55 +219,22 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
         assert_eq!(sample.tags[0].key, "dependency");
         // The sample records the raw measurement only: `value_ms` is the SLI
         // input. No objective, threshold, or `met` flag is embedded; the type has
-        // no such field, and applying a threshold is read-side (FLOWIP-115l).
+        // no such field, and applying a threshold is a FLOWIP-135 read-side concern.
     }
 
-    // 2. Logging evidence is published once per resolved sink delivery. This
-    //    observer has only a post-outcome hook, so its action must describe the
-    //    outcome it actually observed.
-    let logging_rows = logging_rows(&handoff_events);
-    assert_eq!(
-        logging_rows.len(),
-        INPUT_COUNT,
-        "exactly one logging evidence row per sink delivery"
-    );
-    assert!(logging_rows.iter().all(|evidence| matches!(
-        evidence.occurrence(),
-        LoggingOccurrence::SinkDeliveryBoundaryObserved {
-            input,
-            outcome: LoggingSinkOutcome::Attempted {
-                result: LoggingSinkAttemptResult::ReportedSuccess,
-            },
-        } if input.stage_input_position > 0
-    )));
-    assert!(handoff_events
-        .iter()
-        .filter(|event| matches!(
-            &event.content,
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::Logging(_)
-            ))
-        ))
-        .all(|event| event.admission_seq.is_none()));
-
-    // 3. No indicator or logging evidence mirrors into the system journal.
+    // 2. Indicator measurements do not mirror into the system journal.
     assert!(
         !system_log.contains("checkout.process"),
         "indicator samples must not mirror to system.log"
     );
-    assert!(
-        !system_log.contains("checkout.processed.handoff"),
-        "typed logging evidence must not mirror to system.log"
-    );
-
-    // 4. Non-interference: the observers do not drop or duplicate domain output.
+    // 3. Non-interference: the observer does not drop or duplicate domain output.
     assert_eq!(
         data_output_count(&process_events, &Processed::versioned_event_type()),
         INPUT_COUNT,
         "every order produces exactly one processed domain output"
     );
 
-    // 5. FLOWIP-115f regression: with TimingMiddleware deleted, the runtime output
+    // 4. FLOWIP-115f regression: with TimingMiddleware deleted, the runtime output
     //    committer still stamps processing_time on stage outputs, from the
     //    instrumentation timer that already measures every stage.
     let all_stamped = process_events

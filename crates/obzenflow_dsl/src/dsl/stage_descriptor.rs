@@ -89,7 +89,7 @@ fn create_system_observers(_config: &StageConfig) -> StageObserverSet {
     // No built-in observers (FLOWIP-115f): `processing_time` is stamped by the
     // runtime output committer from the instrumentation timer, not by an
     // observer, and the user-facing observation middleware are `indicator()` and
-    // `log_event(..)`. User-attached observers are merged onto this empty default.
+    // `indicator(..)`. User-attached observers are merged onto this empty default.
     StageObserverSet::default()
 }
 
@@ -2781,9 +2781,9 @@ mod tests {
         let attachment = EffectPolicyAttachment {
             effect_type: "test.undeclared",
             factory: Box::new(
-                obzenflow_adapters::middleware::LoggingMiddlewareFactory::new(
-                    "test.undeclared_effect",
-                ),
+                obzenflow_adapters::middleware::IndicatorMiddlewareFactory::new()
+                    .operation("test.undeclared_effect")
+                    .indicator("test.latency"),
             ),
         };
 

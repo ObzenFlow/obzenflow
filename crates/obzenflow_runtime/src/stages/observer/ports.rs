@@ -15,9 +15,7 @@
 
 use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
-use obzenflow_core::event::payloads::observability_payload::{
-    IndicatorSample, LoggingEvidence, LoggingLevel, UserMiddlewareEvent,
-};
+use obzenflow_core::event::payloads::observability_payload::IndicatorSample;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::{ChainEvent, EventEnvelope, StageId};
@@ -62,39 +60,18 @@ impl ObserverReport {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ObserverEvidence {
-    User(UserMiddlewareEvent),
     Indicator(IndicatorSample),
-    Logging(LoggingEvidence),
-}
-
-/// Inert post-append local trace data. It cannot publish or mutate anything.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObserverLocalTrace {
-    pub level: LoggingLevel,
-    pub body: String,
 }
 
 /// One content-only observer publication request.
 #[derive(Debug, Clone)]
 pub struct ObserverDiagnostic {
     pub evidence: ObserverEvidence,
-    pub local_trace: Option<ObserverLocalTrace>,
 }
 
 impl ObserverDiagnostic {
     pub fn new(evidence: ObserverEvidence) -> Self {
-        Self {
-            evidence,
-            local_trace: None,
-        }
-    }
-
-    pub fn with_local_trace(mut self, level: LoggingLevel, body: impl Into<String>) -> Self {
-        self.local_trace = Some(ObserverLocalTrace {
-            level,
-            body: body.into(),
-        });
-        self
+        Self { evidence }
     }
 }
 

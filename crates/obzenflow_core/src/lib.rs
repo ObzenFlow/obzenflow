@@ -40,8 +40,7 @@ extern crate self as obzenflow_core;
 pub use event::schema::{
     assert_distinct_stage_fact_set, DeclaredStageFactSet, EffectOutcomeFacts, Member,
     MiddlewareContextKey, OneFactStageOutput, StageFactSet, StageOutputFacts, StageOutputs,
-    SubsetOf, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedMiddlewareEvent,
-    TypedPayload,
+    SubsetOf, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
 };
 
 // Re-export typed IDs
