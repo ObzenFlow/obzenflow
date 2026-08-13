@@ -21,6 +21,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::observability_payload::{
     MetricsLifecycle, ObservabilityPayload,
 };
+use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{TypedPayload, WriterId};
 use obzenflow_dsl::{
@@ -780,7 +781,9 @@ async fn timeout_duration_precedes_boundary_settlement_and_error_normalisation()
     assert_eq!(observer_observations[0].poll_duration, timeout);
     assert!(matches!(
         &observer_observations[0].outcome,
-        SourcePollObserverOutcome::Error { message } if message.contains("poll timeout exceeded")
+        SourcePollObserverOutcome::Error {
+            kind: ErrorKind::Timeout
+        }
     ));
     assert_eq!(
         calls.load(Ordering::SeqCst),

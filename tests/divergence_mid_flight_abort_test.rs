@@ -21,7 +21,7 @@ use obzenflow_adapters::middleware::{
     MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, SourceAdmission,
     SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome,
 };
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent};
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
