@@ -612,12 +612,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Infinite source lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 
@@ -655,12 +650,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Infinite source lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 
@@ -713,12 +703,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Infinite source lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 

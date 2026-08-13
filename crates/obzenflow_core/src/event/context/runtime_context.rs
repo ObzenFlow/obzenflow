@@ -48,6 +48,18 @@ pub struct RuntimeContext {
     #[serde(default)]
     pub terminal_group_commit_failures_total: u64,
 
+    /// Observer diagnostics dropped because their structure or provenance was invalid.
+    #[serde(default)]
+    pub observer_diagnostics_dropped_invalid_total: u64,
+
+    /// Observer diagnostics dropped because no flow context was available.
+    #[serde(default)]
+    pub observer_diagnostics_dropped_missing_flow_context_total: u64,
+
+    /// Observer diagnostics dropped because their journal append failed.
+    #[serde(default)]
+    pub observer_diagnostics_dropped_journal_append_failed_total: u64,
+
     /// Cumulative committed Data outputs, keyed by exact event type. This is
     /// the tail-seed for named composite output-port counters (FLOWIP-128a B3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

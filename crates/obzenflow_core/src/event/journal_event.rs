@@ -11,6 +11,29 @@ use crate::event::types::{AdmissionSeq, EventId};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
+/// Whether an event participates in flow-global admission ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalAdmissionRole {
+    Flow,
+    ObserverEvidence,
+}
+
+/// Independent vector-clock state selected from durable event content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JournalCausalLane {
+    Flow(WriterId),
+    ObserverEvidence(WriterId),
+}
+
+impl JournalCausalLane {
+    pub fn clock_key(self) -> String {
+        match self {
+            Self::Flow(writer) => writer.to_string(),
+            Self::ObserverEvidence(writer) => format!("observer:{writer}"),
+        }
+    }
+}
+
 /// Private module to seal the trait
 mod private {
     pub trait Sealed {}
@@ -32,6 +55,12 @@ pub trait JournalEvent:
     /// Get a human-readable event type for logging/debugging
     fn event_type_name(&self) -> &str;
 
+    /// Durable-content classification for admission ordering.
+    fn admission_role(&self) -> JournalAdmissionRole;
+
+    /// Durable-content classification for vector-clock state.
+    fn causal_lane(&self) -> JournalCausalLane;
+
     /// Flow-global admission order (FLOWIP-120n F18). The default answers for
     /// event types that never enter a merge (system rows).
     fn admission_seq(&self) -> Option<AdmissionSeq> {
@@ -41,6 +70,9 @@ pub trait JournalEvent:
     /// Stamp the admission order at the journal append (FLOWIP-120n F18).
     /// The default is a no-op for event types that carry no sequence.
     fn set_admission_seq(&mut self, _seq: AdmissionSeq) {}
+
+    /// Remove an inapplicable sequence from non-admitted evidence.
+    fn clear_admission_seq(&mut self) {}
 }
 
 // Export Sealed trait so chain_event.rs and system_event.rs can implement it

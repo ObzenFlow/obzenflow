@@ -542,7 +542,7 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
-            Some(&ctx.observers),
+            Some((&ctx.observers, ctx.lineage_policy)),
             &mut outputs,
         )
         .await?

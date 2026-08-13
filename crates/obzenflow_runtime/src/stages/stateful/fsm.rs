@@ -594,12 +594,7 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Stateful lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 
@@ -735,12 +730,7 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Stateful lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 
@@ -774,12 +764,7 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Stateful lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 

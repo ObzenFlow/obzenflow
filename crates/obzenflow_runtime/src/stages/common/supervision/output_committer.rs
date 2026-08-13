@@ -37,15 +37,20 @@
 //! framework effect/capture record path supplies only the journal, preserving
 //! its compatibility append until typed outcome facts replace it.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-use crate::stages::observer::{ObserverReport, StageObserverBundle};
+use crate::stages::observer::{
+    DiagnosticProvenance, ObserverDiagnostic, ObserverEvidence, ObserverReport, StageObserverBundle,
+};
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::payloads::observability_payload::{
-    MiddlewareLifecycle, ObservabilityPayload,
+    LoggingLevel, MiddlewareLifecycle, ObservabilityPayload,
 };
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::event::{ChainEventContent, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
@@ -53,7 +58,7 @@ use obzenflow_core::{ChainEvent, WriterId};
 
 use crate::backpressure::{BackpressureReservation, BackpressureWriter, DirectFactClaim};
 use crate::feed_plan::StageOutputContract;
-use crate::metrics::instrumentation::StageInstrumentation;
+use crate::metrics::instrumentation::{ObserverDiagnosticDropReason, StageInstrumentation};
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal;
 use crate::stages::observer::dispatch::run_output_commit_observers;
@@ -252,8 +257,12 @@ pub(crate) struct OutputCommitter<'a> {
     /// leave this absent because they own an enforced or replay-scoped
     /// reservation outside the commit helper.
     pub backpressure_writer: Option<&'a BackpressureWriter>,
-    /// Observer bundle for stage output commit hooks.
-    pub observers: Option<&'a StageObserverBundle>,
+    /// Observer bundle for stage output commit hooks and the configured
+    /// lineage policy used if a hook reports derived evidence.
+    pub observers: Option<(
+        &'a StageObserverBundle,
+        obzenflow_core::config::LineagePolicy,
+    )>,
     /// Per-event observer execution scope for replay suppression.
     pub observer_scope: MiddlewareExecutionScope,
 }
@@ -546,7 +555,9 @@ impl OutputCommitter<'_> {
         }
 
         if intent.runs_output_commit_hooks() {
-            if let (Some(observers), Some(flow_context)) = (self.observers, self.flow_context) {
+            if let (Some((observers, lineage)), Some(flow_context)) =
+                (self.observers, self.flow_context)
+            {
                 let before = value_preserving_projection(&event)?;
                 let parent_event = parent.map(|envelope| &envelope.event);
                 let report = run_output_commit_observers(
@@ -562,12 +573,14 @@ impl OutputCommitter<'_> {
                 ensure_value_preserving(before, &event)?;
                 append_observer_diagnostics(
                     report,
-                    flow_context,
+                    Some(flow_context),
                     self.instrumentation,
                     self.data_journal,
-                    parent,
+                    parent.map_or(DiagnosticProvenance::Root, |parent| {
+                        DiagnosticProvenance::Derived { parent, lineage }
+                    }),
                 )
-                .await?;
+                .await;
             }
         }
 
@@ -749,15 +762,25 @@ pub(crate) fn is_framework_middleware_observability_event(event: &ChainEvent) ->
 
 pub(crate) async fn append_observer_diagnostics(
     report: ObserverReport,
-    flow_context: &FlowContext,
+    flow_context: Option<&FlowContext>,
     instrumentation: Option<&Arc<StageInstrumentation>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
-    parent: Option<&EventEnvelope<ChainEvent>>,
-) -> Result<(), CommitError> {
+    provenance: DiagnosticProvenance<'_>,
+) {
     if report.is_empty() {
-        return Ok(());
+        return;
     }
-    validate_observer_diagnostics(&report)?;
+
+    let Some(flow_context) = flow_context else {
+        for _ in report.diagnostics {
+            record_observer_diagnostic_drop(
+                instrumentation,
+                None,
+                ObserverDiagnosticDropReason::MissingFlowContext,
+            );
+        }
+        return;
+    };
 
     let committer = OutputCommitter {
         data_journal,
@@ -772,26 +795,154 @@ pub(crate) async fn append_observer_diagnostics(
     };
 
     for diagnostic in report.diagnostics {
-        committer
-            .append_no_hook_prebuilt(diagnostic, parent, StageAppendIntent::ObserverDiagnostic)
+        if !observer_diagnostic_is_valid(&diagnostic, flow_context, provenance) {
+            record_observer_diagnostic_drop(
+                instrumentation,
+                Some(flow_context),
+                ObserverDiagnosticDropReason::Invalid,
+            );
+            continue;
+        }
+
+        let parent = match provenance {
+            DiagnosticProvenance::Root => None,
+            DiagnosticProvenance::Derived { parent, .. } => Some(parent),
+        };
+        let event = observer_diagnostic_event(diagnostic.evidence, flow_context, provenance);
+        match committer
+            .append_no_hook_prebuilt(event, parent, StageAppendIntent::ObserverDiagnostic)
             .await
-            .map_err(|e| format!("Failed to append observer diagnostic: {e}"))?;
-    }
-
-    Ok(())
-}
-
-fn validate_observer_diagnostics(report: &ObserverReport) -> Result<(), CommitError> {
-    for diagnostic in &report.diagnostics {
-        if diagnostic.is_data() || diagnostic.is_control() {
-            return Err(format!(
-                "observer diagnostic '{}' cannot author Data or flow-control events",
-                diagnostic.event_type()
-            )
-            .into());
+        {
+            Ok(_) => {
+                if let Some(local_trace) = diagnostic.local_trace {
+                    emit_observer_local_trace(local_trace.level, &local_trace.body);
+                }
+            }
+            Err(_) => record_observer_diagnostic_drop(
+                instrumentation,
+                Some(flow_context),
+                ObserverDiagnosticDropReason::JournalAppendFailed,
+            ),
         }
     }
-    Ok(())
+}
+
+pub(crate) fn reject_invalid_observer_diagnostics(
+    report: ObserverReport,
+    flow_context: &FlowContext,
+    instrumentation: Option<&Arc<StageInstrumentation>>,
+) {
+    for _ in report.diagnostics {
+        record_observer_diagnostic_drop(
+            instrumentation,
+            Some(flow_context),
+            ObserverDiagnosticDropReason::Invalid,
+        );
+    }
+}
+
+fn observer_diagnostic_is_valid(
+    diagnostic: &ObserverDiagnostic,
+    flow_context: &FlowContext,
+    provenance: DiagnosticProvenance<'_>,
+) -> bool {
+    if let DiagnosticProvenance::Derived { parent, .. } = provenance {
+        let parent_flow = &parent.event.flow_context;
+        if parent_flow.flow_id != flow_context.flow_id {
+            return false;
+        }
+    }
+
+    if let ObserverEvidence::Logging(evidence) = &diagnostic.evidence {
+        match (provenance, evidence.occurrence().input_reference()) {
+            (DiagnosticProvenance::Root, None) => {}
+            (DiagnosticProvenance::Derived { parent, .. }, Some(input))
+                if input.event_id == parent.event.id => {}
+            _ => return false,
+        }
+    }
+
+    match (&diagnostic.evidence, &diagnostic.local_trace) {
+        (_, None) => true,
+        (ObserverEvidence::Logging(evidence), Some(local_trace)) => {
+            local_trace.level == evidence.level()
+                && evidence.body() == Some(local_trace.body.as_str())
+        }
+        _ => false,
+    }
+}
+
+fn observer_diagnostic_event(
+    evidence: ObserverEvidence,
+    flow_context: &FlowContext,
+    provenance: DiagnosticProvenance<'_>,
+) -> ChainEvent {
+    let middleware = match evidence {
+        ObserverEvidence::User(event) => MiddlewareLifecycle::User(event),
+        ObserverEvidence::Indicator(sample) => MiddlewareLifecycle::Indicator(sample),
+        ObserverEvidence::Logging(evidence) => MiddlewareLifecycle::Logging(evidence),
+    };
+    let payload = ObservabilityPayload::Middleware(middleware);
+    let writer = WriterId::from(flow_context.stage_id);
+    match provenance {
+        DiagnosticProvenance::Root => ChainEventFactory::observability_event(writer, payload),
+        DiagnosticProvenance::Derived {
+            parent, lineage, ..
+        } => ChainEventFactory::derived_event(
+            writer,
+            &parent.event,
+            ChainEventContent::Observability(payload),
+            lineage,
+        ),
+    }
+}
+
+fn emit_observer_local_trace(level: LoggingLevel, body: &str) {
+    match level {
+        LoggingLevel::Trace => tracing::trace!("{body}"),
+        LoggingLevel::Debug => tracing::debug!("{body}"),
+        LoggingLevel::Info => tracing::info!("{body}"),
+        LoggingLevel::Warn => tracing::warn!("{body}"),
+        LoggingLevel::Error => tracing::error!("{body}"),
+    }
+}
+
+type ObserverDiagnosticWarningLimiter =
+    Mutex<HashMap<(Option<obzenflow_core::StageId>, &'static str), Instant>>;
+
+fn record_observer_diagnostic_drop(
+    instrumentation: Option<&Arc<StageInstrumentation>>,
+    flow_context: Option<&FlowContext>,
+    reason: ObserverDiagnosticDropReason,
+) {
+    if let Some(instrumentation) = instrumentation {
+        instrumentation.record_observer_diagnostic_drop(reason);
+    }
+
+    static WARNED: OnceLock<ObserverDiagnosticWarningLimiter> = OnceLock::new();
+    let stage_id = flow_context.map(|context| context.stage_id);
+    let now = Instant::now();
+    let should_warn = {
+        let mut warned = WARNED
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .expect("observer diagnostic warning limiter poisoned");
+        let key = (stage_id, reason.as_str());
+        match warned.get(&key) {
+            Some(last) if now.duration_since(*last) < Duration::from_secs(60) => false,
+            _ => {
+                warned.insert(key, now);
+                true
+            }
+        }
+    };
+    if should_warn {
+        tracing::warn!(
+            stage_id = ?stage_id,
+            reason = reason.as_str(),
+            "observer diagnostic dropped"
+        );
+    }
 }
 
 fn value_preserving_projection(event: &ChainEvent) -> Result<serde_json::Value, CommitError> {
@@ -851,33 +1002,293 @@ fn apply_runtime_journey_identity(event: &mut ChainEvent, flow: &FlowContext) {
 #[cfg(test)]
 mod observer_diagnostic_tests {
     use super::*;
+    use async_trait::async_trait;
     use obzenflow_core::event::context::ReplayContext;
+    use obzenflow_core::event::identity::JournalWriterId;
+    use obzenflow_core::event::payloads::observability_payload::{
+        LoggingEventName, LoggingEvidence, LoggingInputReference, LoggingLevel, LoggingOccurrence,
+        LoggingSourceOutcome, UserMiddlewareEvent,
+    };
     use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::{StageId, WriterId};
+    use obzenflow_core::journal::journal_error::JournalError;
+    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::{EventId, JournalId, JournalOwner, StageId, WriterId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    struct EmptyReader;
+
+    #[async_trait]
+    impl JournalReader<ChainEvent> for EmptyReader {
+        async fn next(&mut self) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+            Ok(None)
+        }
+
+        fn position(&self) -> u64 {
+            0
+        }
+
+        fn is_at_end(&self) -> bool {
+            true
+        }
+    }
+
+    struct PlacementJournal {
+        id: JournalId,
+        calls: AtomicUsize,
+        fail_at: Vec<usize>,
+        appended: Mutex<Vec<(EventEnvelope<ChainEvent>, Option<EventId>)>>,
+    }
+
+    impl PlacementJournal {
+        fn new(fail_at: Vec<usize>) -> Self {
+            Self {
+                id: JournalId::new(),
+                calls: AtomicUsize::new(0),
+                fail_at,
+                appended: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn appended(&self) -> Vec<(EventEnvelope<ChainEvent>, Option<EventId>)> {
+            self.appended.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl Journal<ChainEvent> for PlacementJournal {
+        fn id(&self) -> &JournalId {
+            &self.id
+        }
+
+        fn owner(&self) -> Option<&JournalOwner> {
+            None
+        }
+
+        async fn append(
+            &self,
+            event: ChainEvent,
+            parent: Option<&EventEnvelope<ChainEvent>>,
+        ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_at.contains(&call) {
+                return Err(JournalError::Implementation {
+                    message: format!("injected append failure at call {call}"),
+                    source: "injected observer diagnostic append failure".into(),
+                });
+            }
+            let envelope = EventEnvelope::new(JournalWriterId::new(), event);
+            self.appended
+                .lock()
+                .unwrap()
+                .push((envelope.clone(), parent.map(|parent| parent.event.id)));
+            Ok(envelope)
+        }
+
+        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+            Ok(self
+                .appended
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(envelope, _)| envelope.clone())
+                .collect())
+        }
+
+        async fn read_event(
+            &self,
+            event_id: &EventId,
+        ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+            Ok(self
+                .appended
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(envelope, _)| envelope.event.id == *event_id)
+                .map(|(envelope, _)| envelope.clone()))
+        }
+
+        async fn reader_from(
+            &self,
+            _position: u64,
+        ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
+            Ok(Box::new(EmptyReader))
+        }
+
+        async fn read_last_n(
+            &self,
+            count: usize,
+        ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+            Ok(self
+                .appended
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .take(count)
+                .map(|(envelope, _)| envelope.clone())
+                .collect())
+        }
+    }
+
+    fn flow_context() -> FlowContext {
+        FlowContext {
+            flow_name: "flow".to_string(),
+            flow_id: "flow-id".to_string(),
+            stage_name: "stage".to_string(),
+            stage_id: StageId::new(),
+            stage_type: StageType::Transform,
+        }
+    }
+
+    fn user_diagnostic(event_type: &str) -> ObserverDiagnostic {
+        ObserverDiagnostic::new(ObserverEvidence::User(UserMiddlewareEvent {
+            event_type: event_type.to_string(),
+            payload: serde_json::json!({}),
+        }))
+    }
+
+    fn user_event_type(event: &ChainEvent) -> Option<&str> {
+        match &event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::User(user),
+            )) => Some(&user.event_type),
+            _ => None,
+        }
+    }
+
+    struct InfoEventCounter {
+        events: Arc<AtomicUsize>,
+    }
+
+    impl Subscriber for InfoEventCounter {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            metadata.level() == &tracing::Level::INFO
+        }
+
+        fn new_span(&self, _attributes: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, _event: &Event<'_>) {
+            self.events.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+
+    fn source_logging_diagnostic() -> ObserverDiagnostic {
+        let evidence = LoggingEvidence::new(
+            LoggingEventName::new("test.source.poll").unwrap(),
+            LoggingLevel::Info,
+            LoggingOccurrence::SourcePollObserved {
+                poll_duration_ms: 1,
+                output_count: 0,
+                data_event_count: 0,
+                outcome: LoggingSourceOutcome::Eof,
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        let body = evidence.body().unwrap().to_string();
+        ObserverDiagnostic::new(ObserverEvidence::Logging(evidence))
+            .with_local_trace(LoggingLevel::Info, body)
+    }
 
     #[test]
-    fn observer_reports_reject_data_and_flow_control_before_append() {
-        let writer = WriterId::from(StageId::new());
-        let reports = [
-            ObserverReport::empty().with_diagnostic(ChainEventFactory::data_event(
-                writer,
-                "test.rogue",
-                serde_json::json!({ "value": 1 }),
-            )),
-            ObserverReport::empty().with_diagnostic(ChainEventFactory::eof_event(writer, true)),
-        ];
+    fn local_trace_is_valid_only_for_corresponding_logging_evidence() {
+        let flow_context = FlowContext {
+            flow_name: "flow".to_string(),
+            flow_id: "flow-id".to_string(),
+            stage_name: "stage".to_string(),
+            stage_id: StageId::new(),
+            stage_type: StageType::Transform,
+        };
+        let diagnostic = ObserverDiagnostic::new(ObserverEvidence::User(UserMiddlewareEvent {
+            event_type: "test.user".to_string(),
+            payload: serde_json::json!({}),
+        }))
+        .with_local_trace(LoggingLevel::Info, "not logging evidence");
 
-        for report in reports {
-            let diagnostic = &report.diagnostics[0];
-            assert!(
-                diagnostic.is_data() || diagnostic.is_control(),
-                "fixture must exercise a prohibited observer side channel"
-            );
-            assert!(
-                validate_observer_diagnostics(&report).is_err(),
-                "prohibited diagnostics must fail before any journal append"
-            );
-        }
+        assert!(!observer_diagnostic_is_valid(
+            &diagnostic,
+            &flow_context,
+            DiagnosticProvenance::Root,
+        ));
+    }
+
+    #[test]
+    fn logging_provenance_cannot_downgrade_an_input_occurrence_to_root() {
+        let flow = flow_context();
+        let parent_event = ChainEventFactory::data_event(
+            WriterId::from(flow.stage_id),
+            "test.input.v1",
+            serde_json::json!({}),
+        )
+        .with_flow_context(flow.clone());
+        let parent = EventEnvelope::new(JournalWriterId::new(), parent_event.clone());
+        let input_evidence = LoggingEvidence::new(
+            LoggingEventName::new("test.input.observed").unwrap(),
+            LoggingLevel::Info,
+            LoggingOccurrence::HandlerInputObserved {
+                input: LoggingInputReference {
+                    event_id: parent_event.id,
+                    event_type: parent_event.event_type(),
+                    stage_input_position: Some(1),
+                },
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        let input_diagnostic = ObserverDiagnostic::new(ObserverEvidence::Logging(input_evidence));
+
+        assert!(!observer_diagnostic_is_valid(
+            &input_diagnostic,
+            &flow,
+            DiagnosticProvenance::Root,
+        ));
+        assert!(observer_diagnostic_is_valid(
+            &input_diagnostic,
+            &flow,
+            DiagnosticProvenance::Derived {
+                parent: &parent,
+                lineage: obzenflow_core::config::LineagePolicy::default(),
+            },
+        ));
+
+        let source_evidence = LoggingEvidence::new(
+            LoggingEventName::new("test.source.poll").unwrap(),
+            LoggingLevel::Info,
+            LoggingOccurrence::SourcePollObserved {
+                poll_duration_ms: 1,
+                output_count: 0,
+                data_event_count: 0,
+                outcome: LoggingSourceOutcome::Eof,
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        let source_diagnostic = ObserverDiagnostic::new(ObserverEvidence::Logging(source_evidence));
+        assert!(observer_diagnostic_is_valid(
+            &source_diagnostic,
+            &flow,
+            DiagnosticProvenance::Root,
+        ));
+        assert!(!observer_diagnostic_is_valid(
+            &source_diagnostic,
+            &flow,
+            DiagnosticProvenance::Derived {
+                parent: &parent,
+                lineage: obzenflow_core::config::LineagePolicy::default(),
+            },
+        ));
     }
 
     #[test]
@@ -925,5 +1336,201 @@ mod observer_diagnostic_tests {
             &derived_context,
             MiddlewareExecutionScope::StrictReplayHandler,
         ));
+    }
+
+    #[tokio::test]
+    async fn valid_invalid_valid_is_processed_per_diagnostic_in_order() {
+        let flow = flow_context();
+        let instrumentation = Arc::new(StageInstrumentation::new());
+        let journal_impl = Arc::new(PlacementJournal::new(Vec::new()));
+        let journal: Arc<dyn Journal<ChainEvent>> = journal_impl.clone();
+        let invalid = user_diagnostic("test.invalid")
+            .with_local_trace(LoggingLevel::Info, "trace cannot accompany user evidence");
+        let report = ObserverReport {
+            diagnostics: vec![
+                user_diagnostic("test.first"),
+                invalid,
+                user_diagnostic("test.last"),
+            ],
+        };
+
+        append_observer_diagnostics(
+            report,
+            Some(&flow),
+            Some(&instrumentation),
+            &journal,
+            DiagnosticProvenance::Root,
+        )
+        .await;
+
+        let appended = journal_impl.appended();
+        assert_eq!(appended.len(), 2);
+        assert_eq!(user_event_type(&appended[0].0.event), Some("test.first"));
+        assert_eq!(user_event_type(&appended[1].0.event), Some("test.last"));
+        let snapshot = instrumentation.snapshot();
+        assert_eq!(snapshot.observer_diagnostics_dropped_invalid_total, 1);
+        assert_eq!(
+            snapshot.observer_diagnostics_dropped_journal_append_failed_total,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn every_failed_append_is_counted_and_later_diagnostics_are_attempted() {
+        for failed_call in 0..3 {
+            let flow = flow_context();
+            let instrumentation = Arc::new(StageInstrumentation::new());
+            let journal_impl = Arc::new(PlacementJournal::new(vec![failed_call]));
+            let journal: Arc<dyn Journal<ChainEvent>> = journal_impl.clone();
+            let report = ObserverReport {
+                diagnostics: vec![
+                    user_diagnostic("test.first"),
+                    user_diagnostic("test.middle"),
+                    user_diagnostic("test.last"),
+                ],
+            };
+
+            append_observer_diagnostics(
+                report,
+                Some(&flow),
+                Some(&instrumentation),
+                &journal,
+                DiagnosticProvenance::Root,
+            )
+            .await;
+
+            assert_eq!(journal_impl.calls.load(Ordering::SeqCst), 3);
+            assert_eq!(journal_impl.appended().len(), 2);
+            assert_eq!(
+                instrumentation
+                    .snapshot()
+                    .observer_diagnostics_dropped_journal_append_failed_total,
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn local_trace_is_emitted_only_after_a_successful_append() {
+        let flow = flow_context();
+        let instrumentation = Arc::new(StageInstrumentation::new());
+        let journal_impl = Arc::new(PlacementJournal::new(vec![0]));
+        let journal: Arc<dyn Journal<ChainEvent>> = journal_impl.clone();
+        let info_events = Arc::new(AtomicUsize::new(0));
+        let dispatch = tracing::Dispatch::new(InfoEventCounter {
+            events: info_events.clone(),
+        });
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            tokio_test::block_on(async {
+                append_observer_diagnostics(
+                    ObserverReport::empty().with_diagnostic(source_logging_diagnostic()),
+                    Some(&flow),
+                    Some(&instrumentation),
+                    &journal,
+                    DiagnosticProvenance::Root,
+                )
+                .await;
+                assert_eq!(info_events.load(Ordering::SeqCst), 0);
+
+                append_observer_diagnostics(
+                    ObserverReport::empty().with_diagnostic(source_logging_diagnostic()),
+                    Some(&flow),
+                    Some(&instrumentation),
+                    &journal,
+                    DiagnosticProvenance::Root,
+                )
+                .await;
+            });
+        });
+
+        assert_eq!(journal_impl.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(journal_impl.appended().len(), 1);
+        assert_eq!(info_events.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            instrumentation
+                .snapshot()
+                .observer_diagnostics_dropped_journal_append_failed_total,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_flow_context_counts_each_row_without_touching_the_journal() {
+        let instrumentation = Arc::new(StageInstrumentation::new());
+        let journal_impl = Arc::new(PlacementJournal::new(Vec::new()));
+        let journal: Arc<dyn Journal<ChainEvent>> = journal_impl.clone();
+        append_observer_diagnostics(
+            ObserverReport {
+                diagnostics: vec![
+                    user_diagnostic("test.one"),
+                    user_diagnostic("test.two"),
+                    user_diagnostic("test.three"),
+                ],
+            },
+            None,
+            Some(&instrumentation),
+            &journal,
+            DiagnosticProvenance::Root,
+        )
+        .await;
+
+        assert_eq!(journal_impl.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            instrumentation
+                .snapshot()
+                .observer_diagnostics_dropped_missing_flow_context_total,
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_and_envelope_parent_share_the_configured_lineage_policy() {
+        let flow = flow_context();
+        let writer = WriterId::from(flow.stage_id);
+        let grandparent =
+            ChainEventFactory::data_event(writer, "test.root.v1", serde_json::json!({}));
+        let parent_event = ChainEventFactory::derived_data_event(
+            writer,
+            &grandparent,
+            "test.parent.v1",
+            serde_json::json!({}),
+            obzenflow_core::config::LineagePolicy {
+                max_lineage_depth: 8,
+            },
+        )
+        .with_flow_context(flow.clone());
+        let parent = EventEnvelope::new(JournalWriterId::new(), parent_event);
+        let instrumentation = Arc::new(StageInstrumentation::new());
+        let journal_impl = Arc::new(PlacementJournal::new(Vec::new()));
+        let journal: Arc<dyn Journal<ChainEvent>> = journal_impl.clone();
+
+        append_observer_diagnostics(
+            ObserverReport::empty().with_diagnostic(user_diagnostic("test.derived")),
+            Some(&flow),
+            Some(&instrumentation),
+            &journal,
+            DiagnosticProvenance::Derived {
+                parent: &parent,
+                lineage: obzenflow_core::config::LineagePolicy {
+                    max_lineage_depth: 1,
+                },
+            },
+        )
+        .await;
+
+        let appended = journal_impl.appended();
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].1, Some(parent.event.id));
+        assert_eq!(
+            appended[0].0.event.causality.parent_ids,
+            vec![parent.event.id]
+        );
+        assert!(!appended[0]
+            .0
+            .event
+            .causality
+            .parent_ids
+            .contains(&grandparent.id));
     }
 }

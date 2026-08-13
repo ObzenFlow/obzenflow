@@ -8,8 +8,9 @@ mod factory;
 mod middleware;
 mod observers;
 
-pub use factory::{log, LoggingFamily, LoggingMiddlewareFactory};
+pub use factory::{log_event, LoggingFamily, LoggingMiddlewareFactory};
 pub use middleware::LoggingMiddleware;
+pub use obzenflow_core::event::payloads::observability_payload::LoggingLevel;
 
 #[cfg(test)]
 mod tests;

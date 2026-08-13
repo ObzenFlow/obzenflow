@@ -10,9 +10,9 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use obzenflow_core::event::event_envelope::{EventEnvelope, JournalGroupMember};
-use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
+use obzenflow_core::event::identity::{EventId, JournalWriterId};
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
-use obzenflow_core::event::JournalEvent;
+use obzenflow_core::event::{JournalAdmissionRole, JournalCausalLane, JournalEvent};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -26,7 +26,7 @@ use super::reader::MemoryJournalReader;
 
 pub(super) struct MemoryJournalState<T: JournalEvent> {
     pub(super) events: Vec<EventEnvelope<T>>,
-    writer_clocks: HashMap<WriterId, VectorClock>,
+    writer_clocks: HashMap<JournalCausalLane, VectorClock>,
 }
 
 /// In-memory journal for testing
@@ -98,29 +98,32 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
-        // Get writer_id from the event
-        let writer_id = *event.writer_id();
-
         let mut state = self.state.lock().unwrap();
 
         // FLOWIP-120n F18: stamp under the state lock so sequence order equals
         // append order; re-admitted rows already carry theirs and keep it.
-        if let Some(sequencer) = &self.admission_sequencer {
-            if event.admission_seq().is_none() {
-                event.set_admission_seq(obzenflow_core::AdmissionSeq(
-                    sequencer.fetch_add(1, Ordering::Relaxed),
-                ));
+        match event.admission_role() {
+            JournalAdmissionRole::Flow => {
+                if let Some(sequencer) = &self.admission_sequencer {
+                    if event.admission_seq().is_none() {
+                        event.set_admission_seq(obzenflow_core::AdmissionSeq(
+                            sequencer.fetch_add(1, Ordering::Relaxed),
+                        ));
+                    }
+                }
             }
+            JournalAdmissionRole::ObserverEvidence => event.clear_admission_seq(),
         }
 
         // Compute and store this writer's next clock under the mutex.
-        let current = state.writer_clocks.get(&writer_id).cloned();
+        let lane = event.causal_lane();
+        let current = state.writer_clocks.get(&lane).cloned();
         let vector_clock = CausalOrderingService::advance_for_append(
             current.as_ref(),
-            &writer_id.to_string(),
+            &lane.clock_key(),
             parent.map(|p| &p.vector_clock),
         );
-        state.writer_clocks.insert(writer_id, vector_clock.clone());
+        state.writer_clocks.insert(lane, vector_clock.clone());
 
         // Create envelope with proper vector clock
         let envelope = EventEnvelope {
@@ -156,13 +159,18 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         }
 
         let mut state = self.state.lock().unwrap();
-        if let Some(sequencer) = &self.admission_sequencer {
-            for event in &mut events {
-                if event.admission_seq().is_none() {
-                    event.set_admission_seq(obzenflow_core::AdmissionSeq(
-                        sequencer.fetch_add(1, Ordering::Relaxed),
-                    ));
+        for event in &mut events {
+            match event.admission_role() {
+                JournalAdmissionRole::Flow => {
+                    if let Some(sequencer) = &self.admission_sequencer {
+                        if event.admission_seq().is_none() {
+                            event.set_admission_seq(obzenflow_core::AdmissionSeq(
+                                sequencer.fetch_add(1, Ordering::Relaxed),
+                            ));
+                        }
+                    }
                 }
+                JournalAdmissionRole::ObserverEvidence => event.clear_admission_seq(),
             }
         }
 
@@ -175,13 +183,13 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         })?;
         let mut envelopes = Vec::with_capacity(events.len());
         for (index, event) in events.into_iter().enumerate() {
-            let writer_id = *event.writer_id();
+            let lane = event.causal_lane();
             let vector_clock = CausalOrderingService::advance_for_append(
-                next_writer_clocks.get(&writer_id),
-                &writer_id.to_string(),
+                next_writer_clocks.get(&lane),
+                &lane.clock_key(),
                 parent.map(|p| &p.vector_clock),
             );
-            next_writer_clocks.insert(writer_id, vector_clock.clone());
+            next_writer_clocks.insert(lane, vector_clock.clone());
             envelopes.push(EventEnvelope {
                 journal_writer_id: JournalWriterId::from(self.journal_id),
                 vector_clock,
@@ -244,6 +252,7 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
 mod tests {
     use super::*;
     use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+    use obzenflow_core::event::identity::WriterId;
     use obzenflow_core::id::StageId;
     use serde_json::json;
 

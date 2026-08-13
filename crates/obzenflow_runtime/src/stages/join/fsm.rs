@@ -593,12 +593,7 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Join lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 
@@ -740,12 +735,7 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Join lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 
@@ -779,12 +769,7 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Join lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 

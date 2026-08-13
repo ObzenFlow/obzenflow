@@ -16,12 +16,14 @@ use std::sync::Arc;
 use obzenflow_core::ChainEvent;
 use obzenflow_runtime::stages::observer::StageObserverBundle;
 pub use obzenflow_runtime::stages::observer::{
-    EffectObserver, EffectObserverContext, HandlerObserver, HandlerObserverContext, JoinObserver,
-    JoinObserverContext, ObserverCommitError, ObserverCommitResult, ObserverDeterminism,
-    ObserverReport, OutputCommitObserver, OutputCommitObserverContext, SinkDeliveryObserver,
-    SinkDeliveryObserverContext, SinkDeliveryObserverOutcome, SourcePollObserver,
-    SourcePollObserverContext, SourcePollObserverOutcome, StageLifecycleObserver,
-    StageLifecycleObserverContext, StageLifecyclePhase, StatefulObserver, StatefulObserverContext,
+    DiagnosticProvenance, EffectObserver, EffectObserverContext, HandlerObserver,
+    HandlerObserverContext, JoinObserver, JoinObserverContext, ObserverCommitError,
+    ObserverCommitResult, ObserverDeterminism, ObserverDiagnostic, ObserverEvidence,
+    ObserverLocalTrace, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
+    SinkDeliveryAttemptResult, SinkDeliveryObserver, SinkDeliveryObserverContext,
+    SinkDeliveryObserverOutcome, SourcePollObserver, SourcePollObserverContext,
+    SourcePollObserverOutcome, StageLifecycleObserver, StageLifecycleObserverContext,
+    StageLifecyclePhase, StatefulObserver, StatefulObserverContext,
 };
 
 use crate::middleware::{
@@ -203,7 +205,7 @@ impl HandlerObserver for HandlerObserverChain {
     fn after_handle(
         &self,
         ctx: &HandlerObserverContext<'_>,
-        outputs: &mut [ChainEvent],
+        outputs: &[ChainEvent],
     ) -> ObserverReport {
         let mut merged = ObserverReport::empty();
         for observer in &self.0 {
@@ -251,7 +253,7 @@ impl StatefulObserver for StatefulObserverChain {
     fn after_state_emit(
         &self,
         ctx: &StatefulObserverContext<'_>,
-        outputs: &mut [ChainEvent],
+        outputs: &[ChainEvent],
     ) -> ObserverReport {
         let mut merged = ObserverReport::empty();
         for observer in &self.0 {
@@ -287,7 +289,7 @@ impl JoinObserver for JoinObserverChain {
     fn after_join_output(
         &self,
         ctx: &JoinObserverContext<'_>,
-        outputs: &mut [ChainEvent],
+        outputs: &[ChainEvent],
     ) -> ObserverReport {
         let mut merged = ObserverReport::empty();
         for observer in &self.0 {
@@ -311,7 +313,7 @@ impl SourcePollObserver for SourcePollObserverChain {
     fn after_source_poll(
         &self,
         ctx: &SourcePollObserverContext<'_>,
-        outputs: &mut [ChainEvent],
+        outputs: &[ChainEvent],
     ) -> ObserverReport {
         let mut merged = ObserverReport::empty();
         for observer in &self.0 {

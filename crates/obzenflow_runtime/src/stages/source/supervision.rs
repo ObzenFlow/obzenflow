@@ -42,7 +42,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-fn source_error_kind(error: &SourceError) -> ErrorKind {
+pub(crate) fn source_error_kind(error: &SourceError) -> ErrorKind {
     match error {
         SourceError::Timeout(_) => ErrorKind::Timeout,
         SourceError::Transport(_) => ErrorKind::Remote,
@@ -213,10 +213,10 @@ impl<'a> SourcePollObservation<'a> {
 
     pub(crate) async fn observe(
         &self,
-        outputs: &mut [ChainEvent],
+        outputs: &[ChainEvent],
         poll_duration: Duration,
         outcome: SourcePollObserverOutcome,
-    ) -> Result<(), BoxError> {
+    ) {
         let observer_ctx = SourcePollObserverContext {
             stage_id: self.stage_flow_context.stage_id,
             stage_name: &self.stage_flow_context.stage_name,
@@ -232,40 +232,34 @@ impl<'a> SourcePollObservation<'a> {
             self.data_journal,
             self.instrumentation,
         )
-        .await
+        .await;
     }
 
     pub(crate) async fn observe_empty(
         &self,
         poll_duration: Duration,
         outcome: SourcePollObserverOutcome,
-    ) -> Result<(), BoxError> {
-        let mut outputs = Vec::new();
-        self.observe(outputs.as_mut_slice(), poll_duration, outcome)
-            .await
+    ) {
+        self.observe(&[], poll_duration, outcome).await;
     }
 }
 
 pub(crate) async fn observe_source_boundary_rejection(
     observation: &SourcePollObservation<'_>,
-    control_events: &mut Vec<ChainEvent>,
-    reason: &str,
-) -> Result<(), BoxError> {
+    control_events: &[ChainEvent],
+    policy: Option<&str>,
+) {
     let outcome = SourcePollObserverOutcome::Rejected {
-        reason: reason.to_string(),
+        policy: policy.map(str::to_string),
     };
     if control_events.is_empty() {
         observation
             .observe_empty(Duration::from_nanos(0), outcome)
-            .await
+            .await;
     } else {
         observation
-            .observe(
-                control_events.as_mut_slice(),
-                Duration::from_nanos(0),
-                outcome,
-            )
-            .await
+            .observe(control_events, Duration::from_nanos(0), outcome)
+            .await;
     }
 }
 
@@ -332,7 +326,10 @@ pub(crate) async fn drain_pending_outputs_sync(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&crate::stages::observer::StageObserverBundle>,
+    observers: Option<(
+        &crate::stages::observer::StageObserverBundle,
+        obzenflow_core::config::LineagePolicy,
+    )>,
 ) -> Result<bool, BoxError> {
     while let Some(pending) = pending_outputs.pop_front() {
         if matches!(
@@ -391,7 +388,10 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&crate::stages::observer::StageObserverBundle>,
+    observers: Option<(
+        &crate::stages::observer::StageObserverBundle,
+        obzenflow_core::config::LineagePolicy,
+    )>,
     external_events: &mut EventReceiver<E>,
     on_channel_closed: impl FnOnce() -> E,
 ) -> Result<Option<EventLoopDirective<E>>, BoxError>

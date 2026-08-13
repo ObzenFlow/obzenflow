@@ -27,7 +27,7 @@ use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
 use obzenflow_core::event::SystemEventType;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{CycleDepth, DivergenceContract, StageOutputs, TransportContract};
+use obzenflow_core::{DivergenceContract, StageOutputs, TransportContract};
 use obzenflow_dsl::{effectful_transform, sink, source, test_flow, transform};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{Effects, StageCompletion};
@@ -36,9 +36,6 @@ use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
     SinkWriteReport, TypedFiniteSourceHandler, TypedTransformHandler,
-};
-use obzenflow_runtime::stages::observer::{
-    HandlerObserver, HandlerObserverContext, ObserverReport,
 };
 use obzenflow_runtime::testing::{EventShape, JournalOrder, JournalSnapshot, TestClock};
 use serde::{Deserialize, Serialize};
@@ -266,80 +263,6 @@ impl TypedTransformHandler for LoopBackTransform {
     fn process(&self, mut event: SeedEvent) -> std::result::Result<SeedEvent, HandlerError> {
         event.looped = true;
         Ok(event)
-    }
-}
-
-/// Test-only observer that corrupts the runtime-owned cycle metadata after a
-/// typed handler has produced its facts. This preserves the original
-/// integration proof: the divergence contract must reject an over-depth event
-/// arriving on an SCC-internal edge, independently of the entry guard that
-/// normally prevents an honest flow from constructing one.
-#[derive(Clone, Debug)]
-struct CycleDepthInjectionMiddleware {
-    bump_to: u16,
-}
-
-impl CycleDepthInjectionMiddleware {
-    fn new(bump_to: u16) -> Self {
-        Self { bump_to }
-    }
-}
-
-struct CycleDepthInjectionFamily;
-
-const CYCLE_DEPTH_INJECTION_LABEL: &str = "test_cycle_depth_injection";
-
-impl MiddlewareFactory for CycleDepthInjectionMiddleware {
-    fn label(&self) -> &'static str {
-        CYCLE_DEPTH_INJECTION_LABEL
-    }
-
-    fn override_key(&self) -> MiddlewareOverrideKey {
-        MiddlewareOverrideKey::of::<CycleDepthInjectionFamily>(CYCLE_DEPTH_INJECTION_LABEL)
-    }
-
-    fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::observer_with_family(
-            CYCLE_DEPTH_INJECTION_LABEL,
-            self.override_key().family_label(),
-            vec![MiddlewareSurfaceKind::Handler],
-        )
-    }
-
-    fn materialize(
-        &self,
-        request: MiddlewareAttachmentRequest<'_>,
-        context: &MiddlewareMaterializationContext<'_>,
-    ) -> Result<MiddlewareSurfaceAttachment, MiddlewareFactoryError> {
-        validate_attachment_request(&self.declaration(), &request).map_err(|error| {
-            MiddlewareFactoryError::materialization_failed(
-                CYCLE_DEPTH_INJECTION_LABEL,
-                &context.config.name,
-                error,
-            )
-        })?;
-        Ok(MiddlewareSurfaceAttachment::handler_observer(Arc::new(
-            self.clone(),
-        )))
-    }
-}
-
-impl HandlerObserver for CycleDepthInjectionMiddleware {
-    fn label(&self) -> &'static str {
-        CYCLE_DEPTH_INJECTION_LABEL
-    }
-
-    fn after_handle(
-        &self,
-        _ctx: &HandlerObserverContext<'_>,
-        outputs: &mut [ChainEvent],
-    ) -> ObserverReport {
-        for event in outputs {
-            if event.is_data() && event.cycle_scc_id.is_some() {
-                event.cycle_depth = Some(CycleDepth::new(self.bump_to));
-            }
-        }
-        ObserverReport::empty()
     }
 }
 
@@ -689,117 +612,6 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
     assert!(
         !seen_divergence_violation,
         "did not expect any divergence violations in system.log for SCC-internal fan-in topology"
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
-    let clock = TestClock::new().await.expect("paused runtime");
-    let source = SeedSource::new(10);
-    let delay = DelayedSeedTransform::new(Duration::from_millis(5));
-    let entry = PassThroughTransform;
-    let iter = PassThroughTransform;
-    let inject_cycle_depth = CycleDepthInjectionMiddleware::new(100);
-    let sink = CountingSink;
-
-    let harness = test_flow! {
-        name: "divergence_cycle_depth_abort",
-        journals: memory_journals(),
-
-        stages: {
-            src = source!(SeedEvent => source);
-            delay = effectful_transform!(
-                SeedEvent -> SeedEvent => delay,
-                effects: [],
-                observers: [],
-            );
-            entry = transform!(SeedEvent -> SeedEvent => entry, observers: [inject_cycle_depth]);
-            iter = transform!(SeedEvent -> SeedEvent => iter);
-            snk = sink!(SeedEvent => sink);
-        },
-
-        topology: {
-            src |> delay;
-            delay |> entry;
-            entry |> iter;
-            entry <| iter;
-            entry |> snk;
-        }
-    }
-    .await
-    .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
-
-    let system_journal = harness.system_journal().expect("system journal");
-    let handle = harness.into_inner();
-    let run = tokio::spawn(handle.run());
-
-    use std::convert::Infallible;
-    for _ in 0..400 {
-        if run.is_finished() {
-            break;
-        }
-        clock.advance(Duration::from_millis(50)).await?;
-        // Give supervisors a chance to run timers and propagate contract evidence.
-        let _ = TestClock::settle_scheduler(|| async { Ok::<bool, Infallible>(run.is_finished()) })
-            .await?;
-    }
-    assert!(
-        run.is_finished(),
-        "flow did not terminate under paused time (expected abort)"
-    );
-
-    let run = run.await.expect("join handle");
-    if let Ok(()) = run {
-        anyhow::bail!("expected flow to abort due to cycle_depth divergence violation");
-    }
-
-    let _stable_len = TestClock::settle_scheduler(|| async {
-        let snapshot = JournalSnapshot::capture_system_journal(system_journal.clone()).await?;
-        Ok::<usize, obzenflow_runtime::testing::JournalProbeError>(
-            snapshot.events(JournalOrder::Append).len(),
-        )
-    })
-    .await?;
-
-    let snapshot = JournalSnapshot::capture_system_journal(system_journal.clone()).await?;
-
-    let mut seen_divergence_contract_result = false;
-    let mut seen_cycle_depth_contract_status = false;
-
-    for env in snapshot.events(JournalOrder::Append) {
-        match &env.event.event {
-            SystemEventType::ContractResult {
-                contract_name,
-                status,
-                cause,
-                ..
-            } if contract_name.as_str() == DivergenceContract::NAME => {
-                if *status == ContractResultStatusLabel::Failed
-                    && cause.as_deref() == Some("divergence")
-                {
-                    seen_divergence_contract_result = true;
-                }
-            }
-            SystemEventType::ContractStatus {
-                pass: false,
-                reason: Some(EventViolationCause::Divergence { predicate, .. }),
-                ..
-            } if predicate == "cycle_depth" => {
-                seen_cycle_depth_contract_status = true;
-            }
-            _ => {}
-        }
-    }
-
-    assert!(
-        seen_divergence_contract_result,
-        "expected a failed DivergenceContract ContractResult with cause=divergence in system.log"
-    );
-    assert!(
-        seen_cycle_depth_contract_status,
-        "expected a failing ContractStatus with predicate=cycle_depth in system.log"
     );
 
     Ok(())

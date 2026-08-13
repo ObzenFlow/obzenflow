@@ -50,6 +50,24 @@ impl Default for InstrumentationConfig {
     }
 }
 
+/// Closed reason labels for observer diagnostic loss (FLOWIP-115m).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObserverDiagnosticDropReason {
+    Invalid,
+    MissingFlowContext,
+    JournalAppendFailed,
+}
+
+impl ObserverDiagnosticDropReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Invalid => "invalid",
+            Self::MissingFlowContext => "missing_flow_context",
+            Self::JournalAppendFailed => "journal_append_failed",
+        }
+    }
+}
+
 /// Error when binding control middleware fails validation.
 #[derive(Debug, thiserror::Error)]
 pub enum ControlBindError {
@@ -84,6 +102,9 @@ pub struct StageInstrumentation {
     pub events_emitted_total: AtomicU64,
     pub terminal_groups_committed_total: AtomicU64,
     pub terminal_group_commit_failures_total: AtomicU64,
+    pub observer_diagnostics_dropped_invalid_total: AtomicU64,
+    pub observer_diagnostics_dropped_missing_flow_context_total: AtomicU64,
+    pub observer_diagnostics_dropped_journal_append_failed_total: AtomicU64,
     pub errors_total: AtomicU64,
     pub failures_total: AtomicU64,              // Critical failures
     pub event_loops_total: AtomicU64,           // Total event loop iterations
@@ -181,6 +202,9 @@ impl StageInstrumentation {
             events_emitted_total: AtomicU64::new(0),
             terminal_groups_committed_total: AtomicU64::new(0),
             terminal_group_commit_failures_total: AtomicU64::new(0),
+            observer_diagnostics_dropped_invalid_total: AtomicU64::new(0),
+            observer_diagnostics_dropped_missing_flow_context_total: AtomicU64::new(0),
+            observer_diagnostics_dropped_journal_append_failed_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
             failures_total: AtomicU64::new(0),
             event_loops_total: AtomicU64::new(0),
@@ -229,6 +253,21 @@ impl StageInstrumentation {
             effect_rl_snapshotters: Vec::new(),
             cb_state_view: None,
         }
+    }
+
+    pub fn record_observer_diagnostic_drop(&self, reason: ObserverDiagnosticDropReason) {
+        let counter = match reason {
+            ObserverDiagnosticDropReason::Invalid => {
+                &self.observer_diagnostics_dropped_invalid_total
+            }
+            ObserverDiagnosticDropReason::MissingFlowContext => {
+                &self.observer_diagnostics_dropped_missing_flow_context_total
+            }
+            ObserverDiagnosticDropReason::JournalAppendFailed => {
+                &self.observer_diagnostics_dropped_journal_append_failed_total
+            }
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Bind control-plane publishers from the provider for this stage.
@@ -314,6 +353,15 @@ impl StageInstrumentation {
                 .load(Ordering::Relaxed),
             terminal_group_commit_failures_total: self
                 .terminal_group_commit_failures_total
+                .load(Ordering::Relaxed),
+            observer_diagnostics_dropped_invalid_total: self
+                .observer_diagnostics_dropped_invalid_total
+                .load(Ordering::Relaxed),
+            observer_diagnostics_dropped_missing_flow_context_total: self
+                .observer_diagnostics_dropped_missing_flow_context_total
+                .load(Ordering::Relaxed),
+            observer_diagnostics_dropped_journal_append_failed_total: self
+                .observer_diagnostics_dropped_journal_append_failed_total
                 .load(Ordering::Relaxed),
             data_outputs_by_event_type: {
                 let mut counts: Vec<_> = self
@@ -780,6 +828,11 @@ pub fn snapshot_stage_metrics(instrumentation: &StageInstrumentation) -> StageMe
         events_processed_total: ctx.events_processed_total,
         events_accumulated_total: ctx.events_accumulated_total,
         events_emitted_total: ctx.events_emitted_total,
+        observer_diagnostics_dropped_invalid_total: ctx.observer_diagnostics_dropped_invalid_total,
+        observer_diagnostics_dropped_missing_flow_context_total: ctx
+            .observer_diagnostics_dropped_missing_flow_context_total,
+        observer_diagnostics_dropped_journal_append_failed_total: ctx
+            .observer_diagnostics_dropped_journal_append_failed_total,
         errors_total: ctx.errors_total,
         errors_by_kind: ctx.errors_by_kind,
         in_flight: ctx.in_flight,
@@ -796,7 +849,7 @@ pub fn snapshot_stage_metrics(instrumentation: &StageInstrumentation) -> StageMe
 
 #[cfg(test)]
 mod tests {
-    use super::StageInstrumentation;
+    use super::{ObserverDiagnosticDropReason, StageInstrumentation};
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::vector_clock::VectorClock;
@@ -880,5 +933,38 @@ mod tests {
         let snapshot = instrumentation.snapshot();
         assert_eq!(snapshot.events_emitted_total, 1);
         assert!(snapshot.data_outputs_by_event_type.is_empty());
+    }
+
+    #[test]
+    fn observer_diagnostic_drop_reasons_are_exact_independent_counters() {
+        let instrumentation = StageInstrumentation::new();
+        instrumentation.record_observer_diagnostic_drop(ObserverDiagnosticDropReason::Invalid);
+        instrumentation.record_observer_diagnostic_drop(ObserverDiagnosticDropReason::Invalid);
+        instrumentation
+            .record_observer_diagnostic_drop(ObserverDiagnosticDropReason::MissingFlowContext);
+        instrumentation
+            .record_observer_diagnostic_drop(ObserverDiagnosticDropReason::JournalAppendFailed);
+
+        let runtime = instrumentation.snapshot();
+        assert_eq!(runtime.observer_diagnostics_dropped_invalid_total, 2);
+        assert_eq!(
+            runtime.observer_diagnostics_dropped_missing_flow_context_total,
+            1
+        );
+        assert_eq!(
+            runtime.observer_diagnostics_dropped_journal_append_failed_total,
+            1
+        );
+
+        let stage = super::snapshot_stage_metrics(&instrumentation);
+        assert_eq!(stage.observer_diagnostics_dropped_invalid_total, 2);
+        assert_eq!(
+            stage.observer_diagnostics_dropped_missing_flow_context_total,
+            1
+        );
+        assert_eq!(
+            stage.observer_diagnostics_dropped_journal_append_failed_total,
+            1
+        );
     }
 }

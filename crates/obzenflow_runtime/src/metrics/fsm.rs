@@ -278,6 +278,9 @@ pub struct StageMetrics {
     pub latest_events_processed_total: Option<u64>,
     pub latest_events_accumulated_total: Option<u64>,
     pub latest_events_emitted_total: Option<u64>,
+    pub latest_observer_diagnostics_dropped_invalid_total: Option<u64>,
+    pub latest_observer_diagnostics_dropped_missing_flow_context_total: Option<u64>,
+    pub latest_observer_diagnostics_dropped_journal_append_failed_total: Option<u64>,
     /// Cumulative committed Data outputs by exact event type.
     pub latest_data_outputs_by_event_type: HashMap<EventType, u64>,
     /// Cumulative admitted Data inputs by physical upstream and exact type.
@@ -322,6 +325,21 @@ impl StageMetrics {
             self.latest_events_emitted_total
                 .unwrap_or(0)
                 .max(runtime_ctx.events_emitted_total),
+        );
+        self.latest_observer_diagnostics_dropped_invalid_total = Some(
+            self.latest_observer_diagnostics_dropped_invalid_total
+                .unwrap_or(0)
+                .max(runtime_ctx.observer_diagnostics_dropped_invalid_total),
+        );
+        self.latest_observer_diagnostics_dropped_missing_flow_context_total = Some(
+            self.latest_observer_diagnostics_dropped_missing_flow_context_total
+                .unwrap_or(0)
+                .max(runtime_ctx.observer_diagnostics_dropped_missing_flow_context_total),
+        );
+        self.latest_observer_diagnostics_dropped_journal_append_failed_total = Some(
+            self.latest_observer_diagnostics_dropped_journal_append_failed_total
+                .unwrap_or(0)
+                .max(runtime_ctx.observer_diagnostics_dropped_journal_append_failed_total),
         );
         self.latest_errors_total = Some(
             self.latest_errors_total
@@ -784,6 +802,31 @@ impl MetricsAggregatorContext {
             snapshot
                 .events_emitted_total
                 .insert(*stage_id, emitted_count);
+
+            for (reason, count) in [
+                (
+                    "invalid",
+                    metrics
+                        .latest_observer_diagnostics_dropped_invalid_total
+                        .unwrap_or(0),
+                ),
+                (
+                    "missing_flow_context",
+                    metrics
+                        .latest_observer_diagnostics_dropped_missing_flow_context_total
+                        .unwrap_or(0),
+                ),
+                (
+                    "journal_append_failed",
+                    metrics
+                        .latest_observer_diagnostics_dropped_journal_append_failed_total
+                        .unwrap_or(0),
+                ),
+            ] {
+                snapshot
+                    .observer_diagnostics_dropped_total
+                    .insert((*stage_id, reason.to_string()), count);
+            }
 
             if let Some(value) = metrics.join_reference_since_last_stream {
                 if let Some(metadata) = self.stage_metadata.get(stage_id) {
@@ -1909,6 +1952,32 @@ impl FsmAction for MetricsAggregatorAction {
                                 .unwrap_or(0)
                                 .max(snapshot.events_emitted_total),
                         );
+                        metrics.latest_observer_diagnostics_dropped_invalid_total = Some(
+                            metrics
+                                .latest_observer_diagnostics_dropped_invalid_total
+                                .unwrap_or(0)
+                                .max(snapshot.observer_diagnostics_dropped_invalid_total),
+                        );
+                        metrics.latest_observer_diagnostics_dropped_missing_flow_context_total =
+                            Some(
+                                metrics
+                                    .latest_observer_diagnostics_dropped_missing_flow_context_total
+                                    .unwrap_or(0)
+                                    .max(
+                                        snapshot
+                                            .observer_diagnostics_dropped_missing_flow_context_total,
+                                    ),
+                            );
+                        metrics.latest_observer_diagnostics_dropped_journal_append_failed_total =
+                            Some(
+                                metrics
+                                    .latest_observer_diagnostics_dropped_journal_append_failed_total
+                                    .unwrap_or(0)
+                                    .max(
+                                        snapshot
+                                            .observer_diagnostics_dropped_journal_append_failed_total,
+                                    ),
+                            );
                         metrics.latest_errors_total = Some(
                             metrics
                                 .latest_errors_total

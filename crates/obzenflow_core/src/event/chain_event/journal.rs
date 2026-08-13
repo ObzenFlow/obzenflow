@@ -3,12 +3,35 @@
 // https://obzenflow.dev
 
 use super::{ChainEvent, ChainEventContent};
-use crate::event::journal_event::{JournalEvent, Sealed};
+use crate::event::journal_event::{JournalAdmissionRole, JournalCausalLane, JournalEvent, Sealed};
 use crate::event::payloads::flow_control_payload::FlowControlPayload;
-use crate::event::payloads::observability_payload::{MetricsLifecycle, ObservabilityPayload};
+use crate::event::payloads::observability_payload::{
+    MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload,
+};
 use crate::event::types::{AdmissionSeq, EventId, WriterId};
 
 impl Sealed for ChainEvent {}
+
+fn is_observer_evidence(content: &ChainEventContent) -> bool {
+    match content {
+        ChainEventContent::Data { .. }
+        | ChainEventContent::FlowControl(_)
+        | ChainEventContent::Delivery(_) => false,
+        ChainEventContent::Observability(observability) => match observability {
+            ObservabilityPayload::Stage(_)
+            | ObservabilityPayload::Metrics(_)
+            | ObservabilityPayload::Backpressure(_) => false,
+            ObservabilityPayload::Middleware(middleware) => match middleware {
+                MiddlewareLifecycle::CircuitBreaker(_) | MiddlewareLifecycle::RateLimiter(_) => {
+                    false
+                }
+                MiddlewareLifecycle::Indicator(_)
+                | MiddlewareLifecycle::Logging(_)
+                | MiddlewareLifecycle::User(_) => true,
+            },
+        },
+    }
+}
 
 impl JournalEvent for ChainEvent {
     fn id(&self) -> &EventId {
@@ -19,12 +42,32 @@ impl JournalEvent for ChainEvent {
         &self.writer_id
     }
 
+    fn admission_role(&self) -> JournalAdmissionRole {
+        if is_observer_evidence(&self.content) {
+            JournalAdmissionRole::ObserverEvidence
+        } else {
+            JournalAdmissionRole::Flow
+        }
+    }
+
+    fn causal_lane(&self) -> JournalCausalLane {
+        if is_observer_evidence(&self.content) {
+            JournalCausalLane::ObserverEvidence(self.writer_id)
+        } else {
+            JournalCausalLane::Flow(self.writer_id)
+        }
+    }
+
     fn admission_seq(&self) -> Option<AdmissionSeq> {
         self.admission_seq
     }
 
     fn set_admission_seq(&mut self, seq: AdmissionSeq) {
         self.admission_seq = Some(seq);
+    }
+
+    fn clear_admission_seq(&mut self) {
+        self.admission_seq = None;
     }
 
     /// Zero-alloc category string for metrics & fast logs.

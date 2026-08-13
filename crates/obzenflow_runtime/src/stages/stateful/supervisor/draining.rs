@@ -135,7 +135,7 @@ pub(super) async fn dispatch_draining<
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
-            Some(&ctx.observers),
+            Some((&ctx.observers, ctx.lineage_policy)),
             &mut ctx.pending_outputs,
         )
         .await?
@@ -241,21 +241,23 @@ pub(super) async fn dispatch_draining<
                     run_stateful_before_accumulate_observers(
                         &ctx.observers,
                         &observer_ctx,
+                        ctx.lineage_policy,
                         &ctx.data_journal,
                         &ctx.instrumentation,
                         Some(&envelope),
                     )
-                    .await?;
+                    .await;
 
                     if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
                         run_stateful_after_accumulate_observers(
                             &ctx.observers,
                             &observer_ctx,
+                            ctx.lineage_policy,
                             &ctx.data_journal,
                             &ctx.instrumentation,
                             Some(&envelope),
                         )
-                        .await?;
+                        .await;
 
                         if let Some(state) = &heartbeat_state {
                             state.record_last_consumed(event_id);
@@ -322,11 +324,12 @@ pub(super) async fn dispatch_draining<
                     run_stateful_after_accumulate_observers(
                         &ctx.observers,
                         &observer_ctx,
+                        ctx.lineage_policy,
                         &ctx.data_journal,
                         &ctx.instrumentation,
                         Some(&envelope),
                     )
-                    .await?;
+                    .await;
                     if let Err(err) = &accumulate_result {
                         if let Some(fatal) = err.as_fatal() {
                             let duration = start.elapsed();
@@ -468,7 +471,7 @@ pub(super) async fn dispatch_draining<
                             });
 
                         match handler.emit_with_context(&mut ctx.current_state, output_context) {
-                            Ok(mut events_to_emit) => {
+                            Ok(events_to_emit) => {
                                 if !events_to_emit.is_empty() {
                                     let stage_writer_id =
                                         ctx.writer_id.ok_or("No writer ID available")?;
@@ -484,12 +487,13 @@ pub(super) async fn dispatch_draining<
                                     run_stateful_after_emit_observers(
                                         &ctx.observers,
                                         &observer_ctx,
-                                        events_to_emit.as_mut_slice(),
+                                        ctx.lineage_policy,
+                                        events_to_emit.as_slice(),
                                         &ctx.data_journal,
                                         &ctx.instrumentation,
                                         Some(&envelope),
                                     )
-                                    .await?;
+                                    .await;
 
                                     for mut out in events_to_emit {
                                         out.writer_id = stage_writer_id;
@@ -856,7 +860,7 @@ pub(super) async fn dispatch_draining<
     .await;
 
     match drain_result {
-        Ok(mut drain_events) => {
+        Ok(drain_events) => {
             let stage_writer_id = ctx.writer_id.ok_or("No writer ID available")?;
             let observer_ctx = StatefulObserverContext {
                 stage_id: ctx.stage_id,
@@ -872,12 +876,13 @@ pub(super) async fn dispatch_draining<
             run_stateful_after_emit_observers(
                 &ctx.observers,
                 &observer_ctx,
-                drain_events.as_mut_slice(),
+                ctx.lineage_policy,
+                drain_events.as_slice(),
                 &ctx.data_journal,
                 &ctx.instrumentation,
                 ctx.last_consumed_envelope.as_ref(),
             )
-            .await?;
+            .await;
 
             for mut event in drain_events {
                 event.writer_id = stage_writer_id;

@@ -22,12 +22,14 @@ use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::observer::dispatch::run_sink_delivery_observers;
-use crate::stages::observer::SinkDeliveryObserverOutcome;
+use crate::stages::observer::{SinkDeliveryAttemptResult, SinkDeliveryObserverOutcome};
 use crate::supervised_base::EventLoopDirective;
 use futures::FutureExt;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::{
+    DeliveryMethod, DeliveryPayload, DeliveryResult,
+};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{EventEnvelope, JournalEvent};
 use obzenflow_core::ChainEvent;
@@ -636,21 +638,39 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
 
         let observer_outcome = match &outcome {
             SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(
-                _,
-            ))) => SinkDeliveryObserverOutcome::Delivered,
+                report,
+            ))) => SinkDeliveryObserverOutcome::Attempted {
+                result: match &report.primary.result {
+                    DeliveryResult::Success { .. } => SinkDeliveryAttemptResult::ReportedSuccess,
+                    DeliveryResult::Partial {
+                        successful_count,
+                        failed_count,
+                        ..
+                    } => SinkDeliveryAttemptResult::ReportedPartial {
+                        successful_count: *successful_count,
+                        failed_count: *failed_count,
+                    },
+                    DeliveryResult::Buffered { .. } => SinkDeliveryAttemptResult::ReportedBuffered,
+                    DeliveryResult::Failed { final_attempt, .. } => {
+                        SinkDeliveryAttemptResult::ReportedFailure {
+                            final_attempt: *final_attempt,
+                        }
+                    }
+                },
+            },
             SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Err(
                 err,
-            ))) => SinkDeliveryObserverOutcome::Failed {
-                message: err.to_string(),
+            ))) => SinkDeliveryObserverOutcome::Attempted {
+                result: SinkDeliveryAttemptResult::HandlerError { kind: err.kind() },
             },
             SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Panicked {
-                message,
-            }) => SinkDeliveryObserverOutcome::Failed {
-                message: message.clone(),
+                ..
+            }) => SinkDeliveryObserverOutcome::Attempted {
+                result: SinkDeliveryAttemptResult::HandlerPanicked,
             },
             SinkDeliveryBoundaryOutcome::Rejected(rejection) => {
                 SinkDeliveryObserverOutcome::Rejected {
-                    reason: format!("{}: {}", rejection.policy, rejection.reason),
+                    policy: Some(rejection.policy.clone()),
                 }
             }
         };
@@ -670,11 +690,12 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             &envelope.event,
             stage_input_position.map(|position| position.0),
             observer_outcome,
+            ctx.lineage_policy,
             &ctx.data_journal,
             &ctx.instrumentation,
             envelope,
         )
-        .await?;
+        .await;
 
         let mapped = match outcome {
             SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(

@@ -113,6 +113,9 @@ pub async fn read_stage_metrics_from_tail(
     let mut events_processed_total: Option<u64> = None;
     let mut events_accumulated_total: Option<u64> = None;
     let mut events_emitted_total: Option<u64> = None;
+    let mut observer_diagnostics_dropped_invalid_total: Option<u64> = None;
+    let mut observer_diagnostics_dropped_missing_flow_context_total: Option<u64> = None;
+    let mut observer_diagnostics_dropped_journal_append_failed_total: Option<u64> = None;
     let mut errors_total: Option<u64> = None;
     let mut in_flight: Option<u32> = None;
     let mut p50_ms: Option<u64> = None;
@@ -150,6 +153,18 @@ pub async fn read_stage_metrics_from_tail(
         update_max(&mut events_processed_total, ctx.events_processed_total);
         update_max(&mut events_accumulated_total, ctx.events_accumulated_total);
         update_max(&mut events_emitted_total, ctx.events_emitted_total);
+        update_max(
+            &mut observer_diagnostics_dropped_invalid_total,
+            ctx.observer_diagnostics_dropped_invalid_total,
+        );
+        update_max(
+            &mut observer_diagnostics_dropped_missing_flow_context_total,
+            ctx.observer_diagnostics_dropped_missing_flow_context_total,
+        );
+        update_max(
+            &mut observer_diagnostics_dropped_journal_append_failed_total,
+            ctx.observer_diagnostics_dropped_journal_append_failed_total,
+        );
         update_max(&mut errors_total, ctx.errors_total);
         in_flight = Some(ctx.in_flight);
         p50_ms = Some(ctx.recent_p50_ms);
@@ -178,6 +193,18 @@ pub async fn read_stage_metrics_from_tail(
             update_max(&mut events_processed_total, ctx.events_processed_total);
             update_max(&mut events_accumulated_total, ctx.events_accumulated_total);
             update_max(&mut events_emitted_total, ctx.events_emitted_total);
+            update_max(
+                &mut observer_diagnostics_dropped_invalid_total,
+                ctx.observer_diagnostics_dropped_invalid_total,
+            );
+            update_max(
+                &mut observer_diagnostics_dropped_missing_flow_context_total,
+                ctx.observer_diagnostics_dropped_missing_flow_context_total,
+            );
+            update_max(
+                &mut observer_diagnostics_dropped_journal_append_failed_total,
+                ctx.observer_diagnostics_dropped_journal_append_failed_total,
+            );
             update_max(&mut errors_total, ctx.errors_total);
             update_max(
                 &mut processing_time_sum_nanos,
@@ -207,6 +234,12 @@ pub async fn read_stage_metrics_from_tail(
         events_processed_total: events,
         events_accumulated_total: events_accumulated_total.unwrap_or(0),
         events_emitted_total: events_emitted_total.unwrap_or(0),
+        observer_diagnostics_dropped_invalid_total: observer_diagnostics_dropped_invalid_total
+            .unwrap_or(0),
+        observer_diagnostics_dropped_missing_flow_context_total:
+            observer_diagnostics_dropped_missing_flow_context_total.unwrap_or(0),
+        observer_diagnostics_dropped_journal_append_failed_total:
+            observer_diagnostics_dropped_journal_append_failed_total.unwrap_or(0),
         errors_total: errors_total.unwrap_or(0),
         errors_by_kind,
         in_flight: in_flight.unwrap_or(0),
@@ -403,6 +436,9 @@ mod tests {
             events_emitted_total: 0,
             terminal_groups_committed_total: 0,
             terminal_group_commit_failures_total: 0,
+            observer_diagnostics_dropped_invalid_total: 0,
+            observer_diagnostics_dropped_missing_flow_context_total: 0,
+            observer_diagnostics_dropped_journal_append_failed_total: 0,
             data_outputs_by_event_type: Vec::new(),
             data_inputs_by_upstream_event_type: Vec::new(),
             join_reference_since_last_stream: 0,

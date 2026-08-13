@@ -25,7 +25,7 @@ use obzenflow_runtime::stages::common::handlers::{
     JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::observer::{
-    HandlerObserver, HandlerObserverContext, ObserverReport,
+    ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
 };
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
@@ -190,7 +190,7 @@ impl MiddlewareFactory for ReferenceActivationObserver {
         MiddlewareDeclaration::observer_with_family(
             REFERENCE_ACTIVATION_OBSERVER_LABEL,
             self.override_key().family_label(),
-            vec![MiddlewareSurfaceKind::Handler],
+            vec![MiddlewareSurfaceKind::OutputCommit],
         )
     }
 
@@ -206,37 +206,36 @@ impl MiddlewareFactory for ReferenceActivationObserver {
                 error,
             )
         })?;
-        Ok(MiddlewareSurfaceAttachment::handler_observer(Arc::new(
-            self.clone(),
-        )))
+        Ok(MiddlewareSurfaceAttachment::output_commit_observer(
+            Arc::new(self.clone()),
+        ))
     }
 }
 
-impl HandlerObserver for ReferenceActivationObserver {
+impl OutputCommitObserver for ReferenceActivationObserver {
     fn label(&self) -> &'static str {
         REFERENCE_ACTIVATION_OBSERVER_LABEL
     }
 
-    fn after_handle(
+    fn before_output_commit(
         &self,
-        ctx: &HandlerObserverContext<'_>,
-        outputs: &mut [ChainEvent],
-    ) -> ObserverReport {
-        for event in outputs {
-            let Some(reference) = ReferenceItem::from_event(event) else {
-                continue;
-            };
-            let activation = CompositeActivationContext::new(
-                CompositeId::new("flowip-134f:reference"),
-                ctx.input.id,
-                format!("reference:{}:{}", reference.key, reference.version),
-                ctx.input.processing_info.event_time,
-            );
-            event
-                .try_insert_composite_activation(activation)
-                .expect("reference activation is internally consistent");
-        }
-        ObserverReport::empty()
+        ctx: &OutputCommitObserverContext<'_>,
+        event: &mut ChainEvent,
+    ) -> ObserverCommitResult {
+        let Some(reference) = ReferenceItem::from_event(event) else {
+            return Ok(ObserverReport::empty());
+        };
+        let parent = ctx.parent.expect("reference output has an input parent");
+        let activation = CompositeActivationContext::new(
+            CompositeId::new("flowip-134f:reference"),
+            parent.id,
+            format!("reference:{}:{}", reference.key, reference.version),
+            parent.processing_info.event_time,
+        );
+        event
+            .try_insert_composite_activation(activation)
+            .expect("reference activation is internally consistent");
+        Ok(ObserverReport::empty())
     }
 }
 

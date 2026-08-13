@@ -100,7 +100,10 @@ pub(crate) async fn drain_one_pending(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&crate::stages::observer::StageObserverBundle>,
+    observers: Option<(
+        &crate::stages::observer::StageObserverBundle,
+        obzenflow_core::config::LineagePolicy,
+    )>,
     pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
 ) -> Result<DrainOutcome, Box<dyn std::error::Error + Send + Sync>> {
     match drain_one_pending_resolve(
@@ -257,7 +260,10 @@ pub(crate) async fn drain_one_pending_resolve(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&crate::stages::observer::StageObserverBundle>,
+    observers: Option<(
+        &crate::stages::observer::StageObserverBundle,
+        obzenflow_core::config::LineagePolicy,
+    )>,
     pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
 ) -> Result<DrainAttempt, Box<dyn std::error::Error + Send + Sync>> {
     let is_data = pending.event.is_data();

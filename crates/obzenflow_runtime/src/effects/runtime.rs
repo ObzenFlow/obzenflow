@@ -250,12 +250,13 @@ impl EffectsCore {
             scope,
             effect_type,
             outcome,
+            self.ctx.lineage,
             &self.ctx.data_journal,
             self.ctx.instrumentation.as_ref(),
             Some(&self.ctx.parent),
         )
-        .await
-        .map_err(|e| EffectError::Journal(e.to_string()))
+        .await;
+        Ok(())
     }
 
     async fn observe_effect_result<T>(

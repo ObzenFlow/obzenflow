@@ -54,7 +54,9 @@ use super::fixtures;
 use super::gateway::{AuthorizePayment, GatewayTransform};
 use super::validation;
 use obzenflow::typed::sources as typed_sources;
-use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
+use obzenflow_adapters::middleware::observability::{
+    indicator, log_event, IndicatorKind, LoggingLevel,
+};
 use obzenflow_adapters::middleware::{
     CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder, Retry,
 };
@@ -299,7 +301,11 @@ pub fn assemble_flow(
                         // not change routing or delivery. The stage data journal is
                         // the source of truth, with a tracing mirror for local
                         // visibility.
-                        log().prefix("manual_review")
+                        log_event("payment.authorization.manual_review_handoff")
+                            .level(LoggingLevel::Info)
+                            .tag("operation", "payment.authorization")
+                            .tag("handoff.kind", "manual_review")
+                            .trace_mirror()
                     ]
                 );
             },

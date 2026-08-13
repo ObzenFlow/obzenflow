@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/compile_fail/observer_report_rejects_chain_event.rs:15:53
+   |
+15 |     let _ = ObserverReport::empty().with_diagnostic(event);
+   |                                     --------------- ^^^^^ expected `ObserverDiagnostic`, found `ChainEvent`
+   |                                     |
+   |                                     arguments to this method are incorrect
+   |
+note: method defined here
+  --> src/stages/observer/ports.rs
+   |
+   |     pub fn with_diagnostic(mut self, diagnostic: ObserverDiagnostic) -> Self {
+   |            ^^^^^^^^^^^^^^^

@@ -5,13 +5,13 @@
 use super::{indicator, latency, IndicatorConfig, IndicatorMiddleware};
 use crate::middleware::MiddlewareFactory;
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
-use obzenflow_core::event::payloads::observability_payload::{
-    IndicatorKind, MiddlewareLifecycle, ObservabilityPayload,
-};
-use obzenflow_core::event::{ChainEventContent, ChainEventFactory};
+use obzenflow_core::event::payloads::observability_payload::IndicatorKind;
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_runtime::stages::observer::{HandlerObserver, HandlerObserverContext};
+use obzenflow_runtime::stages::observer::{
+    HandlerObserver, HandlerObserverContext, ObserverDiagnostic, ObserverEvidence,
+};
 use serde_json::json;
 
 fn configured() -> IndicatorMiddleware {
@@ -38,14 +38,12 @@ fn sample_records_raw_value_with_operation_indicator_kind_and_tags() {
 }
 
 #[test]
-fn diagnostic_is_a_typed_indicator_wide_event() {
-    let stage_id = StageId::new();
-    let diagnostic = configured().diagnostic(stage_id, MetricsDuration::from_millis(6_120));
-    let ChainEventContent::Observability(ObservabilityPayload::Middleware(
-        MiddlewareLifecycle::Indicator(sample),
-    )) = diagnostic.content
-    else {
-        panic!("indicator diagnostic should be a typed Indicator middleware event");
+fn diagnostic_is_typed_content_without_event_authorship() {
+    let diagnostic = ObserverDiagnostic::new(ObserverEvidence::Indicator(
+        configured().sample(MetricsDuration::from_millis(6_120)),
+    ));
+    let ObserverEvidence::Indicator(sample) = diagnostic.evidence else {
+        panic!("indicator diagnostic should carry typed Indicator evidence");
     };
     assert_eq!(sample.operation, "payment.authorization");
     assert_eq!(sample.value_ms, 6_120);
@@ -78,11 +76,11 @@ fn after_handle_emits_exactly_one_sample_per_execution() {
     assert!(middleware.before_handle(&ctx).is_empty());
 
     // Fan-out: many outputs, still exactly one sample.
-    let mut outputs = vec![
+    let outputs = vec![
         ChainEventFactory::data_event(WriterId::from(stage_id), "payment.authorized.v1", json!({})),
         ChainEventFactory::data_event(WriterId::from(stage_id), "order.cancelled.v1", json!({})),
     ];
-    let report = middleware.after_handle(&ctx, &mut outputs);
+    let report = middleware.after_handle(&ctx, &outputs);
     assert_eq!(
         report.diagnostics.len(),
         1,

@@ -485,12 +485,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Sink lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 
@@ -527,12 +522,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Sink lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 
@@ -566,12 +556,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Sink lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 

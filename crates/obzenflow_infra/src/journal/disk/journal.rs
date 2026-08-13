@@ -16,9 +16,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use crc32fast::Hasher;
 use obzenflow_core::event::event_envelope::{EventEnvelope, JournalGroupMember};
-use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
+use obzenflow_core::event::identity::{EventId, JournalWriterId};
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
-use obzenflow_core::event::JournalEvent;
+use obzenflow_core::event::{JournalAdmissionRole, JournalCausalLane, JournalEvent};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -80,7 +80,7 @@ pub struct DiskJournal<T: JournalEvent> {
     /// Writers take a write lock; readers take a read lock to avoid torn lines.
     read_write_lock: Arc<RwLock<()>>,
     /// Track vector clocks for each writer
-    writer_clocks: Arc<RwLock<HashMap<WriterId, VectorClock>>>,
+    writer_clocks: Arc<RwLock<HashMap<JournalCausalLane, VectorClock>>>,
     /// Set when a failed append could not be rolled back, leaving the file in an
     /// unknown state. Further appends are rejected until the journal is reopened.
     poisoned: Arc<AtomicBool>,
@@ -277,7 +277,11 @@ impl<T: JournalEvent> DiskJournal<T> {
 
 /// In-memory index (`event_id -> byte offset`) plus per-writer vector clocks
 /// rebuilt from a journal file.
-type RebuiltIndex = (HashMap<Ulid, u64>, HashMap<WriterId, VectorClock>, u64);
+type RebuiltIndex = (
+    HashMap<Ulid, u64>,
+    HashMap<JournalCausalLane, VectorClock>,
+    u64,
+);
 
 fn recover_torn_tail(file: &StdFile, path: &Path, committed_end: u64) -> Result<(), JournalError> {
     let physical_len = file
@@ -353,7 +357,7 @@ fn rebuild_index_from_path<T: JournalEvent>(log_path: &Path) -> Result<RebuiltIn
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
                     index.insert(record.event_id, record_offset);
-                    writer_clocks.insert(record.writer_id, record.vector_clock);
+                    writer_clocks.insert(record.event.causal_lane(), record.vector_clock);
                 }
                 committed_end = offset;
             }
@@ -430,22 +434,28 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
 
         // FLOWIP-120n F18: stamp under the write lock so sequence order equals
         // append order; re-admitted rows already carry theirs and keep it.
-        if let Some(sequencer) = &self.admission_sequencer {
-            if event.admission_seq().is_none() {
-                event.set_admission_seq(obzenflow_core::AdmissionSeq(
-                    sequencer.fetch_add(1, Ordering::Relaxed),
-                ));
+        match event.admission_role() {
+            JournalAdmissionRole::Flow => {
+                if let Some(sequencer) = &self.admission_sequencer {
+                    if event.admission_seq().is_none() {
+                        event.set_admission_seq(obzenflow_core::AdmissionSeq(
+                            sequencer.fetch_add(1, Ordering::Relaxed),
+                        ));
+                    }
+                }
             }
+            JournalAdmissionRole::ObserverEvidence => event.clear_admission_seq(),
         }
 
         // Compute this writer's next clock under the write lock. The helper is
         // store-free, so the writer clock is committed only after the file write
         // and flush succeed below.
+        let lane = event.causal_lane();
         let vector_clock = {
             let writer_clocks = self.writer_clocks.read().await;
             CausalOrderingService::advance_for_append(
-                writer_clocks.get(&writer_id),
-                &writer_id.to_string(),
+                writer_clocks.get(&lane),
+                &lane.clock_key(),
                 parent.map(|p| &p.vector_clock),
             )
         };
@@ -552,10 +562,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             .write()
             .await
             .insert(record.event_id, committed.offset);
-        self.writer_clocks
-            .write()
-            .await
-            .insert(writer_id, vector_clock);
+        self.writer_clocks.write().await.insert(lane, vector_clock);
 
         Ok(envelope)
     }
@@ -589,13 +596,18 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         // One write lock covers clock calculation, construction, the single
         // physical frame append, and publication of every member.
         let _lock = self.read_write_lock.write().await;
-        if let Some(sequencer) = &self.admission_sequencer {
-            for event in &mut events {
-                if event.admission_seq().is_none() {
-                    event.set_admission_seq(obzenflow_core::AdmissionSeq(
-                        sequencer.fetch_add(1, Ordering::Relaxed),
-                    ));
+        for event in &mut events {
+            match event.admission_role() {
+                JournalAdmissionRole::Flow => {
+                    if let Some(sequencer) = &self.admission_sequencer {
+                        if event.admission_seq().is_none() {
+                            event.set_admission_seq(obzenflow_core::AdmissionSeq(
+                                sequencer.fetch_add(1, Ordering::Relaxed),
+                            ));
+                        }
+                    }
                 }
+                JournalAdmissionRole::ObserverEvidence => event.clear_admission_seq(),
             }
         }
 
@@ -608,12 +620,13 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         let mut records = Vec::with_capacity(events.len());
         for (index, event) in events.into_iter().enumerate() {
             let writer_id = *event.writer_id();
+            let lane = event.causal_lane();
             let vector_clock = CausalOrderingService::advance_for_append(
-                next_writer_clocks.get(&writer_id),
-                &writer_id.to_string(),
+                next_writer_clocks.get(&lane),
+                &lane.clock_key(),
                 parent.map(|p| &p.vector_clock),
             );
-            next_writer_clocks.insert(writer_id, vector_clock.clone());
+            next_writer_clocks.insert(lane, vector_clock.clone());
             let timestamp = Utc::now();
             envelopes.push(EventEnvelope {
                 journal_writer_id: JournalWriterId::from(self.journal_id),
@@ -1027,6 +1040,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
 mod tests {
     use super::*;
     use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+    use obzenflow_core::event::identity::WriterId;
     use obzenflow_core::id::StageId;
     use tokio::sync::Barrier;
 

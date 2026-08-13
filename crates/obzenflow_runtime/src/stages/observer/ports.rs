@@ -13,7 +13,12 @@
 //! observation surfaces. Core provides the domain primitives used by those
 //! surfaces, but it must not own runtime middleware contracts.
 
+use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
+use obzenflow_core::event::payloads::observability_payload::{
+    IndicatorSample, LoggingEvidence, LoggingLevel, UserMiddlewareEvent,
+};
+use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::{ChainEvent, EventEnvelope, StageId};
 use std::fmt;
@@ -34,7 +39,7 @@ impl ObserverDeterminism {
 
 #[derive(Debug, Clone, Default)]
 pub struct ObserverReport {
-    pub diagnostics: Vec<ChainEvent>,
+    pub diagnostics: Vec<ObserverDiagnostic>,
 }
 
 impl ObserverReport {
@@ -42,7 +47,7 @@ impl ObserverReport {
         Self::default()
     }
 
-    pub fn with_diagnostic(mut self, diagnostic: ChainEvent) -> Self {
+    pub fn with_diagnostic(mut self, diagnostic: ObserverDiagnostic) -> Self {
         self.diagnostics.push(diagnostic);
         self
     }
@@ -50,6 +55,57 @@ impl ObserverReport {
     pub fn is_empty(&self) -> bool {
         self.diagnostics.is_empty()
     }
+}
+
+/// The only durable evidence families an observer may ask the runtime to
+/// author. The surrounding `ChainEvent` remains entirely runtime-owned.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ObserverEvidence {
+    User(UserMiddlewareEvent),
+    Indicator(IndicatorSample),
+    Logging(LoggingEvidence),
+}
+
+/// Inert post-append local trace data. It cannot publish or mutate anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObserverLocalTrace {
+    pub level: LoggingLevel,
+    pub body: String,
+}
+
+/// One content-only observer publication request.
+#[derive(Debug, Clone)]
+pub struct ObserverDiagnostic {
+    pub evidence: ObserverEvidence,
+    pub local_trace: Option<ObserverLocalTrace>,
+}
+
+impl ObserverDiagnostic {
+    pub fn new(evidence: ObserverEvidence) -> Self {
+        Self {
+            evidence,
+            local_trace: None,
+        }
+    }
+
+    pub fn with_local_trace(mut self, level: LoggingLevel, body: impl Into<String>) -> Self {
+        self.local_trace = Some(ObserverLocalTrace {
+            level,
+            body: body.into(),
+        });
+        self
+    }
+}
+
+/// Runtime-selected semantic and envelope provenance for diagnostics.
+#[derive(Debug, Clone, Copy)]
+pub enum DiagnosticProvenance<'a> {
+    Root,
+    Derived {
+        parent: &'a EventEnvelope<ChainEvent>,
+        lineage: LineagePolicy,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -142,8 +198,8 @@ pub struct JoinObserverContext<'a> {
 pub enum SourcePollObserverOutcome {
     Batch { events: usize },
     Eof,
-    Error { message: String },
-    Rejected { reason: String },
+    Error { kind: ErrorKind },
+    Rejected { policy: Option<String> },
 }
 
 pub struct SourcePollObserverContext<'a> {
@@ -173,9 +229,25 @@ pub struct EffectObserverContext<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SinkDeliveryObserverOutcome {
-    Delivered,
-    Failed { message: String },
-    Rejected { reason: String },
+    Attempted { result: SinkDeliveryAttemptResult },
+    Rejected { policy: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SinkDeliveryAttemptResult {
+    ReportedSuccess,
+    ReportedPartial {
+        successful_count: u64,
+        failed_count: u64,
+    },
+    ReportedBuffered,
+    ReportedFailure {
+        final_attempt: bool,
+    },
+    HandlerError {
+        kind: ErrorKind,
+    },
+    HandlerPanicked,
 }
 
 pub struct SinkDeliveryObserverContext<'a> {
@@ -224,7 +296,7 @@ pub trait HandlerObserver: Send + Sync {
     fn after_handle(
         &self,
         _ctx: &HandlerObserverContext<'_>,
-        _outputs: &mut [ChainEvent],
+        _outputs: &[ChainEvent],
     ) -> ObserverReport {
         ObserverReport::empty()
     }
@@ -248,7 +320,7 @@ pub trait StatefulObserver: Send + Sync {
     fn after_state_emit(
         &self,
         _ctx: &StatefulObserverContext<'_>,
-        _outputs: &mut [ChainEvent],
+        _outputs: &[ChainEvent],
     ) -> ObserverReport {
         ObserverReport::empty()
     }
@@ -268,7 +340,7 @@ pub trait JoinObserver: Send + Sync {
     fn after_join_output(
         &self,
         _ctx: &JoinObserverContext<'_>,
-        _outputs: &mut [ChainEvent],
+        _outputs: &[ChainEvent],
     ) -> ObserverReport {
         ObserverReport::empty()
     }
@@ -284,7 +356,7 @@ pub trait SourcePollObserver: Send + Sync {
     fn after_source_poll(
         &self,
         _ctx: &SourcePollObserverContext<'_>,
-        _outputs: &mut [ChainEvent],
+        _outputs: &[ChainEvent],
     ) -> ObserverReport {
         ObserverReport::empty()
     }

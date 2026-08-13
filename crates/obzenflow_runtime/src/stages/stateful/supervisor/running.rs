@@ -86,7 +86,7 @@ pub(super) async fn dispatch_accumulating<
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
-            Some(&ctx.observers),
+            Some((&ctx.observers, ctx.lineage_policy)),
             &mut ctx.pending_outputs,
         )
         .await?
@@ -374,21 +374,23 @@ pub(super) async fn dispatch_accumulating<
                     run_stateful_before_accumulate_observers(
                         &ctx.observers,
                         &observer_ctx,
+                        ctx.lineage_policy,
                         &ctx.data_journal,
                         &ctx.instrumentation,
                         Some(&envelope),
                     )
-                    .await?;
+                    .await;
 
                     if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
                         run_stateful_after_accumulate_observers(
                             &ctx.observers,
                             &observer_ctx,
+                            ctx.lineage_policy,
                             &ctx.data_journal,
                             &ctx.instrumentation,
                             Some(&envelope),
                         )
-                        .await?;
+                        .await;
 
                         if let Some(state) = &heartbeat_state {
                             state.record_last_consumed(event_id);
@@ -459,11 +461,12 @@ pub(super) async fn dispatch_accumulating<
                     run_stateful_after_accumulate_observers(
                         &ctx.observers,
                         &observer_ctx,
+                        ctx.lineage_policy,
                         &ctx.data_journal,
                         &ctx.instrumentation,
                         Some(&envelope),
                     )
-                    .await?;
+                    .await;
                     if let Err(err) = &accumulate_result {
                         if let Some(fatal) = err.as_fatal() {
                             let duration = start.elapsed();
@@ -798,7 +801,7 @@ pub(super) async fn dispatch_emitting<
                 &mut ctx.backpressure_pulse,
                 &mut ctx.backpressure_stall,
                 Some(&ctx.output_contract),
-                Some(&ctx.observers),
+                Some((&ctx.observers, ctx.lineage_policy)),
                 &mut ctx.pending_outputs,
             )
             .await?
@@ -873,7 +876,7 @@ pub(super) async fn dispatch_emitting<
     .await;
 
     match emit_result {
-        Ok(mut events) if !events.is_empty() => {
+        Ok(events) if !events.is_empty() => {
             let stage_writer_id = ctx.writer_id.ok_or("No writer ID available")?;
             let observer_ctx = StatefulObserverContext {
                 stage_id: ctx.stage_id,
@@ -889,12 +892,13 @@ pub(super) async fn dispatch_emitting<
             run_stateful_after_emit_observers(
                 &ctx.observers,
                 &observer_ctx,
-                events.as_mut_slice(),
+                ctx.lineage_policy,
+                events.as_slice(),
                 &ctx.data_journal,
                 &ctx.instrumentation,
                 ctx.last_consumed_envelope.as_ref(),
             )
-            .await?;
+            .await;
 
             for mut event in events {
                 event.writer_id = stage_writer_id;

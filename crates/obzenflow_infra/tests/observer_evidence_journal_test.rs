@@ -6,12 +6,12 @@
 //!
 //! This is the automated counterpart to the `payment_gateway_resilience`
 //! example: it runs a real flow with a latency `indicator()` on a handler stage
-//! and a `log()` observer on a sink, then inspects the stage data journals to
+//! and a `log_event(..)` observer on a sink, then inspects the stage data journals to
 //! prove that
 //!
 //! * a typed `IndicatorSample` is published once per handler execution, carrying
 //!   the raw `value_ms` measurement and its identity, with no objective embedded;
-//! * a logging `User` evidence row is published per sink delivery;
+//! * a typed logging evidence row is published per sink delivery;
 //! * neither indicator nor logging evidence is mirrored into `system.log`;
 //! * enabling the observers does not change the domain output count.
 //!
@@ -20,11 +20,14 @@
 //! (FLOWIP-115l) over these raw samples.
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
+use obzenflow_adapters::middleware::observability::{
+    indicator, log_event, IndicatorKind, LoggingLevel,
+};
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::observability_payload::{
-    IndicatorSample, MiddlewareLifecycle, ObservabilityPayload,
+    IndicatorSample, LoggingEvidence, LoggingOccurrence, LoggingSinkAttemptResult,
+    LoggingSinkOutcome, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -155,13 +158,13 @@ fn indicator_samples(events: &[ChainEvent]) -> Vec<IndicatorSample> {
         .collect()
 }
 
-fn logging_rows(events: &[ChainEvent]) -> Vec<&serde_json::Value> {
+fn logging_rows(events: &[ChainEvent]) -> Vec<&LoggingEvidence> {
     events
         .iter()
         .filter_map(|event| match &event.content {
             ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::User(user),
-            )) if user.event_type == "obzenflow.logging" => Some(&user.payload),
+                MiddlewareLifecycle::Logging(evidence),
+            )) => Some(evidence),
             _ => None,
         })
         .collect()
@@ -197,7 +200,9 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
                         .tag("dependency", "ledger")
                 ]);
                 handoff = sink!(Processed => handoff, observers: [
-                    log().prefix("handoff")
+                    log_event("checkout.processed.handoff")
+                        .level(LoggingLevel::Info)
+                        .tag("operation", "checkout.process")
                 ]);
             },
 
@@ -248,14 +253,24 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
         INPUT_COUNT,
         "exactly one logging evidence row per sink delivery"
     );
-    assert!(logging_rows.iter().all(|payload| {
-        payload["action"] == "sink_delivery_observed"
-            && payload["details"]["outcome"]["kind"] == "delivered"
-            && payload["details"]["stage_input_position"].is_u64()
-    }));
-    assert!(logging_rows.iter().all(|payload| {
-        payload["action"] != "before_sink_delivery" && payload["action"] != "after_sink_delivery"
-    }));
+    assert!(logging_rows.iter().all(|evidence| matches!(
+        evidence.occurrence(),
+        LoggingOccurrence::SinkDeliveryBoundaryObserved {
+            input,
+            outcome: LoggingSinkOutcome::Attempted {
+                result: LoggingSinkAttemptResult::ReportedSuccess,
+            },
+        } if input.stage_input_position.is_some()
+    )));
+    assert!(handoff_events
+        .iter()
+        .filter(|event| matches!(
+            &event.content,
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::Logging(_)
+            ))
+        ))
+        .all(|event| event.admission_seq.is_none()));
 
     // 3. No indicator or logging evidence mirrors into the system journal.
     assert!(
@@ -263,8 +278,8 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
         "indicator samples must not mirror to system.log"
     );
     assert!(
-        !system_log.contains("obzenflow.logging"),
-        "user logging evidence must not mirror to system.log"
+        !system_log.contains("checkout.processed.handoff"),
+        "typed logging evidence must not mirror to system.log"
     );
 
     // 4. Non-interference: the observers do not drop or duplicate domain output.

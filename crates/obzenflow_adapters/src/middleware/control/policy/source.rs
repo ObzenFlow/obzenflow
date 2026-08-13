@@ -211,7 +211,10 @@ impl SourceBoundary for PerSourcePolicyBoundary {
                             prior.observe(&outcome, &mut ctx);
                         }
                         return SourceBoundaryReport {
-                            outcome: SourceBoundaryOutcome::Rejected { reason },
+                            outcome: SourceBoundaryOutcome::Rejected {
+                                policy: Some(policy.label().to_string()),
+                                reason,
+                            },
                             control_events: ctx.take_control_events(),
                         };
                     }
@@ -531,7 +534,10 @@ mod tests {
         assert_eq!(executed.load(Ordering::SeqCst), 0);
         assert!(matches!(
             report.outcome,
-            SourceBoundaryOutcome::Rejected { ref reason } if reason == "not now"
+            SourceBoundaryOutcome::Rejected {
+                ref policy,
+                ref reason,
+            } if policy.as_deref() == Some("rejecting") && reason == "not now"
         ));
         assert_eq!(report.control_events.len(), 1);
         assert_eq!(

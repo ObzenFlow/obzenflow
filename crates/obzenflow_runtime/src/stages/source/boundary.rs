@@ -86,7 +86,10 @@ pub enum SourceBoundaryOutcome {
     Polled(SourcePollReport),
     /// A policy rejected before polling. 115a source policies do not use this
     /// arm, but the neutral seam reserves it for future fail-fast policies.
-    Rejected { reason: String },
+    Rejected {
+        policy: Option<String>,
+        reason: String,
+    },
 }
 
 /// Source-boundary report consumed by the runtime supervisor.

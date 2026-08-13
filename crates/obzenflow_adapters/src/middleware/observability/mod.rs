@@ -11,4 +11,5 @@ pub mod indicator;
 pub mod logging;
 
 pub use indicator::{indicator, latency, IndicatorKind, IndicatorMiddlewareFactory};
-pub use logging::{log, LoggingMiddleware, LoggingMiddlewareFactory};
+pub use logging::{log_event, LoggingMiddleware, LoggingMiddlewareFactory};
+pub use obzenflow_core::event::payloads::observability_payload::LoggingLevel;

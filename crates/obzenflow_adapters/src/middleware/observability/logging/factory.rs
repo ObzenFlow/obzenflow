@@ -2,19 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Authoring factory for the logging observer (FLOWIP-115f).
-//!
-//! `log()` attaches a logging observer to the surfaces it supports (handler,
-//! stateful, join, source poll, and sink delivery). Each hook publishes a
-//! journalled `MiddlewareLifecycle::User` evidence row and may also mirror the
-//! message to `tracing` for local visibility; the journalled wide event is the
-//! source of truth. The factory is hook-bound and has no legacy shell.
+//! Required-name authoring factory for typed logging evidence (FLOWIP-115m).
 
 use super::LoggingMiddleware;
 use crate::middleware::{
     validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
     MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+};
+use obzenflow_core::event::payloads::observability_payload::{
+    LoggingAttribute, LoggingEventName, LoggingLevel,
 };
 use obzenflow_runtime::stages::observer::ObserverCommitError;
 use serde_json::json;
@@ -23,45 +20,50 @@ use std::sync::Arc;
 /// Override-key family for logging observer middleware.
 pub struct LoggingFamily;
 
-/// Fluent authoring factory for the logging observer.
+/// Fluent authoring factory for one named logging occurrence family.
 #[derive(Clone)]
 pub struct LoggingMiddlewareFactory {
-    prefix: Option<String>,
-    level: tracing::Level,
-}
-
-impl Default for LoggingMiddlewareFactory {
-    fn default() -> Self {
-        Self::new()
-    }
+    event: String,
+    level: LoggingLevel,
+    tags: Vec<(String, String)>,
+    trace_mirror: bool,
 }
 
 impl LoggingMiddlewareFactory {
-    pub fn new() -> Self {
+    pub fn new(event: impl Into<String>) -> Self {
         Self {
-            prefix: None,
-            level: tracing::Level::INFO,
+            event: event.into(),
+            level: LoggingLevel::Info,
+            tags: Vec::new(),
+            trace_mirror: false,
         }
     }
 
-    /// Prefix every journalled and traced message.
-    pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.prefix = Some(prefix.into());
-        self
-    }
-
-    /// Set the tracing level for the local mirror of each evidence row.
-    pub fn level(mut self, level: tracing::Level) -> Self {
+    pub fn level(mut self, level: LoggingLevel) -> Self {
         self.level = level;
         self
     }
 
-    fn build(&self) -> LoggingMiddleware {
-        let middleware = match &self.prefix {
-            Some(prefix) => LoggingMiddleware::with_prefix(prefix.clone()),
-            None => LoggingMiddleware::new(),
-        };
-        middleware.with_level(self.level)
+    pub fn tag(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.tags.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn trace_mirror(mut self) -> Self {
+        self.trace_mirror = true;
+        self
+    }
+
+    fn build(&self) -> Result<LoggingMiddleware, String> {
+        let event = LoggingEventName::new(self.event.clone()).map_err(|error| error.to_string())?;
+        let attributes = self
+            .tags
+            .iter()
+            .map(|(key, value)| LoggingAttribute::new(key.clone(), value.clone()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        LoggingMiddleware::new(event, self.level, attributes, self.trace_mirror)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -76,8 +78,10 @@ impl MiddlewareFactory for LoggingMiddlewareFactory {
 
     fn config_snapshot(&self) -> Option<serde_json::Value> {
         Some(json!({
-            "prefix": self.prefix,
-            "level": self.level.to_string(),
+            "event": self.event,
+            "level": self.level,
+            "tags": self.tags,
+            "trace_mirror": self.trace_mirror,
         }))
     }
 
@@ -101,10 +105,20 @@ impl MiddlewareFactory for LoggingMiddlewareFactory {
         context: &MiddlewareMaterializationContext<'_>,
     ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
         let declaration = self.declaration();
-        validate_attachment_request(&declaration, &request).map_err(|err| {
-            MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
+        validate_attachment_request(&declaration, &request).map_err(|error| {
+            MiddlewareFactoryError::materialization_failed(
+                self.label(),
+                &context.config.name,
+                error,
+            )
         })?;
-        let observer = Arc::new(self.build());
+        let observer = Arc::new(self.build().map_err(|error| {
+            MiddlewareFactoryError::materialization_failed(
+                self.label(),
+                &context.config.name,
+                ObserverCommitError::new(error),
+            )
+        })?);
         match request.surface.kind() {
             MiddlewareSurfaceKind::Handler => {
                 Ok(MiddlewareSurfaceAttachment::handler_observer(observer))
@@ -130,10 +144,7 @@ impl MiddlewareFactory for LoggingMiddlewareFactory {
     }
 }
 
-/// Create a logging observer factory (FLOWIP-115f).
-///
-/// Publishes a journalled `MiddlewareLifecycle::User` evidence row at each
-/// supported hook, e.g. on sink delivery for an operational handoff.
-pub fn log() -> LoggingMiddlewareFactory {
-    LoggingMiddlewareFactory::new()
+/// Create a logging observer with required durable semantic identity.
+pub fn log_event(name: impl Into<String>) -> LoggingMiddlewareFactory {
+    LoggingMiddlewareFactory::new(name)
 }

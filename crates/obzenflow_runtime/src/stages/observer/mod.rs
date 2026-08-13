@@ -12,12 +12,14 @@ pub(crate) mod dispatch;
 pub mod ports;
 
 pub use ports::{
-    EffectObserver, EffectObserverContext, EffectObserverOutcome, HandlerObserver,
-    HandlerObserverContext, JoinCanonicalMergeMetadata, JoinDeliverySnapshot, JoinObserver,
-    JoinObserverContext, JoinSide, JoinSignalKind, JoinSignalSnapshot, ObserverCommitError,
-    ObserverCommitResult, ObserverDeterminism, ObserverReport, OutputCommitObserver,
-    OutputCommitObserverContext, SinkDeliveryObserver, SinkDeliveryObserverContext,
-    SinkDeliveryObserverOutcome, SourcePollObserver, SourcePollObserverContext,
-    SourcePollObserverOutcome, StageLifecycleObserver, StageLifecycleObserverContext,
-    StageLifecyclePhase, StageObserverBundle, StatefulObserver, StatefulObserverContext,
+    DiagnosticProvenance, EffectObserver, EffectObserverContext, EffectObserverOutcome,
+    HandlerObserver, HandlerObserverContext, JoinCanonicalMergeMetadata, JoinDeliverySnapshot,
+    JoinObserver, JoinObserverContext, JoinSide, JoinSignalKind, JoinSignalSnapshot,
+    ObserverCommitError, ObserverCommitResult, ObserverDeterminism, ObserverDiagnostic,
+    ObserverEvidence, ObserverLocalTrace, ObserverReport, OutputCommitObserver,
+    OutputCommitObserverContext, SinkDeliveryAttemptResult, SinkDeliveryObserver,
+    SinkDeliveryObserverContext, SinkDeliveryObserverOutcome, SourcePollObserver,
+    SourcePollObserverContext, SourcePollObserverOutcome, StageLifecycleObserver,
+    StageLifecycleObserverContext, StageLifecyclePhase, StageObserverBundle, StatefulObserver,
+    StatefulObserverContext,
 };

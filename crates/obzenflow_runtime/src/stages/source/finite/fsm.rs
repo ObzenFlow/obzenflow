@@ -612,12 +612,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Finite source lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 
@@ -683,12 +678,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Finite source lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 
@@ -741,12 +731,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     &ctx.data_journal,
                     &ctx.instrumentation,
                 )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Finite source lifecycle observer failed: {e}"
-                    ))
-                })?;
+                .await;
                 Ok(())
             }
 

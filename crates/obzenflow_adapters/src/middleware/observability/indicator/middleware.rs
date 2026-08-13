@@ -10,11 +10,10 @@
 
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
-    IndicatorKind, IndicatorSample, IndicatorTag, MiddlewareLifecycle, ObservabilityPayload,
+    IndicatorKind, IndicatorSample, IndicatorTag,
 };
-use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::time::MetricsDuration;
-use obzenflow_core::{EventId, StageId, WriterId};
+use obzenflow_core::EventId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -103,13 +102,5 @@ impl IndicatorMiddleware {
                 })
                 .collect(),
         }
-    }
-
-    /// Build the journalled wide-event diagnostic carrying one sample.
-    pub(super) fn diagnostic(&self, stage_id: StageId, value: MetricsDuration) -> ChainEvent {
-        ChainEventFactory::observability_event(
-            WriterId::from(stage_id),
-            ObservabilityPayload::Middleware(MiddlewareLifecycle::Indicator(self.sample(value))),
-        )
     }
 }

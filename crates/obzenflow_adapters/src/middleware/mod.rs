@@ -20,7 +20,7 @@
 //!   only inside effect resilience; it is not a standalone attachment.
 //!
 //! Built-in observers are constructed with `indicator()` / `latency()` and
-//! `log()`; built-in control middleware with the checked
+//! `log_event()`; built-in control middleware with the checked
 //! `CircuitBreaker::builder()` and `rate_limit()`. In the DSL, middleware is
 //! attached per stage as an array.
 //!
@@ -72,7 +72,7 @@
 //!     fn after_handle(
 //!         &self,
 //!         _ctx: &HandlerObserverContext<'_>,
-//!         _outputs: &mut [obzenflow_core::ChainEvent],
+//!         _outputs: &[obzenflow_core::ChainEvent],
 //!     ) -> ObserverReport {
 //!         // Build and attach an evidence row, or return `ObserverReport::empty()`.
 //!         ObserverReport::empty()
@@ -159,7 +159,7 @@ pub use control::{
     RateLimiterFactory, RateLimiterMiddleware, Retry,
 };
 
-pub use observability::{log, LoggingMiddleware, LoggingMiddlewareFactory};
+pub use observability::{log_event, LoggingLevel, LoggingMiddleware, LoggingMiddlewareFactory};
 
 // Middleware validation helpers
 pub use validation::{validate_middleware_safety, ValidationResult};

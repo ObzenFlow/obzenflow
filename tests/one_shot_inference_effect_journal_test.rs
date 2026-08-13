@@ -945,7 +945,7 @@ async fn inference_rejects_a_non_resilience_policy_before_role_or_port_resolutio
                 interpret_calls: interpret_calls.clone(),
                 prompt_suffix: "",
             },
-            Box::new(LoggingMiddlewareFactory::new()),
+            Box::new(LoggingMiddlewareFactory::new("test.inference_effect")),
         ))
         .await;
 

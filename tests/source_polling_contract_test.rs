@@ -335,7 +335,7 @@ impl SourcePollObserver for SourceContractObserver {
     fn after_source_poll(
         &self,
         ctx: &SourcePollObserverContext<'_>,
-        _outputs: &mut [ChainEvent],
+        _outputs: &[ChainEvent],
     ) -> ObserverReport {
         self.log.push(ObserverObservation {
             outcome: ctx.outcome.clone(),

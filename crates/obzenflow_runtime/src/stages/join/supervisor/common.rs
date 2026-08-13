@@ -204,7 +204,7 @@ pub(super) async fn flush_pending_outputs<
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
-            Some(&ctx.observers),
+            Some((&ctx.observers, ctx.lineage_policy)),
             &mut ctx.pending_outputs,
         )
         .await?
@@ -266,11 +266,13 @@ pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
     run_join_before_input_observers(
         &ctx.observers,
         &observer_ctx,
+        ctx.lineage_policy,
         &ctx.data_journal,
         &ctx.instrumentation,
         parent,
     )
-    .await
+    .await;
+    Ok(())
 }
 
 pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
@@ -278,7 +280,7 @@ pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
     input: Option<&ChainEvent>,
     delivery: Option<&JoinDeliverySnapshot>,
     signal: Option<&JoinSignalSnapshot>,
-    outputs: &mut [ChainEvent],
+    outputs: &[ChainEvent],
     parent: Option<&EventEnvelope<ChainEvent>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let flow_id = ctx.flow_id.to_string();
@@ -303,12 +305,14 @@ pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
     run_join_after_output_observers(
         &ctx.observers,
         &observer_ctx,
+        ctx.lineage_policy,
         outputs,
         &ctx.data_journal,
         &ctx.instrumentation,
         parent,
     )
-    .await
+    .await;
+    Ok(())
 }
 
 pub(super) fn delivery_snapshot(

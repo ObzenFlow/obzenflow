@@ -12,20 +12,24 @@
 
 use std::sync::Arc;
 
+use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
 use obzenflow_core::event::{EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId};
 
 use super::{
-    EffectObserverContext, EffectObserverOutcome, HandlerObserverContext, JoinObserverContext,
-    ObserverCommitResult, ObserverReport, OutputCommitObserverContext, SinkDeliveryObserverContext,
-    SinkDeliveryObserverOutcome, SourcePollObserverContext, StageLifecycleObserverContext,
-    StageLifecyclePhase, StageObserverBundle, StatefulObserverContext,
+    DiagnosticProvenance, EffectObserverContext, EffectObserverOutcome, HandlerObserverContext,
+    JoinObserverContext, ObserverCommitResult, ObserverReport, OutputCommitObserverContext,
+    SinkDeliveryObserverContext, SinkDeliveryObserverOutcome, SourcePollObserverContext,
+    StageLifecycleObserverContext, StageLifecyclePhase, StageObserverBundle,
+    StatefulObserverContext,
 };
 
 use crate::metrics::instrumentation::StageInstrumentation;
-use crate::stages::common::supervision::output_committer::append_observer_diagnostics;
+use crate::stages::common::supervision::output_committer::{
+    append_observer_diagnostics, reject_invalid_observer_diagnostics,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_before_handler_observers(
@@ -36,12 +40,13 @@ pub(crate) async fn run_before_handler_observers(
     scope: MiddlewareExecutionScope,
     input: &ChainEvent,
     stage_input_position: Option<u64>,
+    lineage: LineagePolicy,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     parent: &EventEnvelope<ChainEvent>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) {
     let Some(observer) = observers.handler.as_ref() else {
-        return Ok(());
+        return;
     };
     let ctx = HandlerObserverContext {
         stage_id,
@@ -54,12 +59,12 @@ pub(crate) async fn run_before_handler_observers(
     let report = observer.before_handle(&ctx);
     append_observer_diagnostics(
         report,
-        flow_context,
+        Some(flow_context),
         Some(instrumentation),
         data_journal,
-        Some(parent),
+        DiagnosticProvenance::Derived { parent, lineage },
     )
-    .await
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -71,13 +76,14 @@ pub(crate) async fn run_after_handler_observers(
     scope: MiddlewareExecutionScope,
     input: &ChainEvent,
     stage_input_position: Option<u64>,
-    outputs: &mut [ChainEvent],
+    lineage: LineagePolicy,
+    outputs: &[ChainEvent],
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     parent: &EventEnvelope<ChainEvent>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) {
     let Some(observer) = observers.handler.as_ref() else {
-        return Ok(());
+        return;
     };
     let ctx = HandlerObserverContext {
         stage_id,
@@ -90,97 +96,118 @@ pub(crate) async fn run_after_handler_observers(
     let report = observer.after_handle(&ctx, outputs);
     append_observer_diagnostics(
         report,
-        flow_context,
+        Some(flow_context),
         Some(instrumentation),
         data_journal,
-        Some(parent),
+        DiagnosticProvenance::Derived { parent, lineage },
     )
-    .await
+    .await;
 }
 
 pub(crate) async fn run_stateful_after_emit_observers(
     observers: &StageObserverBundle,
     ctx: &StatefulObserverContext<'_>,
-    outputs: &mut [ChainEvent],
+    lineage: LineagePolicy,
+    outputs: &[ChainEvent],
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     parent: Option<&EventEnvelope<ChainEvent>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) {
     let Some(observer) = observers.stateful.as_ref() else {
-        return Ok(());
+        return;
     };
     let report = observer.after_state_emit(ctx, outputs);
+    if ctx.input.is_some() && parent.is_none() {
+        reject_invalid_observer_diagnostics(report, ctx.flow_context, Some(instrumentation));
+        return;
+    }
     append_observer_diagnostics(
         report,
-        ctx.flow_context,
+        Some(ctx.flow_context),
         Some(instrumentation),
         data_journal,
-        parent,
+        parent.map_or(DiagnosticProvenance::Root, |parent| {
+            DiagnosticProvenance::Derived { parent, lineage }
+        }),
     )
-    .await
+    .await;
 }
 
 pub(crate) async fn run_stateful_before_accumulate_observers(
     observers: &StageObserverBundle,
     ctx: &StatefulObserverContext<'_>,
+    lineage: LineagePolicy,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     parent: Option<&EventEnvelope<ChainEvent>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) {
     let Some(observer) = observers.stateful.as_ref() else {
-        return Ok(());
+        return;
     };
     let report = observer.before_state_accumulate(ctx);
+    if ctx.input.is_some() && parent.is_none() {
+        reject_invalid_observer_diagnostics(report, ctx.flow_context, Some(instrumentation));
+        return;
+    }
     append_observer_diagnostics(
         report,
-        ctx.flow_context,
+        Some(ctx.flow_context),
         Some(instrumentation),
         data_journal,
-        parent,
+        parent.map_or(DiagnosticProvenance::Root, |parent| {
+            DiagnosticProvenance::Derived { parent, lineage }
+        }),
     )
-    .await
+    .await;
 }
 
 pub(crate) async fn run_stateful_after_accumulate_observers(
     observers: &StageObserverBundle,
     ctx: &StatefulObserverContext<'_>,
+    lineage: LineagePolicy,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     parent: Option<&EventEnvelope<ChainEvent>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) {
     let Some(observer) = observers.stateful.as_ref() else {
-        return Ok(());
+        return;
     };
     let report = observer.after_state_accumulate(ctx);
+    if ctx.input.is_some() && parent.is_none() {
+        reject_invalid_observer_diagnostics(report, ctx.flow_context, Some(instrumentation));
+        return;
+    }
     append_observer_diagnostics(
         report,
-        ctx.flow_context,
+        Some(ctx.flow_context),
         Some(instrumentation),
         data_journal,
-        parent,
+        parent.map_or(DiagnosticProvenance::Root, |parent| {
+            DiagnosticProvenance::Derived { parent, lineage }
+        }),
     )
-    .await
+    .await;
 }
 
 pub(crate) async fn run_source_poll_observers(
     observers: &StageObserverBundle,
     ctx: &SourcePollObserverContext<'_>,
-    outputs: &mut [ChainEvent],
+    outputs: &[ChainEvent],
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) {
     let Some(observer) = observers.source_poll.as_ref() else {
-        return Ok(());
+        return;
     };
     let report = observer.after_source_poll(ctx, outputs);
     append_observer_diagnostics(
         report,
-        ctx.flow_context,
+        Some(ctx.flow_context),
         Some(instrumentation),
         data_journal,
-        None,
+        DiagnosticProvenance::Root,
     )
-    .await
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -193,12 +220,13 @@ pub(crate) async fn run_sink_delivery_observers(
     input: &ChainEvent,
     stage_input_position: Option<u64>,
     outcome: SinkDeliveryObserverOutcome,
+    lineage: LineagePolicy,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     parent: &EventEnvelope<ChainEvent>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) {
     let Some(observer) = observers.sink_delivery.as_ref() else {
-        return Ok(());
+        return;
     };
     let ctx = SinkDeliveryObserverContext {
         stage_id,
@@ -211,12 +239,12 @@ pub(crate) async fn run_sink_delivery_observers(
     let report = observer.after_sink_delivery(&ctx);
     append_observer_diagnostics(
         report,
-        flow_context,
+        Some(flow_context),
         Some(instrumentation),
         data_journal,
-        Some(parent),
+        DiagnosticProvenance::Derived { parent, lineage },
     )
-    .await
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -228,12 +256,13 @@ pub(crate) async fn run_effect_observers(
     scope: MiddlewareExecutionScope,
     effect_type: &str,
     outcome: EffectObserverOutcome,
+    lineage: LineagePolicy,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: Option<&Arc<StageInstrumentation>>,
     parent: Option<&EventEnvelope<ChainEvent>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) {
     let Some(observer) = observers.effect.as_ref() else {
-        return Ok(());
+        return;
     };
     let ctx = EffectObserverContext {
         stage_id,
@@ -244,19 +273,17 @@ pub(crate) async fn run_effect_observers(
         outcome,
     };
     let report = observer.after_effect(&ctx);
-    if let Some(flow_context) = flow_context {
-        append_observer_diagnostics(report, flow_context, instrumentation, data_journal, parent)
-            .await
-    } else if !report.is_empty() {
-        tracing::warn!(
-            stage_name,
-            effect_type,
-            "dropping effect observer diagnostics because no flow context is available"
-        );
-        Ok(())
-    } else {
-        Ok(())
-    }
+    let provenance = parent.map_or(DiagnosticProvenance::Root, |parent| {
+        DiagnosticProvenance::Derived { parent, lineage }
+    });
+    append_observer_diagnostics(
+        report,
+        flow_context,
+        instrumentation,
+        data_journal,
+        provenance,
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -269,9 +296,9 @@ pub(crate) async fn run_stage_lifecycle_observers(
     phase: StageLifecyclePhase,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) {
     let Some(observer) = observers.stage_lifecycle.as_ref() else {
-        return Ok(());
+        return;
     };
     let ctx = StageLifecycleObserverContext {
         stage_id,
@@ -282,55 +309,69 @@ pub(crate) async fn run_stage_lifecycle_observers(
     let report = observer.on_stage_lifecycle(&ctx);
     append_observer_diagnostics(
         report,
-        flow_context,
+        Some(flow_context),
         Some(instrumentation),
         data_journal,
-        None,
+        DiagnosticProvenance::Root,
     )
-    .await
+    .await;
 }
 
 pub(crate) async fn run_join_after_output_observers(
     observers: &StageObserverBundle,
     ctx: &JoinObserverContext<'_>,
-    outputs: &mut [ChainEvent],
+    lineage: LineagePolicy,
+    outputs: &[ChainEvent],
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     parent: Option<&EventEnvelope<ChainEvent>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) {
     let Some(observer) = observers.join.as_ref() else {
-        return Ok(());
+        return;
     };
     let report = observer.after_join_output(ctx, outputs);
+    if ctx.input.is_some() && parent.is_none() {
+        reject_invalid_observer_diagnostics(report, ctx.flow_context, Some(instrumentation));
+        return;
+    }
     append_observer_diagnostics(
         report,
-        ctx.flow_context,
+        Some(ctx.flow_context),
         Some(instrumentation),
         data_journal,
-        parent,
+        parent.map_or(DiagnosticProvenance::Root, |parent| {
+            DiagnosticProvenance::Derived { parent, lineage }
+        }),
     )
-    .await
+    .await;
 }
 
 pub(crate) async fn run_join_before_input_observers(
     observers: &StageObserverBundle,
     ctx: &JoinObserverContext<'_>,
+    lineage: LineagePolicy,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     parent: Option<&EventEnvelope<ChainEvent>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) {
     let Some(observer) = observers.join.as_ref() else {
-        return Ok(());
+        return;
     };
     let report = observer.before_join_input(ctx);
+    if ctx.input.is_some() && parent.is_none() {
+        reject_invalid_observer_diagnostics(report, ctx.flow_context, Some(instrumentation));
+        return;
+    }
     append_observer_diagnostics(
         report,
-        ctx.flow_context,
+        Some(ctx.flow_context),
         Some(instrumentation),
         data_journal,
-        parent,
+        parent.map_or(DiagnosticProvenance::Root, |parent| {
+            DiagnosticProvenance::Derived { parent, lineage }
+        }),
     )
-    .await
+    .await;
 }
 
 pub(crate) fn run_output_commit_observers(

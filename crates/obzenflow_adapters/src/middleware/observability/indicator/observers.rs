@@ -14,7 +14,8 @@
 use super::IndicatorMiddleware;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_runtime::stages::observer::{
-    HandlerObserver, HandlerObserverContext, ObserverDeterminism, ObserverReport,
+    HandlerObserver, HandlerObserverContext, ObserverDeterminism, ObserverDiagnostic,
+    ObserverEvidence, ObserverReport,
 };
 
 impl HandlerObserver for IndicatorMiddleware {
@@ -37,11 +38,13 @@ impl HandlerObserver for IndicatorMiddleware {
     fn after_handle(
         &self,
         ctx: &HandlerObserverContext<'_>,
-        _outputs: &mut [ChainEvent],
+        _outputs: &[ChainEvent],
     ) -> ObserverReport {
         // One sample per execution, recording the raw measured duration. The
         // objective/threshold is applied read-side (FLOWIP-115l), not here.
         let value = self.duration_for_input(ctx.input);
-        ObserverReport::empty().with_diagnostic(self.diagnostic(ctx.stage_id, value))
+        ObserverReport::empty().with_diagnostic(ObserverDiagnostic::new(
+            ObserverEvidence::Indicator(self.sample(value)),
+        ))
     }
 }

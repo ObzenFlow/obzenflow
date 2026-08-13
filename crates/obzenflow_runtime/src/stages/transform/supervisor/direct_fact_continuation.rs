@@ -84,11 +84,12 @@ pub(super) async fn start_if_eligible<
         scope,
         &envelope.event,
         Some(input_position.0),
+        ctx.lineage_policy,
         &ctx.data_journal,
         &ctx.instrumentation,
         envelope,
     )
-    .await?;
+    .await;
 
     let admission = DirectFactAdmission::new(envelope.event.event_type().into(), bound);
     let effect_writer = ctx
@@ -254,9 +255,9 @@ async fn finish_success<
     ctx: &mut TransformContext<H>,
     continuation: DirectFactContinuation,
     flow_context: &FlowContext,
-    mut transformed_events: Vec<ChainEvent>,
+    transformed_events: Vec<ChainEvent>,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
-    if let Err(error) = run_after_handler_observers(
+    run_after_handler_observers(
         &ctx.observers,
         ctx.stage_id,
         &ctx.stage_name,
@@ -264,25 +265,13 @@ async fn finish_success<
         continuation.scope,
         &continuation.envelope.event,
         continuation.input_position.map(|position| position.0),
-        transformed_events.as_mut_slice(),
+        ctx.lineage_policy,
+        transformed_events.as_slice(),
         &ctx.data_journal,
         &ctx.instrumentation,
         &continuation.envelope,
     )
-    .await
-    {
-        return fail(
-            sup,
-            ctx,
-            continuation,
-            direct_fatal(
-                StageFatalCode::Coordination,
-                StageFatalReason::CoordinationFailure,
-                format!("generated after-handler observer failed: {error}"),
-            ),
-        )
-        .await;
-    }
+    .await;
 
     let mut pending = VecDeque::<PendingOutput>::new();
     for event in transformed_events {
@@ -378,7 +367,7 @@ async fn finish_success<
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
-            Some(&ctx.observers),
+            Some((&ctx.observers, ctx.lineage_policy)),
             &mut pending,
         )
         .await

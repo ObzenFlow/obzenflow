@@ -9,8 +9,6 @@ error[E0432]: unresolved imports `obzenflow_runtime::stages::common::handlers::D
   = help: consider importing one of these variants instead:
           obzenflow_adapters::middleware::SinkDeliveryPolicyOutcome::Delivered
           obzenflow_adapters::middleware::SourcePollOutcome::Delivered
-          obzenflow_adapters::middleware::observer::SinkDeliveryObserverOutcome::Delivered
-          obzenflow_runtime::stages::observer::SinkDeliveryObserverOutcome::Delivered
           obzenflow_runtime::stages::sink::journal_sink::SinkDeliveryAttemptOutcome::Delivered
   = help: consider importing this variant instead:
           obzenflow_core::event::ChainEventContent::Delivery
