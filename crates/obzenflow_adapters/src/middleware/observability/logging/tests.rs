@@ -10,8 +10,8 @@ use crate::middleware::{
 };
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::observability_payload::{
-    LoggingAttribute, LoggingEventName, LoggingLevel, LoggingOccurrence, LoggingSinkAttemptResult,
-    LoggingSinkOutcome, LoggingSourceOutcome,
+    LoggingAttribute, LoggingEventName, LoggingLevel, LoggingOccurrence, LoggingPolicyIdentity,
+    LoggingSinkAttemptResult, LoggingSinkOutcome, LoggingSourceOutcome,
 };
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::vector_clock::VectorClock;
@@ -92,11 +92,18 @@ fn handler_report_is_content_only_and_payload_opaque() {
     assert!(matches!(
         evidence.occurrence(),
         LoggingOccurrence::HandlerInputObserved { input }
-            if input.stage_input_position == Some(7)
+            if input.stage_input_position == 7
     ));
     assert!(!serde_json::to_string(evidence)
         .unwrap()
         .contains("must-not-appear"));
+
+    let missing_position = HandlerObserverContext {
+        stage_input_position: None,
+        ..ctx
+    };
+    assert!(HandlerObserver::before_handle(&middleware, &missing_position).is_empty());
+    assert!(HandlerObserver::after_handle(&middleware, &missing_position, &[]).is_empty());
 }
 
 #[test]
@@ -145,7 +152,7 @@ fn handler_and_stateful_rows_have_locked_multiplicity_and_signal_behaviour() {
     assert!(matches!(
         occurrence(HandlerObserver::before_handle(&middleware, &handler)),
         LoggingOccurrence::HandlerInputObserved { input }
-            if input.stage_input_position == Some(11)
+            if input.stage_input_position == 11
     ));
     assert!(matches!(
         occurrence(HandlerObserver::after_handle(
@@ -233,7 +240,7 @@ fn join_rows_require_a_canonical_delivery_and_never_expand_fanout() {
     assert!(matches!(
         occurrence(JoinObserver::before_join_input(&middleware, &ctx)),
         LoggingOccurrence::JoinInputObserved { input, delivery }
-            if input.stage_input_position == Some(17)
+            if input.stage_input_position == 17
                 && delivery.reference_high_water == high_water
                 && delivery.canonical_merge.as_ref().and_then(|m| m.reader_index) == Some(2)
     ));
@@ -282,6 +289,9 @@ fn source_poll_maps_every_closed_outcome_to_exactly_one_row() {
         SourcePollObserverOutcome::Rejected {
             policy: Some("source_breaker".to_string()),
         },
+        SourcePollObserverOutcome::Rejected {
+            policy: Some("secret=sk_live_canary".to_string()),
+        },
     ];
 
     for case in cases {
@@ -294,7 +304,9 @@ fn source_poll_maps_every_closed_outcome_to_exactly_one_row() {
                 LoggingSourceOutcome::Error { kind: kind.clone() }
             }
             SourcePollObserverOutcome::Rejected { policy } => LoggingSourceOutcome::Rejected {
-                policy: policy.clone(),
+                policy: policy
+                    .as_deref()
+                    .and_then(|value| LoggingPolicyIdentity::new(value).ok()),
             },
         };
         let ctx = SourcePollObserverContext {
@@ -500,8 +512,14 @@ fn sink_delivery_uses_exact_boundary_taxonomy_and_canonical_body() {
                 policy: Some("circuit_breaker".to_string()),
             },
             LoggingSinkOutcome::Rejected {
-                policy: Some("circuit_breaker".to_string()),
+                policy: Some(LoggingPolicyIdentity::new("circuit_breaker").unwrap()),
             },
+        ),
+        (
+            SinkDeliveryObserverOutcome::Rejected {
+                policy: Some("secret=sk_live_canary".to_string()),
+            },
+            LoggingSinkOutcome::Rejected { policy: None },
         ),
         (
             SinkDeliveryObserverOutcome::Rejected { policy: None },
@@ -525,8 +543,11 @@ fn sink_delivery_uses_exact_boundary_taxonomy_and_canonical_body() {
         assert!(matches!(
             evidence.occurrence(),
             LoggingOccurrence::SinkDeliveryBoundaryObserved { input, .. }
-                if input.stage_input_position == Some(7)
+                if input.stage_input_position == 7
         ));
+        assert!(!serde_json::to_string(evidence)
+            .unwrap()
+            .contains("sk_live_canary"));
         let LoggingOccurrence::SinkDeliveryBoundaryObserved { outcome, .. } = evidence.occurrence()
         else {
             unreachable!("occurrence was checked above");

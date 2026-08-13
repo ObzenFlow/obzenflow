@@ -260,7 +260,7 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
             outcome: LoggingSinkOutcome::Attempted {
                 result: LoggingSinkAttemptResult::ReportedSuccess,
             },
-        } if input.stage_input_position.is_some()
+        } if input.stage_input_position > 0
     )));
     assert!(handoff_events
         .iter()

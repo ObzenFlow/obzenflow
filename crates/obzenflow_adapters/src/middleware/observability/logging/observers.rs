@@ -6,7 +6,8 @@ use super::LoggingMiddleware;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
     LoggingInputReference, LoggingJoinCanonicalMerge, LoggingJoinDelivery, LoggingJoinSide,
-    LoggingOccurrence, LoggingSinkAttemptResult, LoggingSinkOutcome, LoggingSourceOutcome,
+    LoggingOccurrence, LoggingPolicyIdentity, LoggingSinkAttemptResult, LoggingSinkOutcome,
+    LoggingSourceOutcome,
 };
 use obzenflow_runtime::stages::observer::{
     HandlerObserver, HandlerObserverContext, JoinObserver, JoinObserverContext, JoinSide,
@@ -24,12 +25,21 @@ fn millis(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn input_reference(event: &ChainEvent, stage_input_position: Option<u64>) -> LoggingInputReference {
-    LoggingInputReference {
+fn input_reference(
+    event: &ChainEvent,
+    stage_input_position: Option<u64>,
+) -> Option<LoggingInputReference> {
+    Some(LoggingInputReference {
         event_id: event.id,
         event_type: event.event_type(),
-        stage_input_position,
-    }
+        stage_input_position: stage_input_position?,
+    })
+}
+
+fn policy_identity(policy: &Option<String>) -> Option<LoggingPolicyIdentity> {
+    policy
+        .as_deref()
+        .and_then(|value| LoggingPolicyIdentity::new(value).ok())
 }
 
 fn join_delivery(ctx: &JoinObserverContext<'_>) -> Option<LoggingJoinDelivery> {
@@ -61,11 +71,10 @@ impl HandlerObserver for LoggingMiddleware {
     }
 
     fn before_handle(&self, ctx: &HandlerObserverContext<'_>) -> ObserverReport {
-        ObserverReport::empty().with_diagnostic(self.diagnostic(
-            LoggingOccurrence::HandlerInputObserved {
-                input: input_reference(ctx.input, ctx.stage_input_position),
-            },
-        ))
+        let Some(input) = input_reference(ctx.input, ctx.stage_input_position) else {
+            return ObserverReport::empty();
+        };
+        self.report(LoggingOccurrence::HandlerInputObserved { input })
     }
 
     fn after_handle(
@@ -73,12 +82,13 @@ impl HandlerObserver for LoggingMiddleware {
         ctx: &HandlerObserverContext<'_>,
         outputs: &[ChainEvent],
     ) -> ObserverReport {
-        ObserverReport::empty().with_diagnostic(self.diagnostic(
-            LoggingOccurrence::HandlerOutputObserved {
-                input: input_reference(ctx.input, ctx.stage_input_position),
-                output_count: count(outputs.len()),
-            },
-        ))
+        let Some(input) = input_reference(ctx.input, ctx.stage_input_position) else {
+            return ObserverReport::empty();
+        };
+        self.report(LoggingOccurrence::HandlerOutputObserved {
+            input,
+            output_count: count(outputs.len()),
+        })
     }
 }
 
@@ -95,11 +105,10 @@ impl StatefulObserver for LoggingMiddleware {
         let Some(input) = ctx.input else {
             return ObserverReport::empty();
         };
-        ObserverReport::empty().with_diagnostic(self.diagnostic(
-            LoggingOccurrence::StatefulInputObserved {
-                input: input_reference(input, ctx.stage_input_position),
-            },
-        ))
+        let Some(input) = input_reference(input, ctx.stage_input_position) else {
+            return ObserverReport::empty();
+        };
+        self.report(LoggingOccurrence::StatefulInputObserved { input })
     }
 
     fn after_state_emit(
@@ -110,12 +119,13 @@ impl StatefulObserver for LoggingMiddleware {
         let Some(input) = ctx.input else {
             return ObserverReport::empty();
         };
-        ObserverReport::empty().with_diagnostic(self.diagnostic(
-            LoggingOccurrence::StatefulOutputObserved {
-                input: input_reference(input, ctx.stage_input_position),
-                output_count: count(outputs.len()),
-            },
-        ))
+        let Some(input) = input_reference(input, ctx.stage_input_position) else {
+            return ObserverReport::empty();
+        };
+        self.report(LoggingOccurrence::StatefulOutputObserved {
+            input,
+            output_count: count(outputs.len()),
+        })
     }
 }
 
@@ -132,12 +142,10 @@ impl JoinObserver for LoggingMiddleware {
         let (Some(input), Some(delivery)) = (ctx.input, join_delivery(ctx)) else {
             return ObserverReport::empty();
         };
-        ObserverReport::empty().with_diagnostic(self.diagnostic(
-            LoggingOccurrence::JoinInputObserved {
-                input: input_reference(input, Some(delivery.stage_input_position)),
-                delivery,
-            },
-        ))
+        let Some(input) = input_reference(input, Some(delivery.stage_input_position)) else {
+            return ObserverReport::empty();
+        };
+        self.report(LoggingOccurrence::JoinInputObserved { input, delivery })
     }
 
     fn after_join_output(
@@ -148,13 +156,14 @@ impl JoinObserver for LoggingMiddleware {
         let (Some(input), Some(delivery)) = (ctx.input, join_delivery(ctx)) else {
             return ObserverReport::empty();
         };
-        ObserverReport::empty().with_diagnostic(self.diagnostic(
-            LoggingOccurrence::JoinOutputObserved {
-                input: input_reference(input, Some(delivery.stage_input_position)),
-                delivery,
-                output_count: count(outputs.len()),
-            },
-        ))
+        let Some(input) = input_reference(input, Some(delivery.stage_input_position)) else {
+            return ObserverReport::empty();
+        };
+        self.report(LoggingOccurrence::JoinOutputObserved {
+            input,
+            delivery,
+            output_count: count(outputs.len()),
+        })
     }
 }
 
@@ -181,17 +190,15 @@ impl SourcePollObserver for LoggingMiddleware {
                 LoggingSourceOutcome::Error { kind: kind.clone() }
             }
             SourcePollObserverOutcome::Rejected { policy } => LoggingSourceOutcome::Rejected {
-                policy: policy.clone(),
+                policy: policy_identity(policy),
             },
         };
-        ObserverReport::empty().with_diagnostic(self.diagnostic(
-            LoggingOccurrence::SourcePollObserved {
-                poll_duration_ms: millis(ctx.poll_duration),
-                output_count: count(outputs.len()),
-                data_event_count: count(outputs.iter().filter(|event| event.is_data()).count()),
-                outcome,
-            },
-        ))
+        self.report(LoggingOccurrence::SourcePollObserved {
+            poll_duration_ms: millis(ctx.poll_duration),
+            output_count: count(outputs.len()),
+            data_event_count: count(outputs.iter().filter(|event| event.is_data()).count()),
+            outcome,
+        })
     }
 }
 
@@ -235,14 +242,12 @@ impl SinkDeliveryObserver for LoggingMiddleware {
                 },
             },
             SinkDeliveryObserverOutcome::Rejected { policy } => LoggingSinkOutcome::Rejected {
-                policy: policy.clone(),
+                policy: policy_identity(policy),
             },
         };
-        ObserverReport::empty().with_diagnostic(self.diagnostic(
-            LoggingOccurrence::SinkDeliveryBoundaryObserved {
-                input: input_reference(ctx.input, ctx.stage_input_position),
-                outcome,
-            },
-        ))
+        let Some(input) = input_reference(ctx.input, ctx.stage_input_position) else {
+            return ObserverReport::empty();
+        };
+        self.report(LoggingOccurrence::SinkDeliveryBoundaryObserved { input, outcome })
     }
 }

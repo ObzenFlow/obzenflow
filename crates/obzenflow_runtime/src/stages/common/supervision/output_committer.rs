@@ -910,6 +910,14 @@ fn emit_observer_local_trace(level: LoggingLevel, body: &str) {
 type ObserverDiagnosticWarningLimiter =
     Mutex<HashMap<(Option<obzenflow_core::StageId>, &'static str), Instant>>;
 
+fn lock_observer_diagnostic_warning_limiter(
+    limiter: &ObserverDiagnosticWarningLimiter,
+) -> std::sync::MutexGuard<'_, HashMap<(Option<obzenflow_core::StageId>, &'static str), Instant>> {
+    limiter
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn record_observer_diagnostic_drop(
     instrumentation: Option<&Arc<StageInstrumentation>>,
     flow_context: Option<&FlowContext>,
@@ -923,10 +931,9 @@ fn record_observer_diagnostic_drop(
     let stage_id = flow_context.map(|context| context.stage_id);
     let now = Instant::now();
     let should_warn = {
-        let mut warned = WARNED
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .expect("observer diagnostic warning limiter poisoned");
+        let mut warned = lock_observer_diagnostic_warning_limiter(
+            WARNED.get_or_init(|| Mutex::new(HashMap::new())),
+        );
         let key = (stage_id, reason.as_str());
         match warned.get(&key) {
             Some(last) if now.duration_since(*last) < Duration::from_secs(60) => false,
@@ -1203,6 +1210,23 @@ mod observer_diagnostic_tests {
     }
 
     #[test]
+    fn observer_warning_limiter_recovers_after_poison() {
+        let limiter: Arc<ObserverDiagnosticWarningLimiter> = Arc::new(Mutex::new(HashMap::new()));
+        let poisoning_limiter = Arc::clone(&limiter);
+        let poisoned = std::thread::spawn(move || {
+            let _guard = poisoning_limiter.lock().unwrap();
+            panic!("intentional warning-limiter poison");
+        })
+        .join();
+        assert!(poisoned.is_err());
+        assert!(limiter.is_poisoned());
+
+        let mut recovered = lock_observer_diagnostic_warning_limiter(&limiter);
+        recovered.insert((None, "invalid"), Instant::now());
+        assert!(recovered.contains_key(&(None, "invalid")));
+    }
+
+    #[test]
     fn local_trace_is_valid_only_for_corresponding_logging_evidence() {
         let flow_context = FlowContext {
             flow_name: "flow".to_string(),
@@ -1241,7 +1265,7 @@ mod observer_diagnostic_tests {
                 input: LoggingInputReference {
                     event_id: parent_event.id,
                     event_type: parent_event.event_type(),
-                    stage_input_position: Some(1),
+                    stage_input_position: 1,
                 },
             },
             Vec::new(),

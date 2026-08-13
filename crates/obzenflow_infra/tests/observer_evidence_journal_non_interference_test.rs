@@ -26,7 +26,7 @@ fn root_logging_event(writer: WriterId) -> ChainEvent {
             input: LoggingInputReference {
                 event_id: EventId::new(),
                 event_type: "test.input.v1".to_string(),
-                stage_input_position: Some(1),
+                stage_input_position: 1,
             },
         },
         Vec::new(),
@@ -46,7 +46,7 @@ fn derived_logging_event(writer: WriterId, parent: &ChainEvent) -> ChainEvent {
             input: LoggingInputReference {
                 event_id: parent.id,
                 event_type: parent.event_type(),
-                stage_input_position: Some(1),
+                stage_input_position: 1,
             },
         },
         Vec::new(),

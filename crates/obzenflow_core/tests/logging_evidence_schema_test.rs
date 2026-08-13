@@ -4,8 +4,8 @@
 
 use obzenflow_core::event::payloads::observability_payload::{
     LoggingAttribute, LoggingEventName, LoggingEvidence, LoggingInputReference, LoggingLevel,
-    LoggingOccurrence, LoggingSchemaError, LoggingSinkAttemptResult, LoggingSinkOutcome,
-    LoggingSourceOutcome, MiddlewareLifecycle,
+    LoggingOccurrence, LoggingPolicyIdentity, LoggingSchemaError, LoggingSinkAttemptResult,
+    LoggingSinkOutcome, LoggingSourceOutcome, MiddlewareLifecycle,
 };
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::EventId;
@@ -15,7 +15,7 @@ fn input_reference() -> LoggingInputReference {
     LoggingInputReference {
         event_id: EventId::new(),
         event_type: "payment.authorization_unavailable.v1".to_string(),
-        stage_input_position: Some(7),
+        stage_input_position: 7,
     }
 }
 
@@ -99,6 +99,31 @@ fn attribute_bounds_fail_without_rewriting_or_truncation() {
 }
 
 #[test]
+fn policy_identity_is_bounded_and_rejects_free_form_text() {
+    for valid in ["circuit_breaker", "source.breaker_2", "a"] {
+        assert_eq!(LoggingPolicyIdentity::new(valid).unwrap().as_str(), valid);
+    }
+
+    for invalid in [
+        "",
+        "CircuitBreaker",
+        "contains space",
+        "secret=sk_live_canary",
+        "line\nbreak",
+        "1breaker",
+    ] {
+        assert!(matches!(
+            LoggingPolicyIdentity::new(invalid),
+            Err(LoggingSchemaError::InvalidPolicyIdentity { .. })
+        ));
+    }
+    assert!(matches!(
+        LoggingPolicyIdentity::new("a".repeat(65)),
+        Err(LoggingSchemaError::PolicyIdentityTooLong { .. })
+    ));
+}
+
+#[test]
 fn canonical_payment_payload_has_the_locked_wire_form() {
     let evidence = payment_evidence(LoggingOccurrence::SinkDeliveryBoundaryObserved {
         input: input_reference(),
@@ -173,7 +198,7 @@ fn every_closed_source_and_sink_outcome_round_trips() {
             kind: ErrorKind::Timeout,
         },
         LoggingSourceOutcome::Rejected {
-            policy: Some("source_breaker".to_string()),
+            policy: Some(LoggingPolicyIdentity::new("source_breaker").unwrap()),
         },
         LoggingSourceOutcome::Rejected { policy: None },
     ];
@@ -209,7 +234,7 @@ fn every_closed_source_and_sink_outcome_round_trips() {
         .map(|result| LoggingSinkOutcome::Attempted { result })
         .collect::<Vec<_>>();
     outcomes.push(LoggingSinkOutcome::Rejected {
-        policy: Some("circuit_breaker".to_string()),
+        policy: Some(LoggingPolicyIdentity::new("circuit_breaker").unwrap()),
     });
     outcomes.push(LoggingSinkOutcome::Rejected { policy: None });
 
@@ -265,4 +290,26 @@ fn decoding_rejects_noncanonical_or_extra_runtime_text() {
         "body": "manual-review handoff attempt reported success"
     });
     assert!(serde_json::from_value::<LoggingEvidence>(impossible).is_err());
+
+    let mut missing_position =
+        serde_json::to_value(payment_evidence(LoggingOccurrence::HandlerInputObserved {
+            input: input_reference(),
+        }))
+        .unwrap();
+    missing_position["occurrence"]["input"]
+        .as_object_mut()
+        .expect("input reference object")
+        .remove("stage_input_position");
+    assert!(serde_json::from_value::<LoggingEvidence>(missing_position).is_err());
+
+    let mut invalid_policy =
+        serde_json::to_value(payment_evidence(LoggingOccurrence::SourcePollObserved {
+            poll_duration_ms: 1,
+            output_count: 0,
+            data_event_count: 0,
+            outcome: LoggingSourceOutcome::Rejected { policy: None },
+        }))
+        .unwrap();
+    invalid_policy["occurrence"]["outcome"]["policy"] = json!("secret=sk_live_canary");
+    assert!(serde_json::from_value::<LoggingEvidence>(invalid_policy).is_err());
 }

@@ -196,11 +196,27 @@ pub(super) async fn dispatch_hydrating<
                     let reference_stage_id = ctx.reference_stage_id;
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     let upstream_stage = subscription.last_delivered_upstream_stage();
+                    let delivery_snapshot = common::delivery_snapshot(
+                        crate::stages::observer::JoinSide::Reference,
+                        reference_stage_id,
+                        subscription.last_delivered_stage_input_position(),
+                        &envelope,
+                        &ctx.reference_high_water_clock,
+                        None,
+                    )?;
 
                     if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
                         heartbeat.state.record_data_read(upstream, event_id);
                     }
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
+                    common::observe_join_input(
+                        ctx,
+                        &event,
+                        Some(&delivery_snapshot),
+                        None,
+                        Some(&envelope),
+                    )
+                    .await?;
 
                     if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
                         if let Some(state) = &heartbeat_state {
@@ -229,12 +245,22 @@ pub(super) async fn dispatch_hydrating<
                             subscription.last_delivered_stage_input_position(),
                             subscription.last_delivered_generation(),
                         );
-                        ctx.pending_outputs.push_back(
+                        let mut outputs = vec![event];
+                        common::observe_join_outputs(
+                            ctx,
+                            Some(&envelope.event),
+                            Some(&delivery_snapshot),
+                            None,
+                            outputs.as_mut_slice(),
+                            Some(&envelope),
+                        )
+                        .await?;
+                        ctx.pending_outputs.extend(outputs.into_iter().map(|event| {
                             crate::stages::common::supervision::backpressure_drain::PendingOutput {
                                 event,
                                 scope,
-                            },
-                        );
+                            }
+                        }));
                         ctx.pending_subscription_ack = subscription
                             .last_delivered_upstream_stage()
                             .map(|upstream| PendingSubscriptionAck {
@@ -261,7 +287,7 @@ pub(super) async fn dispatch_hydrating<
                     );
                     let result = ctx.handler.process_reference(
                         &mut ctx.handler_state,
-                        event,
+                        event.clone(),
                         reference_stage_id,
                         writer_id,
                         scope,
@@ -285,10 +311,20 @@ pub(super) async fn dispatch_hydrating<
                         .fetch_add(1, Ordering::Relaxed);
 
                     match result {
-                        Ok(events_produced) => {
+                        Ok(mut events_produced) => {
                             ctx.instrumentation
                                 .events_accumulated_total
                                 .fetch_add(1, Ordering::Relaxed);
+
+                            common::observe_join_outputs(
+                                ctx,
+                                Some(&event),
+                                Some(&delivery_snapshot),
+                                None,
+                                events_produced.as_mut_slice(),
+                                Some(&envelope),
+                            )
+                            .await?;
 
                             tracing::debug!(
                                 stage_name = %ctx.stage_name,
@@ -309,6 +345,15 @@ pub(super) async fn dispatch_hydrating<
                             }
                         }
                         Err(err) => {
+                            common::observe_join_outputs(
+                                ctx,
+                                Some(&event),
+                                Some(&delivery_snapshot),
+                                None,
+                                &[],
+                                Some(&envelope),
+                            )
+                            .await?;
                             if let Some(fatal) = err.as_fatal() {
                                 common::record_join_stage_fatal(
                                     ctx,

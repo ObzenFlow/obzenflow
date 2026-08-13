@@ -26,9 +26,12 @@ pub struct DeliveryContext {
 }
 
 impl DeliveryContext {
-    fn from_event(event: &ChainEvent) -> Self {
+    fn from_event_and_scope(
+        event: &ChainEvent,
+        scope: obzenflow_core::MiddlewareExecutionScope,
+    ) -> Self {
         Self {
-            provenance: if event.replay_context.is_some() {
+            provenance: if scope.is_deterministic_replay() || event.replay_context.is_some() {
                 DeliveryProvenance::Replayed
             } else {
                 DeliveryProvenance::Live
@@ -712,21 +715,15 @@ impl<W> SinkWriterAdapter<W> {
             commit_receipts,
         })
     }
-}
 
-#[async_trait]
-impl<W> SinkHandler for SinkWriterAdapter<W>
-where
-    W: SinkWriter,
-{
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        Ok(self.consume_report(event).await?.primary)
-    }
-
-    async fn consume_report(
+    async fn consume_report_in_scope(
         &mut self,
         event: ChainEvent,
-    ) -> Result<SinkConsumeReport, HandlerError> {
+        scope: obzenflow_core::MiddlewareExecutionScope,
+    ) -> Result<SinkConsumeReport, HandlerError>
+    where
+        W: SinkWriter,
+    {
         let (event_type, payload) = match &event.content {
             ChainEventContent::Data {
                 event_type,
@@ -759,7 +756,7 @@ where
         let pending = lock_pending_registry(&self.registry).mint(event.id);
         let current = pending.identity;
         let context = SinkWriteContext {
-            delivery: DeliveryContext::from_event(&event),
+            delivery: DeliveryContext::from_event_and_scope(&event, scope),
             pending,
             registry: Arc::clone(&self.registry),
         };
@@ -769,6 +766,32 @@ where
         let lowered = self.lower_write_report(current, report)?;
         guard.complete();
         Ok(lowered)
+    }
+}
+
+#[async_trait]
+impl<W> SinkHandler for SinkWriterAdapter<W>
+where
+    W: SinkWriter,
+{
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+        Ok(self.consume_report(event).await?.primary)
+    }
+
+    async fn consume_report(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<SinkConsumeReport, HandlerError> {
+        self.consume_report_in_scope(event, obzenflow_core::MiddlewareExecutionScope::default())
+            .await
+    }
+
+    async fn consume_report_with_scope(
+        &mut self,
+        event: ChainEvent,
+        scope: obzenflow_core::MiddlewareExecutionScope,
+    ) -> Result<SinkConsumeReport, HandlerError> {
+        self.consume_report_in_scope(event, scope).await
     }
 
     async fn flush(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {

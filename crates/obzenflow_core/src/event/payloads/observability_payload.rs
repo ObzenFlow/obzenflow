@@ -148,6 +148,7 @@ const LOGGING_ATTRIBUTE_KEY_PATTERN: &str = "[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)
 pub const LOGGING_MAX_ATTRIBUTES: usize = 16;
 pub const LOGGING_MAX_ATTRIBUTE_KEY_BYTES: usize = 64;
 pub const LOGGING_MAX_ATTRIBUTE_VALUE_BYTES: usize = 256;
+pub const LOGGING_MAX_POLICY_IDENTITY_BYTES: usize = 64;
 
 /// Why a logging declaration or decoded logging row violates the v1 schema.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -166,6 +167,10 @@ pub enum LoggingSchemaError {
     AttributeValueTooLong { key: String },
     #[error("logging attribute '{key}' value contains a control character")]
     AttributeValueContainsControl { key: String },
+    #[error("logging policy identity '{value}' must match {LOGGING_ATTRIBUTE_KEY_PATTERN}")]
+    InvalidPolicyIdentity { value: String },
+    #[error("logging policy identity '{value}' exceeds 64 bytes")]
+    PolicyIdentityTooLong { value: String },
     #[error("logging body does not match the canonical rendering for its event and occurrence")]
     NonCanonicalBody,
 }
@@ -298,14 +303,61 @@ impl<'de> Deserialize<'de> for LoggingAttribute {
     }
 }
 
+/// Validated, bounded identity of a policy that rejected a protected operation.
+///
+/// Rejection reason text is deliberately excluded. A custom policy label only
+/// crosses into durable logging evidence when it satisfies this closed grammar.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LoggingPolicyIdentity(String);
+
+impl LoggingPolicyIdentity {
+    pub fn new(value: impl Into<String>) -> Result<Self, LoggingSchemaError> {
+        let value = value.into();
+        if !matches_segmented_ascii_name(&value, false) {
+            return Err(LoggingSchemaError::InvalidPolicyIdentity { value });
+        }
+        if value.len() > LOGGING_MAX_POLICY_IDENTITY_BYTES {
+            return Err(LoggingSchemaError::PolicyIdentityTooLong { value });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for LoggingPolicyIdentity {
+    type Error = LoggingSchemaError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for LoggingPolicyIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(D::Error::custom)
+    }
+}
+
+impl std::fmt::Display for LoggingPolicyIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 /// Opaque reference to one delivered input. The event payload is never copied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoggingInputReference {
     pub event_id: EventId,
     pub event_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stage_input_position: Option<u64>,
+    pub stage_input_position: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,7 +404,7 @@ pub enum LoggingSourceOutcome {
     },
     Rejected {
         #[serde(skip_serializing_if = "Option::is_none")]
-        policy: Option<String>,
+        policy: Option<LoggingPolicyIdentity>,
     },
 }
 
@@ -387,7 +439,7 @@ pub enum LoggingSinkOutcome {
     },
     Rejected {
         #[serde(skip_serializing_if = "Option::is_none")]
-        policy: Option<String>,
+        policy: Option<LoggingPolicyIdentity>,
     },
 }
 

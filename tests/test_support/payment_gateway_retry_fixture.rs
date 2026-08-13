@@ -14,7 +14,9 @@ use crate::payment_domain::{
 };
 use async_trait::async_trait;
 use obzenflow::typed::sources as typed_sources;
-use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, RateLimiter, Retry};
+use obzenflow_adapters::middleware::{
+    log_event, CircuitBreaker, EffectResilience, LoggingLevel, RateLimiter, Retry,
+};
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
@@ -306,7 +308,16 @@ pub fn build_flow(
                     observers: []
                 );
                 paid_orders = sink!(PaymentAuthorized => record_authorized);
-                manual_review = sink!(PaymentAuthorizationUnavailable => record_unavailable);
+                manual_review = sink!(
+                    PaymentAuthorizationUnavailable => record_unavailable,
+                    observers: [
+                        log_event("payment.authorization.manual_review_handoff")
+                            .level(LoggingLevel::Info)
+                            .tag("operation", "payment.authorization")
+                            .tag("handoff.kind", "manual_review")
+                            .trace_mirror()
+                    ]
+                );
             },
 
             topology: {
