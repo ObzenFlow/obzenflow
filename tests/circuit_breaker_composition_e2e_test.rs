@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, MiddlewareFactory, Retry};
 use obzenflow_core::{
     event::chain_event::ChainEvent,
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
+    event::payloads::delivery_payload::DeliveryMethod,
     event::payloads::observability_payload::{
         CircuitBreakerEvent, CircuitBreakerHealthClassification, MiddlewareLifecycle,
         ObservabilityPayload,
@@ -40,11 +40,12 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectCursor, EffectError, EffectSafety, Effects, IdempotencyKey,
-    SinkDeliverySafety,
+    SinkRedeliverySafety,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -236,23 +237,26 @@ struct CollectSink {
 }
 
 #[async_trait]
-impl SinkHandler for CollectSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if let Some(output) = CompOutput::from_event(&event) {
-            self.outputs
-                .lock()
-                .expect("outputs lock poisoned")
-                .push(output);
-        }
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Memory".to_string()),
-            None,
-        ))
+impl InlineSink for CollectSink {
+    type Input = CompOutput;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    // In-memory collector: re-delivery under either archive verb is safe.
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+    async fn write(
+        &mut self,
+        output: CompOutput,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        self.outputs
+            .lock()
+            .expect("outputs lock poisoned")
+            .push(output);
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Memory".to_string()),
+            None,
+        )))
     }
 }
 

@@ -8,12 +8,6 @@ fn effect_requires_explicit_safety() {
     t.compile_fail("tests/compile_fail/effect_missing_safety.rs");
 }
 
-#[test]
-fn delivery_requires_explicit_safety() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/compile_fail/delivery_missing_safety.rs");
-}
-
 /// FLOWIP-120z: an effect capability set rejects duplicate members.
 #[test]
 fn effect_set_rejects_duplicate_members() {

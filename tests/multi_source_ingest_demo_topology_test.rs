@@ -22,8 +22,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::id::StageId;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::stage_descriptor::StageDescriptor;
@@ -33,7 +32,8 @@ use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
@@ -145,12 +145,22 @@ impl TypedStatefulHandler for IngestAggregator {
 #[derive(Clone, Debug)]
 struct NullSink;
 #[async_trait]
-impl SinkHandler for NullSink {
-    async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
+impl InlineSink for NullSink {
+    type Input = IngestSummary;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
+        &mut self,
+        _event: IngestSummary,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Noop".to_string()),
             None,
-        ))
+        )))
     }
 }
 

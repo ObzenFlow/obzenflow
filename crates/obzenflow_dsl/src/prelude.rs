@@ -21,7 +21,9 @@ pub use obzenflow_core::id::StageId;
 pub use obzenflow_topology::{StageInfo, Topology, TopologyBuilder};
 
 // Handler traits
-pub use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedTransformHandler};
+pub use obzenflow_runtime::stages::common::handlers::{
+    InlineSink, SinkConnector, SinkDescription, SinkWriter, TypedTransformHandler,
+};
 
 // Supervisor config
 pub use obzenflow_runtime::pipeline::config::StageConfig;

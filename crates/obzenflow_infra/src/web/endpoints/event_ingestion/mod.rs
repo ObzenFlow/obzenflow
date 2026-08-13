@@ -293,10 +293,9 @@ fn create_ingestion_surface_from_state(state: IngestionState) -> WebSurfaceAttac
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use obzenflow_core::event::chain_event::ChainEvent;
     use obzenflow_core::event::event_envelope::EventEnvelope;
     use obzenflow_core::event::identity::EventId;
-    use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
     use obzenflow_core::event::{JournalEvent, SystemEvent, SystemEventType};
     use obzenflow_core::id::JournalId;
     use obzenflow_core::id::SystemId;
@@ -320,7 +319,8 @@ mod tests {
     use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::{
-        SinkHandler, TypedAsyncInfiniteSourceHandler,
+        InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+        TypedAsyncInfiniteSourceHandler,
     };
     use obzenflow_runtime::supervised_base::SupervisorHandle;
     use serde_json::json;
@@ -844,24 +844,45 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    #[derive(Clone, Debug)]
-    struct NotifyingSink {
+    #[derive(Debug)]
+    struct NotifyingSink<T> {
         delivered: Arc<AtomicUsize>,
         notify: Arc<Notify>,
+        _phantom: std::marker::PhantomData<fn() -> T>,
+    }
+
+    impl<T> Clone for NotifyingSink<T> {
+        fn clone(&self) -> Self {
+            Self {
+                delivered: Arc::clone(&self.delivered),
+                notify: Arc::clone(&self.notify),
+                _phantom: std::marker::PhantomData,
+            }
+        }
     }
 
     #[async_trait]
-    impl SinkHandler for NotifyingSink {
-        async fn consume(
+    impl<T> InlineSink for NotifyingSink<T>
+    where
+        T: TypedPayload + Send + Sync + 'static,
+    {
+        type Input = T;
+
+        fn describe(&self) -> SinkDescription {
+            SinkDescription::unspecified()
+        }
+
+        async fn write(
             &mut self,
-            _event: ChainEvent,
-        ) -> std::result::Result<DeliveryPayload, HandlerError> {
+            _event: T,
+            _context: SinkWriteContext,
+        ) -> std::result::Result<SinkWriteReport, HandlerError> {
             self.delivered.fetch_add(1, Ordering::AcqRel);
             self.notify.notify_waiters();
-            Ok(DeliveryPayload::success(
+            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
                 DeliveryMethod::Custom("Collect".to_string()),
                 None,
-            ))
+            )))
         }
     }
 
@@ -1692,9 +1713,10 @@ mod tests {
         let delivered_for_flow = Arc::clone(&delivered);
         let notify_for_flow = Arc::clone(&notify);
         let handle = FlowDefinition::materialize(move |_runtime_config| {
-            let sink = NotifyingSink {
+            let sink = NotifyingSink::<TestPayload> {
                 delivered: delivered_for_flow,
                 notify: notify_for_flow,
+                _phantom: std::marker::PhantomData,
             };
 
             Ok(flow! {
@@ -1803,9 +1825,10 @@ mod tests {
         let delivered_for_flow = Arc::clone(&delivered);
         let notify_for_flow = Arc::clone(&notify);
         let handle = FlowDefinition::materialize(move |_runtime_config| {
-            let sink = NotifyingSink {
+            let sink = NotifyingSink::<OrderPayload> {
                 delivered: delivered_for_flow,
                 notify: notify_for_flow,
+                _phantom: std::marker::PhantomData,
             };
 
             Ok(flow! {

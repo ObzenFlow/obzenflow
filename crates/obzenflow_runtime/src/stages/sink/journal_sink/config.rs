@@ -7,6 +7,7 @@
 use super::boundary::SinkDeliveryBoundary;
 use crate::stages::common::control_strategies::SignalGate;
 use crate::stages::observer::StageObserverBundle;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::StageId;
 use std::sync::Arc;
 
@@ -41,9 +42,11 @@ pub struct JournalSinkConfig {
     /// Observe-only middleware hooks for sink delivery.
     pub observers: StageObserverBundle,
 
-    /// Descriptor-declared destination family (FLOWIP-120s). Snapshotted
-    /// from the raw handler before middleware wrapping, so wrappers cannot
-    /// attenuate it; the receipt stamp resolves from this, never from the
-    /// runtime handler.
-    pub delivery_type: Option<&'static str>,
+    /// Connector-described destination identity. The stage name remains the
+    /// fallback for connectors that do not supply one.
+    pub receipt_destination: Option<String>,
+
+    /// Connector-described normal receipt method, used by writer outcomes
+    /// that carry only per-attempt deltas and by runtime-authored failures.
+    pub default_delivery_method: Option<DeliveryMethod>,
 }

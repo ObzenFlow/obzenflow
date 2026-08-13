@@ -1,0 +1,48 @@
+error[E0277]: the trait bound `Value: obzenflow_core::event::schema::typed_payload::TypedPayload` is not satisfied
+ --> tests/compile_fail/sink_witness/csv_value_witness.rs:9:34
+  |
+9 |     let _ = obzenflow_dsl::sink!(serde_json::Value => output);
+  |                                  ^^^^^^^^^^^^^^^^^ the trait `obzenflow_core::event::schema::typed_payload::TypedPayload` is not implemented for `Value`
+  |
+  = help: the following other types implement trait `obzenflow_core::event::schema::typed_payload::TypedPayload`:
+            CsvRow
+            obzenflow_core::ai::chunking::ChunkEnvelope<T>
+            obzenflow_core::ai::map_reduce::AiMapReduceChunkFailed
+            obzenflow_core::ai::map_reduce::AiMapReduceFinaliseFailed
+            obzenflow_core::ai::map_reduce::AiMapReduceJobFailed
+            obzenflow_core::ai::map_reduce::AiMapReduceMapInput<Chunk>
+            obzenflow_core::ai::map_reduce::AiMapReducePlanningFailed
+            obzenflow_core::ai::map_reduce::AiMapReducePlanningManifest
+          and $N others
+note: required by a bound in `typed_sink_descriptor`
+ --> crates/obzenflow_dsl/src/dsl/typing.rs
+  |
+  | pub fn typed_sink_descriptor<C, ArrowInput>(
+  |        --------------------- required by a bound in this function
+...
+  |     ArrowInput: TypedPayload + Send + Sync + 'static,
+  |                 ^^^^^^^^^^^^ required by this bound in `typed_sink_descriptor`
+
+error[E0277]: this sink connector does not witness its declared input
+ --> tests/compile_fail/sink_witness/csv_value_witness.rs:9:13
+  |
+9 |     let _ = obzenflow_dsl::sink!(serde_json::Value => output);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `SinkConnector` is not implemented for `CsvSink<Value>`
+  |
+  = note: implement SinkConnector with Input matching the sink! arrow (FLOWIP-134h)
+help: the trait `SinkConnector` is implemented for `CsvSink<T>`
+ --> crates/obzenflow_adapters/src/sinks/csv.rs
+  |
+  | / impl<T> SinkConnector for CsvSink<T>
+  | | where
+  | |     T: TypedPayload + Send + Sync + 'static,
+  | |____________________________________________^
+note: required by a bound in `typed_sink_descriptor`
+ --> crates/obzenflow_dsl/src/dsl/typing.rs
+  |
+  | pub fn typed_sink_descriptor<C, ArrowInput>(
+  |        --------------------- required by a bound in this function
+...
+  |     C: SinkConnector + fmt::Debug + Send + Sync + 'static,
+  |        ^^^^^^^^^^^^^ required by this bound in `typed_sink_descriptor`
+  = note: this error originates in the macro `$crate::__obzenflow_sink_typed` which comes from the expansion of the macro `obzenflow_dsl::sink` (in Nightly builds, run with -Z macro-backtrace for more info)

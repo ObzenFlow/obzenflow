@@ -3,16 +3,16 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{
-    event::chain_event::ChainEvent,
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler,
+};
 use obzenflow_runtime::stages::transform::MapTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -71,15 +71,22 @@ impl TypedFiniteSourceHandler for SimpleSource {
 struct Printer;
 
 #[async_trait]
-impl SinkHandler for Printer {
-    async fn consume(
+impl InlineSink for Printer {
+    type Input = DoubledEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        _event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
+        _input: DoubledEvent,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Print".to_string()),
             None,
-        ))
+        )))
     }
 }
 

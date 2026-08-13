@@ -14,9 +14,11 @@ use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, R
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::SignalGate;
+use crate::stages::common::handler_error::StageFatal;
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
+use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::observer::{StageLifecyclePhase, StageObserverBundle};
 use crate::stages::resources_builder::BoundSubscriptionFactory;
@@ -24,7 +26,7 @@ use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::{ChainEventFactory, EventEnvelope, SystemEvent};
+use obzenflow_core::event::{EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
@@ -32,6 +34,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
+
+use super::journalled_delivery_event;
 
 // ============================================================================
 // FSM States
@@ -293,6 +297,10 @@ pub struct JournalSinkContext<H: UnifiedSinkHandler> {
     /// destination family, else the stage name. Stamped on every journalled
     /// `DeliveryPayload`.
     pub receipt_destination: String,
+
+    /// Connector-described method used for runtime-authored failure receipts.
+    pub default_delivery_method:
+        Option<obzenflow_core::event::payloads::delivery_payload::DeliveryMethod>,
 
     /// Flow name for flow context
     pub flow_name: String,
@@ -591,14 +599,8 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         // FLOWIP-095k finalizer gate: the audit payload is an
                         // end-of-input completion statement; Truncated discards
                         // it while flush and receipt effects run for every kind.
-                        let suppress_audit = match ctx.terminal_eof_kind.unwrap_or(EofKind::Natural)
-                        {
-                            EofKind::Natural | EofKind::Poison => false,
-                            EofKind::Truncated => true,
-                        };
-                        if let Some(mut payload) = report.audit_payload.filter(|_| !suppress_audit)
-                        {
-                            payload.destination = ctx.receipt_destination.clone();
+                        let report = apply_terminal_eof_audit_gate(report, ctx.terminal_eof_kind);
+                        if let Some(payload) = report.audit_payload {
                             tracing::trace!(
                                 target: "flowip-080o",
                                 stage_name = %ctx.stage_name,
@@ -618,9 +620,13 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                 stage_type: StageType::Sink,
                             };
 
-                            let evt = ChainEventFactory::delivery_event(writer_id, payload)
-                                .with_flow_context(flow_ctx)
-                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                            let evt = journalled_delivery_event(
+                                writer_id,
+                                &ctx.receipt_destination,
+                                payload,
+                            )
+                            .with_flow_context(flow_ctx)
+                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
                             ctx.data_journal.append(evt, None).await.map_err(|e| {
                                 obzenflow_fsm::FsmError::HandlerError(format!(
@@ -650,9 +656,12 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         }
                     }
                     Err(e) => {
+                        if let Some(fatal) = e.as_fatal() {
+                            record_sink_lifecycle_fatal(ctx, fatal, "flush").await?;
+                        }
                         return Err(obzenflow_fsm::FsmError::HandlerError(format!(
                             "Failed to flush: {e:?}"
-                        )))
+                        )));
                     }
                 }
                 tracing::trace!(
@@ -710,23 +719,24 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         stage_name = %stage_name,
                         "sink: Cleanup action - calling handler.drain()"
                     );
-                    let drain_result = handler.drain_report().await.map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to drain handler: {e:?}"
-                        ))
-                    })?;
+                    let drain_result = match handler.drain_report().await {
+                        Ok(report) => report,
+                        Err(error) => {
+                            if let Some(fatal) = error.as_fatal() {
+                                record_sink_lifecycle_fatal(ctx, fatal, "drain").await?;
+                            }
+                            return Err(obzenflow_fsm::FsmError::HandlerError(format!(
+                                "Failed to drain handler: {error:?}"
+                            )));
+                        }
+                    };
 
                     // FLOWIP-095k finalizer gate: the drain audit payload is an
                     // end-of-input completion statement; Truncated discards it
                     // while the drain call and receipt effects run for every kind.
-                    let suppress_audit = match ctx.terminal_eof_kind.unwrap_or(EofKind::Natural) {
-                        EofKind::Natural | EofKind::Poison => false,
-                        EofKind::Truncated => true,
-                    };
-                    if let Some(mut payload) =
-                        drain_result.audit_payload.filter(|_| !suppress_audit)
-                    {
-                        payload.destination = ctx.receipt_destination.clone();
+                    let drain_result =
+                        apply_terminal_eof_audit_gate(drain_result, ctx.terminal_eof_kind);
+                    if let Some(payload) = drain_result.audit_payload {
                         tracing::trace!(
                             target: "flowip-080o",
                             stage_name = %ctx.stage_name,
@@ -746,9 +756,10 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                             stage_type: StageType::Sink,
                         };
 
-                        let evt = ChainEventFactory::delivery_event(writer_id, payload)
-                            .with_flow_context(flow_ctx)
-                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                        let evt =
+                            journalled_delivery_event(writer_id, &ctx.receipt_destination, payload)
+                                .with_flow_context(flow_ctx)
+                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
                         ctx.data_journal.append(evt, None).await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
@@ -796,6 +807,48 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
     }
 }
 
+fn apply_terminal_eof_audit_gate(
+    mut report: crate::stages::common::handlers::SinkLifecycleReport,
+    terminal_eof_kind: Option<EofKind>,
+) -> crate::stages::common::handlers::SinkLifecycleReport {
+    if matches!(
+        terminal_eof_kind.unwrap_or(EofKind::Natural),
+        EofKind::Truncated
+    ) {
+        report.audit_payload = None;
+    }
+    report
+}
+
+async fn record_sink_lifecycle_fatal<H: UnifiedSinkHandler + Send + Sync + 'static>(
+    ctx: &JournalSinkContext<H>,
+    fatal: &StageFatal,
+    phase: &str,
+) -> Result<(), obzenflow_fsm::FsmError> {
+    let writer_id = ctx.writer_id.ok_or_else(|| {
+        obzenflow_fsm::FsmError::HandlerError(format!("fatal sink {phase} has no stage writer id"))
+    })?;
+    record_stage_fatal(
+        fatal,
+        StageFatalCommit {
+            error_journal: &ctx.error_journal,
+            writer_id,
+            stage_id: ctx.stage_id,
+            stage_key: &ctx.stage_name,
+            input_position: None,
+            parent: None,
+            lineage: ctx.lineage_policy,
+        },
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| {
+        obzenflow_fsm::FsmError::HandlerError(format!(
+            "Failed to record fatal sink {phase}: {error}"
+        ))
+    })
+}
+
 async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
     parent_envelope: &EventEnvelope<ChainEvent>,
@@ -812,7 +865,7 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         stage_type: StageType::Sink,
     };
 
-    let evt = ChainEventFactory::delivery_event(writer_id, payload)
+    let evt = journalled_delivery_event(writer_id, &ctx.receipt_destination, payload)
         .with_flow_context(flow_ctx)
         .with_causality(CausalityContext::with_parent(parent_envelope.event.id))
         .with_correlation_from(&parent_envelope.event)
@@ -853,4 +906,46 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_terminal_eof_audit_gate;
+    use crate::stages::common::handlers::{CommitReceipt, SinkLifecycleReport};
+    use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+    use obzenflow_core::EventId;
+
+    fn lifecycle_report(parent_event_id: EventId) -> SinkLifecycleReport {
+        SinkLifecycleReport {
+            audit_payload: Some(DeliveryPayload::success(DeliveryMethod::Noop, None)),
+            commit_receipts: vec![CommitReceipt {
+                parent_event_id,
+                payload: DeliveryPayload::success(DeliveryMethod::Noop, None),
+            }],
+        }
+    }
+
+    #[test]
+    fn terminal_eof_gate_only_suppresses_truncated_audits_and_never_commit_receipts() {
+        for (kind, expects_audit) in [
+            (EofKind::Natural, true),
+            (EofKind::Poison, true),
+            (EofKind::Truncated, false),
+        ] {
+            let parent_event_id = EventId::new();
+            let report =
+                apply_terminal_eof_audit_gate(lifecycle_report(parent_event_id), Some(kind));
+            assert_eq!(report.audit_payload.is_some(), expects_audit, "{kind:?}");
+            assert_eq!(report.commit_receipts.len(), 1, "{kind:?}");
+            assert_eq!(report.commit_receipts[0].parent_event_id, parent_event_id);
+        }
+    }
+
+    #[test]
+    fn missing_terminal_kind_keeps_the_legacy_natural_audit_default() {
+        let report = apply_terminal_eof_audit_gate(lifecycle_report(EventId::new()), None);
+        assert!(report.audit_payload.is_some());
+        assert_eq!(report.commit_receipts.len(), 1);
+    }
 }

@@ -1,0 +1,10 @@
+error[E0599]: no method named `typed` found for struct `CsvSink<T>` in the current scope
+  --> tests/compile_fail/sink_witness/csv_post_build_binder.rs:13:20
+   |
+13 |     let _ = output.typed::<Input>();
+   |                    ^^^^^
+   |
+help: there is a method `type_id` with a similar name
+   |
+13 |     let _ = output.type_id::<Input>();
+   |                        ++

@@ -324,7 +324,7 @@ is covered by its own example rather than this one.
 | `validation.rs` | One multi-type validation stage that classifies each order exactly once. |
 | `gateway.rs`  | Gateway authorization as a replay-suppressed effect, deriving cancellations from declines. |
 | `fixtures.rs` | The scripted upstream order-event sequence. |
-| `deliveries.rs` | The typed `ShippingHandoff` delivery: destination identity, duplicate-safety, and behaviour on the type (FLOWIP-120s tier 3). |
+| `deliveries.rs` | The small `ShippingHandoff` console integration implemented as an `InlineSink`; the flow row adds its repeat-delivery classification. |
 | `console.rs`  | Console projection helpers with replay-provenance labels for the demo output. |
 | `flow.rs`     | The flow wiring and its breaker, retry, and per-attempt limiter configuration. |
 | `main.rs`     | The entry point and CLI banner. |

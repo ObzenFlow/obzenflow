@@ -9,7 +9,10 @@
 pub mod journal_sink;
 pub mod typed;
 
-pub use typed::{
-    DeclareDeliverySafety, DeliveryContext, DeliveryProvenance, FallibleSinkTyped, SinkTyped,
-    SinkTypedWithDelivery,
+pub use crate::stages::common::handlers::sink::{
+    DeliveryContext, DeliveryProvenance, InlineSink, PendingSinkInput, SinkAuditOutcome,
+    SinkBufferedOutcome, SinkCommitReceipt, SinkConnector, SinkDescription, SinkPrimaryOutcome,
+    SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, SinkWriter, SinkWriterInitContext,
+    SinkWriterLifecycleReport,
 };
+pub use typed::{SetSinkRedeliverySafety, SinkTyped};

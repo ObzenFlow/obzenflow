@@ -271,12 +271,10 @@ pub fn assemble_flow(
                     ]
                 );
 
-                // Paid-order sink, tier 3: a typed delivery. `ShippingHandoff`
-                // carries its destination identity, duplicate-safety, and
-                // behaviour on the type; the receipt's journalled destination is
-                // its DELIVERY_TYPE ("shipping.handoff"), and resume needs no
-                // operator flag because SAFETY is declared at compile time.
-                paid_orders = sink!(PaymentAuthorized => shipping_handoff);
+                // Paid-order sink: a tiny in-process console integration. Its
+                // implementation only writes and reports what it actually did;
+                // the site-level clause classifies repeat delivery for resume.
+                paid_orders = sink!(PaymentAuthorized => shipping_handoff, delivery: idempotent);
 
                 // Cancelled-order sink, tier 2: a declared closure. The order's
                 // fate converges from both producers (local validation failures

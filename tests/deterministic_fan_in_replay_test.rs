@@ -14,17 +14,18 @@
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, SinkDeliverySafety,
+    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, SinkRedeliverySafety,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, SinkHandler, StatefulEmission, TypedFiniteSourceHandler,
-    TypedStatefulHandler, TypedTransformHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
+    TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -261,27 +262,41 @@ impl EffectfulTransformHandler for EffectfulTail {
     }
 }
 
-#[derive(Clone, Debug)]
-struct DropSink;
+#[derive(Debug)]
+struct DropSink<T>(std::marker::PhantomData<fn() -> T>);
+
+impl<T> Clone for DropSink<T> {
+    fn clone(&self) -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<T> DropSink<T> {
+    fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
 
 #[async_trait]
-impl SinkHandler for DropSink {
-    async fn consume(
-        &mut self,
-        _event: ChainEvent,
-    ) -> Result<obzenflow_core::event::payloads::delivery_payload::DeliveryPayload, HandlerError>
-    {
-        Ok(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryPayload::success(
-                obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-                None,
-            ),
-        )
+impl<T> InlineSink for DropSink<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Input = T;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    // Deterministic local drop: re-delivery under either archive verb is safe.
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+    async fn write(
+        &mut self,
+        _event: T,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+            None,
+        )))
     }
 }
 
@@ -352,7 +367,7 @@ fn build_two_channel_flow_with_jitter(
         let source_b = ChannelSource::with_jitter("b", 3, jitter_ms);
         let merge = MergeTransform::new();
         let effectful = EffectfulTail { calls };
-        let collector = DropSink;
+        let collector = DropSink::<FanInOutput>::new();
 
         Ok(flow! {
             name: "deterministic_fan_in",
@@ -397,7 +412,7 @@ fn build_skip_level_flow_with_delay(
         let tap = TapTransform::new();
         let merge = MergeTransform::new();
         let effectful = EffectfulTail { calls };
-        let collector = DropSink;
+        let collector = DropSink::<FanInOutput>::new();
 
         Ok(flow! {
             name: "deterministic_fan_in_skip_level",
@@ -436,7 +451,7 @@ fn build_two_channel_stateful_flow(journal_base: PathBuf) -> FlowDefinition {
         let source_b = ChannelSource::with_jitter("b", 3, 0);
         let merge = MergeTransform::new();
         let counter = OrderedListStateful::new();
-        let collector = DropSink;
+        let collector = DropSink::<OrderedList>::new();
 
         Ok(flow! {
             name: "stateful_fan_in",

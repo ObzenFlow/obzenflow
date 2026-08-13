@@ -150,6 +150,7 @@ tempfile = { workspace = true }
 futures = { workspace = true }
 proc-macro2 = { workspace = true }
 syn = { workspace = true, features = ["full", "visit"] }
+csv = { workspace = true }
 
 [features]
 console = ["obzenflow_infra/console"]
@@ -301,6 +302,11 @@ required-features = ["test-support"]
 [[test]]
 name = "replay_truncated_eof_fidelity_test"
 path = "tests/replay_truncated_eof_fidelity_test.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "csv_sink_termination_contract_test"
+path = "tests/csv_sink_termination_contract_test.rs"
 required-features = ["test-support"]
 
 [[test]]

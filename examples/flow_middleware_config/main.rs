@@ -31,14 +31,17 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::typed::sources;
 use obzenflow_adapters::middleware::RateLimiterBuilder;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::SinkDeliverySafety;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedTransformHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedTransformHandler,
+};
 use serde::{Deserialize, Serialize};
 const CONFIG_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -87,28 +90,32 @@ impl CountingSink {
 }
 
 #[async_trait]
-impl SinkHandler for CountingSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+impl InlineSink for CountingSink {
+    type Input = CounterEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+    }
+
+    async fn write(
+        &mut self,
+        event: CounterEvent,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
         self.received += 1;
 
         // Log progress every 20 events
         if self.received.is_multiple_of(20) {
-            let payload = event.payload();
             println!(
                 "[SINK] Received {} events (current: #{})",
-                self.received, payload["count"]
+                self.received, event.count
             );
         }
 
-        Ok(DeliveryPayload::success(
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("InMemory".to_string()),
             Some(1),
-        ))
-    }
-
-    // Local counter plus progress prints: re-delivery under either archive verb is safe.
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+        )))
     }
 }
 

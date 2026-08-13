@@ -1,0 +1,33 @@
+error[E0277]: the trait bound `support::RawHandler: InlineSink` is not satisfied
+  --> tests/compile_fail/sink_witness/raw_handler.rs:10:13
+   |
+10 |     let _ = obzenflow_dsl::sink!(Input => RawHandler);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `InlineSink` is not implemented for `support::RawHandler`
+  --> tests/compile_fail/sink_witness/../support/typed_sink.rs
+   |
+   | pub struct RawHandler;
+   | ^^^^^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `InlineSink`
+  --> tests/compile_fail/sink_witness/../support/typed_sink.rs
+   |
+   |   impl InlineSink for WrongInputHandler {
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `WrongInputHandler`
+   |
+  ::: crates/obzenflow_adapters/src/sinks/console.rs
+   |
+   | / impl<T, F> InlineSink for ConsoleSink<T, F>
+   | | where
+   | |     T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+   | |     F: Formatter<T> + 'static,
+   | |______________________________^ `obzenflow_adapters::sinks::console::ConsoleSink<T, F>`
+   |
+  ::: crates/obzenflow_dsl/src/dsl/typing.rs
+   |
+   | / impl<In> InlineSink for PlaceholderSink<In>
+   | | where
+   | |     In: TypedPayload + Send + Sync + 'static,
+   | |_____________________________________________^ `PlaceholderSink<In>`
+   = note: required for `support::RawHandler` to implement `SinkConnector`
+   = note: this error originates in the macro `$crate::__obzenflow_sink_typed` which comes from the expansion of the macro `obzenflow_dsl::sink` (in Nightly builds, run with -Z macro-backtrace for more info)

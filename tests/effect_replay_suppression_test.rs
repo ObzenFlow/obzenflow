@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, RateLimiterBuilder, Retry};
 use obzenflow_core::{
     event::chain_event::ChainEvent,
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
+    event::payloads::delivery_payload::DeliveryMethod,
     event::payloads::flow_control_payload::FlowControlPayload,
     event::payloads::observability_payload::{
         CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
@@ -27,11 +27,12 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
     is_framework_effect_event_type, Effect, EffectCommitHandle, EffectContext, EffectCursor,
     EffectError, EffectPortRegistry, EffectPortRequirement, EffectRecord, EffectSafety, Effects,
-    IdempotencyKey, SinkDeliverySafety, TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
+    IdempotencyKey, SinkRedeliverySafety, TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulStatefulHandler, EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
+    EffectfulStatefulHandler, EffectfulTransformHandler, InlineSink, SinkDescription,
+    SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, TypedFiniteSourceHandler,
     TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
@@ -860,24 +861,26 @@ struct CollectSink {
 }
 
 #[async_trait]
-impl SinkHandler for CollectSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if let Some(output) = ReplayOutput::from_event(&event) {
-            self.outputs
-                .lock()
-                .expect("outputs lock poisoned")
-                .push(output);
-        }
+impl InlineSink for CollectSink {
+    type Input = ReplayOutput;
 
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Memory".to_string()),
-            None,
-        ))
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    // In-memory collector: re-delivery under either archive verb is safe.
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+    async fn write(
+        &mut self,
+        output: ReplayOutput,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        self.outputs
+            .lock()
+            .expect("outputs lock poisoned")
+            .push(output);
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Memory".to_string()),
+            None,
+        )))
     }
 }
 

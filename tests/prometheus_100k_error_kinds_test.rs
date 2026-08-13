@@ -11,15 +11,14 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_core::{
-    event::chain_event::ChainEvent,
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    TypedPayload,
-};
+use obzenflow_core::{event::payloads::delivery_payload::DeliveryMethod, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler,
+};
 use obzenflow_runtime::stages::transform::TryMapTyped;
 use serde::{Deserialize, Serialize};
 
@@ -131,15 +130,22 @@ impl CompletionSink {
 }
 
 #[async_trait]
-impl SinkHandler for CompletionSink {
-    async fn consume(
+impl InlineSink for CompletionSink {
+    type Input = ProcessedEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        _event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
+        _event: ProcessedEvent,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("InMemory".to_string()),
             Some(1),
-        ))
+        )))
     }
 }
 

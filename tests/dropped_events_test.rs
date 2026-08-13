@@ -9,15 +9,15 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::StageOutputs;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 
@@ -105,30 +105,35 @@ impl TypedTransformHandler for DroppingTransform {
 /// Simple sink that just collects events
 #[derive(Clone, Debug)]
 struct CollectorSink {
-    events: Arc<Mutex<Vec<ChainEvent>>>,
+    events: Arc<Mutex<Vec<CorrelatedTestEvent>>>,
 }
 
 impl CollectorSink {
-    fn new(events: Arc<Mutex<Vec<ChainEvent>>>) -> Self {
+    fn new(events: Arc<Mutex<Vec<CorrelatedTestEvent>>>) -> Self {
         Self { events }
     }
 }
 
 #[async_trait]
-impl SinkHandler for CollectorSink {
-    async fn consume(
+impl InlineSink for CollectorSink {
+    type Input = CorrelatedTestEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
+        event: CorrelatedTestEvent,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
         if let Ok(mut events) = self.events.lock() {
-            if event.is_data() {
-                events.push(event);
-            }
+            events.push(event);
         }
-        Ok(DeliveryPayload::success(
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Collect".to_string()),
             None,
-        ))
+        )))
     }
 }
 
@@ -205,16 +210,6 @@ async fn test_dropped_events_detection() -> Result<()> {
         7,
         "Should have received 7 events (10 - 3 dropped)"
     );
-
-    // Debug: Check if events have correlation IDs
-    println!("\n=== Debug: Event Correlation IDs ===");
-    for (i, event) in events.iter().enumerate() {
-        println!(
-            "Event {}: correlation_id = {:?}",
-            i,
-            event.correlation_id().is_some()
-        );
-    }
 
     // Check dropped events metric (optional - may not be wired in all builds)
     let has_dropped_metric = metrics_text.contains("obzenflow_dropped_events");

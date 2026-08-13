@@ -4,16 +4,15 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::StageOutputs;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use serde::{Deserialize, Serialize};
 
@@ -238,27 +237,25 @@ impl DoneCounterSink {
 }
 
 #[async_trait]
-impl SinkHandler for DoneCounterSink {
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        if let ChainEventContent::Data {
-            event_type,
-            payload,
-        } = &event.content
-        {
-            if SeedEvent::event_type_matches(event_type)
-                && payload.get("kind").and_then(|v| v.as_str()) == Some("done")
-            {
-                self.done_count.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+impl InlineSink for DoneCounterSink {
+    type Input = SeedEvent;
 
-        Ok(DeliveryPayload::success(
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
+        &mut self,
+        event: SeedEvent,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        if event.kind == "done" {
+            self.done_count.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Count".to_string()),
             None,
-        ))
+        )))
     }
 }
 

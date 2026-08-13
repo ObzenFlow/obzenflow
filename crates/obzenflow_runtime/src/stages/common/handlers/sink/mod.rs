@@ -4,9 +4,21 @@
 
 //! Sink handler components
 
-pub mod delivery;
+pub mod connector;
 pub mod traits;
+pub mod typed;
 
-pub use delivery::{Delivered, Delivery};
+pub use connector::{
+    InlineSink, SinkConnector, SinkDescription, SinkWriterInitContext, WithRedeliverySafety,
+};
+#[doc(hidden)]
 pub use traits::UnifiedSinkHandler;
+#[doc(hidden)]
 pub use traits::{CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport};
+#[doc(hidden)]
+pub use typed::SinkWriterAdapter;
+pub use typed::{
+    DeliveryContext, DeliveryProvenance, PendingSinkInput, SinkAuditOutcome, SinkBufferedOutcome,
+    SinkCommitReceipt, SinkPrimaryOutcome, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    SinkWriter, SinkWriterLifecycleReport,
+};

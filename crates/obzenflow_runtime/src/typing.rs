@@ -23,11 +23,6 @@ pub trait TransformTyping {
     type Output;
 }
 
-/// Sink stage typing contract.
-pub trait SinkTyping {
-    type Input;
-}
-
 /// Compile-time assertion helper for source handlers.
 pub fn assert_source_output<H, Out>(_: &H)
 where
@@ -47,8 +42,9 @@ where
 // `assert_stateful_contract`, `assert_sink_input`, `assert_join_contract`,
 // `assert_join_output`, `assert_join_reference_output`,
 // `assert_join_stream_output`) are removed. The DSL no longer has authoring
-// surfaces that need to bypass `TransformTyping`/`SinkTyping`. Join typing is
-// witnessed directly by `TypedJoinHandler` and the `join!` expansion.
+// surfaces that need to bypass `TransformTyping`. Sink and join typing are
+// witnessed directly by `SinkWriter` / `TypedJoinHandler` and their
+// macro expansions.
 // The remaining typed contract is established at the macro
 // expansion site by emitting `TypeHint::exact::<T>()` metadata; runtime
 // fingerprinting is type-erased through `ChainEvent`.

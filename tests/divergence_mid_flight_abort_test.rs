@@ -22,7 +22,7 @@ use obzenflow_adapters::middleware::{
     SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent};
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
 use obzenflow_core::event::SystemEventType;
@@ -34,7 +34,8 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::observer::{
     HandlerObserver, HandlerObserverContext, ObserverReport,
@@ -346,15 +347,22 @@ impl HandlerObserver for CycleDepthInjectionMiddleware {
 struct CountingSink;
 
 #[async_trait]
-impl SinkHandler for CountingSink {
-    async fn consume(
+impl InlineSink for CountingSink {
+    type Input = SeedEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        _event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
+        _event: SeedEvent,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Count".to_string()),
             None,
-        ))
+        )))
     }
 }
 

@@ -25,14 +25,18 @@ fn lowering_retains_closed_positions_and_lane_local_indices() {
     for field in [
         "pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>",
         "pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>",
-        "pub sink_policies: Vec<Box<dyn MiddlewareFactory>>",
-        "pub observers: Vec<Box<dyn MiddlewareFactory>>",
+        "pub(crate) sink_policies: Vec<Box<dyn MiddlewareFactory>>",
+        "pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>",
     ] {
         assert!(
             descriptor.contains(field),
             "descriptor lost its grammar-owned lane: {field}"
         );
     }
+    assert!(
+        descriptor.contains("pub(crate) struct SinkDescriptor"),
+        "the sink erasure descriptor must remain crate-private"
+    );
     for index in [
         "MiddlewareDeclarationIndex::source_with(source_policy_index)",
         "MiddlewareDeclarationIndex::ingress_with()",

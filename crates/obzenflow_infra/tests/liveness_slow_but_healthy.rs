@@ -3,8 +3,8 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::{ChainEvent, EdgeLivenessState, SystemEvent, SystemEventType};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::{EdgeLivenessState, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
@@ -14,7 +14,8 @@ use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -116,15 +117,22 @@ impl EffectfulTransformHandler for SlowAiTransform {
 struct NoopSink;
 
 #[async_trait]
-impl SinkHandler for NoopSink {
-    async fn consume(
+impl InlineSink for NoopSink {
+    type Input = ProbeOutputEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        _event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
+        _input: ProbeOutputEvent,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Noop".to_string()),
             None,
-        ))
+        )))
     }
 }
 

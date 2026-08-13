@@ -6,11 +6,7 @@
 //! effectful stage, before live I/O.
 
 use async_trait::async_trait;
-use obzenflow_core::{
-    event::chain_event::ChainEvent,
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    TypedPayload,
-};
+use obzenflow_core::{event::payloads::delivery_payload::DeliveryMethod, TypedPayload};
 use obzenflow_dsl::dsl::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
 use obzenflow_dsl::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
@@ -21,7 +17,8 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, SinkHandler, TypedFiniteSourceHandler,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -163,16 +160,41 @@ impl EffectfulTransformHandler for EmitOnlyTransform {
     }
 }
 
-#[derive(Clone, Debug)]
-struct DropSink;
+#[derive(Debug)]
+struct DropSink<T>(std::marker::PhantomData<fn() -> T>);
+
+impl<T> Clone for DropSink<T> {
+    fn clone(&self) -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<T> DropSink<T> {
+    fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
 
 #[async_trait]
-impl SinkHandler for DropSink {
-    async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
+impl<T> InlineSink for DropSink<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Input = T;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
+        &mut self,
+        _event: T,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Memory".to_string()),
             None,
-        ))
+        )))
     }
 }
 
@@ -219,7 +241,7 @@ fn missing_effect_fact_descriptor() -> Box<dyn StageDescriptor> {
 fn undeclared_effect_fact_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let inputs_handler = OneShotSource::new();
-        let drops_handler = DropSink;
+        let drops_handler = DropSink::<ContainmentOutput>::new();
 
         Ok(flow! {
             name: "effect_fact_containment_missing",
@@ -245,7 +267,7 @@ fn empty_effects_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let inputs_handler = OneShotSource::new();
         let effectful_handler = EmitOnlyTransform;
-        let drops_handler = DropSink;
+        let drops_handler = DropSink::<ContainmentOutput>::new();
 
         Ok(flow! {
             name: "effect_fact_containment_empty_effects",
@@ -425,7 +447,7 @@ fn colliding_effect_descriptor() -> Box<dyn StageDescriptor> {
 fn colliding_event_type_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let inputs_handler = OneShotSource::new();
-        let drops_handler = DropSink;
+        let drops_handler = DropSink::<ColliderA>::new();
 
         Ok(flow! {
             name: "effect_fact_containment_collision",

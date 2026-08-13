@@ -21,9 +21,7 @@ use crate::supervised_base::{
 };
 
 /// Builder for creating journal sink stages
-pub struct JournalSinkBuilder<
-    H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-> {
+pub struct JournalSinkBuilder<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> {
     handler: H,
     config: JournalSinkConfig,
     resources: StageResources,
@@ -31,9 +29,7 @@ pub struct JournalSinkBuilder<
     heartbeat_config: HeartbeatConfig,
 }
 
-impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    JournalSinkBuilder<H>
-{
+impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> JournalSinkBuilder<H> {
     /// Create a new journal sink builder
     pub fn new(handler: H, config: JournalSinkConfig, resources: StageResources) -> Self {
         Self {
@@ -58,7 +54,7 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 }
 
 #[async_trait::async_trait]
-impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
+impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
     for JournalSinkBuilder<H>
 {
     type Handle = JournalSinkHandle<H>;
@@ -105,12 +101,11 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             ))
         };
 
-        // FLOWIP-120s: single-writer receipt identity, resolved once from the
-        // descriptor snapshot (pre-wrap); never queried from the handler.
+        // Single-writer receipt identity, resolved once from the connector
+        // description (pre-wrap); never queried from the writer.
         let receipt_destination = self
             .config
-            .delivery_type
-            .map(str::to_owned)
+            .receipt_destination
             .unwrap_or_else(|| self.config.stage_name.clone());
 
         let context = JournalSinkContext {
@@ -118,6 +113,7 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
             receipt_destination,
+            default_delivery_method: self.config.default_delivery_method,
             flow_name: self.config.flow_name.clone(),
             flow_id: self.resources.flow_id,
             data_journal: self.resources.data_journal.clone(),

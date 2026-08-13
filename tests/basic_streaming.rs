@@ -3,15 +3,15 @@
 // https://obzenflow.dev
 
 // tests/basic_streaming.rs
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::StageOutputs;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use anyhow::Result;
@@ -55,18 +55,23 @@ impl EventCounterSink {
 }
 
 #[async_trait]
-impl SinkHandler for EventCounterSink {
-    async fn consume(
+impl InlineSink for EventCounterSink {
+    type Input = StreamItem;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        _event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        if _event.is_data() {
-            self.count.fetch_add(1, Ordering::Relaxed);
-        }
-        Ok(DeliveryPayload::success(
+        _event: StreamItem,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Count".to_string()),
             None,
-        ))
+        )))
     }
 }
 
@@ -280,18 +285,23 @@ impl SumSink {
 }
 
 #[async_trait]
-impl SinkHandler for SumSink {
-    async fn consume(
+impl InlineSink for SumSink {
+    type Input = NumberItem;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        if let Some(value) = event.payload().get("value").and_then(|v| v.as_u64()) {
-            self.sum.fetch_add(value, Ordering::Relaxed);
-        }
-        Ok(DeliveryPayload::success(
+        event: NumberItem,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        self.sum.fetch_add(event.value, Ordering::Relaxed);
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Sum".to_string()),
             None,
-        ))
+        )))
     }
 }
 

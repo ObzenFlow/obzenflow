@@ -11,15 +11,14 @@
 use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use obzenflow_benchmarks::prelude::*;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -113,32 +112,34 @@ struct TimestampedSink {
 }
 
 #[async_trait]
-impl SinkHandler for TimestampedSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if let ChainEventContent::Data { payload, .. } = &event.content {
-            if let (Some(emit_time_nanos), Some(index)) = (
-                payload.get("emit_time_nanos").and_then(|v| v.as_u64()),
-                payload.get("index").and_then(|v| v.as_u64()),
-            ) {
-                self.received.fetch_add(1, Ordering::Relaxed);
+impl InlineSink for TimestampedSink {
+    type Input = BenchEvent;
 
-                // Skip warmup events for latency calculation
-                if index >= THROUGHPUT_WARMUP {
-                    // Calculate latency from embedded timestamp
-                    let receive_time_nanos = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos() as u64;
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
 
-                    if receive_time_nanos > emit_time_nanos {
-                        let latency = Duration::from_nanos(receive_time_nanos - emit_time_nanos);
-                        self.latencies.lock().await.push(latency);
-                    }
-                }
+    async fn write(
+        &mut self,
+        event: BenchEvent,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        self.received.fetch_add(1, Ordering::Relaxed);
+        if event.index >= THROUGHPUT_WARMUP {
+            let receive_time_nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+            if receive_time_nanos > event.emit_time_nanos {
+                let latency = Duration::from_nanos(receive_time_nanos - event.emit_time_nanos);
+                self.latencies.lock().await.push(latency);
             }
         }
 
-        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Noop,
+            None,
+        )))
     }
 }
 

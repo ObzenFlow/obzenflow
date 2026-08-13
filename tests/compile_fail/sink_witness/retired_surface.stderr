@@ -1,0 +1,42 @@
+error[E0432]: unresolved imports `obzenflow_runtime::stages::common::handlers::Delivered`, `obzenflow_runtime::stages::common::handlers::Delivery`
+ --> tests/compile_fail/sink_witness/retired_surface.rs:6:51
+  |
+6 | use obzenflow_runtime::stages::common::handlers::{Delivered, Delivery};
+  |                                                   ^^^^^^^^^  ^^^^^^^^ no `Delivery` in `stages::common::handlers`
+  |                                                   |
+  |                                                   no `Delivered` in `stages::common::handlers`
+  |
+  = help: consider importing one of these variants instead:
+          obzenflow_adapters::middleware::SinkDeliveryPolicyOutcome::Delivered
+          obzenflow_adapters::middleware::SourcePollOutcome::Delivered
+          obzenflow_adapters::middleware::observer::SinkDeliveryObserverOutcome::Delivered
+          obzenflow_runtime::stages::observer::SinkDeliveryObserverOutcome::Delivered
+          obzenflow_runtime::stages::sink::journal_sink::SinkDeliveryAttemptOutcome::Delivered
+  = help: consider importing this variant instead:
+          obzenflow_core::event::ChainEventContent::Delivery
+
+error[E0432]: unresolved imports `obzenflow_runtime::stages::sink::FallibleSinkTyped`, `obzenflow_runtime::stages::sink::SinkTypedWithDelivery`
+ --> tests/compile_fail/sink_witness/retired_surface.rs:7:39
+  |
+7 | use obzenflow_runtime::stages::sink::{FallibleSinkTyped, SinkTyped, SinkTypedWithDelivery};
+  |                                       ^^^^^^^^^^^^^^^^^             ^^^^^^^^^^^^^^^^^^^^^ no `SinkTypedWithDelivery` in `stages::sink`
+  |                                       |
+  |                                       no `FallibleSinkTyped` in `stages::sink`
+
+error[E0432]: unresolved import `obzenflow_runtime::typing::SinkTyping`
+ --> tests/compile_fail/sink_witness/retired_surface.rs:8:5
+  |
+8 | use obzenflow_runtime::typing::SinkTyping;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `SinkTyping` in `typing`
+
+error[E0599]: no method named `include_all` found for struct `ConsoleSink<T, F>` in the current scope
+  --> tests/compile_fail/sink_witness/retired_surface.rs:15:57
+   |
+15 |     let _ = ConsoleSink::<Input, JsonFormatter>::json().include_all();
+   |                                                         ^^^^^^^^^^^ method not found in `ConsoleSink<support::Input>`
+
+error[E0599]: no method named `allow_skip` found for struct `SinkTyped<T, F, Fut, Mode>` in the current scope
+  --> tests/compile_fail/sink_witness/retired_surface.rs:16:59
+   |
+16 |     let _ = SinkTyped::new(|_input: Input| async move {}).allow_skip();
+   |                                                           ^^^^^^^^^^ method not found in `SinkTyped<support::Input, {closure@$DIR/tests/compile_fail/sink_witness/retired_surface.rs:16:28: 16:43}, {async block@$DIR/tests/compile_fail/sink_witness/retired_surface.rs:16:44: 16:54}>`

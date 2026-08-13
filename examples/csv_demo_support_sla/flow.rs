@@ -113,7 +113,7 @@ impl TypedJoinHandler for SupportSlaJoin {
 fn build_flow(
     customers: CsvSource<Customer>,
     tickets: CsvSource<Ticket>,
-    output_sink: CsvSink,
+    output_sink: CsvSink<EnrichedTicket>,
     journals_dir: PathBuf,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
@@ -151,7 +151,7 @@ pub fn run_example(paths: DemoPaths, presentation: Presentation) -> Result<()> {
         .chunk_size(25)
         .build()?;
 
-    let output_sink = CsvSink::builder()
+    let output_sink = CsvSink::<EnrichedTicket>::builder()
         .path(&paths.output_csv)
         .columns([
             "ticket_id",

@@ -19,18 +19,18 @@ mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, infinite_source, join, sink, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
-use obzenflow_runtime::effects::SinkDeliverySafety;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkHandler, StatefulEmission, TypedInfiniteSourceHandler, TypedJoinHandler,
+    InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, StatefulEmission, TypedInfiniteSourceHandler, TypedJoinHandler,
     TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::join::JoinReferenceMode;
@@ -229,16 +229,23 @@ struct CountingSink {
 }
 
 #[async_trait]
-impl SinkHandler for CountingSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if LedgerSnapshot::from_event(&event).is_some() {
-            self.delivered.fetch_add(1, Ordering::SeqCst);
-        }
-        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
+impl InlineSink for CountingSink {
+    type Input = LedgerSnapshot;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+    async fn write(
+        &mut self,
+        _input: LedgerSnapshot,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        self.delivered.fetch_add(1, Ordering::SeqCst);
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Noop,
+            None,
+        )))
     }
 }
 

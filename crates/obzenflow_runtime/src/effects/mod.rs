@@ -80,7 +80,7 @@ pub(crate) use context::EffectRuntimeMode;
 pub use declaration::{
     DomainFacts, Effect, EffectDeclaration, EffectOutcomeKind, EffectOutcomeSemantics,
     EffectSafety, IdempotencyKey, IdempotencyKeyPolicy, PreparedEffectSuccess, RecordedReply,
-    SinkDeliverySafety, TransactionalEffectPort,
+    SinkRedeliverySafety, TransactionalEffectPort,
 };
 // FLOWIP-120z effect capability sets; the list traits are doc(hidden)
 // plumbing that must stay reachable for the public `DeclaredEffectSet` impl.

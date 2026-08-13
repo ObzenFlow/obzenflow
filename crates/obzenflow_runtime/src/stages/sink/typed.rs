@@ -2,678 +2,306 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Typed sink helpers
-//!
-//! Sinks normally consume `ChainEvent` and must:
-//! - filter by event type
-//! - deserialize JSON payloads
-//! - construct `DeliveryPayload` receipts
-//!
-//! `SinkTyped` and `FallibleSinkTyped` eliminate that boilerplate by working
-//! with domain types that implement `TypedPayload`.
+//! Closure conveniences for the canonical typed sink protocol.
 
-use crate::effects::SinkDeliverySafety;
+use crate::effects::SinkRedeliverySafety;
 use crate::stages::common::handler_error::HandlerError;
-use crate::stages::common::handlers::SinkHandler;
-use crate::typing::SinkTyping;
+use crate::stages::common::handlers::{
+    DeliveryContext, SinkConnector, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, SinkWriter, SinkWriterInitContext, WithRedeliverySafety,
+};
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::{ChainEvent, TypedPayload};
-use serde::de::DeserializeOwned;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::TypedPayload;
 use std::future::Future;
 use std::marker::PhantomData;
 
-/// Typed sink handler that consumes domain values of type `T`.
+#[doc(hidden)]
+pub struct InfallibleSinkMode;
+#[doc(hidden)]
+pub struct WithDeliverySinkMode;
+#[doc(hidden)]
+pub struct FallibleSinkMode;
+
+/// A typed closure sink.
 ///
-/// Semantics:
-/// - Non-data events are silently skipped (success noop)
-/// - Data events with a non-matching event type error by default
-///   (`Err(HandlerError::Validation(..))`), or are silently skipped with `.allow_skip()`
-/// - Data events with a matching event type but invalid payload deserialize as
-///   `Err(HandlerError::Deserialization(...))`
-/// - On success, returns a success `DeliveryPayload`
-pub struct SinkTyped<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
-{
+/// `new`, `with_delivery`, and `fallible` are sealed modes of this one
+/// convenience connector; opening it creates a stage-local [`SinkWriter`].
+pub struct SinkTyped<T, F, Fut, Mode = InfallibleSinkMode> {
     handler: F,
-    allow_skip: bool,
-    delivery_safety: Option<SinkDeliverySafety>,
-    _phantom: PhantomData<fn() -> (T, Fut)>,
+    description: SinkDescription,
+    _input: PhantomData<fn() -> T>,
+    _future: PhantomData<fn() -> Fut>,
+    _mode: PhantomData<fn() -> Mode>,
 }
 
-impl<T, F, Fut> Clone for SinkTyped<T, F, Fut>
+impl<T, F, Fut, Mode> Clone for SinkTyped<T, F, Fut, Mode>
 where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
+    F: Clone,
 {
     fn clone(&self) -> Self {
         Self {
             handler: self.handler.clone(),
-            allow_skip: self.allow_skip,
-            delivery_safety: self.delivery_safety,
-            _phantom: PhantomData,
+            description: self.description.clone(),
+            _input: PhantomData,
+            _future: PhantomData,
+            _mode: PhantomData,
         }
     }
 }
 
-impl<T, F, Fut> SinkTyped<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
-{
-    /// Create a typed sink from an infallible async handler (primary constructor).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let sink = SinkTyped::new(|event: MyEvent| async move {
-    ///     println!("Received: {:?}", event);
-    /// });
-    /// ```
-    pub fn new(handler: F) -> Self {
-        Self {
-            handler,
-            allow_skip: false,
-            delivery_safety: None,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Opt out of strict mode and silently skip non-matching event types.
-    ///
-    /// By default, `SinkTyped` returns `Err(HandlerError::Validation(..))` on a
-    /// data event type mismatch to catch miswired pipelines early.
-    pub fn allow_skip(mut self) -> Self {
-        self.allow_skip = true;
-        self
-    }
-
-    /// Declare the delivery path idempotent (safe to re-consume on resume).
-    pub fn idempotent(mut self) -> Self {
-        self.delivery_safety = Some(SinkDeliverySafety::IdempotentProjection);
-        self
-    }
-
-    /// Declare a non-idempotent external write (resume refuses without opt-in).
-    pub fn non_idempotent(mut self) -> Self {
-        self.delivery_safety = Some(SinkDeliverySafety::NonIdempotentExternal);
-        self
-    }
-}
-
-impl<T> SinkTyped<T, fn(T) -> std::future::Ready<()>, std::future::Ready<()>>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-{
-    /// Create a fallible typed sink.
-    ///
-    /// Returns `FallibleSinkTyped` for error-returning handlers.
-    pub fn fallible<G, FutG>(handler: G) -> FallibleSinkTyped<T, G, FutG>
-    where
-        G: FnMut(T) -> FutG + Send + Sync + Clone,
-        FutG: Future<Output = Result<(), HandlerError>> + Send,
-    {
-        FallibleSinkTyped::new(handler)
-    }
-
-    /// Create a typed sink whose handler also receives the delivery's
-    /// [`DeliveryContext`], so it can tell a fresh outcome from one
-    /// reconstructed during replay (FLOWIP-120i).
-    ///
-    /// ```ignore
-    /// let paid_orders_handler = SinkTyped::with_delivery(
-    ///     |authorized: PaymentAuthorized, delivery| async move {
-    ///         send_to_shipping(authorized, delivery.provenance());
-    ///     }
-    /// );
-    /// paid_orders = sink!(PaymentAuthorized => paid_orders_handler);
-    /// ```
-    pub fn with_delivery<G, FutG>(handler: G) -> SinkTypedWithDelivery<T, G, FutG>
-    where
-        G: FnMut(T, DeliveryContext) -> FutG + Send + Sync + Clone,
-        FutG: Future<Output = ()> + Send,
-    {
-        SinkTypedWithDelivery::new(handler)
-    }
-}
-
-#[async_trait]
-impl<T, F, Fut> SinkHandler for SinkTyped<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
-{
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        let (event_type, payload) = match &event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } => (event_type.as_str(), payload),
-            _ => {
-                return Ok(DeliveryPayload::success(
-                    DeliveryMethod::Custom("Skipped".to_string()),
-                    None,
-                ))
-            }
-        };
-
-        if !T::event_type_matches(event_type) {
-            if self.allow_skip {
-                return Ok(DeliveryPayload::success(
-                    DeliveryMethod::Custom("Skipped".to_string()),
-                    None,
-                ));
-            }
-
-            return Err(HandlerError::Validation(format!(
-                "SinkTyped expected event type '{}' (or '{}'), got '{}'",
-                T::EVENT_TYPE,
-                T::versioned_event_type(),
-                event_type
-            )));
-        }
-
-        let typed_event: T = serde_json::from_value(payload.clone()).map_err(|e| {
-            HandlerError::Deserialization(format!(
-                "SinkTyped failed to deserialize {}: {e}",
-                std::any::type_name::<T>()
-            ))
-        })?;
-
-        (self.handler)(typed_event).await;
-
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("TypedSink".to_string()),
-            Some(1),
-        ))
-    }
-
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        self.delivery_safety
-    }
-}
-
-impl<T, F, Fut> std::fmt::Debug for SinkTyped<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
-{
+impl<T, F, Fut, Mode> std::fmt::Debug for SinkTyped<T, F, Fut, Mode> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SinkTyped")
             .field("payload_type", &std::any::type_name::<T>())
-            .field("allow_skip", &self.allow_skip)
-            .field("delivery_safety", &self.delivery_safety)
+            .field("description", &self.description)
             .finish()
     }
 }
 
-impl<T, F, Fut> SinkTyping for SinkTyped<T, F, Fut>
+impl<T, F, Fut> SinkTyped<T, F, Fut, InfallibleSinkMode>
 where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
+    T: TypedPayload + Send + Sync + 'static,
+    F: FnMut(T) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
 {
-    type Input = T;
-}
-
-/// FLOWIP-120i: per-delivery provenance for typed sinks.
-///
-/// Built by the framework from the event envelope before payload
-/// deserialization, so the raw `ChainEvent` never crosses the typed boundary.
-/// Provenance derives from `event.replay_context`, which the replay driver
-/// stamps on re-injected source events and every derived event inherits; that
-/// per-event derivation is what keeps labels honest when FLOWIP-120n's resume
-/// mixes a replayed prefix with a live tail in one run, where a run-scoped
-/// flag would lie about the tail.
-#[derive(Debug, Clone)]
-pub struct DeliveryContext {
-    provenance: DeliveryProvenance,
-}
-
-impl DeliveryContext {
-    pub(crate) fn from_event(event: &ChainEvent) -> Self {
-        Self {
-            provenance: if event.replay_context.is_some() {
-                DeliveryProvenance::Replayed
-            } else {
-                DeliveryProvenance::Live
-            },
-        }
-    }
-
-    pub fn provenance(&self) -> DeliveryProvenance {
-        self.provenance
-    }
-
-    pub fn is_replayed(&self) -> bool {
-        matches!(self.provenance, DeliveryProvenance::Replayed)
-    }
-}
-
-/// Whether a delivered outcome is fresh or reconstructed from a recorded run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DeliveryProvenance {
-    Live,
-    Replayed,
-}
-
-/// Typed sink handler whose closure also receives the delivery's
-/// [`DeliveryContext`] (FLOWIP-120i). Constructed via
-/// [`SinkTyped::with_delivery`]; consumes through the same skip, mismatch,
-/// and deserialization semantics as [`SinkTyped`]. The context is passed by
-/// value: it is a small owned view, and an `async move` handler could not
-/// borrow it across the returned future otherwise.
-pub struct SinkTypedWithDelivery<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
-{
-    handler: F,
-    allow_skip: bool,
-    delivery_safety: Option<SinkDeliverySafety>,
-    _phantom: PhantomData<fn() -> (T, Fut)>,
-}
-
-impl<T, F, Fut> Clone for SinkTypedWithDelivery<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
-{
-    fn clone(&self) -> Self {
-        Self {
-            handler: self.handler.clone(),
-            allow_skip: self.allow_skip,
-            delivery_safety: self.delivery_safety,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<T, F, Fut> SinkTypedWithDelivery<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
-{
+    /// Build an infallible closure sink over `T`.
     pub fn new(handler: F) -> Self {
         Self {
             handler,
-            allow_skip: false,
-            delivery_safety: None,
-            _phantom: PhantomData,
+            description: SinkDescription::method(DeliveryMethod::Custom(
+                "typed_closure".to_string(),
+            )),
+            _input: PhantomData,
+            _future: PhantomData,
+            _mode: PhantomData,
+        }
+    }
+}
+
+impl<T> SinkTyped<T, fn(T) -> std::future::Ready<()>, std::future::Ready<()>, InfallibleSinkMode>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    /// Build a fallible closure sink whose errors follow the sink error path.
+    pub fn fallible<G, FutG>(handler: G) -> SinkTyped<T, G, FutG, FallibleSinkMode>
+    where
+        G: FnMut(T) -> FutG + Send + Sync + Clone + 'static,
+        FutG: Future<Output = Result<(), HandlerError>> + Send + 'static,
+    {
+        SinkTyped {
+            handler,
+            description: SinkDescription::method(DeliveryMethod::Custom(
+                "typed_closure".to_string(),
+            )),
+            _input: PhantomData,
+            _future: PhantomData,
+            _mode: PhantomData,
         }
     }
 
-    /// Opt out of strict mode and silently skip non-matching event types.
-    pub fn allow_skip(mut self) -> Self {
-        self.allow_skip = true;
-        self
+    /// Build a closure sink that also receives read-only delivery provenance.
+    pub fn with_delivery<G, FutG>(handler: G) -> SinkTyped<T, G, FutG, WithDeliverySinkMode>
+    where
+        G: FnMut(T, DeliveryContext) -> FutG + Send + Sync + Clone + 'static,
+        FutG: Future<Output = ()> + Send + 'static,
+    {
+        SinkTyped {
+            handler,
+            description: SinkDescription::method(DeliveryMethod::Custom(
+                "typed_closure".to_string(),
+            )),
+            _input: PhantomData,
+            _future: PhantomData,
+            _mode: PhantomData,
+        }
     }
+}
 
-    /// Declare the delivery path idempotent (safe to re-consume on resume).
+impl<T, F, Fut, Mode> SinkTyped<T, F, Fut, Mode> {
+    /// Declare this projection safe to re-run during replay or resume.
     pub fn idempotent(mut self) -> Self {
-        self.delivery_safety = Some(SinkDeliverySafety::IdempotentProjection);
+        self.description = self
+            .description
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat);
         self
     }
 
-    /// Declare a non-idempotent external write (resume refuses without opt-in).
+    /// Declare that duplicate external delivery requires archive-verb opt-in.
     pub fn non_idempotent(mut self) -> Self {
-        self.delivery_safety = Some(SinkDeliverySafety::NonIdempotentExternal);
+        self.description = self
+            .description
+            .with_redelivery_safety(SinkRedeliverySafety::DuplicateSensitive);
         self
+    }
+}
+
+fn closure_success() -> SinkWriteReport {
+    SinkWriteReport::terminal(SinkTerminalOutcome::success(Some(1)))
+}
+
+/// Mutable execution half of a closure sink.
+pub struct ClosureSinkWriter<T, F, Fut, Mode> {
+    handler: F,
+    _input: PhantomData<fn() -> T>,
+    _future: PhantomData<fn() -> Fut>,
+    _mode: PhantomData<fn() -> Mode>,
+}
+
+impl<T, F, Fut, Mode> std::fmt::Debug for ClosureSinkWriter<T, F, Fut, Mode> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClosureSinkWriter")
+            .field("payload_type", &std::any::type_name::<T>())
+            .finish_non_exhaustive()
+    }
+}
+
+macro_rules! impl_closure_connector {
+    ($mode:ty, $($bound:tt)*) => {
+        #[async_trait]
+        impl<T, F, Fut> SinkConnector for SinkTyped<T, F, Fut, $mode>
+        where
+            T: TypedPayload + Send + Sync + 'static,
+            F: Send + Sync + Clone + 'static,
+            Fut: Future + Send + 'static,
+            $($bound)*
+        {
+            type Input = T;
+            type Writer = ClosureSinkWriter<T, F, Fut, $mode>;
+
+            fn describe(&self) -> SinkDescription {
+                self.description.clone()
+            }
+
+            async fn open(
+                &self,
+                _context: SinkWriterInitContext,
+            ) -> Result<Self::Writer, HandlerError> {
+                Ok(ClosureSinkWriter {
+                    handler: self.handler.clone(),
+                    _input: PhantomData,
+                    _future: PhantomData,
+                    _mode: PhantomData,
+                })
+            }
+        }
+    };
+}
+
+impl_closure_connector!(
+    InfallibleSinkMode,
+    F: FnMut(T) -> Fut,
+    Fut: Future<Output = ()>
+);
+impl_closure_connector!(
+    WithDeliverySinkMode,
+    F: FnMut(T, DeliveryContext) -> Fut,
+    Fut: Future<Output = ()>
+);
+impl_closure_connector!(
+    FallibleSinkMode,
+    F: FnMut(T) -> Fut,
+    Fut: Future<Output = Result<(), HandlerError>>
+);
+
+#[async_trait]
+impl<T, F, Fut> SinkWriter for ClosureSinkWriter<T, F, Fut, InfallibleSinkMode>
+where
+    T: TypedPayload + Send + Sync + 'static,
+    F: FnMut(T) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    type Input = T;
+
+    async fn write(
+        &mut self,
+        input: T,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        (self.handler)(input).await;
+        Ok(closure_success())
     }
 }
 
 #[async_trait]
-impl<T, F, Fut> SinkHandler for SinkTypedWithDelivery<T, F, Fut>
+impl<T, F, Fut> SinkWriter for ClosureSinkWriter<T, F, Fut, WithDeliverySinkMode>
 where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
-{
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        let (event_type, payload) = match &event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } => (event_type.as_str(), payload),
-            _ => {
-                return Ok(DeliveryPayload::success(
-                    DeliveryMethod::Custom("Skipped".to_string()),
-                    None,
-                ))
-            }
-        };
-
-        if !T::event_type_matches(event_type) {
-            if self.allow_skip {
-                return Ok(DeliveryPayload::success(
-                    DeliveryMethod::Custom("Skipped".to_string()),
-                    None,
-                ));
-            }
-
-            return Err(HandlerError::Validation(format!(
-                "SinkTypedWithDelivery expected event type '{}' (or '{}'), got '{}'",
-                T::EVENT_TYPE,
-                T::versioned_event_type(),
-                event_type
-            )));
-        }
-
-        let context = DeliveryContext::from_event(&event);
-
-        let typed_event: T = serde_json::from_value(payload.clone()).map_err(|e| {
-            HandlerError::Deserialization(format!(
-                "SinkTypedWithDelivery failed to deserialize {}: {e}",
-                std::any::type_name::<T>()
-            ))
-        })?;
-
-        (self.handler)(typed_event, context).await;
-
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("TypedSink".to_string()),
-            Some(1),
-        ))
-    }
-
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        self.delivery_safety
-    }
-}
-
-impl<T, F, Fut> std::fmt::Debug for SinkTypedWithDelivery<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SinkTypedWithDelivery")
-            .field("payload_type", &std::any::type_name::<T>())
-            .field("allow_skip", &self.allow_skip)
-            .field("delivery_safety", &self.delivery_safety)
-            .finish()
-    }
-}
-
-impl<T, F, Fut> SinkTyping for SinkTypedWithDelivery<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
+    T: TypedPayload + Send + Sync + 'static,
+    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
 {
     type Input = T;
-}
 
-/// Typed sink handler for fallible async handlers.
-///
-/// Unlike `SinkTyped`, the handler returns `Result<(), HandlerError>`. Errors are
-/// returned as `Err(HandlerError)` so the sink supervisor can journal failed
-/// delivery receipts and emit error-marked events.
-pub struct FallibleSinkTyped<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = Result<(), HandlerError>> + Send,
-{
-    handler: F,
-    allow_skip: bool,
-    delivery_safety: Option<SinkDeliverySafety>,
-    _phantom: PhantomData<fn() -> (T, Fut)>,
-}
-
-impl<T, F, Fut> Clone for FallibleSinkTyped<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = Result<(), HandlerError>> + Send,
-{
-    fn clone(&self) -> Self {
-        Self {
-            handler: self.handler.clone(),
-            allow_skip: self.allow_skip,
-            delivery_safety: self.delivery_safety,
-            _phantom: PhantomData,
-        }
+    async fn write(
+        &mut self,
+        input: T,
+        context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        (self.handler)(input, context.delivery().clone()).await;
+        Ok(closure_success())
     }
-}
-
-impl<T, F, Fut> FallibleSinkTyped<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = Result<(), HandlerError>> + Send,
-{
-    /// Create a typed sink from a fallible async handler (primary constructor).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let sink = FallibleSinkTyped::new(|event: MyEvent| async move {
-    ///     database::insert(&event).await.map_err(|e| HandlerError::Other(e.to_string()))
-    /// });
-    /// ```
-    pub fn new(handler: F) -> Self {
-        Self {
-            handler,
-            allow_skip: false,
-            delivery_safety: None,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Opt out of strict mode and silently skip non-matching event types.
-    ///
-    /// By default, `FallibleSinkTyped` returns `Err(HandlerError::Validation(..))`
-    /// on a data event type mismatch to catch miswired pipelines early.
-    pub fn allow_skip(mut self) -> Self {
-        self.allow_skip = true;
-        self
-    }
-
-    /// Declare the delivery path idempotent (safe to re-consume on resume).
-    pub fn idempotent(mut self) -> Self {
-        self.delivery_safety = Some(SinkDeliverySafety::IdempotentProjection);
-        self
-    }
-
-    /// Declare a non-idempotent external write (resume refuses without opt-in).
-    pub fn non_idempotent(mut self) -> Self {
-        self.delivery_safety = Some(SinkDeliverySafety::NonIdempotentExternal);
-        self
-    }
-}
-
-impl<T, F, Fut> SinkTyping for FallibleSinkTyped<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = Result<(), HandlerError>> + Send,
-{
-    type Input = T;
 }
 
 #[async_trait]
-impl<T, F, Fut> SinkHandler for FallibleSinkTyped<T, F, Fut>
+impl<T, F, Fut> SinkWriter for ClosureSinkWriter<T, F, Fut, FallibleSinkMode>
 where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = Result<(), HandlerError>> + Send,
+    T: TypedPayload + Send + Sync + 'static,
+    F: FnMut(T) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = Result<(), HandlerError>> + Send + 'static,
 {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        let (event_type, payload) = match &event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } => (event_type.as_str(), payload),
-            _ => {
-                return Ok(DeliveryPayload::success(
-                    DeliveryMethod::Custom("Skipped".to_string()),
-                    None,
-                ))
-            }
-        };
+    type Input = T;
 
-        if !T::event_type_matches(event_type) {
-            if self.allow_skip {
-                return Ok(DeliveryPayload::success(
-                    DeliveryMethod::Custom("Skipped".to_string()),
-                    None,
-                ));
-            }
-
-            return Err(HandlerError::Validation(format!(
-                "FallibleSinkTyped expected event type '{}' (or '{}'), got '{}'",
-                T::EVENT_TYPE,
-                T::versioned_event_type(),
-                event_type
-            )));
-        }
-
-        let typed_event: T = serde_json::from_value(payload.clone()).map_err(|e| {
-            HandlerError::Deserialization(format!(
-                "FallibleSinkTyped failed to deserialize {}: {e}",
-                std::any::type_name::<T>()
-            ))
-        })?;
-
-        (self.handler)(typed_event).await?;
-
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("TypedSink".to_string()),
-            Some(1),
-        ))
-    }
-
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        self.delivery_safety
-    }
-}
-
-impl<T, F, Fut> std::fmt::Debug for FallibleSinkTyped<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = Result<(), HandlerError>> + Send,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FallibleSinkTyped")
-            .field("payload_type", &std::any::type_name::<T>())
-            .field("allow_skip", &self.allow_skip)
-            .field("delivery_safety", &self.delivery_safety)
-            .finish()
+    async fn write(
+        &mut self,
+        input: T,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        (self.handler)(input).await?;
+        Ok(closure_success())
     }
 }
 
 mod sealed {
     pub trait Sealed {}
+
+    impl<C: super::SinkConnector> Sealed for C {}
 }
 
-/// Lowering target for the `sink!` macro's `delivery:` clause (FLOWIP-120s).
-/// Implemented only by the closure-tier typed sinks, so the clause fails by
-/// trait bound on any other handler: a typed `Delivery` carries `SAFETY` on
-/// the type, and a custom `SinkHandler` struct implements
-/// `SinkHandler::delivery_safety` directly. Type-level metadata is never
-/// restated at the flow site.
+/// Sealed lowering target for the `sink!` macro's site-level `delivery:`
+/// classification.
+#[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "the `delivery:` clause applies to closure-tier sinks only",
-    note = "a typed `Delivery` declares safety through its `SAFETY` const, and a custom \
-            `SinkHandler` implements `delivery_safety()` on the type; the site clause exists \
-            only for closures, which have no type to carry the declaration"
+    message = "the `delivery:` clause requires a SinkConnector",
+    note = "configure redelivery safety on the connector or use the sink! clause"
 )]
-pub trait DeclareDeliverySafety: sealed::Sealed + Sized {
-    fn declare_idempotent(self) -> Self;
-    fn declare_non_idempotent(self) -> Self;
+pub trait SetSinkRedeliverySafety: sealed::Sealed + Sized {
+    type Output;
+
+    fn safe_to_repeat(self) -> Self::Output;
+    fn duplicate_sensitive(self) -> Self::Output;
 }
 
-impl<T, F, Fut> sealed::Sealed for SinkTyped<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
-{
-}
+impl<C: SinkConnector> SetSinkRedeliverySafety for C {
+    type Output = WithRedeliverySafety<C>;
 
-impl<T, F, Fut> DeclareDeliverySafety for SinkTyped<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
-{
-    fn declare_idempotent(self) -> Self {
-        self.idempotent()
+    fn safe_to_repeat(self) -> Self::Output {
+        WithRedeliverySafety::new(self, SinkRedeliverySafety::SafeToRepeat)
     }
 
-    fn declare_non_idempotent(self) -> Self {
-        self.non_idempotent()
-    }
-}
-
-impl<T, F, Fut> sealed::Sealed for SinkTypedWithDelivery<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
-{
-}
-
-impl<T, F, Fut> DeclareDeliverySafety for SinkTypedWithDelivery<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = ()> + Send,
-{
-    fn declare_idempotent(self) -> Self {
-        self.idempotent()
-    }
-
-    fn declare_non_idempotent(self) -> Self {
-        self.non_idempotent()
-    }
-}
-
-impl<T, F, Fut> sealed::Sealed for FallibleSinkTyped<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = Result<(), HandlerError>> + Send,
-{
-}
-
-impl<T, F, Fut> DeclareDeliverySafety for FallibleSinkTyped<T, F, Fut>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: FnMut(T) -> Fut + Send + Sync + Clone,
-    Fut: Future<Output = Result<(), HandlerError>> + Send,
-{
-    fn declare_idempotent(self) -> Self {
-        self.idempotent()
-    }
-
-    fn declare_non_idempotent(self) -> Self {
-        self.non_idempotent()
+    fn duplicate_sensitive(self) -> Self::Output {
+        WithRedeliverySafety::new(self, SinkRedeliverySafety::DuplicateSensitive)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stages::common::handlers::{SinkHandler, SinkWriterAdapter};
+    use crate::stages::sink::DeliveryProvenance;
+    use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{StageId, WriterId};
     use serde::{Deserialize, Serialize};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -685,290 +313,133 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.payload";
     }
 
-    #[tokio::test]
-    async fn sink_typed_skips_non_data_events() {
-        let called = Arc::new(AtomicUsize::new(0));
-        let called_for_closure = called.clone();
-
-        let mut sink = SinkTyped::new(move |_value: TestPayload| {
-            let called_for_closure = called_for_closure.clone();
-            async move {
-                called_for_closure.fetch_add(1, Ordering::Relaxed);
-            }
-        });
-
-        let event = ChainEventFactory::eof_event(WriterId::from(StageId::new()), true);
-        let receipt = sink.consume(event).await.expect("consume should succeed");
-
-        assert_eq!(called.load(Ordering::Relaxed), 0);
-        assert!(matches!(
-            receipt.delivery_method,
-            DeliveryMethod::Custom(ref name) if name == "Skipped"
-        ));
-    }
-
-    #[tokio::test]
-    async fn sink_typed_errors_on_type_mismatches_by_default() {
-        let event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "other.type",
-            serde_json::json!({"n": 1}),
-        );
-
-        let mut sink = SinkTyped::new(|_value: TestPayload| async move {});
-
-        let err = sink
-            .consume(event)
-            .await
-            .expect_err("expected validation error");
-        assert!(matches!(err, HandlerError::Validation(_)));
-    }
-
-    #[tokio::test]
-    async fn sink_typed_allow_skip_silently_skips_type_mismatches() {
-        let called = Arc::new(AtomicUsize::new(0));
-        let called_for_closure = called.clone();
-
-        let mut sink = SinkTyped::new(move |_value: TestPayload| {
-            let called_for_closure = called_for_closure.clone();
-            async move {
-                called_for_closure.fetch_add(1, Ordering::Relaxed);
-            }
-        })
-        .allow_skip();
-
-        let event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "other.type",
-            serde_json::json!({"n": 1}),
-        );
-
-        let receipt = sink.consume(event).await.expect("consume should succeed");
-        assert_eq!(called.load(Ordering::Relaxed), 0);
-        assert!(matches!(
-            receipt.delivery_method,
-            DeliveryMethod::Custom(ref name) if name == "Skipped"
-        ));
-    }
-
-    #[tokio::test]
-    async fn sink_typed_errors_on_parse_failure_for_matching_type() {
-        let mut sink = SinkTyped::new(|_value: TestPayload| async move {});
-
-        let event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            TestPayload::EVENT_TYPE,
-            serde_json::json!({"wrong": 1}),
-        );
-
-        let err = sink
-            .consume(event)
-            .await
-            .expect_err("expected deserialization error");
-        assert!(matches!(err, HandlerError::Deserialization(_)));
-    }
-
-    #[tokio::test]
-    async fn sink_typed_calls_handler_on_success() {
-        let seen = Arc::new(Mutex::new(Vec::<TestPayload>::new()));
-        let seen_for_closure = seen.clone();
-
-        let mut sink = SinkTyped::new(move |value: TestPayload| {
-            let seen_for_closure = seen_for_closure.clone();
-            async move {
-                seen_for_closure
-                    .lock()
-                    .expect("seen lock poisoned")
-                    .push(value);
-            }
-        });
-
-        let event = ChainEventFactory::data_event(
+    fn event(n: usize) -> obzenflow_core::ChainEvent {
+        ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
             TestPayload::versioned_event_type(),
-            serde_json::json!({"n": 42}),
-        );
+            serde_json::json!({ "n": n }),
+        )
+    }
 
-        let receipt = sink.consume(event).await.expect("consume should succeed");
-        assert!(matches!(
-            receipt.delivery_method,
-            DeliveryMethod::Custom(ref name) if name == "TypedSink"
-        ));
-
-        let values = seen.lock().expect("seen lock poisoned").clone();
-        assert_eq!(values, vec![TestPayload { n: 42 }]);
+    async fn adapted<C>(connector: C) -> SinkWriterAdapter<C::Writer>
+    where
+        C: SinkConnector<Input = TestPayload>,
+    {
+        let stage_id = StageId::new();
+        let description = connector.describe();
+        let writer = connector
+            .open(SinkWriterInitContext::new(
+                stage_id,
+                "closure".to_string(),
+                "test".to_string(),
+            ))
+            .await
+            .expect("closure connector opens");
+        SinkWriterAdapter::with_default_method(
+            writer,
+            stage_id,
+            description.default_method().cloned(),
+        )
     }
 
     #[tokio::test]
-    async fn fallible_sink_typed_propagates_handler_error() {
-        let mut sink = FallibleSinkTyped::new(|_value: TestPayload| async move {
-            Err(HandlerError::Timeout("boom".to_string()))
+    async fn every_closure_mode_uses_the_same_typed_adapter() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_closure = Arc::clone(&seen);
+        let handler = SinkTyped::new(move |input: TestPayload| {
+            let seen = Arc::clone(&seen_for_closure);
+            async move { seen.lock().expect("seen lock poisoned").push(input) }
         });
-
-        let event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            TestPayload::EVENT_TYPE,
-            serde_json::json!({"n": 1}),
-        );
-
-        let err = sink
-            .consume(event)
+        let mut adapter = adapted(handler).await;
+        let report = adapter
+            .consume_report(event(4))
             .await
-            .expect_err("expected handler error");
-        assert!(matches!(err, HandlerError::Timeout(_)));
+            .expect("typed closure consumes");
+        assert!(matches!(
+            report.primary.result,
+            DeliveryResult::Success { .. }
+        ));
+        assert_eq!(
+            *seen.lock().expect("seen lock poisoned"),
+            vec![TestPayload { n: 4 }]
+        );
     }
 
-    fn stamped_with_replay_context(mut event: ChainEvent) -> ChainEvent {
-        event.replay_context = Some(obzenflow_core::event::context::ReplayContext {
-            original_event_id: obzenflow_core::event::types::EventId::new(),
+    async fn assert_closure_receipt<C>(connector: C)
+    where
+        C: SinkConnector<Input = TestPayload>,
+    {
+        let mut adapter = adapted(connector).await;
+        let report = adapter
+            .consume_report(event(9))
+            .await
+            .expect("closure mode consumes");
+        assert!(matches!(
+            report.primary.result,
+            DeliveryResult::Success { .. }
+        ));
+        assert!(matches!(
+            report.primary.delivery_method,
+            DeliveryMethod::Custom(ref name) if name == "typed_closure"
+        ));
+        assert_eq!(report.primary.bytes_processed, Some(1));
+        assert_eq!(report.primary.items_delivered, None);
+    }
+
+    #[tokio::test]
+    async fn every_closure_mode_uses_the_connector_receipt_method() {
+        assert_closure_receipt(SinkTyped::new(|_input: TestPayload| async move {})).await;
+        assert_closure_receipt(SinkTyped::with_delivery(
+            |_input: TestPayload, _delivery| async move {},
+        ))
+        .await;
+        assert_closure_receipt(SinkTyped::fallible(
+            |_input: TestPayload| async move { Ok(()) },
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn with_delivery_receives_replay_provenance() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_closure = Arc::clone(&seen);
+        let handler =
+            SinkTyped::with_delivery(move |_input: TestPayload, delivery: DeliveryContext| {
+                let seen = Arc::clone(&seen_for_closure);
+                async move {
+                    seen.lock()
+                        .expect("seen lock poisoned")
+                        .push(delivery.provenance())
+                }
+            });
+        let mut adapter = adapted(handler).await;
+        let mut replayed = event(1);
+        replayed.replay_context = Some(obzenflow_core::event::context::ReplayContext {
+            original_event_id: obzenflow_core::EventId::new(),
             original_flow_id: "flow_01SOURCE".to_string(),
             original_stage_id: StageId::new(),
             archive_path: std::path::PathBuf::from("tmp/archive"),
             replayed_at: chrono::Utc::now(),
         });
-        event
-    }
-
-    #[tokio::test]
-    async fn with_delivery_reports_live_provenance_for_unstamped_events() {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let seen_for_closure = seen.clone();
-
-        let mut sink = SinkTyped::with_delivery(move |value: TestPayload, delivery| {
-            let seen_for_closure = seen_for_closure.clone();
-            async move {
-                seen_for_closure
-                    .lock()
-                    .expect("seen lock poisoned")
-                    .push((value, delivery.provenance()));
-            }
-        });
-
-        let event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            TestPayload::EVENT_TYPE,
-            serde_json::json!({"n": 7}),
-        );
-        let receipt = sink.consume(event).await.expect("consume should succeed");
-
-        assert!(matches!(
-            receipt.delivery_method,
-            DeliveryMethod::Custom(ref name) if name == "TypedSink"
-        ));
-        assert_eq!(
-            seen.lock().expect("seen lock poisoned").clone(),
-            vec![(TestPayload { n: 7 }, DeliveryProvenance::Live)]
-        );
-    }
-
-    #[tokio::test]
-    async fn with_delivery_reports_replayed_provenance_for_stamped_events() {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let seen_for_closure = seen.clone();
-
-        let mut sink = SinkTyped::with_delivery(move |value: TestPayload, delivery| {
-            let seen_for_closure = seen_for_closure.clone();
-            async move {
-                seen_for_closure
-                    .lock()
-                    .expect("seen lock poisoned")
-                    .push((value, delivery.is_replayed()));
-            }
-        });
-
-        let event = stamped_with_replay_context(ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            TestPayload::EVENT_TYPE,
-            serde_json::json!({"n": 9}),
-        ));
-        sink.consume(event).await.expect("consume should succeed");
-
-        assert_eq!(
-            seen.lock().expect("seen lock poisoned").clone(),
-            vec![(TestPayload { n: 9 }, true)]
-        );
-    }
-
-    #[tokio::test]
-    async fn with_delivery_keeps_sink_typed_skip_and_mismatch_semantics() {
-        let called = Arc::new(AtomicUsize::new(0));
-        let called_for_closure = called.clone();
-        let mut sink = SinkTyped::with_delivery(move |_value: TestPayload, _delivery| {
-            let called_for_closure = called_for_closure.clone();
-            async move {
-                called_for_closure.fetch_add(1, Ordering::Relaxed);
-            }
-        });
-
-        let eof = ChainEventFactory::eof_event(WriterId::from(StageId::new()), true);
-        let receipt = sink.consume(eof).await.expect("non-data events skip");
-        assert!(matches!(
-            receipt.delivery_method,
-            DeliveryMethod::Custom(ref name) if name == "Skipped"
-        ));
-
-        let mismatched = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "other.type",
-            serde_json::json!({"n": 1}),
-        );
-        let err = sink
-            .consume(mismatched.clone())
+        adapter
+            .consume_report(replayed)
             .await
-            .expect_err("type mismatches error by default");
-        assert!(matches!(err, HandlerError::Validation(_)));
-
-        let mut lenient = sink.allow_skip();
-        let receipt = lenient
-            .consume(mismatched)
-            .await
-            .expect("allow_skip skips mismatches");
-        assert!(matches!(
-            receipt.delivery_method,
-            DeliveryMethod::Custom(ref name) if name == "Skipped"
-        ));
-        assert_eq!(called.load(Ordering::Relaxed), 0);
+            .expect("replayed delivery consumes");
+        assert_eq!(
+            *seen.lock().expect("seen lock poisoned"),
+            vec![DeliveryProvenance::Replayed]
+        );
     }
 
     #[test]
-    fn typed_sinks_default_to_undeclared_delivery_safety() {
-        let sink = SinkTyped::new(|_value: TestPayload| async move {});
-        assert_eq!(SinkHandler::delivery_safety(&sink), None);
+    fn closure_redelivery_safety_is_explicit_and_replaceable() {
+        let undeclared = SinkTyped::new(|_input: TestPayload| async move {});
+        assert_eq!(undeclared.describe().redelivery_safety(), None);
 
-        let fallible = FallibleSinkTyped::new(|_value: TestPayload| async move { Ok(()) });
-        assert_eq!(SinkHandler::delivery_safety(&fallible), None);
-
-        let with_delivery =
-            SinkTyped::with_delivery(|_value: TestPayload, _delivery| async move {});
-        assert_eq!(SinkHandler::delivery_safety(&with_delivery), None);
-    }
-
-    #[test]
-    fn typed_sink_builders_declare_delivery_safety() {
-        let sink = SinkTyped::new(|_value: TestPayload| async move {}).idempotent();
+        let declared = SinkTyped::new(|_input: TestPayload| async move {}).idempotent();
         assert_eq!(
-            SinkHandler::delivery_safety(&sink),
-            Some(SinkDeliverySafety::IdempotentProjection)
-        );
-
-        let sink = SinkTyped::new(|_value: TestPayload| async move {}).non_idempotent();
-        assert_eq!(
-            SinkHandler::delivery_safety(&sink),
-            Some(SinkDeliverySafety::NonIdempotentExternal)
-        );
-
-        let fallible =
-            FallibleSinkTyped::new(|_value: TestPayload| async move { Ok(()) }).non_idempotent();
-        assert_eq!(
-            SinkHandler::delivery_safety(&fallible),
-            Some(SinkDeliverySafety::NonIdempotentExternal)
-        );
-
-        let with_delivery =
-            SinkTyped::with_delivery(|_value: TestPayload, _delivery| async move {}).idempotent();
-        assert_eq!(
-            SinkHandler::delivery_safety(&with_delivery),
-            Some(SinkDeliverySafety::IdempotentProjection)
+            declared.describe().redelivery_safety(),
+            Some(SinkRedeliverySafety::SafeToRepeat)
         );
     }
 }

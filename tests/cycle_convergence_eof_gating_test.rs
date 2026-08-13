@@ -4,9 +4,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{CycleDepth, StageOutputs};
 use obzenflow_dsl::{
@@ -15,8 +13,9 @@ use obzenflow_dsl::{
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-    TypedFiniteSourceHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -262,20 +261,25 @@ impl DoneCounterSink {
 }
 
 #[async_trait]
-impl SinkHandler for DoneCounterSink {
-    async fn consume(
+impl InlineSink for DoneCounterSink {
+    type Input = SeedEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        if let ChainEventContent::Data { payload, .. } = &event.content {
-            if payload.get("kind").and_then(|v| v.as_str()) == Some(KIND_DONE) {
-                self.done_events.fetch_add(1, Ordering::Relaxed);
-            }
+        event: SeedEvent,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        if event.kind == KIND_DONE {
+            self.done_events.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(DeliveryPayload::success(
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Count".to_string()),
             None,
-        ))
+        )))
     }
 }
 

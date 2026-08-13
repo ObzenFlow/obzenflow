@@ -25,11 +25,11 @@ use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::SinkDeliverySafety;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    JoinReferenceView, SinkHandler, TypedFiniteSourceHandler, TypedJoinHandler,
-    TypedTransformHandler,
+    InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -177,23 +177,22 @@ impl TypedTransformHandler for RefValidator {
 struct DropSink;
 
 #[async_trait]
-impl SinkHandler for DropSink {
-    async fn consume(
-        &mut self,
-        _event: ChainEvent,
-    ) -> Result<obzenflow_core::event::payloads::delivery_payload::DeliveryPayload, HandlerError>
-    {
-        Ok(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryPayload::success(
-                obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
-                None,
-            ),
-        )
+impl InlineSink for DropSink {
+    type Input = JoinedItem;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    // Deterministic local drop: re-delivery under either archive verb is safe.
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+    async fn write(
+        &mut self,
+        _event: JoinedItem,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+            None,
+        )))
     }
 }
 

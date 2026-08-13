@@ -1531,6 +1531,7 @@ dependencies = [
  "async-trait",
  "clap",
  "criterion",
+ "csv",
  "fastrand",
  "futures",
  "obzenflow-topology",

@@ -10,7 +10,7 @@ use obzenflow_adapters::sources::http_pull::HttpRetryConfig;
 use obzenflow_adapters::sources::{
     simple_poll, HttpPollConfig, HttpPollSource, HttpPullConfig, HttpPullSource,
 };
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainEvent, ChainEventContent};
 use obzenflow_core::http_client::Url;
@@ -21,10 +21,13 @@ use obzenflow_dsl::{async_infinite_source, async_source, flow, sink, FlowDefinit
 use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
 };
-use obzenflow_runtime::effects::SinkDeliverySafety;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedAsyncFiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedAsyncFiniteSourceHandler,
+};
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -72,16 +75,23 @@ struct CountingSink {
 }
 
 #[async_trait]
-impl SinkHandler for CountingSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if HttpFixtureEvent::from_event(&event).is_some() {
-            self.delivered.fetch_add(1, Ordering::SeqCst);
-        }
-        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
+impl InlineSink for CountingSink {
+    type Input = HttpFixtureEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+    async fn write(
+        &mut self,
+        _input: HttpFixtureEvent,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        self.delivered.fetch_add(1, Ordering::SeqCst);
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Noop,
+            None,
+        )))
     }
 }
 

@@ -5,7 +5,7 @@
 //! Console projection helpers for the tutorial's deliveries.
 //!
 //! These functions stand in for real subscribers. In production, paid orders
-//! feed the `ShippingHandoff` typed delivery (see `deliveries.rs`), cancelled
+//! feed the `ShippingHandoff` typed sink (see `deliveries.rs`), cancelled
 //! orders might feed customer notification and order-status services, and
 //! unavailable authorizations might feed retry or manual-review workflows.
 //!

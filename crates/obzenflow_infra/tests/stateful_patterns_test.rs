@@ -6,13 +6,14 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::TypedPayload;
+use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -108,35 +109,56 @@ impl TypedFiniteSourceHandler for EmptySource {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CollectingSink {
+#[derive(Debug)]
+struct CollectingSink<T> {
     events: Arc<Mutex<Vec<ChainEvent>>>,
+    _input: std::marker::PhantomData<fn() -> T>,
 }
 
-impl CollectingSink {
+impl<T> Clone for CollectingSink<T> {
+    fn clone(&self) -> Self {
+        Self {
+            events: Arc::clone(&self.events),
+            _input: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T> CollectingSink<T> {
     fn new(events: Arc<Mutex<Vec<ChainEvent>>>) -> Self {
-        Self { events }
+        Self {
+            events,
+            _input: std::marker::PhantomData,
+        }
     }
 }
 
 #[async_trait]
-impl SinkHandler for CollectingSink {
-    async fn consume(
+impl<T> InlineSink for CollectingSink<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Input = T;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<
-        obzenflow_core::event::payloads::delivery_payload::DeliveryPayload,
-        HandlerError,
-    > {
-        self.events.lock().unwrap().push(event);
-        Ok(
-            obzenflow_core::event::payloads::delivery_payload::DeliveryPayload::success(
-                obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
-                    "collect".to_string(),
-                ),
-                None,
+        input: T,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(input.to_event(WriterId::from(StageId::new())));
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                "collect".to_string(),
             ),
-        )
+            None,
+        )))
     }
 }
 
@@ -303,7 +325,7 @@ async fn counter_emits_single_event_on_drain() {
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = NumberSource::new(5);
             let counter_handler = CounterHandler::new();
-            let sink_handler = CollectingSink::new(events_for_flow);
+            let sink_handler = CollectingSink::<CountResult>::new(events_for_flow);
 
             Ok(flow! {
                 name: "pattern_counter_test",
@@ -343,7 +365,7 @@ async fn accumulator_emits_one_event_per_input_on_drain() {
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = NumberSource::new(5);
             let accumulator_handler = AccumulatorHandler::new();
-            let sink_handler = CollectingSink::new(events_for_flow);
+            let sink_handler = CollectingSink::<CollectedValue>::new(events_for_flow);
 
             Ok(flow! {
                 name: "pattern_accumulator_test",
@@ -381,7 +403,7 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = NumberSource::new(10);
             let sum_handler = SumHandler::new();
-            let sink_handler = CollectingSink::new(events_for_flow);
+            let sink_handler = CollectingSink::<SumResult>::new(events_for_flow);
 
             Ok(flow! {
                 name: "pattern_sum_test",
@@ -421,7 +443,7 @@ async fn immediate_emitter_emits_during_accumulating() {
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = NumberSource::new(5);
             let emitter_handler = ImmediateEmitter::new();
-            let sink_handler = CollectingSink::new(events_for_flow);
+            let sink_handler = CollectingSink::<ProgressUpdate>::new(events_for_flow);
 
             Ok(flow! {
                 name: "pattern_immediate_test",
@@ -459,7 +481,7 @@ async fn empty_source_still_triggers_drain_for_stateful_handler() {
         .run_async(FlowDefinition::materialize(move |_runtime_config| {
             let source_handler = EmptySource::new();
             let counter_handler = CounterHandler::new();
-            let sink_handler = CollectingSink::new(events_for_flow);
+            let sink_handler = CollectingSink::<CountResult>::new(events_for_flow);
 
             Ok(flow! {
                 name: "pattern_empty_test",

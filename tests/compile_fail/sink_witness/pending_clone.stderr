@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `PendingSinkInput` in the current scope
+ --> tests/compile_fail/sink_witness/pending_clone.rs:8:21
+  |
+8 |     let _ = pending.clone();
+  |                     ^^^^^ method not found in `PendingSinkInput`

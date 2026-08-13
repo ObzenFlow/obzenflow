@@ -10,18 +10,17 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::CircuitBreaker;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{
-    event::chain_event::ChainEvent,
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-};
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{SinkHandler, TypedFiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler,
+};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// File-local payload for the circuit-breaker metrics test. The JSON
 /// shape matches what `TimedEventSource` / `RapidSource` emit; the type
@@ -107,11 +106,11 @@ impl TypedFiniteSourceHandler for TimedEventSource {
 /// Sink that tracks received events
 #[derive(Clone, Debug)]
 struct MetricsSink {
-    events: Arc<Mutex<Vec<ChainEvent>>>,
+    events: Arc<Mutex<Vec<CircuitMetricEvent>>>,
 }
 
 impl MetricsSink {
-    fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
+    fn new() -> (Self, Arc<Mutex<Vec<CircuitMetricEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
@@ -123,18 +122,25 @@ impl MetricsSink {
 }
 
 #[async_trait]
-impl SinkHandler for MetricsSink {
-    async fn consume(
+impl InlineSink for MetricsSink {
+    type Input = CircuitMetricEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
+        event: CircuitMetricEvent,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
         if let Ok(mut events) = self.events.lock() {
             events.push(event);
         }
-        Ok(DeliveryPayload::success(
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("collect".to_string()),
             None,
-        ))
+        )))
     }
 }
 
@@ -269,10 +275,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to lock events: {e:?}"))?;
 
         let events_len = events.len();
-        let success_count = events
-            .iter()
-            .filter(|e| e.payload().get("type") == Some(&json!("normal")))
-            .count();
+        let success_count = events.iter().filter(|e| e.kind == "normal").count();
 
         (events_len, success_count)
     };

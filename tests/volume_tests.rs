@@ -7,7 +7,7 @@
                // surface (`source!(T => h)`, `transform!(In -> Out => h)`, `sink!(In => h)`)
                // so this file does not advertise the deleted untyped forms. Re-enabling the
                // harness requires reconciling the handlers with the current DSL traits
-               // (`SourceTyping`, `TransformTyping`, `SinkTyping`) and reviewing the
+               // (`SourceTyping`, `TransformTyping`, `InlineSink`) and reviewing the
                // `DiskJournal::new` / monitoring-middleware surface drift since this file
                // was last live.
 
@@ -18,7 +18,8 @@ use obzenflow_core::journal::writer_id::WriterId;
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::DiskJournal;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TransformHandler, TypedFiniteSourceHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TransformHandler, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
@@ -136,10 +137,24 @@ impl CountingSink {
 }
 
 #[async_trait]
-impl SinkHandler for CountingSink {
-    fn consume(&mut self, _event: ChainEvent) -> obzenflow_core::Result<()> {
+impl InlineSink for CountingSink {
+    type Input = BenchEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
+        &mut self,
+        _event: BenchEvent,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, obzenflow_runtime::stages::common::handler_error::HandlerError>
+    {
         self.counter.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
+            None,
+        )))
     }
 }
 

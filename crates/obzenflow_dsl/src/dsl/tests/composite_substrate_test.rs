@@ -98,6 +98,12 @@ mod tests {
             obzenflow_core::event::context::StageType::Transform
         }
 
+        fn sink_description(
+            &self,
+        ) -> Option<&obzenflow_runtime::stages::common::handlers::SinkDescription> {
+            None
+        }
+
         fn effect_declarations(&self) -> Vec<EffectDeclaration> {
             vec![EffectDeclaration {
                 effect_type: "test.fixture_effect",

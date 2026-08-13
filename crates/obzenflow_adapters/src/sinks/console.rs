@@ -7,13 +7,14 @@
 //! A typed sink for printing events to stdout/stderr with reusable formatters.
 
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::{ChainEvent, TypedPayload};
-use obzenflow_runtime::effects::SinkDeliverySafety;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::TypedPayload;
+use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::SinkHandler;
-use obzenflow_runtime::typing::SinkTyping;
+use obzenflow_runtime::stages::common::handlers::{
+    InlineSink, SinkAuditOutcome, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport, SinkWriterLifecycleReport,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::marker::PhantomData;
@@ -39,6 +40,11 @@ impl OutputDestination {
             Self::Stdout => DeliveryMethod::Custom("console:stdout".to_string()),
             Self::Stderr => DeliveryMethod::Custom("console:stderr".to_string()),
         }
+    }
+
+    fn description(self) -> SinkDescription {
+        SinkDescription::method(self.delivery_method())
+            .with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
     }
 }
 
@@ -489,7 +495,6 @@ fn is_wide(code: u32) -> bool {
 pub struct ConsoleSink<T, F = JsonFormatter> {
     formatter: F,
     destination: OutputDestination,
-    include_non_data: bool,
     _phantom: PhantomData<fn() -> T>,
 }
 
@@ -501,7 +506,6 @@ where
         Self {
             formatter: self.formatter.clone(),
             destination: self.destination,
-            include_non_data: self.include_non_data,
             _phantom: PhantomData,
         }
     }
@@ -512,7 +516,6 @@ impl<T, F> std::fmt::Debug for ConsoleSink<T, F> {
         f.debug_struct("ConsoleSink")
             .field("type", &std::any::type_name::<T>())
             .field("destination", &self.destination)
-            .field("include_non_data", &self.include_non_data)
             .finish()
     }
 }
@@ -528,7 +531,6 @@ where
         ConsoleSink {
             formatter: JsonFormatter,
             destination: OutputDestination::Stdout,
-            include_non_data: false,
             _phantom: PhantomData,
         }
     }
@@ -540,7 +542,6 @@ where
         ConsoleSink {
             formatter: JsonPrettyFormatter,
             destination: OutputDestination::Stdout,
-            include_non_data: false,
             _phantom: PhantomData,
         }
     }
@@ -552,7 +553,6 @@ where
         ConsoleSink {
             formatter: DebugFormatter,
             destination: OutputDestination::Stdout,
-            include_non_data: false,
             _phantom: PhantomData,
         }
     }
@@ -564,7 +564,6 @@ where
         ConsoleSink {
             formatter: TableFormatter::new(columns, extractor),
             destination: OutputDestination::Stdout,
-            include_non_data: false,
             _phantom: PhantomData,
         }
     }
@@ -579,7 +578,6 @@ where
         ConsoleSink {
             formatter: SnapshotTableFormatter::new(columns, extractor),
             destination: OutputDestination::Stdout,
-            include_non_data: false,
             _phantom: PhantomData,
         }
     }
@@ -591,7 +589,6 @@ where
         ConsoleSink {
             formatter,
             destination: OutputDestination::Stdout,
-            include_non_data: false,
             _phantom: PhantomData,
         }
     }
@@ -602,81 +599,44 @@ impl<T, F> ConsoleSink<T, F> {
         self.destination = OutputDestination::Stderr;
         self
     }
-
-    pub fn include_all(mut self) -> Self {
-        self.include_non_data = true;
-        self
-    }
-}
-
-impl<T, F> SinkTyping for ConsoleSink<T, F>
-where
-    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-{
-    type Input = T;
 }
 
 #[async_trait]
-impl<T, F> SinkHandler for ConsoleSink<T, F>
+impl<T, F> InlineSink for ConsoleSink<T, F>
 where
     T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
-    F: Formatter<T>,
+    F: Formatter<T> + 'static,
 {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        match &event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } => {
-                if !T::event_type_matches(event_type) {
-                    return Ok(DeliveryPayload::success(
-                        self.destination.delivery_method(),
-                        None,
-                    ));
-                }
+    type Input = T;
 
-                let typed: T = serde_json::from_value(payload.clone()).map_err(|e| {
-                    HandlerError::Deserialization(format!(
-                        "ConsoleSink failed to deserialize {}: {e}",
-                        std::any::type_name::<T>()
-                    ))
-                })?;
-
-                if let Some(output) = self.formatter.format(&typed) {
-                    self.destination.write_line(&output);
-                }
-            }
-            _ => {
-                if self.include_non_data {
-                    let output = format!("Event: {} | {}", event.event_type(), event.payload());
-                    self.destination.write_line(&output);
-                }
-            }
-        }
-
-        Ok(DeliveryPayload::success(
-            self.destination.delivery_method(),
-            None,
-        ))
+    fn describe(&self) -> SinkDescription {
+        self.destination.description()
     }
 
-    async fn flush(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
-        let Some(output) = self.formatter.flush() else {
-            return Ok(None);
-        };
+    async fn write(
+        &mut self,
+        input: T,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        if let Some(output) = self.formatter.format(&input) {
+            self.destination.write_line(&output);
+        }
 
-        self.destination.write_line(&output);
-
-        Ok(Some(DeliveryPayload::success(
-            self.destination.delivery_method(),
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success(
             None,
         )))
     }
 
-    // Console re-prints deterministically on catch-up; per-event labels mark
-    // replays (FLOWIP-120n F16).
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        Some(SinkDeliverySafety::IdempotentProjection)
+    async fn flush(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
+        let Some(output) = self.formatter.flush() else {
+            return Ok(SinkWriterLifecycleReport::default());
+        };
+
+        self.destination.write_line(&output);
+
+        Ok(SinkWriterLifecycleReport::audit(SinkAuditOutcome::success(
+            None,
+        )))
     }
 }
 
@@ -685,6 +645,9 @@ mod tests {
     use super::*;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::WriterId;
+    use obzenflow_runtime::stages::common::handlers::{
+        SinkConnector, SinkHandler, SinkWriterAdapter, SinkWriterInitContext,
+    };
     use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -700,12 +663,37 @@ mod tests {
         const SCHEMA_VERSION: u32 = 1;
     }
 
+    async fn adapted<C>(connector: C) -> SinkWriterAdapter<C::Writer>
+    where
+        C: SinkConnector<Input = TestEvent>,
+    {
+        let stage_id = obzenflow_core::StageId::new();
+        let description = connector.describe();
+        let writer = connector
+            .open(SinkWriterInitContext::new(
+                stage_id,
+                "console".to_string(),
+                "test".to_string(),
+            ))
+            .await
+            .expect("console connector opens");
+        SinkWriterAdapter::with_default_method(
+            writer,
+            stage_id,
+            description.default_method().cloned(),
+        )
+    }
+
     #[test]
-    fn console_sink_declares_idempotent_delivery() {
+    fn console_sink_describes_repeatable_redelivery() {
         let sink = ConsoleSink::<TestEvent>::json();
         assert_eq!(
-            SinkHandler::delivery_safety(&sink),
-            Some(SinkDeliverySafety::IdempotentProjection)
+            InlineSink::describe(&sink).default_method(),
+            Some(&DeliveryMethod::Custom("console:stdout".to_string()))
+        );
+        assert_eq!(
+            InlineSink::describe(&sink).redelivery_safety(),
+            Some(SinkRedeliverySafety::SafeToRepeat)
         );
     }
 
@@ -837,8 +825,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn console_sink_skips_non_matching_event_types() {
-        let mut sink = ConsoleSink::<TestEvent>::table(&["value"], |e| vec![e.value.clone()]);
+    async fn console_sink_rejects_non_matching_event_types() {
+        let sink = ConsoleSink::<TestEvent>::table(&["value"], |e| vec![e.value.clone()]);
+        let mut sink = adapted(sink).await;
 
         let event = ChainEventFactory::data_event(
             WriterId::from(obzenflow_core::StageId::new()),
@@ -846,19 +835,23 @@ mod tests {
             json!({"value": "ignored"}),
         );
 
-        let payload = sink.consume(event).await.expect("should not error");
-        assert!(matches!(payload.delivery_method, DeliveryMethod::Custom(_)));
+        let error = sink
+            .consume(event)
+            .await
+            .expect_err("mismatch must be strict");
+        assert!(matches!(error, HandlerError::Validation(_)));
     }
 
     #[tokio::test]
     async fn console_sink_to_stderr_sets_delivery_method() {
-        let mut sink =
+        let sink =
             ConsoleSink::<TestEvent>::table(&["value"], |e| vec![e.value.clone()]).to_stderr();
+        let mut sink = adapted(sink).await;
 
         let event = ChainEventFactory::data_event(
             WriterId::from(obzenflow_core::StageId::new()),
-            "other.event",
-            json!({"value": "ignored"}),
+            TestEvent::versioned_event_type(),
+            json!({"value": "printed"}),
         );
 
         let payload = sink.consume(event).await.expect("should not error");
@@ -873,10 +866,11 @@ mod tests {
         let called = Arc::new(AtomicUsize::new(0));
         let called_for_formatter = called.clone();
 
-        let mut sink = ConsoleSink::<TestEvent>::new(move |e: &TestEvent| {
+        let sink = ConsoleSink::<TestEvent>::new(move |e: &TestEvent| {
             called_for_formatter.fetch_add(1, Ordering::SeqCst);
             format!("value={}", e.value)
         });
+        let mut sink = adapted(sink).await;
 
         let event = ChainEventFactory::data_event(
             WriterId::from(obzenflow_core::StageId::new()),

@@ -12,19 +12,20 @@ use obzenflow_adapters::middleware::{
     MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::StageId;
 use obzenflow_core::TypedPayload;
+use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::observer::{
     ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
@@ -100,18 +101,23 @@ impl EventCounterSink {
 }
 
 #[async_trait]
-impl SinkHandler for EventCounterSink {
-    async fn consume(
+impl InlineSink for EventCounterSink {
+    type Input = TransformStageEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        if event.is_data() {
-            self.count.fetch_add(1, Ordering::Relaxed);
-        }
-        Ok(DeliveryPayload::success(
+        _event: TransformStageEvent,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Count".to_string()),
             None,
-        ))
+        )))
     }
 }
 
@@ -127,16 +133,26 @@ impl CollectSink {
 }
 
 #[async_trait]
-impl SinkHandler for CollectSink {
-    async fn consume(
+impl InlineSink for CollectSink {
+    type Input = TransformStageEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        self.events.lock().unwrap().push(event);
-        Ok(DeliveryPayload::success(
+        event: TransformStageEvent,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(event.to_event(WriterId::from(StageId::new())));
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Collect".to_string()),
             None,
-        ))
+        )))
     }
 }
 

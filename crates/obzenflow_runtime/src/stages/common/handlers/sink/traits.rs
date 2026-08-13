@@ -2,36 +2,35 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Handler trait for **sink stages** that *consume* events and emit a
-//! delivery receipt.
+//! Erased runtime protocol for sink stages.
 //!
 //! ## The sink contract (FLOWIP-120f/120s)
 //!
 //! A sink is delivery-only: it consumes facts and emits receipts, and it is
-//! the surface for **idempotent, recompute-safe, receipt-governed** writes,
+//! the surface for **repeatable, recompute-safe, receipt-governed** writes,
 //! `view = f(facts)`: a materialized-view upsert, a keyed queue publish, a
 //! console projection. Replay and resume re-consume a sink's tape, so a
-//! non-idempotent external write whose outcome matters belongs behind the
+//! duplicate-sensitive external write whose outcome matters belongs behind the
 //! effect boundary instead: an effectful transform performs it through
 //! `fx.perform`, authors named outcome facts, and a plain sink projects
-//! those facts. A destination that absorbs duplicates itself may stay a
-//! sink, declared `NonIdempotentExternal`, governed by the archive-verb
-//! gates.
+//! those facts. A duplicate-sensitive sink requires the archive gate's
+//! explicit operator opt-in before replay or resume re-performs its writes.
 //!
 //! The runtime journals each `DeliveryPayload`, stamping its `destination`
-//! from the handler's declared `delivery_type()` (else the stage name), so
-//! delivery success, partials, and failures are durable and queryable.
+//! from the connector's snapshotted [`SinkDescription`]
+//! (else the stage name), so delivery success, partials, and failures are
+//! durable and queryable.
 //!
-//! ## Quick start: the typed tiers
+//! ## Quick start: typed sink authoring
 //!
-//! Most sinks never implement this trait directly. A quick projection binds a
-//! `SinkTyped` adapter before its `sink!` declaration; a production destination
-//! is a typed
-//! [`Delivery`](super::delivery::Delivery), carrying identity and
-//! duplicate-safety on the type and bridging onto this trait automatically:
+//! This trait is the erased runtime substrate. Authored resource-owning sinks
+//! implement [`SinkConnector`](super::connector::SinkConnector) and return a
+//! stage-local [`SinkWriter`](super::typed::SinkWriter). A small integration
+//! can implement [`InlineSink`](super::connector::InlineSink), while a closure
+//! can bind `SinkTyped` before its `sink!` declaration:
 //!
 //! ```ignore
-//! // Tier 1/2: bind typed adapters, optionally with declared safety and provenance.
+//! // Bind typed adapters, optionally with declared safety and provenance.
 //! let quick_handler = SinkTyped::new(|authorized: PaymentAuthorized| async move {
 //!     println!("{authorized:?}");
 //! });
@@ -44,16 +43,16 @@
 //! );
 //! let declared = sink!(PaymentAuthorized => declared_handler, delivery: idempotent);
 //!
-//! // Tier 3: a typed delivery.
-//! let shipping = ShippingHandoff::new(queue);
+//! // A configured queue connector opens its writer at materialisation.
+//! let shipping = ShippingConnector::new(queue_config);
 //! let production = sink!(PaymentAuthorized => shipping);
 //! ```
 //!
-//! Implement `SinkHandler` directly only for buffered or otherwise
-//! non-trivial receipt protocols (see `consume_report`/`flush_report`), and
-//! declare `delivery_safety()` so resume and replay can classify the sink.
+//! Buffered destinations use `SinkWriteContext::defer` and return typed commit
+//! receipts from `write`, `flush`, or `drain`; the sole runtime adapter lowers
+//! those capabilities onto this protocol.
 
-use crate::effects::{EffectInvocationContext, SinkDeliverySafety};
+use crate::effects::EffectInvocationContext;
 use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
@@ -86,7 +85,10 @@ pub struct SinkLifecycleReport {
     pub commit_receipts: Vec<CommitReceipt>,
 }
 
-/// Trait every **sink stage** must implement.
+/// Erased protocol implemented by framework sink adapters.
+///
+/// Application integrations normally implement `SinkConnector`/`SinkWriter`
+/// or `InlineSink`; the runtime owns the bridge to this trait.
 #[async_trait]
 pub trait SinkHandler: Send + Sync {
     /// Consume a single event and return a `DeliveryPayload` describing
@@ -101,8 +103,8 @@ pub trait SinkHandler: Send + Sync {
     /// Extended consume hook for buffered sinks that may need to emit
     /// additional commit receipts after accepting the current event.
     ///
-    /// Default behaviour preserves the legacy `consume()` contract so existing
-    /// sinks do not need to change.
+    /// Default behaviour preserves the smaller raw `consume()` contract for
+    /// internal adapters that do not emit additional commit receipts.
     async fn consume_report(
         &mut self,
         event: ChainEvent,
@@ -147,25 +149,6 @@ pub trait SinkHandler: Send + Sync {
             commit_receipts: Vec::new(),
         })
     }
-
-    /// Declared delivery safety. `None` is undeclared: resume fails closed and
-    /// the error names both remedies (declare, or opt in to duplication).
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        None
-    }
-
-    /// Declared destination family (typed deliveries, FLOWIP-120s). `None`
-    /// for handlers with no declared destination; receipts then carry the
-    /// stage name.
-    fn delivery_type(&self) -> Option<&'static str> {
-        None
-    }
-
-    /// Declared destination instance coordinates for the FLOWIP-095g
-    /// recovery compatibility gate. `None` is undeclared.
-    fn canonical_destination(&self) -> Option<serde_json::Value> {
-        None
-    }
 }
 
 #[doc(hidden)]
@@ -189,12 +172,9 @@ pub trait UnifiedSinkHandler: Send + Sync {
         "1"
     }
 
-    // Declaration hooks (`delivery_safety`, `delivery_type`,
-    // `canonical_destination`) deliberately do not exist on this trait.
-    // Declarations live on `SinkHandler` and are snapshotted by the
-    // descriptor from the raw handler before any wrapping; a runtime-side
-    // copy would let a wrapper silently attenuate them to undeclared
-    // (FLOWIP-120s, the former generic sink-wrapper finding).
+    // Connector descriptions deliberately do not exist on either erased
+    // runtime trait. The DSL snapshots the description from `SinkConnector`
+    // before opening and erasing its writer (FLOWIP-134h).
 }
 
 #[async_trait]

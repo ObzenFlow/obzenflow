@@ -20,6 +20,7 @@ use crate::stages::common::supervision::control_resolution::{
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
+use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::observer::dispatch::run_sink_delivery_observers;
 use crate::stages::observer::SinkDeliveryObserverOutcome;
 use crate::supervised_base::EventLoopDirective;
@@ -28,7 +29,7 @@ use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainEventFactory, EventEnvelope, JournalEvent};
+use obzenflow_core::event::{EventEnvelope, JournalEvent};
 use obzenflow_core::ChainEvent;
 use obzenflow_core::WriterId;
 use obzenflow_fsm::StateVariant;
@@ -40,12 +41,13 @@ use super::super::boundary::{
     SinkDeliveryAttemptOutcome, SinkDeliveryBoundaryOutcome, SinkDeliveryExecutor,
 };
 use super::super::fsm::{JournalSinkContext, JournalSinkEvent, JournalSinkState};
+use super::super::journalled_delivery_event;
 use super::JournalSinkSupervisor;
 use obzenflow_core::MiddlewareExecutionScope;
 use serde_json::json;
 
 pub(super) async fn dispatch_running<
-    H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JournalSinkSupervisor<H>,
     state: &JournalSinkState<H>,
@@ -244,7 +246,7 @@ pub(super) async fn dispatch_running<
     }
 }
 
-async fn dispatch_event<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static>(
+async fn dispatch_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     envelope: &EventEnvelope<ChainEvent>,
@@ -269,29 +271,10 @@ async fn dispatch_event<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send +
             dispatch_data_event(ctx, subscription, envelope, stage_input_position).await
         }
         _ => {
-            // For other content types, just consume without instrumentation.
-            let envelope_event = envelope.event.clone();
-            let event_id = envelope_event.id;
+            // Typed sink writers are a Data-only authoring surface. Delivery
+            // and observability rows remain runtime transport/lifecycle input.
+            let event_id = envelope.event.id;
             let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
-            if let Err(e) = ctx
-                .handler
-                .consume_report(
-                    envelope_event,
-                    None,
-                    ctx.runtime_execution.dispatch_scope(
-                        ctx.stage_id,
-                        None,
-                        subscription.last_delivered_generation(),
-                    ),
-                )
-                .await
-            {
-                tracing::error!(
-                    stage_name = %ctx.stage_name,
-                    error = ?e,
-                    "Failed to consume control/system event"
-                );
-            }
             if let Some(state) = &heartbeat_state {
                 state.record_last_consumed(event_id);
             }
@@ -300,9 +283,7 @@ async fn dispatch_event<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send +
     }
 }
 
-async fn dispatch_control_event<
-    H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
->(
+async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     envelope: &EventEnvelope<ChainEvent>,
@@ -456,27 +437,6 @@ async fn dispatch_control_event<
             )
             .await?;
 
-            // For non-EOF control events, let handler consume if needed.
-            let envelope_event = envelope.event.clone();
-            if let Err(e) = ctx
-                .handler
-                .consume_report(
-                    envelope_event,
-                    None,
-                    ctx.runtime_execution.dispatch_scope(
-                        ctx.stage_id,
-                        None,
-                        subscription.last_delivered_generation(),
-                    ),
-                )
-                .await
-            {
-                tracing::error!(
-                    stage_name = %ctx.stage_name,
-                    error = ?e,
-                    "Failed to consume control event"
-                );
-            }
             Ok(EventLoopDirective::Continue)
         }
         ControlAction::ForwardAndDrain => {
@@ -571,9 +531,7 @@ impl<H: UnifiedSinkHandler + Send + Sync> SinkDeliveryExecutor for ConsumeExecut
     }
 }
 
-async fn dispatch_data_event<
-    H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
->(
+async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     envelope: &EventEnvelope<ChainEvent>,
@@ -582,8 +540,6 @@ async fn dispatch_data_event<
     let envelope_event = envelope.event.clone();
     let event_id = envelope_event.id;
     let stage_name = ctx.stage_name.clone();
-    // FLOWIP-120s single-writer receipt identity, resolved at build.
-    let receipt_destination = ctx.receipt_destination.clone();
     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
     let upstream_stage = subscription.last_delivered_upstream_stage();
     let effect_context = stage_input_position.and_then(|input_seq| {
@@ -666,6 +622,18 @@ async fn dispatch_data_event<
             )
         };
 
+        // A typed-settlement protocol failure contradicts a runtime invariant.
+        // Keep it above the ordinary per-record failure path so it cannot be
+        // normalised into a failed delivery receipt.
+        if let SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Err(
+            error,
+        ))) = &outcome
+        {
+            if error.is_fatal() {
+                return Err(Box::new(error.clone()) as Box<dyn std::error::Error + Send + Sync>);
+            }
+        }
+
         let observer_outcome = match &outcome {
             SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(
                 _,
@@ -711,24 +679,18 @@ async fn dispatch_data_event<
         let mapped = match outcome {
             SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(
                 report,
-            ))) => {
-                let mut report = *report;
-                report.primary.destination = receipt_destination.clone();
-                for commit in &mut report.commit_receipts {
-                    commit.payload.destination = receipt_destination.clone();
-                }
-                (report, None, false)
-            }
+            ))) => (*report, None, false),
             SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Err(
                 err,
             ))) => {
-                let mut fail_payload = DeliveryPayload::failed(
-                    DeliveryMethod::Noop,
+                let fail_payload = DeliveryPayload::failed(
+                    ctx.default_delivery_method
+                        .clone()
+                        .unwrap_or(DeliveryMethod::Noop),
                     "sink_error",
                     err.to_string(),
                     /* final_attempt */ false,
                 );
-                fail_payload.destination = receipt_destination.clone();
                 (
                     crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
                     Some(err),
@@ -743,13 +705,14 @@ async fn dispatch_data_event<
                     panic = %message,
                     "SinkHandler::consume() panicked"
                 );
-                let mut fail_payload = DeliveryPayload::failed(
-                    DeliveryMethod::Noop,
+                let fail_payload = DeliveryPayload::failed(
+                    ctx.default_delivery_method
+                        .clone()
+                        .unwrap_or(DeliveryMethod::Noop),
                     "handler_panic",
                     message,
                     /* final_attempt */ true,
                 );
-                fail_payload.destination = receipt_destination.clone();
                 (
                     crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
                     None,
@@ -767,8 +730,10 @@ async fn dispatch_data_event<
                     reason = %rejection.reason,
                     "Sink delivery rejected by policy (FLOWIP-115b)"
                 );
-                let mut fail_payload = DeliveryPayload::failed(
-                    DeliveryMethod::Noop,
+                let fail_payload = DeliveryPayload::failed(
+                    ctx.default_delivery_method
+                        .clone()
+                        .unwrap_or(DeliveryMethod::Noop),
                     "sink_policy_rejected",
                     format!("{}: {}", rejection.policy, rejection.reason),
                     /* final_attempt */ false,
@@ -786,7 +751,6 @@ async fn dispatch_data_event<
                     "upstream_stage_id": upstream_stage.map(|stage_id| stage_id.to_string()),
                     "input_position": stage_input_position.map(|position| position.0)
                 }));
-                fail_payload.destination = receipt_destination.clone();
                 (
                     crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
                     None,
@@ -896,14 +860,44 @@ async fn dispatch_data_event<
             }
         }
         Err(e) => {
-            // Instrumentation-level or unexpected failure: treat as stage-fatal.
-            let mut fail_payload = DeliveryPayload::failed(
-                DeliveryMethod::Noop,
+            if let Some(fatal) = e
+                .downcast_ref::<crate::stages::common::handler_error::HandlerError>()
+                .and_then(|error| error.as_fatal())
+            {
+                let writer_id = ctx
+                    .writer_id
+                    .ok_or_else(|| "fatal sink input has no stage writer id".to_string())?;
+                record_stage_fatal(
+                    fatal,
+                    StageFatalCommit {
+                        error_journal: &ctx.error_journal,
+                        writer_id,
+                        stage_id: ctx.stage_id,
+                        stage_key: &ctx.stage_name,
+                        input_position: stage_input_position,
+                        parent: Some(envelope),
+                        lineage: ctx.lineage_policy,
+                    },
+                )
+                .await?;
+                if let Some(state) = &heartbeat_state {
+                    state.record_last_consumed(event_id);
+                }
+                return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
+                    fatal.detail.clone(),
+                )));
+            }
+
+            // Instrumentation-level or unexpected failure: preserve the
+            // existing failed-receipt policy.
+            let fail_payload = DeliveryPayload::failed(
+                ctx.default_delivery_method
+                    .clone()
+                    .unwrap_or(DeliveryMethod::Noop),
                 "sink_error",
                 e.to_string(),
                 /* final_attempt */ false,
             );
-            fail_payload.destination = ctx.receipt_destination.clone();
             journal_delivery_receipt(ctx, subscription, envelope, fail_payload)
                 .await
                 .map_err(|je| format!("Failed to journal sink failure: {je}"))?;
@@ -914,7 +908,7 @@ async fn dispatch_data_event<
 }
 
 async fn journal_delivery_receipt<
-    H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static,
 >(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
@@ -931,7 +925,7 @@ async fn journal_delivery_receipt<
     );
 
     let writer_id = WriterId::from(ctx.stage_id);
-    let delivery_event = ChainEventFactory::delivery_event(writer_id, payload)
+    let delivery_event = journalled_delivery_event(writer_id, &ctx.receipt_destination, payload)
         .with_flow_context(flow_context)
         .with_causality(CausalityContext::with_parent(parent_envelope.event.id))
         .with_correlation_from(&parent_envelope.event)

@@ -37,7 +37,7 @@ const FORBIDDEN: &[(&str, &str)] = &[
 // projection. File-granular like the ambient table above, and kept separate
 // from it: ambient tokens are not applied to sink files, sink tokens are not
 // applied to effectful files. Escape with `// allow-sink-io: <reason>`.
-const SINK_MARKERS: &[&str] = &["impl SinkHandler", "impl Delivery", "sink!"];
+const SINK_MARKERS: &[&str] = &["impl SinkWriter", "sink!"];
 
 const SINK_FORBIDDEN: &[(&str, &str)] = &[
     ("reqwest::", "an effectful transform plus a plain sink"),

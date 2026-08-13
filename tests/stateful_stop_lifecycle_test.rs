@@ -6,8 +6,7 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
@@ -29,7 +28,8 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use std::sync::Arc;
@@ -40,15 +40,22 @@ use tempfile::tempdir;
 struct NoopSink;
 
 #[async_trait]
-impl SinkHandler for NoopSink {
-    async fn consume(
+impl InlineSink for NoopSink {
+    type Input = LifecycleEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        _event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
+        _event: LifecycleEvent,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Noop".to_string()),
             None,
-        ))
+        )))
     }
 }
 
@@ -64,16 +71,23 @@ impl SlowSink {
 }
 
 #[async_trait]
-impl SinkHandler for SlowSink {
-    async fn consume(
+impl InlineSink for SlowSink {
+    type Input = LifecycleEvent;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified()
+    }
+
+    async fn write(
         &mut self,
-        _event: ChainEvent,
-    ) -> std::result::Result<DeliveryPayload, HandlerError> {
+        _event: LifecycleEvent,
+        _context: SinkWriteContext,
+    ) -> std::result::Result<SinkWriteReport, HandlerError> {
         tokio::time::sleep(self.sleep).await;
-        Ok(DeliveryPayload::success(
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Noop".to_string()),
             None,
-        ))
+        )))
     }
 }
 
