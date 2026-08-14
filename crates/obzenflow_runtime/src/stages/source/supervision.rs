@@ -33,7 +33,7 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use serde_json::json;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -187,6 +187,7 @@ pub(crate) fn emit_batch_to_pending_outputs(
 }
 
 pub(crate) struct SourcePollObservation<'a> {
+    flow_id: FlowId,
     stage_flow_context: &'a FlowContext,
     observers: &'a StageObserverBundle,
     scope: MiddlewareExecutionScope,
@@ -194,11 +195,13 @@ pub(crate) struct SourcePollObservation<'a> {
 
 impl<'a> SourcePollObservation<'a> {
     pub(crate) fn new(
+        flow_id: FlowId,
         stage_flow_context: &'a FlowContext,
         observers: &'a StageObserverBundle,
         scope: MiddlewareExecutionScope,
     ) -> Self {
         Self {
+            flow_id,
             stage_flow_context,
             observers,
             scope,
@@ -218,7 +221,8 @@ impl<'a> SourcePollObservation<'a> {
         if !self.is_enabled() {
             return;
         }
-        let observer_ctx = SourcePollObserverContext::new(self.stage_flow_context, outcome);
+        let observer_ctx =
+            SourcePollObserverContext::new(self.flow_id, self.stage_flow_context, outcome);
         run_source_poll_observers(self.observers, self.scope, &observer_ctx, outputs);
     }
 

@@ -118,7 +118,7 @@ async fn poll_live_reference<
     };
 
     match poll {
-        PollResult::Event(envelope) => handle_reference_envelope(sup, ctx, envelope, None).await,
+        PollResult::Event(envelope) => handle_reference_envelope(sup, ctx, envelope).await,
         PollResult::CursorAdvanced {
             upstream,
             completed_data_rows,
@@ -148,7 +148,6 @@ async fn handle_reference_envelope<
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
     envelope: EventEnvelope<ChainEvent>,
-    canonical_merge: Option<crate::stages::observer::JoinCanonicalMergeMetadata>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.reference_subscription.as_mut() else {
         return Ok(None);
@@ -295,7 +294,6 @@ async fn handle_reference_envelope<
                         subscription.last_delivered_stage_input_position(),
                         &envelope,
                         &ctx.reference_high_water_clock,
-                        canonical_merge.clone(),
                     )
                 })
                 .transpose()?;
@@ -490,7 +488,7 @@ async fn poll_live_stream<
     };
 
     match poll {
-        PollResult::Event(envelope) => handle_stream_envelope(sup, ctx, envelope, None).await,
+        PollResult::Event(envelope) => handle_stream_envelope(sup, ctx, envelope).await,
         PollResult::CursorAdvanced {
             upstream,
             completed_data_rows,
@@ -520,7 +518,6 @@ async fn handle_stream_envelope<
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
     envelope: EventEnvelope<ChainEvent>,
-    canonical_merge: Option<crate::stages::observer::JoinCanonicalMergeMetadata>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.stream_subscription.as_mut() else {
         return Ok(None);
@@ -687,7 +684,6 @@ async fn handle_stream_envelope<
                         subscription.last_delivered_stage_input_position(),
                         &envelope,
                         &ctx.reference_high_water_clock,
-                        canonical_merge.clone(),
                     )
                 })
                 .transpose()?;
@@ -1126,16 +1122,7 @@ async fn dispatch_live_canonical<
             };
             match poll {
                 PollResult::Event(envelope) => {
-                    handle_reference_envelope(
-                        sup,
-                        ctx,
-                        envelope,
-                        Some(crate::stages::observer::JoinCanonicalMergeMetadata::new(
-                            Some("reference".to_string()),
-                            None,
-                        )),
-                    )
-                    .await?
+                    handle_reference_envelope(sup, ctx, envelope).await?
                 }
                 PollResult::CursorAdvanced {
                     upstream,
@@ -1162,18 +1149,7 @@ async fn dispatch_live_canonical<
                 subscription.take_merge_candidate("Live", Some(&mut ctx.stream_contract_state[..]))
             };
             match poll {
-                PollResult::Event(envelope) => {
-                    handle_stream_envelope(
-                        sup,
-                        ctx,
-                        envelope,
-                        Some(crate::stages::observer::JoinCanonicalMergeMetadata::new(
-                            Some("stream".to_string()),
-                            None,
-                        )),
-                    )
-                    .await?
-                }
+                PollResult::Event(envelope) => handle_stream_envelope(sup, ctx, envelope).await?,
                 PollResult::CursorAdvanced {
                     upstream,
                     completed_data_rows,

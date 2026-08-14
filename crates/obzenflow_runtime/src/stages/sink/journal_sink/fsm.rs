@@ -477,6 +477,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
+                    ctx.flow_id,
                     &flow_context,
                     scope,
                     StageLifecyclePhase::Running,
@@ -509,6 +510,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
+                    ctx.flow_id,
                     &flow_context,
                     scope,
                     StageLifecyclePhase::Completed,
@@ -538,6 +540,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
+                    ctx.flow_id,
                     &flow_context,
                     scope,
                     StageLifecyclePhase::Failed,

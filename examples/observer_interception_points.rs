@@ -86,6 +86,7 @@ struct DeliveryTrace;
 impl SinkDeliveryObserver for DeliveryTrace {
     fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
         tracing::info!(
+            flow_id = %ctx.flow_id(),
             stage = ctx.stage_name(),
             stage_input_position = ?ctx.stage_input_position(),
             outcome = ?ctx.outcome(),

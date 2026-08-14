@@ -78,10 +78,11 @@ pub(super) async fn start_if_eligible<
 
     run_before_handler_observers(
         &ctx.observers,
+        ctx.flow_id,
         flow_context,
         scope,
         &envelope.event,
-        Some(input_position.0),
+        input_position,
     );
 
     let admission = DirectFactAdmission::new(envelope.event.event_type().into(), bound);
@@ -250,12 +251,16 @@ async fn finish_success<
     flow_context: &FlowContext,
     transformed_events: Vec<ChainEvent>,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    let input_position = continuation
+        .input_position
+        .ok_or("generated direct-fact continuation has no deterministic stage input position")?;
     run_after_handler_observers(
         &ctx.observers,
+        ctx.flow_id,
         flow_context,
         continuation.scope,
         &continuation.envelope.event,
-        continuation.input_position.map(|position| position.0),
+        input_position,
         transformed_events.as_slice(),
     );
 

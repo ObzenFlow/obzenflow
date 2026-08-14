@@ -14,7 +14,7 @@ use obzenflow_core::{ChainEvent, FlowId, StageId};
 use super::{
     EffectObserverContext, EffectObserverOutcome, HandlerObserverContext, JoinObserverContext,
     SinkDeliveryObserverContext, SinkDeliveryObserverOutcome, SourcePollObserverContext,
-    StageLifecycleObserverContext, StageLifecyclePhase, StageObserverBundle,
+    StageInputPosition, StageLifecycleObserverContext, StageLifecyclePhase, StageObserverBundle,
     StatefulObserverContext,
 };
 
@@ -24,15 +24,16 @@ fn is_live(scope: MiddlewareExecutionScope) -> bool {
 
 pub(crate) fn run_before_handler_observers(
     observers: &StageObserverBundle,
+    flow_id: FlowId,
     flow_context: &FlowContext,
     scope: MiddlewareExecutionScope,
     input: &ChainEvent,
-    stage_input_position: Option<u64>,
+    stage_input_position: StageInputPosition,
 ) {
     let Some(observer) = observers.handler().filter(|_| is_live(scope)) else {
         return;
     };
-    let ctx = HandlerObserverContext::new(flow_context, input, stage_input_position);
+    let ctx = HandlerObserverContext::new(flow_id, flow_context, input, stage_input_position);
     observer.invoke(ctx.stage_name(), "handler", "before_handle", |port| {
         port.before_handle(&ctx)
     });
@@ -40,16 +41,17 @@ pub(crate) fn run_before_handler_observers(
 
 pub(crate) fn run_after_handler_observers(
     observers: &StageObserverBundle,
+    flow_id: FlowId,
     flow_context: &FlowContext,
     scope: MiddlewareExecutionScope,
     input: &ChainEvent,
-    stage_input_position: Option<u64>,
+    stage_input_position: StageInputPosition,
     outputs: &[ChainEvent],
 ) {
     let Some(observer) = observers.handler().filter(|_| is_live(scope)) else {
         return;
     };
-    let ctx = HandlerObserverContext::new(flow_context, input, stage_input_position);
+    let ctx = HandlerObserverContext::new(flow_id, flow_context, input, stage_input_position);
     observer.invoke(ctx.stage_name(), "handler", "after_handle", |port| {
         port.after_handle(&ctx, outputs);
     });
@@ -120,16 +122,23 @@ pub(crate) fn run_source_poll_observers(
 
 pub(crate) fn run_sink_delivery_observers(
     observers: &StageObserverBundle,
+    flow_id: FlowId,
     flow_context: &FlowContext,
     scope: MiddlewareExecutionScope,
     input: &ChainEvent,
-    stage_input_position: Option<u64>,
+    stage_input_position: StageInputPosition,
     outcome: SinkDeliveryObserverOutcome,
 ) {
     let Some(observer) = observers.sink_delivery().filter(|_| is_live(scope)) else {
         return;
     };
-    let ctx = SinkDeliveryObserverContext::new(flow_context, input, stage_input_position, outcome);
+    let ctx = SinkDeliveryObserverContext::new(
+        flow_id,
+        flow_context,
+        input,
+        stage_input_position,
+        outcome,
+    );
     observer.invoke(
         ctx.stage_name(),
         "sink_delivery",
@@ -158,6 +167,7 @@ pub(crate) fn run_effect_observers(
 
 pub(crate) fn run_stage_lifecycle_observers(
     observers: &StageObserverBundle,
+    flow_id: FlowId,
     flow_context: &FlowContext,
     scope: MiddlewareExecutionScope,
     phase: StageLifecyclePhase,
@@ -165,7 +175,7 @@ pub(crate) fn run_stage_lifecycle_observers(
     let Some(observer) = observers.stage_lifecycle().filter(|_| is_live(scope)) else {
         return;
     };
-    let ctx = StageLifecycleObserverContext::new(flow_context, phase);
+    let ctx = StageLifecycleObserverContext::new(flow_id, flow_context, phase);
     observer.invoke(
         ctx.stage_name(),
         "stage_lifecycle",
@@ -226,10 +236,11 @@ mod tests {
         let mut builder = StageObserverBundleBuilder::default();
         builder.push_handler("counts", Arc::new(Counts(calls.clone())));
         let observers = builder.build();
+        let flow_id = FlowId::new();
         let stage_id = StageId::new();
         let flow_context = FlowContext {
             flow_name: "flow".to_string(),
-            flow_id: "run".to_string(),
+            flow_id: flow_id.to_string(),
             stage_name: "stage".to_string(),
             stage_id,
             stage_type: StageType::Transform,
@@ -244,16 +255,24 @@ mod tests {
             MiddlewareExecutionScope::StrictReplayHandler,
             MiddlewareExecutionScope::ResumeHandler,
         ] {
-            run_before_handler_observers(&observers, &flow_context, scope, &input, Some(1));
+            run_before_handler_observers(
+                &observers,
+                flow_id,
+                &flow_context,
+                scope,
+                &input,
+                StageInputPosition(1),
+            );
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
 
         run_before_handler_observers(
             &observers,
+            flow_id,
             &flow_context,
             MiddlewareExecutionScope::LiveHandler,
             &input,
-            Some(1),
+            StageInputPosition(1),
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }

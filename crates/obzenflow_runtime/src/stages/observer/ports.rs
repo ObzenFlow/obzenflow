@@ -8,6 +8,7 @@
 //! views. Ordinary observers return no value and receive no framework writer,
 //! control boundary, continuation, executor, resolver, or settlement handle.
 
+use crate::messaging::upstream_subscription::StageInputPosition;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::vector_clock::VectorClock;
@@ -19,47 +20,22 @@ pub enum JoinSide {
     Stream,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JoinCanonicalMergeMetadata {
-    selected_feed: Option<String>,
-    reader_index: Option<usize>,
-}
-
-impl JoinCanonicalMergeMetadata {
-    pub(crate) fn new(selected_feed: Option<String>, reader_index: Option<usize>) -> Self {
-        Self {
-            selected_feed,
-            reader_index,
-        }
-    }
-
-    pub fn selected_feed(&self) -> Option<&str> {
-        self.selected_feed.as_deref()
-    }
-
-    pub fn reader_index(&self) -> Option<usize> {
-        self.reader_index
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct JoinDeliverySnapshot {
     side: JoinSide,
     delivered_source_stage_id: StageId,
-    delivered_stage_input_position: u64,
+    delivered_stage_input_position: StageInputPosition,
     input_envelope: EventEnvelope<ChainEvent>,
     reference_high_water: VectorClock,
-    canonical_merge: Option<JoinCanonicalMergeMetadata>,
 }
 
 impl JoinDeliverySnapshot {
     pub(crate) fn new(
         side: JoinSide,
         delivered_source_stage_id: StageId,
-        delivered_stage_input_position: u64,
+        delivered_stage_input_position: StageInputPosition,
         input_envelope: EventEnvelope<ChainEvent>,
         reference_high_water: VectorClock,
-        canonical_merge: Option<JoinCanonicalMergeMetadata>,
     ) -> Self {
         Self {
             side,
@@ -67,7 +43,6 @@ impl JoinDeliverySnapshot {
             delivered_stage_input_position,
             input_envelope,
             reference_high_water,
-            canonical_merge,
         }
     }
 
@@ -79,7 +54,7 @@ impl JoinDeliverySnapshot {
         self.delivered_source_stage_id
     }
 
-    pub fn delivered_stage_input_position(&self) -> u64 {
+    pub fn delivered_stage_input_position(&self) -> StageInputPosition {
         self.delivered_stage_input_position
     }
 
@@ -89,10 +64,6 @@ impl JoinDeliverySnapshot {
 
     pub fn reference_high_water(&self) -> &VectorClock {
         &self.reference_high_water
-    }
-
-    pub fn canonical_merge(&self) -> Option<&JoinCanonicalMergeMetadata> {
-        self.canonical_merge.as_ref()
     }
 }
 
@@ -130,18 +101,21 @@ pub enum JoinObserverOccurrence<'a> {
 }
 
 pub struct HandlerObserverContext<'a> {
+    flow_id: FlowId,
     flow_context: &'a FlowContext,
     input: &'a ChainEvent,
-    stage_input_position: Option<u64>,
+    stage_input_position: StageInputPosition,
 }
 
 impl<'a> HandlerObserverContext<'a> {
     pub(crate) fn new(
+        flow_id: FlowId,
         flow_context: &'a FlowContext,
         input: &'a ChainEvent,
-        stage_input_position: Option<u64>,
+        stage_input_position: StageInputPosition,
     ) -> Self {
         Self {
+            flow_id,
             flow_context,
             input,
             stage_input_position,
@@ -152,8 +126,8 @@ impl<'a> HandlerObserverContext<'a> {
         &self.flow_context.flow_name
     }
 
-    pub fn flow_id(&self) -> &str {
-        &self.flow_context.flow_id
+    pub fn flow_id(&self) -> FlowId {
+        self.flow_id
     }
 
     pub fn stage_id(&self) -> StageId {
@@ -172,24 +146,27 @@ impl<'a> HandlerObserverContext<'a> {
         self.input
     }
 
-    pub fn stage_input_position(&self) -> Option<u64> {
+    pub fn stage_input_position(&self) -> StageInputPosition {
         self.stage_input_position
     }
 }
 
 pub struct StatefulObserverContext<'a> {
+    flow_id: FlowId,
     flow_context: &'a FlowContext,
     input: Option<&'a ChainEvent>,
-    stage_input_position: Option<u64>,
+    stage_input_position: Option<StageInputPosition>,
 }
 
 impl<'a> StatefulObserverContext<'a> {
     pub(crate) fn new(
+        flow_id: FlowId,
         flow_context: &'a FlowContext,
         input: Option<&'a ChainEvent>,
-        stage_input_position: Option<u64>,
+        stage_input_position: Option<StageInputPosition>,
     ) -> Self {
         Self {
+            flow_id,
             flow_context,
             input,
             stage_input_position,
@@ -200,8 +177,8 @@ impl<'a> StatefulObserverContext<'a> {
         &self.flow_context.flow_name
     }
 
-    pub fn flow_id(&self) -> &str {
-        &self.flow_context.flow_id
+    pub fn flow_id(&self) -> FlowId {
+        self.flow_id
     }
 
     pub fn stage_id(&self) -> StageId {
@@ -220,22 +197,25 @@ impl<'a> StatefulObserverContext<'a> {
         self.input
     }
 
-    pub fn stage_input_position(&self) -> Option<u64> {
+    pub fn stage_input_position(&self) -> Option<StageInputPosition> {
         self.stage_input_position
     }
 }
 
 pub struct JoinObserverContext<'a> {
+    flow_id: FlowId,
     flow_context: &'a FlowContext,
     occurrence: JoinObserverOccurrence<'a>,
 }
 
 impl<'a> JoinObserverContext<'a> {
     pub(crate) fn new(
+        flow_id: FlowId,
         flow_context: &'a FlowContext,
         occurrence: JoinObserverOccurrence<'a>,
     ) -> Self {
         Self {
+            flow_id,
             flow_context,
             occurrence,
         }
@@ -245,8 +225,8 @@ impl<'a> JoinObserverContext<'a> {
         &self.flow_context.flow_name
     }
 
-    pub fn flow_id(&self) -> &str {
-        &self.flow_context.flow_id
+    pub fn flow_id(&self) -> FlowId {
+        self.flow_id
     }
 
     pub fn stage_id(&self) -> StageId {
@@ -272,7 +252,7 @@ impl<'a> JoinObserverContext<'a> {
         }
     }
 
-    pub fn stage_input_position(&self) -> Option<u64> {
+    pub fn stage_input_position(&self) -> Option<StageInputPosition> {
         match self.occurrence {
             JoinObserverOccurrence::Delivery(delivery) => {
                 Some(delivery.delivered_stage_input_position())
@@ -291,13 +271,19 @@ pub enum SourcePollObserverOutcome {
 }
 
 pub struct SourcePollObserverContext<'a> {
+    flow_id: FlowId,
     flow_context: &'a FlowContext,
     outcome: SourcePollObserverOutcome,
 }
 
 impl<'a> SourcePollObserverContext<'a> {
-    pub(crate) fn new(flow_context: &'a FlowContext, outcome: SourcePollObserverOutcome) -> Self {
+    pub(crate) fn new(
+        flow_id: FlowId,
+        flow_context: &'a FlowContext,
+        outcome: SourcePollObserverOutcome,
+    ) -> Self {
         Self {
+            flow_id,
             flow_context,
             outcome,
         }
@@ -307,8 +293,8 @@ impl<'a> SourcePollObserverContext<'a> {
         &self.flow_context.flow_name
     }
 
-    pub fn flow_id(&self) -> &str {
-        &self.flow_context.flow_id
+    pub fn flow_id(&self) -> FlowId {
+        self.flow_id
     }
 
     pub fn stage_id(&self) -> StageId {
@@ -404,20 +390,23 @@ pub enum SinkDeliveryAttemptResult {
 }
 
 pub struct SinkDeliveryObserverContext<'a> {
+    flow_id: FlowId,
     flow_context: &'a FlowContext,
     input: &'a ChainEvent,
-    stage_input_position: Option<u64>,
+    stage_input_position: StageInputPosition,
     outcome: SinkDeliveryObserverOutcome,
 }
 
 impl<'a> SinkDeliveryObserverContext<'a> {
     pub(crate) fn new(
+        flow_id: FlowId,
         flow_context: &'a FlowContext,
         input: &'a ChainEvent,
-        stage_input_position: Option<u64>,
+        stage_input_position: StageInputPosition,
         outcome: SinkDeliveryObserverOutcome,
     ) -> Self {
         Self {
+            flow_id,
             flow_context,
             input,
             stage_input_position,
@@ -429,8 +418,8 @@ impl<'a> SinkDeliveryObserverContext<'a> {
         &self.flow_context.flow_name
     }
 
-    pub fn flow_id(&self) -> &str {
-        &self.flow_context.flow_id
+    pub fn flow_id(&self) -> FlowId {
+        self.flow_id
     }
 
     pub fn stage_id(&self) -> StageId {
@@ -449,7 +438,7 @@ impl<'a> SinkDeliveryObserverContext<'a> {
         self.input
     }
 
-    pub fn stage_input_position(&self) -> Option<u64> {
+    pub fn stage_input_position(&self) -> StageInputPosition {
         self.stage_input_position
     }
 
@@ -466,13 +455,19 @@ pub enum StageLifecyclePhase {
 }
 
 pub struct StageLifecycleObserverContext<'a> {
+    flow_id: FlowId,
     flow_context: &'a FlowContext,
     phase: StageLifecyclePhase,
 }
 
 impl<'a> StageLifecycleObserverContext<'a> {
-    pub(crate) fn new(flow_context: &'a FlowContext, phase: StageLifecyclePhase) -> Self {
+    pub(crate) fn new(
+        flow_id: FlowId,
+        flow_context: &'a FlowContext,
+        phase: StageLifecyclePhase,
+    ) -> Self {
         Self {
+            flow_id,
             flow_context,
             phase,
         }
@@ -482,8 +477,8 @@ impl<'a> StageLifecycleObserverContext<'a> {
         &self.flow_context.flow_name
     }
 
-    pub fn flow_id(&self) -> &str {
-        &self.flow_context.flow_id
+    pub fn flow_id(&self) -> FlowId {
+        self.flow_id
     }
 
     pub fn stage_id(&self) -> StageId {
@@ -537,4 +532,106 @@ pub trait SinkDeliveryObserver: Send + Sync {
 
 pub trait StageLifecycleObserver: Send + Sync {
     fn on_stage_lifecycle(&self, _ctx: &StageLifecycleObserverContext<'_>) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_core::event::{ChainEventFactory, JournalWriterId};
+    use obzenflow_core::WriterId;
+
+    fn require_flow_id(_: FlowId) {}
+    fn require_position(_: StageInputPosition) {}
+    fn require_optional_position(_: Option<StageInputPosition>) {}
+
+    #[test]
+    fn public_context_coordinates_preserve_nominal_types_and_honest_absence() {
+        let flow_id = FlowId::new();
+        let stage_id = StageId::new();
+        let flow_context = FlowContext {
+            flow_name: "flow".to_string(),
+            // Proves contexts do not parse or trust the serialised event field.
+            flow_id: "legacy-serialised-id".to_string(),
+            stage_name: "stage".to_string(),
+            stage_id,
+            stage_type: StageType::Transform,
+        };
+        let event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test.input",
+            serde_json::json!({}),
+        );
+        let position = StageInputPosition(7);
+
+        let handler = HandlerObserverContext::new(flow_id, &flow_context, &event, position);
+        require_flow_id(handler.flow_id());
+        require_position(handler.stage_input_position());
+        assert_eq!(handler.flow_id(), flow_id);
+        assert_eq!(handler.stage_input_position(), position);
+
+        let stateful = StatefulObserverContext::new(flow_id, &flow_context, None, None);
+        require_flow_id(stateful.flow_id());
+        require_optional_position(stateful.stage_input_position());
+        assert_eq!(stateful.stage_input_position(), None);
+
+        let delivery = JoinDeliverySnapshot::new(
+            JoinSide::Stream,
+            StageId::new(),
+            position,
+            EventEnvelope::new(JournalWriterId::new(), event.clone()),
+            VectorClock::new(),
+        );
+        require_position(delivery.delivered_stage_input_position());
+        let join_delivery = JoinObserverContext::new(
+            flow_id,
+            &flow_context,
+            JoinObserverOccurrence::Delivery(&delivery),
+        );
+        require_flow_id(join_delivery.flow_id());
+        require_optional_position(join_delivery.stage_input_position());
+        assert_eq!(join_delivery.stage_input_position(), Some(position));
+
+        let signal = JoinSignalSnapshot::new(None, JoinSignalKind::Drain);
+        let join_signal = JoinObserverContext::new(
+            flow_id,
+            &flow_context,
+            JoinObserverOccurrence::Signal(&signal),
+        );
+        assert_eq!(join_signal.stage_input_position(), None);
+
+        let source = SourcePollObserverContext::new(
+            flow_id,
+            &flow_context,
+            SourcePollObserverOutcome::Batch { events: 1 },
+        );
+        require_flow_id(source.flow_id());
+
+        let effect = EffectObserverContext::new(
+            flow_id,
+            stage_id,
+            "stage",
+            "test.effect",
+            EffectObserverOutcome::Succeeded,
+        );
+        require_flow_id(effect.flow_id());
+
+        let sink = SinkDeliveryObserverContext::new(
+            flow_id,
+            &flow_context,
+            &event,
+            position,
+            SinkDeliveryObserverOutcome::Attempted {
+                result: SinkDeliveryAttemptResult::ReportedSuccess,
+            },
+        );
+        require_flow_id(sink.flow_id());
+        require_position(sink.stage_input_position());
+
+        let lifecycle = StageLifecycleObserverContext::new(
+            flow_id,
+            &flow_context,
+            StageLifecyclePhase::Running,
+        );
+        require_flow_id(lifecycle.flow_id());
+    }
 }

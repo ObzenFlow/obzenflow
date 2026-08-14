@@ -927,6 +927,7 @@ impl fmt::Debug for StageObserverBundle {
 mod tests {
     use super::*;
     use crate::effects::{EffectOutcomeKind, EffectSafety, IdempotencyKeyPolicy};
+    use crate::messaging::upstream_subscription::StageInputPosition;
     use crate::stages::observer::EffectObserverOutcome;
     use obzenflow_core::event::context::{FlowContext, StageType};
     use obzenflow_core::event::ChainEventFactory;
@@ -1134,10 +1135,11 @@ mod tests {
         )
     }
 
-    fn context() -> (FlowContext, ChainEvent) {
+    fn context() -> (FlowId, FlowContext, ChainEvent) {
+        let flow_id = FlowId::new();
         let flow_context = FlowContext {
             flow_name: "flow".to_string(),
-            flow_id: "run".to_string(),
+            flow_id: flow_id.to_string(),
             stage_name: "stage".to_string(),
             stage_id: StageId::new(),
             stage_type: StageType::Transform,
@@ -1147,7 +1149,7 @@ mod tests {
             "test.event",
             serde_json::json!({}),
         );
-        (flow_context, event)
+        (flow_id, flow_context, event)
     }
 
     #[test]
@@ -1160,8 +1162,9 @@ mod tests {
         builder.push_handler("panics", panics.clone());
         builder.push_handler("counts", counts.clone());
         let bundle = builder.build();
-        let (flow_context, event) = context();
-        let ctx = HandlerObserverContext::new(&flow_context, &event, Some(1));
+        let (flow_id, flow_context, event) = context();
+        let ctx =
+            HandlerObserverContext::new(flow_id, &flow_context, &event, StageInputPosition(1));
 
         for _ in 0..3 {
             bundle.handler().expect("handler port").invoke(
@@ -1192,8 +1195,9 @@ mod tests {
             );
         }
         let bundle = builder.build();
-        let (flow_context, event) = context();
-        let ctx = HandlerObserverContext::new(&flow_context, &event, Some(1));
+        let (flow_id, flow_context, event) = context();
+        let ctx =
+            HandlerObserverContext::new(flow_id, &flow_context, &event, StageInputPosition(1));
 
         bundle.handler().expect("one composed handler port").invoke(
             "stage",
@@ -1218,8 +1222,9 @@ mod tests {
         builder.push_handler("panics", panics.clone());
         builder.push_handler("counts", counts.clone());
         let bundle = builder.build();
-        let (flow_context, event) = context();
-        let ctx = HandlerObserverContext::new(&flow_context, &event, Some(1));
+        let (flow_id, flow_context, event) = context();
+        let ctx =
+            HandlerObserverContext::new(flow_id, &flow_context, &event, StageInputPosition(1));
 
         tracing::subscriber::with_default(
             PanickingWarningSubscriber {
@@ -1262,7 +1267,7 @@ mod tests {
         builder.push_handler("panics", panics.clone());
         builder.push_handler("counts", counts.clone());
         let bundle = Arc::new(builder.build());
-        let (flow_context, event) = context();
+        let (flow_id, flow_context, event) = context();
         let flow_context = Arc::new(flow_context);
         let event = Arc::new(event);
         let barrier = Arc::new(Barrier::new(WORKERS));
@@ -1280,7 +1285,12 @@ mod tests {
                 std::thread::spawn(move || {
                     barrier.wait();
                     tracing::dispatcher::with_default(&dispatch, || {
-                        let ctx = HandlerObserverContext::new(&flow_context, &event, Some(1));
+                        let ctx = HandlerObserverContext::new(
+                            flow_id,
+                            &flow_context,
+                            &event,
+                            StageInputPosition(1),
+                        );
                         bundle.handler().expect("handler port").invoke(
                             "stage",
                             "handler",
@@ -1302,7 +1312,8 @@ mod tests {
         assert_eq!(counts.0.load(Ordering::SeqCst), WORKERS);
 
         tracing::dispatcher::with_default(&dispatch, || {
-            let ctx = HandlerObserverContext::new(&flow_context, &event, Some(2));
+            let ctx =
+                HandlerObserverContext::new(flow_id, &flow_context, &event, StageInputPosition(2));
             bundle.handler().expect("handler port").invoke(
                 "stage",
                 "handler",
@@ -1603,8 +1614,9 @@ mod tests {
             bindings,
         )
         .expect("second bundle");
-        let (flow_context, event) = context();
-        let ctx = HandlerObserverContext::new(&flow_context, &event, Some(1));
+        let (flow_id, flow_context, event) = context();
+        let ctx =
+            HandlerObserverContext::new(flow_id, &flow_context, &event, StageInputPosition(1));
 
         for bundle in [&first, &first, &second] {
             bundle.handler().expect("handler port").invoke(

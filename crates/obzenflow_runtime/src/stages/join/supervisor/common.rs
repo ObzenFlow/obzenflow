@@ -18,8 +18,8 @@ use crate::stages::observer::dispatch::{
     run_join_after_output_observers, run_join_before_input_observers,
 };
 use crate::stages::observer::{
-    JoinCanonicalMergeMetadata, JoinDeliverySnapshot, JoinObserverContext, JoinObserverOccurrence,
-    JoinSide, JoinSignalKind, JoinSignalSnapshot,
+    JoinDeliverySnapshot, JoinObserverContext, JoinObserverOccurrence, JoinSide, JoinSignalKind,
+    JoinSignalSnapshot,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -260,7 +260,7 @@ pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
         (None, Some(signal)) => JoinObserverOccurrence::Signal(signal),
         _ => return Err("join observer occurrence must be exactly one delivery or signal".into()),
     };
-    let observer_ctx = JoinObserverContext::new(&flow_context, occurrence);
+    let observer_ctx = JoinObserverContext::new(ctx.flow_id, &flow_context, occurrence);
     run_join_before_input_observers(&ctx.observers, scope, &observer_ctx);
     Ok(())
 }
@@ -290,7 +290,7 @@ pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
         (None, Some(signal)) => JoinObserverOccurrence::Signal(signal),
         _ => return Err("join observer occurrence must be exactly one delivery or signal".into()),
     };
-    let observer_ctx = JoinObserverContext::new(&flow_context, occurrence);
+    let observer_ctx = JoinObserverContext::new(ctx.flow_id, &flow_context, occurrence);
     run_join_after_output_observers(&ctx.observers, scope, &observer_ctx, outputs);
     Ok(())
 }
@@ -301,17 +301,15 @@ pub(super) fn delivery_snapshot(
     stage_input_position: Option<StageInputPosition>,
     envelope: &EventEnvelope<ChainEvent>,
     reference_high_water: &obzenflow_core::event::vector_clock::VectorClock,
-    canonical_merge: Option<JoinCanonicalMergeMetadata>,
 ) -> Result<JoinDeliverySnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let position =
         stage_input_position.ok_or("join delivered data input without StageInputPosition")?;
     Ok(JoinDeliverySnapshot::new(
         side,
         source_stage_id,
-        position.0,
+        position,
         envelope.clone(),
         reference_high_water.clone(),
-        canonical_merge,
     ))
 }
 

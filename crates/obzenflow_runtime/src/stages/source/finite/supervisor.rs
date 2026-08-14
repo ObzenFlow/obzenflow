@@ -587,6 +587,7 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     .await;
 
                     let source_poll_observation = SourcePollObservation::new(
+                        ctx.flow_id,
                         &stage_flow_context,
                         &ctx.observers,
                         obzenflow_core::MiddlewareExecutionScope::LiveHandler,

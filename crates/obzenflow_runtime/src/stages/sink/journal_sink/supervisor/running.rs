@@ -539,6 +539,8 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
     envelope: &EventEnvelope<ChainEvent>,
     stage_input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    let observer_input_position =
+        stage_input_position.ok_or("sink delivered data input without StageInputPosition")?;
     let envelope_event = envelope.event.clone();
     let event_id = envelope_event.id;
     let stage_name = ctx.stage_name.clone();
@@ -688,10 +690,11 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             );
             run_sink_delivery_observers(
                 &ctx.observers,
+                ctx.flow_id,
                 &flow_context,
                 scope,
                 &envelope.event,
-                stage_input_position.map(|position| position.0),
+                observer_input_position,
                 observer_outcome,
             );
         }

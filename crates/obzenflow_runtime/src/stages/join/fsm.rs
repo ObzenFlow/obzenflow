@@ -584,6 +584,7 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                 };
                 run_stage_lifecycle_observers(
                     &ctx.observers,
+                    ctx.flow_id,
                     &flow_context,
                     ctx.runtime_execution
                         .dispatch_scope(ctx.stage_id, None, None),
@@ -721,6 +722,7 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                 };
                 run_stage_lifecycle_observers(
                     &ctx.observers,
+                    ctx.flow_id,
                     &flow_context,
                     ctx.runtime_execution
                         .dispatch_scope(ctx.stage_id, None, None),
@@ -750,6 +752,7 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                 };
                 run_stage_lifecycle_observers(
                     &ctx.observers,
+                    ctx.flow_id,
                     &flow_context,
                     ctx.runtime_execution
                         .dispatch_scope(ctx.stage_id, None, None),

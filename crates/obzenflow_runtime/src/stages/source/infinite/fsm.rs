@@ -604,6 +604,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
+                    ctx.flow_id,
                     &flow_context,
                     scope,
                     StageLifecyclePhase::Failed,
@@ -637,6 +638,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
+                    ctx.flow_id,
                     &flow_context,
                     scope,
                     StageLifecyclePhase::Running,
@@ -685,6 +687,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
+                    ctx.flow_id,
                     &flow_context,
                     scope,
                     StageLifecyclePhase::Completed,

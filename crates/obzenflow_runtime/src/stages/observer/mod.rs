@@ -12,6 +12,7 @@ mod composition;
 pub(crate) mod dispatch;
 pub mod ports;
 
+pub use crate::messaging::upstream_subscription::StageInputPosition;
 pub(crate) use composition::ObserverTarget;
 pub use composition::{
     observer_shell_surfaces_for_stage, ObserverBinding, ObserverBindingError, ObserverSurface,
@@ -19,8 +20,8 @@ pub use composition::{
 };
 pub use ports::{
     EffectObserver, EffectObserverContext, EffectObserverOutcome, HandlerObserver,
-    HandlerObserverContext, JoinCanonicalMergeMetadata, JoinDeliverySnapshot, JoinObserver,
-    JoinObserverContext, JoinObserverOccurrence, JoinSide, JoinSignalKind, JoinSignalSnapshot,
+    HandlerObserverContext, JoinDeliverySnapshot, JoinObserver, JoinObserverContext,
+    JoinObserverOccurrence, JoinSide, JoinSignalKind, JoinSignalSnapshot,
     SinkDeliveryAttemptResult, SinkDeliveryObserver, SinkDeliveryObserverContext,
     SinkDeliveryObserverOutcome, SourcePollObserver, SourcePollObserverContext,
     SourcePollObserverOutcome, StageLifecycleObserver, StageLifecycleObserverContext,

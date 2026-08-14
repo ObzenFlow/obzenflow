@@ -7,8 +7,9 @@ error[E0624]: associated function `new` is private
  ::: src/stages/observer/ports.rs
   |
   | /     pub(crate) fn new(
+  | |         flow_id: FlowId,
   | |         flow_context: &'a FlowContext,
   | |         input: &'a ChainEvent,
-  | |         stage_input_position: Option<u64>,
+  | |         stage_input_position: StageInputPosition,
   | |     ) -> Self {
   | |_____________- private associated function defined here

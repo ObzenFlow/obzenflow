@@ -467,6 +467,8 @@ async fn dispatch_running_inner<
                     }
                 }
                 obzenflow_core::event::ChainEventContent::Data { .. } => {
+                    let observer_input_position = stage_input_position
+                        .ok_or("transform delivered data input without StageInputPosition")?;
                     // FLOWIP-120c H3: the middleware execution scope is
                     // computed per dispatched event from the delivered
                     // position, not baked into the wrapper at build time.
@@ -527,10 +529,11 @@ async fn dispatch_running_inner<
                     if handler_invoked {
                         run_before_handler_observers(
                             &ctx.observers,
+                            ctx.flow_id,
                             flow_context,
                             scope,
                             &envelope.event,
-                            stage_input_position.map(|position| position.0),
+                            observer_input_position,
                         );
                     }
                     let result =
@@ -592,10 +595,11 @@ async fn dispatch_running_inner<
                             if handler_invoked {
                                 run_after_handler_observers(
                                     &ctx.observers,
+                                    ctx.flow_id,
                                     flow_context,
                                     scope,
                                     &envelope.event,
-                                    stage_input_position.map(|position| position.0),
+                                    observer_input_position,
                                     transformed_events.as_slice(),
                                 );
                             }

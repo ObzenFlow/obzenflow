@@ -230,9 +230,10 @@ pub(super) async fn dispatch_draining<
                         None,
                     );
                     let observer_ctx = StatefulObserverContext::new(
+                        ctx.flow_id,
                         &flow_context,
                         Some(&event),
-                        stage_input_position.map(|position| position.0),
+                        stage_input_position,
                     );
                     let accumulate_invoked =
                         !matches!(event.processing_info.status, ProcessingStatus::Error { .. });
@@ -454,9 +455,10 @@ pub(super) async fn dispatch_draining<
                                     let stage_writer_id =
                                         ctx.writer_id.ok_or("No writer ID available")?;
                                     let observer_ctx = StatefulObserverContext::new(
+                                        ctx.flow_id,
                                         &flow_context,
                                         Some(&event),
-                                        stage_input_position.map(|position| position.0),
+                                        stage_input_position,
                                     );
                                     run_stateful_after_emit_observers(
                                         &ctx.observers,
@@ -833,11 +835,12 @@ pub(super) async fn dispatch_draining<
         Ok(drain_events) => {
             let stage_writer_id = ctx.writer_id.ok_or("No writer ID available")?;
             let observer_ctx = StatefulObserverContext::new(
+                ctx.flow_id,
                 &flow_context,
                 ctx.last_consumed_envelope
                     .as_ref()
                     .map(|envelope| &envelope.event),
-                ctx.last_input_position.map(|position| position.0),
+                ctx.last_input_position,
             );
             run_stateful_after_emit_observers(
                 &ctx.observers,

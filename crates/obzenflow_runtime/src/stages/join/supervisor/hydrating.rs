@@ -210,7 +210,6 @@ pub(super) async fn dispatch_hydrating<
                             subscription.last_delivered_stage_input_position(),
                             &envelope,
                             &ctx.reference_high_water_clock,
-                            None,
                         )
                     })
                     .transpose()?;

@@ -184,6 +184,8 @@ async fn dispatch_draining_inner<
             }
 
             // Process data events (or pass through error-marked events).
+            let observer_input_position = stage_input_position
+                .ok_or("transform delivered data input without StageInputPosition during drain")?;
             // Generation None: drain follows the stage frontier (FLOWIP-120n).
             let scope =
                 ctx.runtime_execution
@@ -240,10 +242,11 @@ async fn dispatch_draining_inner<
             if handler_invoked {
                 run_before_handler_observers(
                     &ctx.observers,
+                    ctx.flow_id,
                     flow_context,
                     scope,
                     &envelope.event,
-                    stage_input_position.map(|position| position.0),
+                    observer_input_position,
                 );
             }
             let transformed_result =
@@ -330,10 +333,11 @@ async fn dispatch_draining_inner<
             if handler_invoked {
                 run_after_handler_observers(
                     &ctx.observers,
+                    ctx.flow_id,
                     flow_context,
                     scope,
                     &envelope.event,
-                    stage_input_position.map(|position| position.0),
+                    observer_input_position,
                     transformed_events.as_slice(),
                 );
             }
