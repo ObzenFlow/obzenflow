@@ -10,6 +10,7 @@ use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{JonestownSignalStrategy, SignalGate};
 use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
+use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
@@ -72,6 +73,14 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
     type Error = BuilderError;
 
     async fn build(self) -> Result<Self::Handle, Self::Error> {
+        let observers = StageObserverBundle::compose_checked(
+            &self.config.stage_name,
+            ObserverTarget::Stateful {
+                effects: &self.resources.effect_declarations,
+            },
+            self.config.observer_bindings,
+        )?;
+
         // Create channels for supervisor communication
         let (event_sender, event_receiver, state_watcher) =
             ChannelBuilder::new().build(StatefulState::<H>::Created);
@@ -124,7 +133,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             handler: Arc::new(handler),
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
-            observers: self.config.observers.clone(),
+            observers,
             flow_name: self.config.flow_name.clone(),
             flow_id: self.resources.flow_id,
             current_state: initial_state,

@@ -9,6 +9,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::effects::EffectDeclaration;
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::ChainEvent;
 
 use super::ports::{
@@ -17,6 +19,339 @@ use super::ports::{
     SourcePollObserverContext, StageLifecycleObserver, StageLifecycleObserverContext,
     StatefulObserver, StatefulObserverContext,
 };
+
+/// A runtime-owned ordinary observer surface.
+///
+/// This closed vocabulary is shared with outer-layer diagnostics, while the
+/// runtime remains authoritative for whether a concrete stage target accepts a
+/// surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ObserverSurface {
+    Handler,
+    Stateful,
+    Join,
+    SourcePoll,
+    Effect,
+    SinkDelivery,
+    StageLifecycle,
+}
+
+impl fmt::Display for ObserverSurface {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Handler => "handler",
+            Self::Stateful => "stateful",
+            Self::Join => "join",
+            Self::SourcePoll => "source_poll",
+            Self::Effect => "effect",
+            Self::SinkDelivery => "sink_delivery",
+            Self::StageLifecycle => "stage_lifecycle",
+        };
+        f.write_str(name)
+    }
+}
+
+const SOURCE_SURFACES: &[ObserverSurface] =
+    &[ObserverSurface::SourcePoll, ObserverSurface::StageLifecycle];
+const TRANSFORM_SURFACES: &[ObserverSurface] =
+    &[ObserverSurface::Handler, ObserverSurface::StageLifecycle];
+const EFFECTFUL_TRANSFORM_SURFACES: &[ObserverSurface] = &[
+    ObserverSurface::Handler,
+    ObserverSurface::Effect,
+    ObserverSurface::StageLifecycle,
+];
+const STATEFUL_SURFACES: &[ObserverSurface] =
+    &[ObserverSurface::Stateful, ObserverSurface::StageLifecycle];
+const EFFECTFUL_STATEFUL_SURFACES: &[ObserverSurface] = &[
+    ObserverSurface::Stateful,
+    ObserverSurface::Effect,
+    ObserverSurface::StageLifecycle,
+];
+const JOIN_SURFACES: &[ObserverSurface] = &[ObserverSurface::Join, ObserverSurface::StageLifecycle];
+const SINK_SURFACES: &[ObserverSurface] = &[
+    ObserverSurface::SinkDelivery,
+    ObserverSurface::StageLifecycle,
+];
+
+/// Runtime-owned shell compatibility used by the DSL for early diagnostics.
+///
+/// Effect compatibility additionally depends on the concrete stage's declared
+/// effect subjects and is therefore decided only by runtime stage builders.
+pub fn observer_shell_surfaces_for_stage(stage_type: StageType) -> &'static [ObserverSurface] {
+    match stage_type {
+        StageType::FiniteSource | StageType::InfiniteSource => SOURCE_SURFACES,
+        StageType::Transform => TRANSFORM_SURFACES,
+        StageType::Stateful => STATEFUL_SURFACES,
+        StageType::Join => JOIN_SURFACES,
+        StageType::Sink => SINK_SURFACES,
+    }
+}
+
+#[derive(Clone)]
+enum ObserverBindingKind {
+    Handler(Arc<dyn HandlerObserver>),
+    Stateful(Arc<dyn StatefulObserver>),
+    Join(Arc<dyn JoinObserver>),
+    SourcePoll(Arc<dyn SourcePollObserver>),
+    Effect(Vec<EffectObserverSubject>),
+    SinkDelivery(Arc<dyn SinkDeliveryObserver>),
+    StageLifecycle(Arc<dyn StageLifecycleObserver>),
+}
+
+#[derive(Clone)]
+struct EffectObserverSubject {
+    effect_type: &'static str,
+    observer: Arc<dyn EffectObserver>,
+}
+
+/// One labelled, surface-specific, safe input to runtime observer composition.
+///
+/// The private closed sum prevents a caller from injecting a bundle or control
+/// attachment. Runtime still validates the binding against the concrete stage
+/// target before materialising any observer ports.
+#[derive(Clone)]
+pub struct ObserverBinding {
+    label: &'static str,
+    kind: ObserverBindingKind,
+}
+
+impl ObserverBinding {
+    fn new(label: &'static str, kind: ObserverBindingKind) -> Result<Self, ObserverBindingError> {
+        if label.trim().is_empty() {
+            return Err(ObserverBindingError::EmptyLabel);
+        }
+        Ok(Self { label, kind })
+    }
+
+    pub fn handler(
+        label: &'static str,
+        observer: Arc<dyn HandlerObserver>,
+    ) -> Result<Self, ObserverBindingError> {
+        Self::new(label, ObserverBindingKind::Handler(observer))
+    }
+
+    pub fn stateful(
+        label: &'static str,
+        observer: Arc<dyn StatefulObserver>,
+    ) -> Result<Self, ObserverBindingError> {
+        Self::new(label, ObserverBindingKind::Stateful(observer))
+    }
+
+    pub fn join(
+        label: &'static str,
+        observer: Arc<dyn JoinObserver>,
+    ) -> Result<Self, ObserverBindingError> {
+        Self::new(label, ObserverBindingKind::Join(observer))
+    }
+
+    pub fn source_poll(
+        label: &'static str,
+        observer: Arc<dyn SourcePollObserver>,
+    ) -> Result<Self, ObserverBindingError> {
+        Self::new(label, ObserverBindingKind::SourcePoll(observer))
+    }
+
+    pub fn effect(
+        label: &'static str,
+        effect_type: &'static str,
+        observer: Arc<dyn EffectObserver>,
+    ) -> Result<Self, ObserverBindingError> {
+        Self::effects(label, vec![(effect_type, observer)])
+    }
+
+    /// Bind one logical effect-observer declaration to its concrete declared
+    /// subjects. Runtime gives the whole declaration one quarantine latch.
+    pub fn effects(
+        label: &'static str,
+        subjects: Vec<(&'static str, Arc<dyn EffectObserver>)>,
+    ) -> Result<Self, ObserverBindingError> {
+        if subjects.is_empty() {
+            return Err(ObserverBindingError::EmptyEffectSubjects { label });
+        }
+        for (index, (effect_type, _)) in subjects.iter().enumerate() {
+            if subjects[..index]
+                .iter()
+                .any(|(prior, _)| prior == effect_type)
+            {
+                return Err(ObserverBindingError::DuplicateEffectSubject {
+                    label,
+                    effect_type: *effect_type,
+                });
+            }
+        }
+        Self::new(
+            label,
+            ObserverBindingKind::Effect(
+                subjects
+                    .into_iter()
+                    .map(|(effect_type, observer)| EffectObserverSubject {
+                        effect_type,
+                        observer,
+                    })
+                    .collect(),
+            ),
+        )
+    }
+
+    pub fn sink_delivery(
+        label: &'static str,
+        observer: Arc<dyn SinkDeliveryObserver>,
+    ) -> Result<Self, ObserverBindingError> {
+        Self::new(label, ObserverBindingKind::SinkDelivery(observer))
+    }
+
+    pub fn stage_lifecycle(
+        label: &'static str,
+        observer: Arc<dyn StageLifecycleObserver>,
+    ) -> Result<Self, ObserverBindingError> {
+        Self::new(label, ObserverBindingKind::StageLifecycle(observer))
+    }
+
+    pub fn label(&self) -> &'static str {
+        self.label
+    }
+
+    pub fn surface(&self) -> ObserverSurface {
+        match self.kind {
+            ObserverBindingKind::Handler(_) => ObserverSurface::Handler,
+            ObserverBindingKind::Stateful(_) => ObserverSurface::Stateful,
+            ObserverBindingKind::Join(_) => ObserverSurface::Join,
+            ObserverBindingKind::SourcePoll(_) => ObserverSurface::SourcePoll,
+            ObserverBindingKind::Effect(_) => ObserverSurface::Effect,
+            ObserverBindingKind::SinkDelivery(_) => ObserverSurface::SinkDelivery,
+            ObserverBindingKind::StageLifecycle(_) => ObserverSurface::StageLifecycle,
+        }
+    }
+
+    pub fn effect_types(&self) -> impl ExactSizeIterator<Item = &'static str> + '_ {
+        let subjects: &[EffectObserverSubject] = match &self.kind {
+            ObserverBindingKind::Effect(subjects) => subjects,
+            _ => &[],
+        };
+        subjects.iter().map(|subject| subject.effect_type)
+    }
+}
+
+impl fmt::Debug for ObserverBinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ObserverBinding")
+            .field("label", &self.label)
+            .field("surface", &self.surface())
+            .field("effect_types", &self.effect_types().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+/// Ordered collection of closed observer bindings accepted by runtime configs.
+#[derive(Clone, Default)]
+pub struct StageObserverBindings {
+    bindings: Vec<ObserverBinding>,
+}
+
+impl StageObserverBindings {
+    pub fn push(&mut self, binding: ObserverBinding) {
+        self.bindings.push(binding);
+    }
+
+    pub fn extend(&mut self, other: Self) {
+        self.bindings.extend(other.bindings);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.bindings.len()
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &ObserverBinding> {
+        self.bindings.iter()
+    }
+}
+
+impl fmt::Debug for StageObserverBindings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(&self.bindings).finish()
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ObserverBindingError {
+    #[error("observer declaration label must not be empty")]
+    EmptyLabel,
+    #[error("effect observer '{label}' must name at least one declared effect subject")]
+    EmptyEffectSubjects { label: &'static str },
+    #[error("effect observer '{label}' repeats effect subject '{effect_type}'")]
+    DuplicateEffectSubject {
+        label: &'static str,
+        effect_type: &'static str,
+    },
+    #[error(
+        "observer '{label}' requests surface {requested} on stage '{stage}' ({stage_kind}), which permits {permitted:?}"
+    )]
+    IncompatibleSurface {
+        stage: String,
+        stage_kind: &'static str,
+        label: &'static str,
+        requested: ObserverSurface,
+        permitted: Vec<ObserverSurface>,
+    },
+    #[error(
+        "observer '{label}' targets undeclared effect '{effect_type}' on stage '{stage}' ({stage_kind}); declared effects are {declared_effects:?}"
+    )]
+    UndeclaredEffect {
+        stage: String,
+        stage_kind: &'static str,
+        label: &'static str,
+        effect_type: &'static str,
+        declared_effects: Vec<&'static str>,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ObserverTarget<'a> {
+    FiniteSource,
+    InfiniteSource,
+    Transform { effects: &'a [EffectDeclaration] },
+    Stateful { effects: &'a [EffectDeclaration] },
+    Join,
+    Sink,
+}
+
+impl<'a> ObserverTarget<'a> {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::FiniteSource => "finite source",
+            Self::InfiniteSource => "infinite source",
+            Self::Transform { effects } if effects.is_empty() => "transform",
+            Self::Transform { .. } => "effectful transform",
+            Self::Stateful { effects } if effects.is_empty() => "stateful",
+            Self::Stateful { .. } => "effectful stateful",
+            Self::Join => "join",
+            Self::Sink => "sink",
+        }
+    }
+
+    fn permitted_surfaces(self) -> &'static [ObserverSurface] {
+        match self {
+            Self::FiniteSource | Self::InfiniteSource => SOURCE_SURFACES,
+            Self::Transform { effects } if effects.is_empty() => TRANSFORM_SURFACES,
+            Self::Transform { .. } => EFFECTFUL_TRANSFORM_SURFACES,
+            Self::Stateful { effects } if effects.is_empty() => STATEFUL_SURFACES,
+            Self::Stateful { .. } => EFFECTFUL_STATEFUL_SURFACES,
+            Self::Join => JOIN_SURFACES,
+            Self::Sink => SINK_SURFACES,
+        }
+    }
+
+    fn effects(self) -> &'a [EffectDeclaration] {
+        match self {
+            Self::Transform { effects } | Self::Stateful { effects } => effects,
+            _ => &[],
+        }
+    }
+}
 
 struct ObserverChild<T: ?Sized> {
     label: &'static str,
@@ -202,14 +537,42 @@ impl SourcePollObserver for SourcePollObserverChain {
     }
 }
 
-struct EffectObserverChain(Vec<ObserverChild<dyn EffectObserver>>);
+struct EffectObserverChild {
+    label: &'static str,
+    subjects: Vec<EffectObserverSubject>,
+    quarantined: AtomicBool,
+}
+
+impl EffectObserverChild {
+    fn invoke(&self, ctx: &EffectObserverContext<'_>) {
+        if self.quarantined.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(subject) = self
+            .subjects
+            .iter()
+            .find(|subject| subject.effect_type == ctx.effect_type())
+        else {
+            return;
+        };
+
+        if catch_unwind(AssertUnwindSafe(|| subject.observer.after_effect(ctx))).is_err()
+            && self
+                .quarantined
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            warn_quarantined(self.label, ctx.stage_name(), "effect", "after_effect");
+        }
+    }
+}
+
+struct EffectObserverChain(Vec<EffectObserverChild>);
 
 impl EffectObserver for EffectObserverChain {
     fn after_effect(&self, ctx: &EffectObserverContext<'_>) {
         for child in &self.0 {
-            child.invoke(ctx.stage_name(), "effect", "after_effect", |observer| {
-                observer.after_effect(ctx);
-            });
+            child.invoke(ctx);
         }
     }
 }
@@ -244,45 +607,55 @@ impl StageLifecycleObserver for StageLifecycleObserverChain {
     }
 }
 
-/// Safe, ordered input to the runtime-owned observer compositor.
+/// Private raw materialiser reached only after runtime target validation.
 ///
-/// The adapter binder supplies one declaration label with every child. The
-/// fields stay private so callers cannot install a pre-composed port that
-/// bypasses per-child quarantine.
-#[doc(hidden)]
+/// Fields and construction stay inside the runtime crate so cross-crate
+/// callers can supply only closed [`ObserverBinding`] values.
 #[derive(Default)]
-pub struct StageObserverBundleBuilder {
+pub(crate) struct StageObserverBundleBuilder {
     handler: Vec<ObserverChild<dyn HandlerObserver>>,
     stateful: Vec<ObserverChild<dyn StatefulObserver>>,
     join: Vec<ObserverChild<dyn JoinObserver>>,
     source_poll: Vec<ObserverChild<dyn SourcePollObserver>>,
-    effect: Vec<ObserverChild<dyn EffectObserver>>,
+    effect: Vec<EffectObserverChild>,
     sink_delivery: Vec<ObserverChild<dyn SinkDeliveryObserver>>,
     stage_lifecycle: Vec<ObserverChild<dyn StageLifecycleObserver>>,
 }
 
 impl StageObserverBundleBuilder {
-    pub fn push_handler(&mut self, label: &'static str, observer: Arc<dyn HandlerObserver>) {
+    pub(crate) fn push_handler(&mut self, label: &'static str, observer: Arc<dyn HandlerObserver>) {
         self.handler.push(ObserverChild::new(label, observer));
     }
 
-    pub fn push_stateful(&mut self, label: &'static str, observer: Arc<dyn StatefulObserver>) {
+    pub(crate) fn push_stateful(
+        &mut self,
+        label: &'static str,
+        observer: Arc<dyn StatefulObserver>,
+    ) {
         self.stateful.push(ObserverChild::new(label, observer));
     }
 
-    pub fn push_join(&mut self, label: &'static str, observer: Arc<dyn JoinObserver>) {
+    pub(crate) fn push_join(&mut self, label: &'static str, observer: Arc<dyn JoinObserver>) {
         self.join.push(ObserverChild::new(label, observer));
     }
 
-    pub fn push_source_poll(&mut self, label: &'static str, observer: Arc<dyn SourcePollObserver>) {
+    pub(crate) fn push_source_poll(
+        &mut self,
+        label: &'static str,
+        observer: Arc<dyn SourcePollObserver>,
+    ) {
         self.source_poll.push(ObserverChild::new(label, observer));
     }
 
-    pub fn push_effect(&mut self, label: &'static str, observer: Arc<dyn EffectObserver>) {
-        self.effect.push(ObserverChild::new(label, observer));
+    fn push_effect(&mut self, label: &'static str, subjects: Vec<EffectObserverSubject>) {
+        self.effect.push(EffectObserverChild {
+            label,
+            subjects,
+            quarantined: AtomicBool::new(false),
+        });
     }
 
-    pub fn push_sink_delivery(
+    pub(crate) fn push_sink_delivery(
         &mut self,
         label: &'static str,
         observer: Arc<dyn SinkDeliveryObserver>,
@@ -290,7 +663,7 @@ impl StageObserverBundleBuilder {
         self.sink_delivery.push(ObserverChild::new(label, observer));
     }
 
-    pub fn push_stage_lifecycle(
+    pub(crate) fn push_stage_lifecycle(
         &mut self,
         label: &'static str,
         observer: Arc<dyn StageLifecycleObserver>,
@@ -299,36 +672,28 @@ impl StageObserverBundleBuilder {
             .push(ObserverChild::new(label, observer));
     }
 
-    pub fn extend(&mut self, other: Self) {
-        self.handler.extend(other.handler);
-        self.stateful.extend(other.stateful);
-        self.join.extend(other.join);
-        self.source_poll.extend(other.source_poll);
-        self.effect.extend(other.effect);
-        self.sink_delivery.extend(other.sink_delivery);
-        self.stage_lifecycle.extend(other.stage_lifecycle);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.handler.is_empty()
-            && self.stateful.is_empty()
-            && self.join.is_empty()
-            && self.source_poll.is_empty()
-            && self.effect.is_empty()
-            && self.sink_delivery.is_empty()
-            && self.stage_lifecycle.is_empty()
-    }
-
-    pub fn build(self) -> StageObserverBundle {
+    pub(crate) fn build(self) -> StageObserverBundle {
         StageObserverBundle {
             handler: compose(self.handler, HandlerObserverChain),
             stateful: compose(self.stateful, StatefulObserverChain),
             join: compose(self.join, JoinObserverChain),
             source_poll: compose(self.source_poll, SourcePollObserverChain),
-            effect: compose(self.effect, EffectObserverChain),
+            effect: compose_effect(self.effect),
             sink_delivery: compose(self.sink_delivery, SinkDeliveryObserverChain),
             stage_lifecycle: compose(self.stage_lifecycle, StageLifecycleObserverChain),
         }
+    }
+}
+
+fn compose_effect(
+    children: Vec<EffectObserverChild>,
+) -> Option<HardenedObserverPort<dyn EffectObserver>> {
+    if children.is_empty() {
+        None
+    } else {
+        Some(HardenedObserverPort::new(Arc::new(EffectObserverChain(
+            children,
+        ))))
     }
 }
 
@@ -366,15 +731,14 @@ impl_into_observer_arc!(HandlerObserverChain, dyn HandlerObserver);
 impl_into_observer_arc!(StatefulObserverChain, dyn StatefulObserver);
 impl_into_observer_arc!(JoinObserverChain, dyn JoinObserver);
 impl_into_observer_arc!(SourcePollObserverChain, dyn SourcePollObserver);
-impl_into_observer_arc!(EffectObserverChain, dyn EffectObserver);
 impl_into_observer_arc!(SinkDeliveryObserverChain, dyn SinkDeliveryObserver);
 impl_into_observer_arc!(StageLifecycleObserverChain, dyn StageLifecycleObserver);
 
 /// Opaque, per-stage composed observer ports.
 ///
-/// Only the empty/default value is directly constructible. Non-empty values
-/// come from [`StageObserverBundleBuilder`], which always applies labelled
-/// per-child quarantine.
+/// Only the empty/default value is directly constructible. Runtime stage
+/// builders create non-empty values through a private compositor that always
+/// applies labelled per-child quarantine.
 #[derive(Clone, Default)]
 pub struct StageObserverBundle {
     handler: Option<HardenedObserverPort<dyn HandlerObserver>>,
@@ -387,6 +751,71 @@ pub struct StageObserverBundle {
 }
 
 impl StageObserverBundle {
+    pub(crate) fn compose_checked(
+        stage: &str,
+        target: ObserverTarget<'_>,
+        bindings: StageObserverBindings,
+    ) -> Result<Self, ObserverBindingError> {
+        let mut builder = StageObserverBundleBuilder::default();
+        let permitted = target.permitted_surfaces();
+
+        for binding in bindings.bindings {
+            let requested = binding.surface();
+            if !permitted.contains(&requested) {
+                return Err(ObserverBindingError::IncompatibleSurface {
+                    stage: stage.to_string(),
+                    stage_kind: target.kind(),
+                    label: binding.label,
+                    requested,
+                    permitted: permitted.to_vec(),
+                });
+            }
+
+            match binding.kind {
+                ObserverBindingKind::Handler(observer) => {
+                    builder.push_handler(binding.label, observer)
+                }
+                ObserverBindingKind::Stateful(observer) => {
+                    builder.push_stateful(binding.label, observer)
+                }
+                ObserverBindingKind::Join(observer) => builder.push_join(binding.label, observer),
+                ObserverBindingKind::SourcePoll(observer) => {
+                    builder.push_source_poll(binding.label, observer)
+                }
+                ObserverBindingKind::Effect(subjects) => {
+                    for subject in &subjects {
+                        if !target
+                            .effects()
+                            .iter()
+                            .any(|effect| effect.effect_type == subject.effect_type)
+                        {
+                            return Err(ObserverBindingError::UndeclaredEffect {
+                                stage: stage.to_string(),
+                                stage_kind: target.kind(),
+                                label: binding.label,
+                                effect_type: subject.effect_type,
+                                declared_effects: target
+                                    .effects()
+                                    .iter()
+                                    .map(|effect| effect.effect_type)
+                                    .collect(),
+                            });
+                        }
+                    }
+                    builder.push_effect(binding.label, subjects);
+                }
+                ObserverBindingKind::SinkDelivery(observer) => {
+                    builder.push_sink_delivery(binding.label, observer)
+                }
+                ObserverBindingKind::StageLifecycle(observer) => {
+                    builder.push_stage_lifecycle(binding.label, observer)
+                }
+            }
+        }
+
+        Ok(builder.build())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.handler.is_none()
             && self.stateful.is_none()
@@ -451,9 +880,11 @@ impl fmt::Debug for StageObserverBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::effects::{EffectOutcomeKind, EffectSafety, IdempotencyKeyPolicy};
+    use crate::stages::observer::EffectObserverOutcome;
     use obzenflow_core::event::context::{FlowContext, StageType};
     use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::{StageId, WriterId};
+    use obzenflow_core::{FlowId, StageId, WriterId};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Barrier, Mutex};
     use tracing::span::{Attributes, Id, Record};
@@ -543,6 +974,63 @@ mod tests {
                 .expect("recording observer lock")
                 .push(self.id);
         }
+    }
+
+    struct NoopObserver;
+
+    impl HandlerObserver for NoopObserver {}
+    impl StatefulObserver for NoopObserver {}
+    impl JoinObserver for NoopObserver {}
+    impl SourcePollObserver for NoopObserver {}
+    impl EffectObserver for NoopObserver {}
+    impl SinkDeliveryObserver for NoopObserver {}
+    impl StageLifecycleObserver for NoopObserver {}
+
+    fn declared_effect(effect_type: &'static str) -> EffectDeclaration {
+        EffectDeclaration {
+            effect_type,
+            safety: EffectSafety::Idempotent,
+            idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
+            required_ports: Vec::new(),
+            transactional_executor: None,
+            outcome_kind: EffectOutcomeKind::RecordedReply,
+            public_outcome_fact_types: Vec::new(),
+        }
+    }
+
+    fn binding_for(surface: ObserverSurface) -> ObserverBinding {
+        match surface {
+            ObserverSurface::Handler => {
+                ObserverBinding::handler("observer", Arc::new(NoopObserver))
+            }
+            ObserverSurface::Stateful => {
+                ObserverBinding::stateful("observer", Arc::new(NoopObserver))
+            }
+            ObserverSurface::Join => ObserverBinding::join("observer", Arc::new(NoopObserver)),
+            ObserverSurface::SourcePoll => {
+                ObserverBinding::source_poll("observer", Arc::new(NoopObserver))
+            }
+            ObserverSurface::Effect => {
+                ObserverBinding::effect("observer", "effect.a", Arc::new(NoopObserver))
+            }
+            ObserverSurface::SinkDelivery => {
+                ObserverBinding::sink_delivery("observer", Arc::new(NoopObserver))
+            }
+            ObserverSurface::StageLifecycle => {
+                ObserverBinding::stage_lifecycle("observer", Arc::new(NoopObserver))
+            }
+        }
+        .expect("valid test binding")
+    }
+
+    fn effect_context(effect_type: &'static str) -> EffectObserverContext<'static> {
+        EffectObserverContext::new(
+            FlowId::new(),
+            StageId::new(),
+            "stage",
+            effect_type,
+            EffectObserverOutcome::Succeeded,
+        )
     }
 
     fn context() -> (FlowContext, ChainEvent) {
@@ -720,5 +1208,261 @@ mod tests {
         assert_eq!(panics.calls.load(Ordering::SeqCst), calls_after_race);
         assert_eq!(warnings.load(Ordering::SeqCst), 1);
         assert_eq!(counts.0.load(Ordering::SeqCst), WORKERS + 1);
+    }
+
+    #[test]
+    fn runtime_owns_the_complete_stage_surface_matrix() {
+        let effects = [declared_effect("effect.a")];
+        let cases = [
+            (ObserverTarget::FiniteSource, SOURCE_SURFACES),
+            (ObserverTarget::InfiniteSource, SOURCE_SURFACES),
+            (
+                ObserverTarget::Transform { effects: &[] },
+                TRANSFORM_SURFACES,
+            ),
+            (
+                ObserverTarget::Transform { effects: &effects },
+                EFFECTFUL_TRANSFORM_SURFACES,
+            ),
+            (ObserverTarget::Stateful { effects: &[] }, STATEFUL_SURFACES),
+            (
+                ObserverTarget::Stateful { effects: &effects },
+                EFFECTFUL_STATEFUL_SURFACES,
+            ),
+            (ObserverTarget::Join, JOIN_SURFACES),
+            (ObserverTarget::Sink, SINK_SURFACES),
+        ];
+        let all_surfaces = [
+            ObserverSurface::Handler,
+            ObserverSurface::Stateful,
+            ObserverSurface::Join,
+            ObserverSurface::SourcePoll,
+            ObserverSurface::Effect,
+            ObserverSurface::SinkDelivery,
+            ObserverSurface::StageLifecycle,
+        ];
+
+        for (target, permitted) in cases {
+            for surface in all_surfaces {
+                let mut bindings = StageObserverBindings::default();
+                bindings.push(binding_for(surface));
+                let accepted =
+                    StageObserverBundle::compose_checked("stage", target, bindings).is_ok();
+                assert_eq!(
+                    accepted,
+                    permitted.contains(&surface),
+                    "{} unexpectedly handled {surface}",
+                    target.kind()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_rejects_an_undeclared_effect_subject() {
+        let effects = [declared_effect("effect.a")];
+        let mut bindings = StageObserverBindings::default();
+        bindings.push(
+            ObserverBinding::effect("wrong-subject", "effect.b", Arc::new(NoopObserver))
+                .expect("valid closed binding"),
+        );
+
+        let error = StageObserverBundle::compose_checked(
+            "orders",
+            ObserverTarget::Transform { effects: &effects },
+            bindings,
+        )
+        .expect_err("undeclared subject must fail before execution");
+
+        assert!(matches!(
+            error,
+            ObserverBindingError::UndeclaredEffect {
+                stage,
+                stage_kind: "effectful transform",
+                label: "wrong-subject",
+                effect_type: "effect.b",
+                declared_effects,
+            } if stage == "orders" && declared_effects == ["effect.a"]
+        ));
+    }
+
+    #[test]
+    fn closed_bindings_reject_invalid_labels_and_duplicate_effect_subjects() {
+        assert!(matches!(
+            ObserverBinding::handler("  ", Arc::new(NoopObserver)),
+            Err(ObserverBindingError::EmptyLabel)
+        ));
+        let observer: Arc<dyn EffectObserver> = Arc::new(NoopObserver);
+        assert!(matches!(
+            ObserverBinding::effects(
+                "effects",
+                vec![("effect.a", observer.clone()), ("effect.a", observer),],
+            ),
+            Err(ObserverBindingError::DuplicateEffectSubject {
+                label: "effects",
+                effect_type: "effect.a",
+            })
+        ));
+    }
+
+    struct RecordsEffect {
+        materialization: &'static str,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl EffectObserver for RecordsEffect {
+        fn after_effect(&self, ctx: &EffectObserverContext<'_>) {
+            self.calls.lock().expect("effect call lock").push(format!(
+                "{}:{}",
+                self.materialization,
+                ctx.effect_type()
+            ));
+        }
+    }
+
+    #[test]
+    fn effect_dispatch_invokes_only_the_matching_materialised_subject() {
+        let effects = [declared_effect("effect.a"), declared_effect("effect.b")];
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let binding = ObserverBinding::effects(
+            "effects",
+            vec![
+                (
+                    "effect.a",
+                    Arc::new(RecordsEffect {
+                        materialization: "a",
+                        calls: calls.clone(),
+                    }),
+                ),
+                (
+                    "effect.b",
+                    Arc::new(RecordsEffect {
+                        materialization: "b",
+                        calls: calls.clone(),
+                    }),
+                ),
+            ],
+        )
+        .expect("valid effect binding");
+        let mut bindings = StageObserverBindings::default();
+        bindings.push(binding);
+        let bundle = StageObserverBundle::compose_checked(
+            "stage",
+            ObserverTarget::Transform { effects: &effects },
+            bindings,
+        )
+        .expect("compatible effect observers");
+
+        for effect_type in ["effect.a", "effect.b"] {
+            let ctx = effect_context(effect_type);
+            bundle.effect().expect("effect port").invoke(
+                "stage",
+                "effect",
+                "after_effect",
+                |observer| observer.after_effect(&ctx),
+            );
+        }
+
+        assert_eq!(
+            *calls.lock().expect("effect call lock"),
+            ["a:effect.a", "b:effect.b"]
+        );
+    }
+
+    struct PanicsEffect;
+
+    impl EffectObserver for PanicsEffect {
+        fn after_effect(&self, _ctx: &EffectObserverContext<'_>) {
+            panic!("effect observer panic");
+        }
+    }
+
+    struct CountsEffect(Arc<AtomicUsize>);
+
+    impl EffectObserver for CountsEffect {
+        fn after_effect(&self, _ctx: &EffectObserverContext<'_>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn effect_declaration_shares_quarantine_across_subjects_but_not_siblings() {
+        let effects = [declared_effect("effect.a"), declared_effect("effect.b")];
+        let grouped_b_calls = Arc::new(AtomicUsize::new(0));
+        let sibling_calls = Arc::new(AtomicUsize::new(0));
+        let mut bindings = StageObserverBindings::default();
+        bindings.push(
+            ObserverBinding::effects(
+                "panics",
+                vec![
+                    ("effect.a", Arc::new(PanicsEffect)),
+                    ("effect.b", Arc::new(CountsEffect(grouped_b_calls.clone()))),
+                ],
+            )
+            .expect("valid grouped effect binding"),
+        );
+        bindings.push(
+            ObserverBinding::effect(
+                "sibling",
+                "effect.b",
+                Arc::new(CountsEffect(sibling_calls.clone())),
+            )
+            .expect("valid sibling binding"),
+        );
+        let bundle = StageObserverBundle::compose_checked(
+            "stage",
+            ObserverTarget::Transform { effects: &effects },
+            bindings,
+        )
+        .expect("compatible effect observers");
+
+        for effect_type in ["effect.a", "effect.b"] {
+            let ctx = effect_context(effect_type);
+            bundle.effect().expect("effect port").invoke(
+                "stage",
+                "effect",
+                "after_effect",
+                |observer| observer.after_effect(&ctx),
+            );
+        }
+
+        assert_eq!(grouped_b_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(sibling_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn each_bundle_materialisation_gets_fresh_quarantine_state() {
+        let panics = Arc::new(PanicsOnce {
+            calls: AtomicUsize::new(0),
+        });
+        let mut bindings = StageObserverBindings::default();
+        bindings.push(
+            ObserverBinding::handler("panics", panics.clone()).expect("valid handler binding"),
+        );
+        let first = StageObserverBundle::compose_checked(
+            "first",
+            ObserverTarget::Transform { effects: &[] },
+            bindings.clone(),
+        )
+        .expect("first bundle");
+        let second = StageObserverBundle::compose_checked(
+            "second",
+            ObserverTarget::Transform { effects: &[] },
+            bindings,
+        )
+        .expect("second bundle");
+        let (flow_context, event) = context();
+        let ctx = HandlerObserverContext::new(&flow_context, &event, Some(1));
+
+        for bundle in [&first, &first, &second] {
+            bundle.handler().expect("handler port").invoke(
+                "stage",
+                "handler",
+                "before_handle",
+                |observer| observer.before_handle(&ctx),
+            );
+        }
+
+        assert_eq!(panics.calls.load(Ordering::SeqCst), 2);
     }
 }

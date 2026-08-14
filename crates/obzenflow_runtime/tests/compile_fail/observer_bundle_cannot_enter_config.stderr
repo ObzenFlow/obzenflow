@@ -1,0 +1,7 @@
+error[E0609]: no field `observers` on type `TransformConfig`
+  --> tests/compile_fail/observer_bundle_cannot_enter_config.rs:11:12
+   |
+11 |     config.observers = StageObserverBundle::default();
+   |            ^^^^^^^^^ unknown field
+   |
+   = note: available fields are: `stage_id`, `stage_name`, `flow_name`, `upstream_stages`, `control_strategy`, `cycle_guard`

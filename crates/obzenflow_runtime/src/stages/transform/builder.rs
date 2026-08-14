@@ -19,6 +19,7 @@ use crate::stages::common::control_strategies::{JonestownSignalStrategy, SignalG
 use crate::stages::common::cycle_guard::CycleGuard;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
+use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
@@ -81,6 +82,14 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     type Error = BuilderError;
 
     async fn build(self) -> Result<Self::Handle, Self::Error> {
+        let observers = StageObserverBundle::compose_checked(
+            &self.config.stage_name,
+            ObserverTarget::Transform {
+                effects: &self.resources.effect_declarations,
+            },
+            self.config.observer_bindings,
+        )?;
+
         // Create channels for supervisor communication
         let (event_sender, event_receiver, state_watcher) =
             ChannelBuilder::new().build(TransformState::<H>::Created);
@@ -130,7 +139,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             handler,
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
-            observers: self.config.observers.clone(),
+            observers,
             flow_name: self.config.flow_name.clone(),
             flow_id: self.resources.flow_id,
             data_journal: self.resources.data_journal.clone(),

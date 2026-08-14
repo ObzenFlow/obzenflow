@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler;
+use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::strategies::{CompletionGate, JonestownSourceStrategy};
@@ -71,6 +72,12 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
     type Error = BuilderError;
 
     async fn build(self) -> Result<Self::Handle, Self::Error> {
+        let observers = StageObserverBundle::compose_checked(
+            &self.config.stage_name,
+            ObserverTarget::FiniteSource,
+            self.config.observer_bindings,
+        )?;
+
         let (event_sender, event_receiver, state_watcher) =
             ChannelBuilder::new().build(FiniteSourceState::<H>::Created);
 
@@ -86,7 +93,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
         let context = FiniteSourceContext::<H>::new(FiniteSourceContextInit {
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
-            observers: self.config.observers.clone(),
+            observers,
             flow_name: self.config.flow_name.clone(),
             flow_id: self.resources.flow_id,
             data_journal: self.resources.data_journal.clone(),

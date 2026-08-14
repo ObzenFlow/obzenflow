@@ -12,9 +12,11 @@ mod composition;
 pub(crate) mod dispatch;
 pub mod ports;
 
-pub use composition::StageObserverBundle;
-#[doc(hidden)]
-pub use composition::StageObserverBundleBuilder;
+pub(crate) use composition::ObserverTarget;
+pub use composition::{
+    observer_shell_surfaces_for_stage, ObserverBinding, ObserverBindingError, ObserverSurface,
+    StageObserverBindings, StageObserverBundle,
+};
 pub use ports::{
     EffectObserver, EffectObserverContext, EffectObserverOutcome, HandlerObserver,
     HandlerObserverContext, JoinCanonicalMergeMetadata, JoinDeliverySnapshot, JoinObserver,

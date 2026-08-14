@@ -204,9 +204,8 @@ pub(crate) fn run_join_before_input_observers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stages::observer::{
-        HandlerObserver, HandlerObserverContext, StageObserverBundleBuilder,
-    };
+    use crate::stages::observer::composition::StageObserverBundleBuilder;
+    use crate::stages::observer::{HandlerObserver, HandlerObserverContext};
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::WriterId;

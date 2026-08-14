@@ -14,6 +14,7 @@ use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{JonestownSignalStrategy, SignalGate};
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
+use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
@@ -61,6 +62,12 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
     type Error = BuilderError;
 
     async fn build(self) -> Result<Self::Handle, Self::Error> {
+        let observers = StageObserverBundle::compose_checked(
+            &self.config.stage_name,
+            ObserverTarget::Sink,
+            self.config.observer_bindings,
+        )?;
+
         // Create channels for supervisor communication
         let (event_sender, event_receiver, state_watcher) =
             ChannelBuilder::new().build(JournalSinkState::<H>::Created);
@@ -77,8 +84,6 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             .unwrap_or_else(|| Arc::new(JonestownSignalStrategy));
 
         let sink_delivery_boundary = self.config.sink_delivery_boundary;
-        let observers = self.config.observers;
-
         let heartbeat_config = self.heartbeat_config.clone();
         let heartbeat = if self
             .resources

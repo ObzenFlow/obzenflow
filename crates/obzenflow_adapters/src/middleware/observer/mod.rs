@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use obzenflow_runtime::stages::observer::{
-    EffectObserver, HandlerObserver, JoinObserver, SinkDeliveryObserver, SourcePollObserver,
-    StageLifecycleObserver, StageObserverBundle, StageObserverBundleBuilder, StatefulObserver,
+    EffectObserver, HandlerObserver, JoinObserver, ObserverBinding, SinkDeliveryObserver,
+    SourcePollObserver, StageLifecycleObserver, StageObserverBindings, StatefulObserver,
 };
 use thiserror::Error;
 
@@ -31,11 +31,11 @@ pub(crate) const OBSERVER_SURFACE_KINDS: &[MiddlewareSurfaceKind] = &[
     MiddlewareSurfaceKind::StageLifecycle,
 ];
 
-/// Adapter-owned routing of checked attachments into the runtime-owned safe
-/// compositor.
+/// Adapter-owned translation of checked attachments into closed runtime
+/// bindings. Bundle materialisation remains runtime-private.
 #[derive(Default)]
 pub struct StageObserverSet {
-    builder: StageObserverBundleBuilder,
+    bindings: StageObserverBindings,
 }
 
 impl StageObserverSet {
@@ -44,27 +44,29 @@ impl StageObserverSet {
         attachment: CheckedMiddlewareSurfaceAttachment,
     ) -> Result<(), String> {
         let (label, kind) = attachment.into_labelled_kind();
-        match kind {
+        let binding = match kind {
             MiddlewareSurfaceAttachmentKind::HandlerObserver(observer) => {
-                self.builder.push_handler(label, observer)
+                ObserverBinding::handler(label, observer)
             }
             MiddlewareSurfaceAttachmentKind::StatefulObserver(observer) => {
-                self.builder.push_stateful(label, observer)
+                ObserverBinding::stateful(label, observer)
             }
             MiddlewareSurfaceAttachmentKind::JoinObserver(observer) => {
-                self.builder.push_join(label, observer)
+                ObserverBinding::join(label, observer)
             }
             MiddlewareSurfaceAttachmentKind::SourcePollObserver(observer) => {
-                self.builder.push_source_poll(label, observer)
+                ObserverBinding::source_poll(label, observer)
             }
-            MiddlewareSurfaceAttachmentKind::EffectObserver(observer) => {
-                self.builder.push_effect(label, observer)
+            MiddlewareSurfaceAttachmentKind::EffectObserver(_) => {
+                return Err(format!(
+                    "effect observer '{label}' requires its checked effect subject"
+                ))
             }
             MiddlewareSurfaceAttachmentKind::SinkDeliveryObserver(observer) => {
-                self.builder.push_sink_delivery(label, observer)
+                ObserverBinding::sink_delivery(label, observer)
             }
             MiddlewareSurfaceAttachmentKind::StageLifecycleObserver(observer) => {
-                self.builder.push_stage_lifecycle(label, observer)
+                ObserverBinding::stage_lifecycle(label, observer)
             }
             MiddlewareSurfaceAttachmentKind::SourcePoll(_)
             | MiddlewareSurfaceAttachmentKind::Effect(_)
@@ -75,15 +77,50 @@ impl StageObserverSet {
                 )
             }
         }
+        .map_err(|error| error.to_string())?;
+        self.bindings.push(binding);
+        Ok(())
+    }
+
+    pub fn push_effect_attachments(
+        &mut self,
+        attachments: Vec<(&'static str, CheckedMiddlewareSurfaceAttachment)>,
+    ) -> Result<(), String> {
+        let mut label = None;
+        let mut subjects = Vec::with_capacity(attachments.len());
+        for (effect_type, attachment) in attachments {
+            let (attachment_label, kind) = attachment.into_labelled_kind();
+            if let Some(expected) = label {
+                if expected != attachment_label {
+                    return Err(format!(
+                        "effect observer declaration changed label from '{expected}' to '{attachment_label}' across subjects"
+                    ));
+                }
+            } else {
+                label = Some(attachment_label);
+            }
+            let MiddlewareSurfaceAttachmentKind::EffectObserver(observer) = kind else {
+                return Err(format!(
+                    "binder expected an effect observer attachment for '{attachment_label}'"
+                ));
+            };
+            subjects.push((effect_type, observer));
+        }
+        let label = label.ok_or_else(|| {
+            "effect observer declaration has no concrete declared effect subject".to_string()
+        })?;
+        let binding =
+            ObserverBinding::effects(label, subjects).map_err(|error| error.to_string())?;
+        self.bindings.push(binding);
         Ok(())
     }
 
     pub fn extend(&mut self, other: StageObserverSet) {
-        self.builder.extend(other.builder);
+        self.bindings.extend(other.bindings);
     }
 
-    pub fn build(self) -> StageObserverBundle {
-        self.builder.build()
+    pub fn into_bindings(self) -> StageObserverBindings {
+        self.bindings
     }
 }
 
@@ -221,7 +258,7 @@ observer_factory!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_runtime::stages::observer::{HandlerObserverContext, StageObserverBundle};
+    use obzenflow_runtime::stages::observer::HandlerObserverContext;
 
     struct Noop;
 
@@ -277,9 +314,63 @@ mod tests {
     }
 
     #[test]
-    fn empty_set_builds_the_public_empty_bundle() {
-        let bundle: StageObserverBundle = StageObserverSet::default().build();
-        assert!(bundle.is_empty());
+    fn empty_set_builds_an_empty_closed_binding_collection() {
+        let bindings = StageObserverSet::default().into_bindings();
+        assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn translation_preserves_declaration_labels_and_order() {
+        let mut observers = StageObserverSet::default();
+        for label in ["first", "second", "third"] {
+            let observer: Arc<dyn HandlerObserver> = Arc::new(Noop);
+            let attachment = CheckedMiddlewareSurfaceAttachment::from_validated(
+                label,
+                MiddlewareSurfaceAttachment::handler_observer(observer),
+            );
+            observers
+                .push_attachment(attachment)
+                .expect("translate checked observer");
+        }
+
+        let bindings = observers.into_bindings();
+        assert_eq!(
+            bindings
+                .iter()
+                .map(ObserverBinding::label)
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
+    }
+
+    #[test]
+    fn effect_subject_materialisations_become_one_logical_binding() {
+        let attachments = ["effect.a", "effect.b"]
+            .into_iter()
+            .map(|effect_type| {
+                let observer: Arc<dyn EffectObserver> = Arc::new(Noop);
+                (
+                    effect_type,
+                    CheckedMiddlewareSurfaceAttachment::from_validated(
+                        "effects",
+                        MiddlewareSurfaceAttachment::effect_observer(observer),
+                    ),
+                )
+            })
+            .collect();
+        let mut observers = StageObserverSet::default();
+        observers
+            .push_effect_attachments(attachments)
+            .expect("translate checked effect observers");
+
+        let bindings = observers.into_bindings();
+        assert_eq!(bindings.len(), 1);
+        let binding = bindings.iter().next().expect("one binding");
+        assert_eq!(binding.label(), "effects");
+        assert_eq!(
+            binding.effect_types().collect::<Vec<_>>(),
+            ["effect.a", "effect.b"]
+        );
     }
 
     #[test]

@@ -166,15 +166,8 @@ async fn stateful_emit_interval_emits_while_idle() {
         writer_id: WriterId::from(stateful_stage),
     };
 
-    let config = StatefulConfig {
-        stage_id: stateful_stage,
-        stage_name: "timer_stateful".to_string(),
-        flow_name: "timer_flow".to_string(),
-        upstream_stages: vec![src],
-        observers: obzenflow_runtime::stages::observer::StageObserverBundle::default(),
-        emit_interval: Some(emit_interval),
-        control_strategy: None,
-    };
+    let mut config = StatefulConfig::new(stateful_stage, "timer_stateful", "timer_flow", vec![src]);
+    config.emit_interval = Some(emit_interval);
 
     let handle = StatefulBuilder::new(handler, config, stateful_resources)
         .build()
@@ -350,15 +343,13 @@ async fn stateful_emit_interval_advances_under_paused_time() {
         writer_id: WriterId::from(stateful_stage),
     };
 
-    let config = StatefulConfig {
-        stage_id: stateful_stage,
-        stage_name: "paused_timer_stateful".to_string(),
-        flow_name: "paused_timer_flow".to_string(),
-        upstream_stages: vec![src],
-        observers: obzenflow_runtime::stages::observer::StageObserverBundle::default(),
-        emit_interval: Some(emit_interval),
-        control_strategy: None,
-    };
+    let mut config = StatefulConfig::new(
+        stateful_stage,
+        "paused_timer_stateful",
+        "paused_timer_flow",
+        vec![src],
+    );
+    config.emit_interval = Some(emit_interval);
 
     let handle = StatefulBuilder::new(handler, config, stateful_resources)
         .build()
