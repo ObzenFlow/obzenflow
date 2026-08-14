@@ -159,8 +159,13 @@ impl ObserverBinding {
         Self::effects(label, vec![(effect_type, observer)])
     }
 
-    /// Bind one logical effect-observer declaration to its concrete declared
-    /// subjects. Runtime gives the whole declaration one quarantine latch.
+    /// Bind one logical effect-observer attachment to its concrete declared
+    /// subjects. Runtime dispatches only the matching subject product and gives
+    /// the whole attachment one quarantine latch.
+    ///
+    /// A caller that creates several bindings creates several sibling
+    /// attachments. Runtime does not infer shared attachment identity from
+    /// labels or `Arc` pointer identity.
     pub fn effects(
         label: &'static str,
         subjects: Vec<(&'static str, Arc<dyn EffectObserver>)>,
@@ -173,10 +178,7 @@ impl ObserverBinding {
                 .iter()
                 .any(|(prior, _)| prior == effect_type)
             {
-                return Err(ObserverBindingError::DuplicateEffectSubject {
-                    label,
-                    effect_type: *effect_type,
-                });
+                return Err(ObserverBindingError::DuplicateEffectSubject { label, effect_type });
             }
         }
         Self::new(
@@ -324,9 +326,9 @@ impl<'a> ObserverTarget<'a> {
         match self {
             Self::FiniteSource => "finite source",
             Self::InfiniteSource => "infinite source",
-            Self::Transform { effects } if effects.is_empty() => "transform",
+            Self::Transform { effects: [] } => "transform",
             Self::Transform { .. } => "effectful transform",
-            Self::Stateful { effects } if effects.is_empty() => "stateful",
+            Self::Stateful { effects: [] } => "stateful",
             Self::Stateful { .. } => "effectful stateful",
             Self::Join => "join",
             Self::Sink => "sink",
@@ -336,9 +338,9 @@ impl<'a> ObserverTarget<'a> {
     fn permitted_surfaces(self) -> &'static [ObserverSurface] {
         match self {
             Self::FiniteSource | Self::InfiniteSource => SOURCE_SURFACES,
-            Self::Transform { effects } if effects.is_empty() => TRANSFORM_SURFACES,
+            Self::Transform { effects: [] } => TRANSFORM_SURFACES,
             Self::Transform { .. } => EFFECTFUL_TRANSFORM_SURFACES,
-            Self::Stateful { effects } if effects.is_empty() => STATEFUL_SURFACES,
+            Self::Stateful { effects: [] } => STATEFUL_SURFACES,
             Self::Stateful { .. } => EFFECTFUL_STATEFUL_SURFACES,
             Self::Join => JOIN_SURFACES,
             Self::Sink => SINK_SURFACES,
@@ -372,6 +374,10 @@ impl<T: ?Sized> ObserverChild<T> {
     where
         F: FnOnce(&T),
     {
+        // Supported stage dispatch is serial for one materialised attachment.
+        // The atomic is shared by internal bundle clones as defensive one-way
+        // state; it cannot recall a call that an unsupported concurrent caller
+        // already advanced past this check.
         if self.quarantined.load(Ordering::Acquire) {
             return;
         }
@@ -418,6 +424,8 @@ impl<T: ?Sized> HardenedObserverPort<T> {
     ) where
         F: FnOnce(&T),
     {
+        // See `ObserverChild::invoke`: stage-local calls are serial, while the
+        // shared atomic defensively contains later calls through bundle clones.
         if self.quarantined.load(Ordering::Acquire) {
             return;
         }
@@ -434,14 +442,44 @@ impl<T: ?Sized> HardenedObserverPort<T> {
 }
 
 fn warn_quarantined(label: &'static str, stage: &str, surface: &'static str, phase: &'static str) {
+    emit_quarantine_warning(label, stage, surface, phase, None);
+}
+
+fn warn_effect_quarantined(
+    label: &'static str,
+    stage: &str,
+    phase: &'static str,
+    effect_type: &str,
+) {
+    emit_quarantine_warning(label, stage, "effect", phase, Some(effect_type));
+}
+
+fn emit_quarantine_warning(
+    label: &'static str,
+    stage: &str,
+    surface: &'static str,
+    phase: &'static str,
+    effect_type: Option<&str>,
+) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
-        tracing::warn!(
-            observer = label,
-            stage,
-            surface,
-            phase,
-            "observer panicked and was quarantined for the remainder of the stage run"
-        );
+        if let Some(effect_type) = effect_type {
+            tracing::warn!(
+                observer = label,
+                stage,
+                surface,
+                phase,
+                effect_type,
+                "observer panicked and was quarantined for the remainder of the stage run"
+            );
+        } else {
+            tracing::warn!(
+                observer = label,
+                stage,
+                surface,
+                phase,
+                "observer panicked and was quarantined for the remainder of the stage run"
+            );
+        }
     }));
 }
 
@@ -545,6 +583,9 @@ struct EffectObserverChild {
 
 impl EffectObserverChild {
     fn invoke(&self, ctx: &EffectObserverContext<'_>) {
+        // All subject products belong to one logical stage attachment and
+        // share this declaration-wide latch. Supported effect dispatch is
+        // serial; the atomic also keeps internal bundle clones coherent.
         if self.quarantined.load(Ordering::Acquire) {
             return;
         }
@@ -562,7 +603,12 @@ impl EffectObserverChild {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
-            warn_quarantined(self.label, ctx.stage_name(), "effect", "after_effect");
+            warn_effect_quarantined(
+                self.label,
+                ctx.stage_name(),
+                "after_effect",
+                ctx.effect_type(),
+            );
         }
     }
 }
@@ -887,6 +933,7 @@ mod tests {
     use obzenflow_core::{FlowId, StageId, WriterId};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Barrier, Mutex};
+    use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Metadata, Subscriber};
 
@@ -920,6 +967,35 @@ mod tests {
 
     struct CountingWarningSubscriber {
         warnings: Arc<AtomicUsize>,
+    }
+
+    struct EffectWarningSubscriber {
+        warnings: Arc<AtomicUsize>,
+        effect_types: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct EffectTypeVisitor<'a> {
+        effect_types: &'a Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Visit for EffectTypeVisitor<'_> {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "effect_type" {
+                self.effect_types
+                    .lock()
+                    .expect("effect warning field lock")
+                    .push(value.to_string());
+            }
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "effect_type" {
+                self.effect_types
+                    .lock()
+                    .expect("effect warning field lock")
+                    .push(format!("{value:?}").trim_matches('"').to_string());
+            }
+        }
     }
 
     impl Subscriber for PanickingWarningSubscriber {
@@ -960,6 +1036,31 @@ mod tests {
 
         fn event(&self, _event: &Event<'_>) {
             self.warnings.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+
+    impl Subscriber for EffectWarningSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            self.warnings.fetch_add(1, Ordering::SeqCst);
+            event.record(&mut EffectTypeVisitor {
+                effect_types: &self.effect_types,
+            });
         }
 
         fn enter(&self, _span: &Id) {}
@@ -1144,8 +1245,13 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_panics_make_one_quarantine_transition_and_later_calls_skip_child() {
+    fn defensive_concurrent_calls_make_one_transition_and_post_race_calls_skip_child() {
         const WORKERS: usize = 8;
+
+        // Runtime stage dispatch is serial for one materialised attachment.
+        // This synthetic race proves only that defensive concurrent callers
+        // share one transition and warning. Calls already beyond the pre-check
+        // are allowed to finish; the serial post-race call must be skipped.
 
         let panics = Arc::new(PanicsOnce {
             calls: AtomicUsize::new(0),
@@ -1428,6 +1534,52 @@ mod tests {
 
         assert_eq!(grouped_b_calls.load(Ordering::SeqCst), 0);
         assert_eq!(sibling_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn effect_quarantine_warning_names_the_triggering_subject() {
+        let effects = [declared_effect("effect.a"), declared_effect("effect.b")];
+        let mut bindings = StageObserverBindings::default();
+        bindings.push(
+            ObserverBinding::effects(
+                "panics",
+                vec![
+                    ("effect.a", Arc::new(PanicsEffect)),
+                    ("effect.b", Arc::new(NoopObserver)),
+                ],
+            )
+            .expect("valid grouped effect binding"),
+        );
+        let bundle = StageObserverBundle::compose_checked(
+            "stage",
+            ObserverTarget::Transform { effects: &effects },
+            bindings,
+        )
+        .expect("compatible effect observers");
+        let effect_types = Arc::new(Mutex::new(Vec::new()));
+        let warnings = Arc::new(AtomicUsize::new(0));
+
+        tracing::subscriber::with_default(
+            EffectWarningSubscriber {
+                warnings: warnings.clone(),
+                effect_types: effect_types.clone(),
+            },
+            || {
+                let ctx = effect_context("effect.a");
+                bundle.effect().expect("effect port").invoke(
+                    "stage",
+                    "effect",
+                    "after_effect",
+                    |observer| observer.after_effect(&ctx),
+                );
+            },
+        );
+
+        assert_eq!(
+            *effect_types.lock().expect("effect warning assertion lock"),
+            ["effect.a"]
+        );
+        assert_eq!(warnings.load(Ordering::SeqCst), 1);
     }
 
     #[test]

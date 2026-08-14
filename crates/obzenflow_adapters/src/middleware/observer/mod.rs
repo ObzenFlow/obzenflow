@@ -82,6 +82,9 @@ impl StageObserverSet {
         Ok(())
     }
 
+    /// Regroup every checked subject product from one `observers:` declaration
+    /// into one runtime attachment. This preserves subject-aware factory
+    /// materialisation without multiplying dispatch or quarantine identities.
     pub fn push_effect_attachments(
         &mut self,
         attachments: Vec<(&'static str, CheckedMiddlewareSurfaceAttachment)>,
