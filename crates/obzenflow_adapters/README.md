@@ -6,7 +6,7 @@ This crate is an internal implementation detail of the ObzenFlow project. Most u
 
 Provides concrete typed policy, observer, source, sink, and monitoring implementations.
 
-- **Typed policy and observer attachments.** Composable factories for rate limiting, circuit breaking, effect resilience, and observability bind at supported live-I/O and observer surfaces through the `flow!` macro.
+- **Typed policy and observer attachments.** Control factories for rate limiting, circuit breaking, and effect resilience bind at supported live-I/O surfaces. Seven ordinary observer helpers bind read-only, live-only callbacks at framework-owned interception points through the `flow!` macro.
 - **Source adapters.** Ready-to-use source handlers: CSV file reader, HTTP pull/poll sources with pluggable decoders, and an HTTP ingestion source for server-mode flows.
 - **Sink adapters.** Console sink (with JSON, debug, and table formatters) and CSV file sink.
 - **Monitoring exporters.** Prometheus exporter out of the box, with a console summary exporter for local development. The `MetricsExporter` trait makes it straightforward to build custom exporters for other backends.

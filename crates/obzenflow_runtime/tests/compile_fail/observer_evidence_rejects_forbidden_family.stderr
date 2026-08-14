@@ -1,5 +1,0 @@
-error[E0599]: no variant or associated item named `Data` found for enum `obzenflow_runtime::stages::observer::ObserverEvidence` in the current scope
-  --> tests/compile_fail/observer_evidence_rejects_forbidden_family.rs:15:31
-   |
-15 |     let _ = ObserverEvidence::Data(event);
-   |                               ^^^^ variant or associated item not found in `obzenflow_runtime::stages::observer::ObserverEvidence`

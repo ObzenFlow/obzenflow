@@ -387,7 +387,6 @@ impl ChainEvent {
                     MiddlewareLifecycle::RateLimiter(_) => {
                         "lifecycle.middleware.rate_limiter".into()
                     }
-                    MiddlewareLifecycle::Indicator(_) => "lifecycle.middleware.indicator".into(),
                 },
                 // FLOWIP-115e: backpressure is runtime flow control, not
                 // middleware, so its label is not under `middleware`.

@@ -584,16 +584,11 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                 };
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.stage_id,
-                    &ctx.stage_name,
                     &flow_context,
                     ctx.runtime_execution
                         .dispatch_scope(ctx.stage_id, None, None),
                     StageLifecyclePhase::Running,
-                    &ctx.data_journal,
-                    &ctx.instrumentation,
-                )
-                .await;
+                );
                 Ok(())
             }
 
@@ -726,16 +721,11 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                 };
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.stage_id,
-                    &ctx.stage_name,
                     &flow_context,
                     ctx.runtime_execution
                         .dispatch_scope(ctx.stage_id, None, None),
                     StageLifecyclePhase::Completed,
-                    &ctx.data_journal,
-                    &ctx.instrumentation,
-                )
-                .await;
+                );
                 Ok(())
             }
 
@@ -760,16 +750,11 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                 };
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.stage_id,
-                    &ctx.stage_name,
                     &flow_context,
                     ctx.runtime_execution
                         .dispatch_scope(ctx.stage_id, None, None),
                     StageLifecyclePhase::Failed,
-                    &ctx.data_journal,
-                    &ctx.instrumentation,
-                )
-                .await;
+                );
                 Ok(())
             }
 

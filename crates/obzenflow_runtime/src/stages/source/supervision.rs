@@ -188,51 +188,38 @@ pub(crate) fn emit_batch_to_pending_outputs(
 
 pub(crate) struct SourcePollObservation<'a> {
     stage_flow_context: &'a FlowContext,
-    instrumentation: &'a Arc<StageInstrumentation>,
     observers: &'a StageObserverBundle,
     scope: MiddlewareExecutionScope,
-    data_journal: &'a Arc<dyn Journal<ChainEvent>>,
 }
 
 impl<'a> SourcePollObservation<'a> {
     pub(crate) fn new(
         stage_flow_context: &'a FlowContext,
-        instrumentation: &'a Arc<StageInstrumentation>,
         observers: &'a StageObserverBundle,
         scope: MiddlewareExecutionScope,
-        data_journal: &'a Arc<dyn Journal<ChainEvent>>,
     ) -> Self {
         Self {
             stage_flow_context,
-            instrumentation,
             observers,
             scope,
-            data_journal,
         }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.observers.has_source_poll() && !self.scope.is_deterministic_replay()
     }
 
     pub(crate) async fn observe(
         &self,
         outputs: &[ChainEvent],
-        poll_duration: Duration,
+        _poll_duration: Duration,
         outcome: SourcePollObserverOutcome,
     ) {
-        let observer_ctx = SourcePollObserverContext {
-            stage_id: self.stage_flow_context.stage_id,
-            stage_name: &self.stage_flow_context.stage_name,
-            flow_context: self.stage_flow_context,
-            scope: self.scope,
-            poll_duration,
-            outcome,
-        };
-        run_source_poll_observers(
-            self.observers,
-            &observer_ctx,
-            outputs,
-            self.data_journal,
-            self.instrumentation,
-        )
-        .await;
+        if !self.is_enabled() {
+            return;
+        }
+        let observer_ctx = SourcePollObserverContext::new(self.stage_flow_context, outcome);
+        run_source_poll_observers(self.observers, self.scope, &observer_ctx, outputs);
     }
 
     pub(crate) async fn observe_empty(
@@ -249,6 +236,9 @@ pub(crate) async fn observe_source_boundary_rejection(
     control_events: &[ChainEvent],
     policy: Option<&str>,
 ) {
+    if !observation.is_enabled() {
+        return;
+    }
     let outcome = SourcePollObserverOutcome::Rejected {
         policy: policy.map(str::to_string),
     };
@@ -326,10 +316,6 @@ pub(crate) async fn drain_pending_outputs_sync(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<(
-        &crate::stages::observer::StageObserverBundle,
-        obzenflow_core::config::LineagePolicy,
-    )>,
 ) -> Result<bool, BoxError> {
     while let Some(pending) = pending_outputs.pop_front() {
         if matches!(
@@ -359,7 +345,6 @@ pub(crate) async fn drain_pending_outputs_sync(
             backpressure_pulse,
             backpressure_stall,
             output_contract,
-            observers,
             pending_outputs,
         )
         .await?
@@ -388,10 +373,6 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<(
-        &crate::stages::observer::StageObserverBundle,
-        obzenflow_core::config::LineagePolicy,
-    )>,
     external_events: &mut EventReceiver<E>,
     on_channel_closed: impl FnOnce() -> E,
 ) -> Result<Option<EventLoopDirective<E>>, BoxError>
@@ -428,7 +409,6 @@ where
             backpressure_pulse,
             backpressure_stall,
             output_contract,
-            observers,
             pending_outputs,
         )
         .await?
@@ -818,7 +798,6 @@ mod tests {
                 &mut backpressure_pulse,
                 &mut backpressure_stall,
                 None,
-                None,
                 &mut receiver,
                 || TestEvent::ChannelClosed,
             )
@@ -921,7 +900,6 @@ mod tests {
                 &writer,
                 &mut backpressure_pulse,
                 &mut backpressure_stall,
-                None,
                 None,
                 &mut receiver,
                 || TestEvent::ChannelClosed,

@@ -2,18 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-134f journal oracle for typed joins, contribution evidence, and replay.
+//! FLOWIP-134f journal oracle for typed joins, selected reference facts, and replay.
+//!
+//! Composite-activation selection is covered at the typed join adapter boundary,
+//! where tests can supply genuine runtime-owned activation evidence. This
+//! end-to-end oracle deliberately does not manufacture envelope provenance from
+//! ordinary middleware.
 
-use obzenflow_adapters::middleware::{
-    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
-    MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
-    MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
-};
-use obzenflow_core::event::context::CompositeActivationContext;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainEventContent, EventEnvelope};
-use obzenflow_core::id::CompositeId;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
@@ -23,9 +21,6 @@ use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     JoinReferenceView, TypedFiniteSourceHandler, TypedJoinHandler, TypedTransformHandler,
-};
-use obzenflow_runtime::stages::observer::{
-    ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
 };
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
@@ -165,80 +160,6 @@ impl TypedTransformHandler for IdentityReference {
     }
 }
 
-/// Test-only observability middleware that restores the reference-entry
-/// evidence this join oracle needs without granting the typed source envelope
-/// authority.
-#[derive(Clone, Debug)]
-struct ReferenceActivationObserver;
-
-struct ReferenceActivationObserverFamily;
-
-const REFERENCE_ACTIVATION_OBSERVER_LABEL: &str = "typed_join_reference_activation";
-
-impl MiddlewareFactory for ReferenceActivationObserver {
-    fn label(&self) -> &'static str {
-        REFERENCE_ACTIVATION_OBSERVER_LABEL
-    }
-
-    fn override_key(&self) -> MiddlewareOverrideKey {
-        MiddlewareOverrideKey::of::<ReferenceActivationObserverFamily>(
-            REFERENCE_ACTIVATION_OBSERVER_LABEL,
-        )
-    }
-
-    fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::observer_with_family(
-            REFERENCE_ACTIVATION_OBSERVER_LABEL,
-            self.override_key().family_label(),
-            vec![MiddlewareSurfaceKind::OutputCommit],
-        )
-    }
-
-    fn materialize(
-        &self,
-        request: MiddlewareAttachmentRequest<'_>,
-        context: &MiddlewareMaterializationContext<'_>,
-    ) -> Result<MiddlewareSurfaceAttachment, MiddlewareFactoryError> {
-        validate_attachment_request(&self.declaration(), &request).map_err(|error| {
-            MiddlewareFactoryError::materialization_failed(
-                REFERENCE_ACTIVATION_OBSERVER_LABEL,
-                &context.config.name,
-                error,
-            )
-        })?;
-        Ok(MiddlewareSurfaceAttachment::output_commit_observer(
-            Arc::new(self.clone()),
-        ))
-    }
-}
-
-impl OutputCommitObserver for ReferenceActivationObserver {
-    fn label(&self) -> &'static str {
-        REFERENCE_ACTIVATION_OBSERVER_LABEL
-    }
-
-    fn before_output_commit(
-        &self,
-        ctx: &OutputCommitObserverContext<'_>,
-        event: &mut ChainEvent,
-    ) -> ObserverCommitResult {
-        let Some(reference) = ReferenceItem::from_event(event) else {
-            return Ok(ObserverReport::empty());
-        };
-        let parent = ctx.parent.expect("reference output has an input parent");
-        let activation = CompositeActivationContext::new(
-            CompositeId::new("flowip-134f:reference"),
-            parent.id,
-            format!("reference:{}:{}", reference.key, reference.version),
-            parent.processing_info.event_time,
-        );
-        event
-            .try_insert_composite_activation(activation)
-            .expect("reference activation is internally consistent");
-        Ok(ObserverReport::empty())
-    }
-}
-
 #[derive(Clone, Debug)]
 struct RejectMarkedStream;
 
@@ -342,7 +263,6 @@ fn build_flow(
         let references = ReferenceSource::new(reference_reads.clone());
         let streams = StreamSource::new(stream_reads.clone());
         let reference_validate = IdentityReference;
-        let reference_activation = ReferenceActivationObserver;
         let stream_validate = RejectMarkedStream;
         let joined = ExactJoin {
             calls: join_calls.clone(),
@@ -355,7 +275,7 @@ fn build_flow(
 
             stages: {
                 references = source!(ReferenceItem => references);
-                reference_validate = transform!(ReferenceItem -> ReferenceItem => reference_validate, observers: [reference_activation]);
+                reference_validate = transform!(ReferenceItem -> ReferenceItem => reference_validate);
                 streams = source!(StreamItem => streams);
                 stream_validate = transform!(StreamItem -> StreamItem => stream_validate);
                 joined = join!(catalog reference_validate: ReferenceItem, StreamItem -> JoinedFact => joined);
@@ -484,13 +404,6 @@ fn facts(events: &[EventEnvelope<ChainEvent>]) -> Vec<JoinedFact> {
         .collect()
 }
 
-fn has_activation(event: &ChainEvent, entry_port: &str) -> bool {
-    event
-        .composite_activations()
-        .iter()
-        .any(|activation| activation.entry_port == entry_port)
-}
-
 fn assert_journal_contract(run_dir: &Path, events: &[EventEnvelope<ChainEvent>]) {
     let expected = vec![
         JoinedFact {
@@ -535,23 +448,6 @@ fn assert_journal_contract(run_dir: &Path, events: &[EventEnvelope<ChainEvent>])
         envelope.event.writer_id == writer
             && envelope.event.event_type() == JoinedFact::versioned_event_type()
     }));
-
-    let k1 = authored
-        .iter()
-        .filter(|envelope| {
-            JoinedFact::from_event(&envelope.event).is_some_and(|fact| fact.key == "k1")
-        })
-        .collect::<Vec<_>>();
-    assert!(k1.iter().all(|envelope| {
-        has_activation(&envelope.event, "reference:k1:new")
-            && !has_activation(&envelope.event, "reference:k1:old")
-    }));
-    assert!(authored
-        .iter()
-        .filter(|envelope| {
-            JoinedFact::from_event(&envelope.event).is_some_and(|fact| fact.key == "k2")
-        })
-        .all(|envelope| has_activation(&envelope.event, "reference:k2:terminal")));
 
     let local_eof = events
         .iter()

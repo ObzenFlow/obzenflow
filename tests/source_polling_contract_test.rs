@@ -6,9 +6,6 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::observer::{
-    ObserverReport, SourcePollObserver, SourcePollObserverContext, SourcePollObserverOutcome,
-};
 use obzenflow_adapters::middleware::{
     validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
@@ -33,6 +30,9 @@ use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
     TypedInfiniteSourceHandler,
+};
+use obzenflow_runtime::stages::observer::{
+    SourcePollObserver, SourcePollObserverContext, SourcePollObserverOutcome,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
@@ -131,7 +131,6 @@ impl PolicyLog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ObserverObservation {
     outcome: SourcePollObserverOutcome,
-    poll_duration: Duration,
 }
 
 #[derive(Default)]
@@ -329,20 +328,10 @@ struct SourceContractObserver {
 }
 
 impl SourcePollObserver for SourceContractObserver {
-    fn label(&self) -> &'static str {
-        "source_contract_observer"
-    }
-
-    fn after_source_poll(
-        &self,
-        ctx: &SourcePollObserverContext<'_>,
-        _outputs: &[ChainEvent],
-    ) -> ObserverReport {
+    fn after_source_poll(&self, ctx: &SourcePollObserverContext<'_>, _outputs: &[ChainEvent]) {
         self.log.push(ObserverObservation {
-            outcome: ctx.outcome.clone(),
-            poll_duration: ctx.poll_duration,
+            outcome: ctx.outcome().clone(),
         });
-        ObserverReport::empty()
     }
 }
 
@@ -487,12 +476,14 @@ async fn stop_after_first_poll(
 }
 
 #[tokio::test(start_paused = true)]
-async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> Result<()> {
+async fn control_policy_owns_raw_poll_duration_across_all_four_source_supervisors() -> Result<()> {
     let policy_delay = Duration::from_secs(30);
     let async_raw_delay = Duration::from_secs(3);
 
     let sync_finite_observer_log = Arc::new(ObserverLog::default());
     let sync_finite_observer_for_flow = sync_finite_observer_log.clone();
+    let sync_finite_policy_log = Arc::new(PolicyLog::default());
+    let sync_finite_policy_for_flow = sync_finite_policy_log.clone();
     let source = SyncFiniteOnce::new();
     let sink = NoopSink;
     let sync_finite = test_flow! {
@@ -506,7 +497,7 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
                         after_poll_delay: policy_delay,
                         ..PolicySettings::default()
                     },
-                    Arc::new(PolicyLog::default()),
+                    sync_finite_policy_for_flow,
                 )
             ], observers: [
                 SourceContractObserverFactory { log: sync_finite_observer_for_flow }
@@ -526,13 +517,15 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
         .await
         .map_err(|error| anyhow!("sync finite timing flow failed: {error}"))?;
     assert_eq!(
-        sync_finite_observer_log.snapshot()[0].poll_duration,
-        Duration::ZERO,
+        sync_finite_policy_log.snapshot()[0].poll_duration,
+        Some(Duration::ZERO),
         "sync finite timing must stop before the async policy delay"
     );
 
     let async_finite_observer_log = Arc::new(ObserverLog::default());
     let async_finite_observer_for_flow = async_finite_observer_log.clone();
+    let async_finite_policy_log = Arc::new(PolicyLog::default());
+    let async_finite_policy_for_flow = async_finite_policy_log.clone();
     let source = AsyncFiniteOnce {
         emitted: false,
         raw_delay: async_raw_delay,
@@ -549,7 +542,7 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
                         after_poll_delay: policy_delay,
                         ..PolicySettings::default()
                     },
-                    Arc::new(PolicyLog::default()),
+                    async_finite_policy_for_flow,
                 )
             ], observers: [
                 SourceContractObserverFactory { log: async_finite_observer_for_flow }
@@ -569,13 +562,15 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
         .await
         .map_err(|error| anyhow!("async finite timing flow failed: {error}"))?;
     assert_eq!(
-        async_finite_observer_log.snapshot()[0].poll_duration,
-        async_raw_delay,
+        async_finite_policy_log.snapshot()[0].poll_duration,
+        Some(async_raw_delay),
         "async finite timing must include the raw poll and exclude the policy delay"
     );
 
     let sync_infinite_observer_log = Arc::new(ObserverLog::default());
     let sync_infinite_observer_for_flow = sync_infinite_observer_log.clone();
+    let sync_infinite_policy_log = Arc::new(PolicyLog::default());
+    let sync_infinite_policy_for_flow = sync_infinite_policy_log.clone();
     let sync_infinite_calls = Arc::new(AtomicUsize::new(0));
     let source = SyncInfiniteOnce {
         calls: sync_infinite_calls,
@@ -592,7 +587,7 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
                         after_poll_delay: policy_delay,
                         ..PolicySettings::default()
                     },
-                    Arc::new(PolicyLog::default()),
+                    sync_infinite_policy_for_flow,
                 )
             ], observers: [
                 SourceContractObserverFactory { log: sync_infinite_observer_for_flow }
@@ -608,13 +603,15 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
     .map_err(|error| anyhow!("sync infinite timing flow failed to build: {error}"))?;
     stop_after_first_poll(sync_infinite.into_inner(), &sync_infinite_observer_log).await?;
     assert_eq!(
-        sync_infinite_observer_log.snapshot()[0].poll_duration,
-        Duration::ZERO,
+        sync_infinite_policy_log.snapshot()[0].poll_duration,
+        Some(Duration::ZERO),
         "sync infinite timing must stop before the async policy delay"
     );
 
     let async_infinite_observer_log = Arc::new(ObserverLog::default());
     let async_infinite_observer_for_flow = async_infinite_observer_log.clone();
+    let async_infinite_policy_log = Arc::new(PolicyLog::default());
+    let async_infinite_policy_for_flow = async_infinite_policy_log.clone();
     let async_infinite_calls = Arc::new(AtomicUsize::new(0));
     let source = AsyncInfiniteOnce {
         calls: async_infinite_calls,
@@ -632,7 +629,7 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
                         after_poll_delay: policy_delay,
                         ..PolicySettings::default()
                     },
-                    Arc::new(PolicyLog::default()),
+                    async_infinite_policy_for_flow,
                 )
             ], observers: [
                 SourceContractObserverFactory { log: async_infinite_observer_for_flow }
@@ -648,8 +645,8 @@ async fn poll_duration_is_raw_poll_only_across_all_four_source_supervisors() -> 
     .map_err(|error| anyhow!("async infinite timing flow failed to build: {error}"))?;
     stop_after_first_poll(async_infinite.into_inner(), &async_infinite_observer_log).await?;
     assert_eq!(
-        async_infinite_observer_log.snapshot()[0].poll_duration,
-        async_raw_delay,
+        async_infinite_policy_log.snapshot()[0].poll_duration,
+        Some(async_raw_delay),
         "async infinite timing must include the raw poll and exclude the policy delay"
     );
 
@@ -778,7 +775,6 @@ async fn timeout_duration_precedes_boundary_settlement_and_error_normalisation()
         "the timed-out poll settles dependency policy exactly once"
     );
     let observer_observations = observer_log.snapshot();
-    assert_eq!(observer_observations[0].poll_duration, timeout);
     assert!(matches!(
         &observer_observations[0].outcome,
         SourcePollObserverOutcome::Error {
@@ -871,7 +867,6 @@ async fn configured_none_disables_the_finite_source_poll_timeout() -> Result<()>
         },
         "a poll longer than the finite default must complete when the handler disables enforcement"
     );
-    assert_eq!(observer_log.snapshot()[0].poll_duration, raw_delay);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     Ok(())

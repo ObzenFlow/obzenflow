@@ -391,10 +391,6 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                     &mut ctx.backpressure_pulse,
                     &mut ctx.backpressure_stall,
                     Some(&ctx.output_contract),
-                    Some((
-                        &ctx.observers,
-                        obzenflow_core::config::LineagePolicy::default(),
-                    )),
                 )
                 .await?
                 {
@@ -663,10 +659,8 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
 
                     let source_poll_observation = SourcePollObservation::new(
                         &stage_flow_context,
-                        &ctx.instrumentation,
                         &ctx.observers,
                         obzenflow_core::MiddlewareExecutionScope::LiveHandler,
-                        &ctx.data_journal,
                     );
 
                     match report.outcome {

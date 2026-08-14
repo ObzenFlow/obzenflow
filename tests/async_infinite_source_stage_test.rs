@@ -4,11 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{
-    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
-    MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
-    MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
-};
+use obzenflow_adapters::middleware::source_poll_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
@@ -20,9 +16,7 @@ use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedAsyncInfiniteSourceHandler,
 };
-use obzenflow_runtime::stages::observer::{
-    ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
-};
+use obzenflow_runtime::stages::observer::{SourcePollObserver, SourcePollObserverContext};
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
@@ -159,67 +153,16 @@ impl InlineSink for CollectSink {
 }
 
 #[derive(Clone, Debug)]
-struct CountDataCommitObserver {
+struct CountSourcePollObserver {
     calls: Arc<AtomicU64>,
 }
 
-impl OutputCommitObserver for CountDataCommitObserver {
-    fn label(&self) -> &'static str {
-        "count_data_commit"
-    }
-
-    fn before_output_commit(
-        &self,
-        _ctx: &OutputCommitObserverContext<'_>,
-        event: &mut ChainEvent,
-    ) -> ObserverCommitResult {
-        if event.is_data() {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-        }
-        Ok(ObserverReport::empty())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct CountDataCommitFactory {
-    calls: Arc<AtomicU64>,
-}
-
-impl MiddlewareFactory for CountDataCommitFactory {
-    fn label(&self) -> &'static str {
-        "count_data_commit"
-    }
-
-    fn override_key(&self) -> MiddlewareOverrideKey {
-        MiddlewareOverrideKey::of::<CountDataCommitFactory>("count_data_commit")
-    }
-
-    fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::observer(self.label(), vec![MiddlewareSurfaceKind::OutputCommit])
-    }
-
-    fn materialize(
-        &self,
-        request: MiddlewareAttachmentRequest<'_>,
-        context: &MiddlewareMaterializationContext<'_>,
-    ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-        validate_attachment_request(&self.declaration(), &request).map_err(|err| {
-            MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
-        })?;
-        match request.surface.kind() {
-            MiddlewareSurfaceKind::OutputCommit => {
-                Ok(MiddlewareSurfaceAttachment::output_commit_observer(
-                    Arc::new(CountDataCommitObserver {
-                        calls: self.calls.clone(),
-                    }),
-                ))
-            }
-            other => Err(MiddlewareFactoryError::materialization_failed(
-                self.label(),
-                &context.config.name,
-                std::io::Error::other(format!("unsupported observer surface {other:?}")),
-            )),
-        }
+impl SourcePollObserver for CountSourcePollObserver {
+    fn after_source_poll(&self, _ctx: &SourcePollObserverContext<'_>, outputs: &[ChainEvent]) {
+        self.calls.fetch_add(
+            outputs.iter().filter(|event| event.is_data()).count() as u64,
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -332,7 +275,10 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
 
             stages: {
                 source = async_infinite_source!(AsyncInfiniteEvent => source, observers: [
-                    CountDataCommitFactory { calls: observer_calls_for_flow }
+                    source_poll_observer(
+                        "count_source_poll_data",
+                        CountSourcePollObserver { calls: observer_calls_for_flow }
+                    )
                 ]);
                 sink = sink!(AsyncInfiniteEvent => sink);
             },
@@ -377,7 +323,7 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
     assert_eq!(
         observer_calls.load(Ordering::Relaxed),
         data_events.len() as u64,
-        "the typed output-commit observer sees every data event without mutating it"
+        "the source-poll observer sees every live data event"
     );
 
     assert_eq!(

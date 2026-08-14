@@ -4,24 +4,14 @@ error[E0277]: the trait bound `CheckedCircuitBreakerBuilder: MiddlewareFactory` 
 12 |     needs_factory(&unchecked);
    |                   ^^^^^^^^^^ the trait `MiddlewareFactory` is not implemented for `CheckedCircuitBreakerBuilder`
    |
-help: the following other types implement trait `MiddlewareFactory`
-  --> src/middleware/middleware_factory.rs
-   |
-   | impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Box<F>`
-   |
-  ::: src/middleware/observability/indicator/factory.rs
-   |
-   | impl MiddlewareFactory for IndicatorMiddlewareFactory {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `IndicatorMiddlewareFactory`
-   |
-  ::: src/middleware/control/rate_limiter/factory.rs
-   |
-   | impl MiddlewareFactory for RateLimiterFactory {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `RateLimiterFactory`
-   |
-  ::: src/middleware/control/circuit_breaker/factory.rs
-   |
-   | impl MiddlewareFactory for CircuitBreaker {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `obzenflow_adapters::middleware::CircuitBreaker`
+   = help: the following other types implement trait `MiddlewareFactory`:
+             Box<F>
+             EffectObserverFactory<T>
+             HandlerObserverFactory<T>
+             JoinObserverFactory<T>
+             RateLimiterFactory
+             SinkDeliveryObserverFactory<T>
+             SourcePollObserverFactory<T>
+             StageLifecycleObserverFactory<T>
+           and $N others
    = note: required for the cast from `&CheckedCircuitBreakerBuilder` to `&dyn MiddlewareFactory`

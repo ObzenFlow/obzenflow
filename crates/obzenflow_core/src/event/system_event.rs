@@ -881,7 +881,7 @@ impl SystemEventFactory {
 }
 
 // Implement JournalEvent for SystemEvent
-use crate::event::journal_event::{JournalAdmissionRole, JournalCausalLane, JournalEvent, Sealed};
+use crate::event::journal_event::{JournalEvent, Sealed};
 
 // Implement the sealed trait first
 impl Sealed for SystemEvent {}
@@ -893,14 +893,6 @@ impl JournalEvent for SystemEvent {
 
     fn writer_id(&self) -> &WriterId {
         &self.writer_id
-    }
-
-    fn admission_role(&self) -> JournalAdmissionRole {
-        JournalAdmissionRole::Flow
-    }
-
-    fn causal_lane(&self) -> JournalCausalLane {
-        JournalCausalLane::Flow(self.writer_id)
     }
 
     fn event_type_name(&self) -> &str {

@@ -86,10 +86,9 @@ fn factory_declares_circuit_breaker(factory: &dyn MiddlewareFactory) -> bool {
 pub const BINDING_DERIVED_NAME_SENTINEL: &str = "__obzenflow_binding_derived_name__";
 
 fn create_system_observers(_config: &StageConfig) -> StageObserverSet {
-    // No built-in observers (FLOWIP-115f): `processing_time` is stamped by the
-    // runtime output committer from the instrumentation timer, not by an
-    // observer, and the user-facing observation middleware are `indicator()` and
-    // `indicator(..)`. User-attached observers are merged onto this empty default.
+    // No built-in observers (FLOWIP-115m Part 2). Runtime instrumentation and
+    // output finalisation remain framework-owned; user observers attach only
+    // through the explicit passive lane.
     StageObserverSet::default()
 }
 
@@ -97,22 +96,18 @@ fn observer_surfaces_for_stage(stage_type: StageType) -> &'static [MiddlewareSur
     match stage_type {
         StageType::FiniteSource | StageType::InfiniteSource => &[
             MiddlewareSurfaceKind::SourcePoll,
-            MiddlewareSurfaceKind::OutputCommit,
             MiddlewareSurfaceKind::StageLifecycle,
         ],
         StageType::Transform => &[
             MiddlewareSurfaceKind::Handler,
-            MiddlewareSurfaceKind::OutputCommit,
             MiddlewareSurfaceKind::StageLifecycle,
         ],
         StageType::Stateful => &[
             MiddlewareSurfaceKind::Stateful,
-            MiddlewareSurfaceKind::OutputCommit,
             MiddlewareSurfaceKind::StageLifecycle,
         ],
         StageType::Join => &[
             MiddlewareSurfaceKind::Join,
-            MiddlewareSurfaceKind::OutputCommit,
             MiddlewareSurfaceKind::StageLifecycle,
         ],
         StageType::Sink => &[
@@ -1607,9 +1602,10 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        // `observers:` is already an observation-only lane. Effect observers
-        // fan out over the declared effects while the same declaration index is
-        // reused for every surface/subject produced by that one list entry.
+        // `observers:` is already an observe-only interception lane. Effect
+        // observers fan out over the declared effects while the same
+        // declaration index is reused for every surface/subject produced by
+        // that one list entry.
         let mut shell_specs = Vec::new();
         let mut effect_observers = StageObserverSet::default();
         for (observer_index, factory) in observer_factories.into_iter().enumerate() {
@@ -2780,11 +2776,7 @@ mod tests {
     fn effect_policy_attachment_validation_rejects_undeclared_effect() {
         let attachment = EffectPolicyAttachment {
             effect_type: "test.undeclared",
-            factory: Box::new(
-                obzenflow_adapters::middleware::IndicatorMiddlewareFactory::new()
-                    .operation("test.undeclared_effect")
-                    .indicator("test.latency"),
-            ),
+            factory: Box::new(obzenflow_adapters::middleware::RateLimiterFactory::new(1.0)),
         };
 
         let error = validate_effect_policy_attachments("effectful", &[], &[attachment])
@@ -3590,36 +3582,12 @@ mod observer_placement_negative_tests {
     /// A no-op observer that supports every observer surface this factory may be
     /// placed on. All hooks use the trait defaults (record nothing).
     struct NoopObserver;
-    impl HandlerObserver for NoopObserver {
-        fn label(&self) -> &'static str {
-            "loud-observer"
-        }
-    }
-    impl StatefulObserver for NoopObserver {
-        fn label(&self) -> &'static str {
-            "loud-observer"
-        }
-    }
-    impl JoinObserver for NoopObserver {
-        fn label(&self) -> &'static str {
-            "loud-observer"
-        }
-    }
-    impl SourcePollObserver for NoopObserver {
-        fn label(&self) -> &'static str {
-            "loud-observer"
-        }
-    }
-    impl SinkDeliveryObserver for NoopObserver {
-        fn label(&self) -> &'static str {
-            "loud-observer"
-        }
-    }
-    impl StageLifecycleObserver for NoopObserver {
-        fn label(&self) -> &'static str {
-            "loud-observer"
-        }
-    }
+    impl HandlerObserver for NoopObserver {}
+    impl StatefulObserver for NoopObserver {}
+    impl JoinObserver for NoopObserver {}
+    impl SourcePollObserver for NoopObserver {}
+    impl SinkDeliveryObserver for NoopObserver {}
+    impl StageLifecycleObserver for NoopObserver {}
 
     /// An observer factory used to prove the planner reaches typed materialization.
     struct LoudObserverFactory;
@@ -3761,7 +3729,7 @@ mod observer_placement_negative_tests {
                 other => Err(MiddlewareFactoryError::materialization_failed(
                     self.label(),
                     &context.config.name,
-                    obzenflow_runtime::stages::observer::ObserverCommitError::new(format!(
+                    std::io::Error::other(format!(
                         "unsupported recording observer surface {other:?}"
                     )),
                 )),
@@ -3825,9 +3793,7 @@ mod observer_placement_negative_tests {
                 other => Err(MiddlewareFactoryError::materialization_failed(
                     self.label(),
                     &context.config.name,
-                    obzenflow_runtime::stages::observer::ObserverCommitError::new(format!(
-                        "unsupported loud observer surface {other:?}"
-                    )),
+                    std::io::Error::other(format!("unsupported loud observer surface {other:?}")),
                 )),
             }
         }

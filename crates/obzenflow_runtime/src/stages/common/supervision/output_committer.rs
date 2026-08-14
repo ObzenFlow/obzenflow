@@ -37,20 +37,14 @@
 //! framework effect/capture record path supplies only the journal, preserving
 //! its compatibility append until typed outcome facts replace it.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
-use crate::stages::observer::{
-    DiagnosticProvenance, ObserverDiagnostic, ObserverEvidence, ObserverReport, StageObserverBundle,
-};
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::payloads::observability_payload::{
     MiddlewareLifecycle, ObservabilityPayload,
 };
-use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::event::{ChainEventContent, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
@@ -58,10 +52,9 @@ use obzenflow_core::{ChainEvent, WriterId};
 
 use crate::backpressure::{BackpressureReservation, BackpressureWriter, DirectFactClaim};
 use crate::feed_plan::StageOutputContract;
-use crate::metrics::instrumentation::{ObserverDiagnosticDropReason, StageInstrumentation};
+use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal;
-use crate::stages::observer::dispatch::run_output_commit_observers;
 
 fn output_contract_summary(output_contract: &StageOutputContract) -> String {
     output_contract
@@ -185,8 +178,8 @@ pub(crate) enum MirrorPolicy {
     FrameworkMiddlewareAllowlist,
 }
 
-/// The kind of stage-runtime journal append, used to gate the
-/// `before_output_commit` observer hook and the framework system-journal mirror.
+/// The kind of stage-runtime journal append, used to gate runtime enrichment
+/// and the framework system-journal mirror.
 ///
 /// Only the five wired variants exist. Other stage-runtime appends are
 /// out-of-surface raw appends today: error-journal and error-routed-data writes,
@@ -195,16 +188,13 @@ pub(crate) enum MirrorPolicy {
 /// `fx.emit` / domain-effect-outcome / framework-effect-record facts (which flow
 /// through `NonDataStageFact`) each append directly to their journal (and mirror
 /// directly where applicable) rather than through this seam. Routing them through
-/// named intents is deferred to a committer-consolidation slice (FLOWIP-120b);
-/// it is not required for the `before_output_commit` boundary, which only the
-/// `NormalStageData` path reaches.
+/// named intents is deferred to a committer-consolidation slice (FLOWIP-120b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StageAppendIntent {
     NormalStageData,
     NonDataStageFact,
     FrameworkTerminal,
     FrameworkObservability,
-    ObserverDiagnostic,
 }
 
 /// One member of a policy-neutral atomic journal group.
@@ -218,14 +208,13 @@ impl StageAppendIntent {
     pub(crate) fn mirror_policy(self) -> MirrorPolicy {
         match self {
             Self::FrameworkObservability => MirrorPolicy::FrameworkMiddlewareAllowlist,
-            Self::NormalStageData
-            | Self::NonDataStageFact
-            | Self::FrameworkTerminal
-            | Self::ObserverDiagnostic => MirrorPolicy::None,
+            Self::NormalStageData | Self::NonDataStageFact | Self::FrameworkTerminal => {
+                MirrorPolicy::None
+            }
         }
     }
 
-    pub(crate) fn runs_output_commit_hooks(self) -> bool {
+    pub(crate) fn receives_runtime_data_enrichment(self) -> bool {
         matches!(self, Self::NormalStageData)
     }
 }
@@ -257,13 +246,7 @@ pub(crate) struct OutputCommitter<'a> {
     /// leave this absent because they own an enforced or replay-scoped
     /// reservation outside the commit helper.
     pub backpressure_writer: Option<&'a BackpressureWriter>,
-    /// Observer bundle for stage output commit hooks and the configured
-    /// lineage policy used if a hook reports derived evidence.
-    pub observers: Option<(
-        &'a StageObserverBundle,
-        obzenflow_core::config::LineagePolicy,
-    )>,
-    /// Per-event observer execution scope for replay suppression.
+    /// Per-event execution scope for replay-sensitive runtime enrichment.
     pub observer_scope: MiddlewareExecutionScope,
 }
 
@@ -418,14 +401,6 @@ impl OutputCommitter<'_> {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
-        if self.observers.is_some()
-            && entries
-                .iter()
-                .any(|entry| entry.intent.runs_output_commit_hooks())
-        {
-            return Err("atomic journal groups cannot run output-commit observers before their commit point".into());
-        }
-
         let mut prepared = Vec::with_capacity(entries.len());
         let mut metadata = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -535,7 +510,9 @@ impl OutputCommitter<'_> {
                 event.writer_id = WriterId::from(flow_context.stage_id);
             }
             event = event.with_flow_context(flow_context.clone());
-            if intent.runs_output_commit_hooks() && !self.observer_scope.is_deterministic_replay() {
+            if intent.receives_runtime_data_enrichment()
+                && !self.observer_scope.is_deterministic_replay()
+            {
                 apply_runtime_journey_identity(&mut event, flow_context);
             }
         }
@@ -548,40 +525,12 @@ impl OutputCommitter<'_> {
             // field is excluded from replay equivalence by the value-preserving
             // projection, like runtime_context telemetry; the authoritative original
             // journal holds the live measurement.
-            if intent.runs_output_commit_hooks() && !self.observer_scope.is_deterministic_replay() {
+            if intent.receives_runtime_data_enrichment()
+                && !self.observer_scope.is_deterministic_replay()
+            {
                 event.processing_info.processing_time = instrumentation.last_processing_time();
             }
             event = event.with_runtime_context(instrumentation.snapshot_with_control());
-        }
-
-        if intent.runs_output_commit_hooks() {
-            if let (Some((observers, lineage)), Some(flow_context)) =
-                (self.observers, self.flow_context)
-            {
-                let before = value_preserving_projection(&event)?;
-                let parent_event = parent.map(|envelope| &envelope.event);
-                let report = run_output_commit_observers(
-                    observers,
-                    flow_context.stage_id,
-                    &flow_context.stage_name,
-                    flow_context,
-                    self.observer_scope,
-                    parent_event,
-                    &mut event,
-                )
-                .map_err(|e| -> CommitError { e.to_string().into() })?;
-                ensure_value_preserving(before, &event)?;
-                append_observer_diagnostics(
-                    report,
-                    Some(flow_context),
-                    self.instrumentation,
-                    self.data_journal,
-                    parent.map_or(DiagnosticProvenance::Root, |parent| {
-                        DiagnosticProvenance::Derived { parent, lineage }
-                    }),
-                )
-                .await;
-            }
         }
 
         Ok(event)
@@ -618,44 +567,6 @@ impl OutputCommitter<'_> {
                 mirror_middleware_event_to_system_journal(written, system_journal).await;
             }
         }
-    }
-
-    async fn append_no_hook_prebuilt(
-        &self,
-        mut event: ChainEvent,
-        parent: Option<&EventEnvelope<ChainEvent>>,
-        intent: StageAppendIntent,
-    ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
-        debug_assert!(!intent.runs_output_commit_hooks());
-
-        if let Some(flow_context) = self.flow_context {
-            event = event.with_flow_context(flow_context.clone());
-        }
-
-        if let Some(instrumentation) = self.instrumentation {
-            event = event.with_runtime_context(instrumentation.snapshot_with_control());
-        }
-
-        let written = self
-            .data_journal
-            .append(event, parent)
-            .await
-            .map_err(|e| -> CommitError { e.to_string().into() })?;
-
-        if let Some(heartbeat) = self.heartbeat_state {
-            heartbeat.record_last_output(written.event.id);
-        }
-
-        if matches!(
-            intent.mirror_policy(),
-            MirrorPolicy::FrameworkMiddlewareAllowlist
-        ) {
-            if let Some(system_journal) = self.system_journal {
-                mirror_middleware_event_to_system_journal(&written, system_journal).await;
-            }
-        }
-
-        Ok(written)
     }
 
     /// Validate a prebuilt event before a caller performs any external gating
@@ -733,7 +644,6 @@ pub(crate) async fn commit_framework_observability_events(
         heartbeat_state: context.heartbeat_state,
         output_contract: None,
         backpressure_writer: Some(context.backpressure_writer),
-        observers: None,
         observer_scope: context.observer_scope,
     };
 
@@ -758,192 +668,6 @@ pub(crate) fn is_framework_middleware_observability_event(event: &ChainEvent) ->
             MiddlewareLifecycle::CircuitBreaker(_) | MiddlewareLifecycle::RateLimiter(_)
         ))
     )
-}
-
-pub(crate) async fn append_observer_diagnostics(
-    report: ObserverReport,
-    flow_context: Option<&FlowContext>,
-    instrumentation: Option<&Arc<StageInstrumentation>>,
-    data_journal: &Arc<dyn Journal<ChainEvent>>,
-    provenance: DiagnosticProvenance<'_>,
-) {
-    if report.is_empty() {
-        return;
-    }
-
-    let Some(flow_context) = flow_context else {
-        for _ in report.diagnostics {
-            record_observer_diagnostic_drop(
-                instrumentation,
-                None,
-                ObserverDiagnosticDropReason::MissingFlowContext,
-            );
-        }
-        return;
-    };
-
-    let committer = OutputCommitter {
-        data_journal,
-        flow_context: Some(flow_context),
-        system_journal: None,
-        instrumentation,
-        heartbeat_state: None,
-        output_contract: None,
-        backpressure_writer: None,
-        observers: None,
-        observer_scope: MiddlewareExecutionScope::LiveHandler,
-    };
-
-    for diagnostic in report.diagnostics {
-        if !observer_diagnostic_is_valid(&diagnostic, flow_context, provenance) {
-            record_observer_diagnostic_drop(
-                instrumentation,
-                Some(flow_context),
-                ObserverDiagnosticDropReason::Invalid,
-            );
-            continue;
-        }
-
-        let parent = match provenance {
-            DiagnosticProvenance::Root => None,
-            DiagnosticProvenance::Derived { parent, .. } => Some(parent),
-        };
-        let event = observer_diagnostic_event(diagnostic.evidence, flow_context, provenance);
-        match committer
-            .append_no_hook_prebuilt(event, parent, StageAppendIntent::ObserverDiagnostic)
-            .await
-        {
-            Ok(_) => {}
-            Err(_) => record_observer_diagnostic_drop(
-                instrumentation,
-                Some(flow_context),
-                ObserverDiagnosticDropReason::JournalAppendFailed,
-            ),
-        }
-    }
-}
-
-pub(crate) fn reject_invalid_observer_diagnostics(
-    report: ObserverReport,
-    flow_context: &FlowContext,
-    instrumentation: Option<&Arc<StageInstrumentation>>,
-) {
-    for _ in report.diagnostics {
-        record_observer_diagnostic_drop(
-            instrumentation,
-            Some(flow_context),
-            ObserverDiagnosticDropReason::Invalid,
-        );
-    }
-}
-
-fn observer_diagnostic_is_valid(
-    _diagnostic: &ObserverDiagnostic,
-    flow_context: &FlowContext,
-    provenance: DiagnosticProvenance<'_>,
-) -> bool {
-    if let DiagnosticProvenance::Derived { parent, .. } = provenance {
-        let parent_flow = &parent.event.flow_context;
-        if parent_flow.flow_id != flow_context.flow_id {
-            return false;
-        }
-    }
-
-    true
-}
-
-fn observer_diagnostic_event(
-    evidence: ObserverEvidence,
-    flow_context: &FlowContext,
-    provenance: DiagnosticProvenance<'_>,
-) -> ChainEvent {
-    let middleware = match evidence {
-        ObserverEvidence::Indicator(sample) => MiddlewareLifecycle::Indicator(sample),
-    };
-    let payload = ObservabilityPayload::Middleware(middleware);
-    let writer = WriterId::from(flow_context.stage_id);
-    match provenance {
-        DiagnosticProvenance::Root => ChainEventFactory::observability_event(writer, payload),
-        DiagnosticProvenance::Derived {
-            parent, lineage, ..
-        } => ChainEventFactory::derived_event(
-            writer,
-            &parent.event,
-            ChainEventContent::Observability(payload),
-            lineage,
-        ),
-    }
-}
-
-type ObserverDiagnosticWarningLimiter =
-    Mutex<HashMap<(Option<obzenflow_core::StageId>, &'static str), Instant>>;
-
-fn lock_observer_diagnostic_warning_limiter(
-    limiter: &ObserverDiagnosticWarningLimiter,
-) -> std::sync::MutexGuard<'_, HashMap<(Option<obzenflow_core::StageId>, &'static str), Instant>> {
-    limiter
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-fn record_observer_diagnostic_drop(
-    instrumentation: Option<&Arc<StageInstrumentation>>,
-    flow_context: Option<&FlowContext>,
-    reason: ObserverDiagnosticDropReason,
-) {
-    if let Some(instrumentation) = instrumentation {
-        instrumentation.record_observer_diagnostic_drop(reason);
-    }
-
-    static WARNED: OnceLock<ObserverDiagnosticWarningLimiter> = OnceLock::new();
-    let stage_id = flow_context.map(|context| context.stage_id);
-    let now = Instant::now();
-    let should_warn = {
-        let mut warned = lock_observer_diagnostic_warning_limiter(
-            WARNED.get_or_init(|| Mutex::new(HashMap::new())),
-        );
-        let key = (stage_id, reason.as_str());
-        match warned.get(&key) {
-            Some(last) if now.duration_since(*last) < Duration::from_secs(60) => false,
-            _ => {
-                warned.insert(key, now);
-                true
-            }
-        }
-    };
-    if should_warn {
-        tracing::warn!(
-            stage_id = ?stage_id,
-            reason = reason.as_str(),
-            "observer diagnostic dropped"
-        );
-    }
-}
-
-fn value_preserving_projection(event: &ChainEvent) -> Result<serde_json::Value, CommitError> {
-    let mut value = serde_json::to_value(event).map_err(|e| -> CommitError { e.into() })?;
-    if let Some(processing) = value
-        .as_object_mut()
-        .and_then(|object| object.get_mut("processing_info"))
-        .and_then(|value| value.as_object_mut())
-    {
-        processing.remove("processing_time");
-    }
-    if let Some(object) = value.as_object_mut() {
-        object.remove("observability");
-    }
-    Ok(value)
-}
-
-fn ensure_value_preserving(
-    before: serde_json::Value,
-    event: &ChainEvent,
-) -> Result<(), CommitError> {
-    let after = value_preserving_projection(event)?;
-    if before == after {
-        return Ok(());
-    }
-    Err("output-commit observer changed non-observability event fields".into())
 }
 
 fn apply_runtime_journey_identity(event: &mut ChainEvent, flow: &FlowContext) {
@@ -971,332 +695,5 @@ fn apply_runtime_journey_identity(event: &mut ChainEvent, flow: &FlowContext) {
             stage_name = %flow.stage_name,
             "Non-source derived data event missing correlation_id"
         );
-    }
-}
-
-#[cfg(test)]
-mod observer_diagnostic_tests {
-    use super::*;
-    use async_trait::async_trait;
-    use obzenflow_core::event::context::ReplayContext;
-    use obzenflow_core::event::identity::JournalWriterId;
-    use obzenflow_core::event::payloads::observability_payload::{IndicatorKind, IndicatorSample};
-    use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::journal::journal_error::JournalError;
-    use obzenflow_core::journal::journal_reader::JournalReader;
-    use obzenflow_core::{EventId, JournalId, JournalOwner, StageId, WriterId};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct EmptyReader;
-
-    #[async_trait]
-    impl JournalReader<ChainEvent> for EmptyReader {
-        async fn next(&mut self) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
-            Ok(None)
-        }
-
-        fn position(&self) -> u64 {
-            0
-        }
-
-        fn is_at_end(&self) -> bool {
-            true
-        }
-    }
-
-    struct PlacementJournal {
-        id: JournalId,
-        calls: AtomicUsize,
-        fail_at: Vec<usize>,
-        appended: Mutex<Vec<(EventEnvelope<ChainEvent>, Option<EventId>)>>,
-    }
-
-    impl PlacementJournal {
-        fn new(fail_at: Vec<usize>) -> Self {
-            Self {
-                id: JournalId::new(),
-                calls: AtomicUsize::new(0),
-                fail_at,
-                appended: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn appended(&self) -> Vec<(EventEnvelope<ChainEvent>, Option<EventId>)> {
-            self.appended.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait]
-    impl Journal<ChainEvent> for PlacementJournal {
-        fn id(&self) -> &JournalId {
-            &self.id
-        }
-
-        fn owner(&self) -> Option<&JournalOwner> {
-            None
-        }
-
-        async fn append(
-            &self,
-            event: ChainEvent,
-            parent: Option<&EventEnvelope<ChainEvent>>,
-        ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.fail_at.contains(&call) {
-                return Err(JournalError::Implementation {
-                    message: format!("injected append failure at call {call}"),
-                    source: "injected observer diagnostic append failure".into(),
-                });
-            }
-            let envelope = EventEnvelope::new(JournalWriterId::new(), event);
-            self.appended
-                .lock()
-                .unwrap()
-                .push((envelope.clone(), parent.map(|parent| parent.event.id)));
-            Ok(envelope)
-        }
-
-        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
-            Ok(self
-                .appended
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(envelope, _)| envelope.clone())
-                .collect())
-        }
-
-        async fn read_event(
-            &self,
-            event_id: &EventId,
-        ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
-            Ok(self
-                .appended
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|(envelope, _)| envelope.event.id == *event_id)
-                .map(|(envelope, _)| envelope.clone()))
-        }
-
-        async fn reader_from(
-            &self,
-            _position: u64,
-        ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
-            Ok(Box::new(EmptyReader))
-        }
-
-        async fn read_last_n(
-            &self,
-            count: usize,
-        ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
-            Ok(self
-                .appended
-                .lock()
-                .unwrap()
-                .iter()
-                .rev()
-                .take(count)
-                .map(|(envelope, _)| envelope.clone())
-                .collect())
-        }
-    }
-
-    fn flow_context() -> FlowContext {
-        FlowContext {
-            flow_name: "flow".to_string(),
-            flow_id: "flow-id".to_string(),
-            stage_name: "stage".to_string(),
-            stage_id: StageId::new(),
-            stage_type: StageType::Transform,
-        }
-    }
-
-    fn indicator_diagnostic(indicator: &str) -> ObserverDiagnostic {
-        ObserverDiagnostic::new(ObserverEvidence::Indicator(IndicatorSample {
-            kind: IndicatorKind::Latency,
-            operation: "test.operation".to_string(),
-            indicator: indicator.to_string(),
-            value_ms: 1,
-            tags: Vec::new(),
-        }))
-    }
-
-    #[test]
-    fn observer_warning_limiter_recovers_after_poison() {
-        let limiter: Arc<ObserverDiagnosticWarningLimiter> = Arc::new(Mutex::new(HashMap::new()));
-        let poisoning_limiter = Arc::clone(&limiter);
-        let poisoned = std::thread::spawn(move || {
-            let _guard = poisoning_limiter.lock().unwrap();
-            panic!("intentional warning-limiter poison");
-        })
-        .join();
-        assert!(poisoned.is_err());
-        assert!(limiter.is_poisoned());
-
-        let mut recovered = lock_observer_diagnostic_warning_limiter(&limiter);
-        recovered.insert((None, "invalid"), Instant::now());
-        assert!(recovered.contains_key(&(None, "invalid")));
-    }
-
-    #[test]
-    fn source_commit_boundary_is_structural_authorship_proof() {
-        let current = StageId::new();
-        let archived = StageId::new();
-        let mut event = ChainEventFactory::data_event(
-            WriterId::from(archived),
-            "test.replayed.v1",
-            serde_json::json!({ "value": 1 }),
-        );
-        event.replay_context = Some(ReplayContext {
-            original_event_id: event.id,
-            original_flow_id: "archived-flow".to_string(),
-            original_stage_id: archived,
-            archive_path: "archive".into(),
-            replayed_at: chrono::Utc::now(),
-        });
-        let source_context = FlowContext {
-            flow_name: "flow".to_string(),
-            flow_id: "current-flow".to_string(),
-            stage_name: "source".to_string(),
-            stage_id: current,
-            stage_type: StageType::FiniteSource,
-        };
-
-        assert!(event_is_authored_by_stage(
-            &event,
-            &source_context,
-            MiddlewareExecutionScope::StrictReplayHandler,
-        ));
-        assert!(event_is_authored_by_stage(
-            &event,
-            &source_context,
-            MiddlewareExecutionScope::LiveHandler,
-        ));
-
-        let derived_context = FlowContext {
-            stage_name: "transform".to_string(),
-            stage_type: StageType::Transform,
-            ..source_context
-        };
-        assert!(!event_is_authored_by_stage(
-            &event,
-            &derived_context,
-            MiddlewareExecutionScope::StrictReplayHandler,
-        ));
-    }
-
-    #[tokio::test]
-    async fn every_failed_append_is_counted_and_later_diagnostics_are_attempted() {
-        for failed_call in 0..3 {
-            let flow = flow_context();
-            let instrumentation = Arc::new(StageInstrumentation::new());
-            let journal_impl = Arc::new(PlacementJournal::new(vec![failed_call]));
-            let journal: Arc<dyn Journal<ChainEvent>> = journal_impl.clone();
-            let report = ObserverReport {
-                diagnostics: vec![
-                    indicator_diagnostic("test.first"),
-                    indicator_diagnostic("test.middle"),
-                    indicator_diagnostic("test.last"),
-                ],
-            };
-
-            append_observer_diagnostics(
-                report,
-                Some(&flow),
-                Some(&instrumentation),
-                &journal,
-                DiagnosticProvenance::Root,
-            )
-            .await;
-
-            assert_eq!(journal_impl.calls.load(Ordering::SeqCst), 3);
-            assert_eq!(journal_impl.appended().len(), 2);
-            assert_eq!(
-                instrumentation
-                    .snapshot()
-                    .observer_diagnostics_dropped_journal_append_failed_total,
-                1
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn missing_flow_context_counts_each_row_without_touching_the_journal() {
-        let instrumentation = Arc::new(StageInstrumentation::new());
-        let journal_impl = Arc::new(PlacementJournal::new(Vec::new()));
-        let journal: Arc<dyn Journal<ChainEvent>> = journal_impl.clone();
-        append_observer_diagnostics(
-            ObserverReport {
-                diagnostics: vec![
-                    indicator_diagnostic("test.one"),
-                    indicator_diagnostic("test.two"),
-                    indicator_diagnostic("test.three"),
-                ],
-            },
-            None,
-            Some(&instrumentation),
-            &journal,
-            DiagnosticProvenance::Root,
-        )
-        .await;
-
-        assert_eq!(journal_impl.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            instrumentation
-                .snapshot()
-                .observer_diagnostics_dropped_missing_flow_context_total,
-            3
-        );
-    }
-
-    #[tokio::test]
-    async fn semantic_and_envelope_parent_share_the_configured_lineage_policy() {
-        let flow = flow_context();
-        let writer = WriterId::from(flow.stage_id);
-        let grandparent =
-            ChainEventFactory::data_event(writer, "test.root.v1", serde_json::json!({}));
-        let parent_event = ChainEventFactory::derived_data_event(
-            writer,
-            &grandparent,
-            "test.parent.v1",
-            serde_json::json!({}),
-            obzenflow_core::config::LineagePolicy {
-                max_lineage_depth: 8,
-            },
-        )
-        .with_flow_context(flow.clone());
-        let parent = EventEnvelope::new(JournalWriterId::new(), parent_event);
-        let instrumentation = Arc::new(StageInstrumentation::new());
-        let journal_impl = Arc::new(PlacementJournal::new(Vec::new()));
-        let journal: Arc<dyn Journal<ChainEvent>> = journal_impl.clone();
-
-        append_observer_diagnostics(
-            ObserverReport::empty().with_diagnostic(indicator_diagnostic("test.derived")),
-            Some(&flow),
-            Some(&instrumentation),
-            &journal,
-            DiagnosticProvenance::Derived {
-                parent: &parent,
-                lineage: obzenflow_core::config::LineagePolicy {
-                    max_lineage_depth: 1,
-                },
-            },
-        )
-        .await;
-
-        let appended = journal_impl.appended();
-        assert_eq!(appended.len(), 1);
-        assert_eq!(appended[0].1, Some(parent.event.id));
-        assert_eq!(
-            appended[0].0.event.causality.parent_ids,
-            vec![parent.event.id]
-        );
-        assert!(!appended[0]
-            .0
-            .event
-            .causality
-            .parent_ids
-            .contains(&grandparent.id));
     }
 }

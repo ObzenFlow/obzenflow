@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `obzenflow_runtime::stages::observer::OutputCommitObserver`
+ --> tests/compile_fail/output_commit_observer_is_not_public.rs:5:5
+  |
+5 | use obzenflow_runtime::stages::observer::OutputCommitObserver;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `OutputCommitObserver` in `stages::observer`

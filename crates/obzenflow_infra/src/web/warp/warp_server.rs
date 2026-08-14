@@ -4733,7 +4733,6 @@ impl MiddlewareSseState {
                 }
                 _ => None,
             },
-            _ => None,
         }
     }
 
@@ -4884,7 +4883,6 @@ impl MiddlewareSseState {
                 }
                 _ => {}
             },
-            _ => {}
         }
     }
 

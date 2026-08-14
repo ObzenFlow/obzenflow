@@ -2,18 +2,19 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Execution scope for typed policy boundaries and runtime observers.
+//! Execution scope for typed policy boundaries and runtime observer gating.
 //!
 //! During deterministic replay a stage is reconstructed from recorded events
-//! and performs no live external work. Replay-sensitive observers receive the
-//! reconstruction variants, while source, effect, and sink policy contexts are
-//! constructed only for the corresponding live boundary variants.
+//! and performs no live external work. Ordinary observers are suppressed for
+//! the reconstruction variants, while source, effect, and sink policy contexts
+//! are constructed only for the corresponding live boundary variants.
 //!
 //! The placement split makes policy suppression structural: control policy
 //! attaches to live I/O units only, so strict replay bypasses it rather than
 //! asking it to inspect a flag. Runtime supervisors compute stage scope for
-//! observer dispatch and journal evidence; adapter-owned boundaries assign the
-//! live scope to their invocation-local typed policy carrier.
+//! observer suppression and replay-sensitive runtime enrichment; adapter-owned
+//! boundaries assign the live scope to their invocation-local typed policy
+//! carrier.
 //!
 //! Stage scope is deliberately not inferred from `event.replay_context`: that
 //! field is stamped only on re-injected source events and is nulled across

@@ -18,8 +18,8 @@ use crate::stages::observer::dispatch::{
     run_join_after_output_observers, run_join_before_input_observers,
 };
 use crate::stages::observer::{
-    JoinCanonicalMergeMetadata, JoinDeliverySnapshot, JoinObserverContext, JoinSide,
-    JoinSignalKind, JoinSignalSnapshot,
+    JoinCanonicalMergeMetadata, JoinDeliverySnapshot, JoinObserverContext, JoinObserverOccurrence,
+    JoinSide, JoinSignalKind, JoinSignalSnapshot,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -204,7 +204,6 @@ pub(super) async fn flush_pending_outputs<
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
-            Some((&ctx.observers, ctx.lineage_policy)),
             &mut ctx.pending_outputs,
         )
         .await?
@@ -239,11 +238,15 @@ pub(super) async fn flush_pending_outputs<
 
 pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
     ctx: &JoinContext<H>,
-    input: &ChainEvent,
+    scope: obzenflow_core::MiddlewareExecutionScope,
+    _input: &ChainEvent,
     delivery: Option<&JoinDeliverySnapshot>,
     signal: Option<&JoinSignalSnapshot>,
-    parent: Option<&EventEnvelope<ChainEvent>>,
+    _parent: Option<&EventEnvelope<ChainEvent>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !ctx.observers.has_join() || scope.is_deterministic_replay() {
+        return Ok(());
+    }
     let flow_id = ctx.flow_id.to_string();
     let flow_context = make_flow_context(
         &ctx.flow_name,
@@ -252,37 +255,28 @@ pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
         ctx.stage_id,
         StageType::Join,
     );
-    let observer_ctx = JoinObserverContext {
-        stage_id: ctx.stage_id,
-        stage_name: &ctx.stage_name,
-        flow_context: &flow_context,
-        scope: ctx
-            .runtime_execution
-            .dispatch_scope(ctx.stage_id, None, None),
-        input: Some(input),
-        delivery,
-        signal,
+    let occurrence = match (delivery, signal) {
+        (Some(delivery), None) => JoinObserverOccurrence::Delivery(delivery),
+        (None, Some(signal)) => JoinObserverOccurrence::Signal(signal),
+        _ => return Err("join observer occurrence must be exactly one delivery or signal".into()),
     };
-    run_join_before_input_observers(
-        &ctx.observers,
-        &observer_ctx,
-        ctx.lineage_policy,
-        &ctx.data_journal,
-        &ctx.instrumentation,
-        parent,
-    )
-    .await;
+    let observer_ctx = JoinObserverContext::new(&flow_context, occurrence);
+    run_join_before_input_observers(&ctx.observers, scope, &observer_ctx);
     Ok(())
 }
 
 pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
     ctx: &JoinContext<H>,
-    input: Option<&ChainEvent>,
+    scope: obzenflow_core::MiddlewareExecutionScope,
+    _input: Option<&ChainEvent>,
     delivery: Option<&JoinDeliverySnapshot>,
     signal: Option<&JoinSignalSnapshot>,
     outputs: &[ChainEvent],
-    parent: Option<&EventEnvelope<ChainEvent>>,
+    _parent: Option<&EventEnvelope<ChainEvent>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !ctx.observers.has_join() || scope.is_deterministic_replay() {
+        return Ok(());
+    }
     let flow_id = ctx.flow_id.to_string();
     let flow_context = make_flow_context(
         &ctx.flow_name,
@@ -291,27 +285,13 @@ pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
         ctx.stage_id,
         StageType::Join,
     );
-    let observer_ctx = JoinObserverContext {
-        stage_id: ctx.stage_id,
-        stage_name: &ctx.stage_name,
-        flow_context: &flow_context,
-        scope: ctx
-            .runtime_execution
-            .dispatch_scope(ctx.stage_id, None, None),
-        input,
-        delivery,
-        signal,
+    let occurrence = match (delivery, signal) {
+        (Some(delivery), None) => JoinObserverOccurrence::Delivery(delivery),
+        (None, Some(signal)) => JoinObserverOccurrence::Signal(signal),
+        _ => return Err("join observer occurrence must be exactly one delivery or signal".into()),
     };
-    run_join_after_output_observers(
-        &ctx.observers,
-        &observer_ctx,
-        ctx.lineage_policy,
-        outputs,
-        &ctx.data_journal,
-        &ctx.instrumentation,
-        parent,
-    )
-    .await;
+    let observer_ctx = JoinObserverContext::new(&flow_context, occurrence);
+    run_join_after_output_observers(&ctx.observers, scope, &observer_ctx, outputs);
     Ok(())
 }
 
@@ -325,14 +305,14 @@ pub(super) fn delivery_snapshot(
 ) -> Result<JoinDeliverySnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let position =
         stage_input_position.ok_or("join delivered data input without StageInputPosition")?;
-    Ok(JoinDeliverySnapshot {
+    Ok(JoinDeliverySnapshot::new(
         side,
-        delivered_source_stage_id: source_stage_id,
-        delivered_stage_input_position: position.0,
-        input_envelope: envelope.clone(),
-        reference_high_water: reference_high_water.clone(),
+        source_stage_id,
+        position.0,
+        envelope.clone(),
+        reference_high_water.clone(),
         canonical_merge,
-    })
+    ))
 }
 
 pub(super) fn signal_snapshot(
@@ -349,7 +329,7 @@ pub(super) fn signal_snapshot(
         obzenflow_core::event::ChainEventContent::FlowControl(_) => JoinSignalKind::OtherControl,
         _ => return None,
     };
-    Some(JoinSignalSnapshot { side, signal })
+    Some(JoinSignalSnapshot::new(side, signal))
 }
 
 pub(super) fn observe_reference_envelope<H: UnifiedJoinHandler>(

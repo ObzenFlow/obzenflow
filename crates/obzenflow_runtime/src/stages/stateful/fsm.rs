@@ -586,15 +586,10 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.stage_id,
-                    &ctx.stage_name,
                     &flow_context,
                     scope,
                     StageLifecyclePhase::Running,
-                    &ctx.data_journal,
-                    &ctx.instrumentation,
-                )
-                .await;
+                );
                 Ok(())
             }
 
@@ -722,15 +717,10 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.stage_id,
-                    &ctx.stage_name,
                     &flow_context,
                     scope,
                     StageLifecyclePhase::Completed,
-                    &ctx.data_journal,
-                    &ctx.instrumentation,
-                )
-                .await;
+                );
                 Ok(())
             }
 
@@ -756,15 +746,10 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.stage_id,
-                    &ctx.stage_name,
                     &flow_context,
                     scope,
                     StageLifecyclePhase::Failed,
-                    &ctx.data_journal,
-                    &ctx.instrumentation,
-                )
-                .await;
+                );
                 Ok(())
             }
 

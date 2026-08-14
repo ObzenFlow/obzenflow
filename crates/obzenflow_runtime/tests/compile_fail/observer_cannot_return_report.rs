@@ -2,18 +2,18 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_core::ChainEvent;
 use obzenflow_runtime::stages::observer::{HandlerObserver, HandlerObserverContext};
 
-struct MutatingObserver;
+struct ReturningObserver;
 
-impl HandlerObserver for MutatingObserver {
+impl HandlerObserver for ReturningObserver {
     fn after_handle(
         &self,
         _ctx: &HandlerObserverContext<'_>,
         outputs: &[ChainEvent],
-    ) {
-        outputs[0].writer_id = WriterId::from(StageId::new());
+    ) -> ChainEvent {
+        outputs[0].clone()
     }
 }
 

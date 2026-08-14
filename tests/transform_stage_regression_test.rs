@@ -6,11 +6,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{
-    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
-    MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
-    MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
-};
+use obzenflow_adapters::middleware::handler_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -27,9 +23,7 @@ use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::observer::{
-    ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
-};
+use obzenflow_runtime::stages::observer::{HandlerObserver, HandlerObserverContext};
 use obzenflow_runtime::stages::transform::TryMapTyped;
 use serde::{Deserialize, Serialize};
 
@@ -182,67 +176,16 @@ impl TypedTransformHandler for ErrorTransform {
 }
 
 #[derive(Clone, Debug)]
-struct CountDataCommitObserver {
+struct CountHandlerOutputObserver {
     calls: Arc<AtomicU64>,
 }
 
-impl OutputCommitObserver for CountDataCommitObserver {
-    fn label(&self) -> &'static str {
-        "count_data_commit"
-    }
-
-    fn before_output_commit(
-        &self,
-        _ctx: &OutputCommitObserverContext<'_>,
-        event: &mut ChainEvent,
-    ) -> ObserverCommitResult {
-        if event.is_data() {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-        }
-        Ok(ObserverReport::empty())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct CountDataCommitFactory {
-    calls: Arc<AtomicU64>,
-}
-
-impl MiddlewareFactory for CountDataCommitFactory {
-    fn label(&self) -> &'static str {
-        "count_data_commit"
-    }
-
-    fn override_key(&self) -> MiddlewareOverrideKey {
-        MiddlewareOverrideKey::of::<CountDataCommitFactory>("count_data_commit")
-    }
-
-    fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::observer(self.label(), vec![MiddlewareSurfaceKind::OutputCommit])
-    }
-
-    fn materialize(
-        &self,
-        request: MiddlewareAttachmentRequest<'_>,
-        context: &MiddlewareMaterializationContext<'_>,
-    ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-        validate_attachment_request(&self.declaration(), &request).map_err(|err| {
-            MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
-        })?;
-        match request.surface.kind() {
-            MiddlewareSurfaceKind::OutputCommit => {
-                Ok(MiddlewareSurfaceAttachment::output_commit_observer(
-                    Arc::new(CountDataCommitObserver {
-                        calls: self.calls.clone(),
-                    }),
-                ))
-            }
-            other => Err(MiddlewareFactoryError::materialization_failed(
-                self.label(),
-                &context.config.name,
-                std::io::Error::other(format!("unsupported observer surface {other:?}")),
-            )),
-        }
+impl HandlerObserver for CountHandlerOutputObserver {
+    fn after_handle(&self, _ctx: &HandlerObserverContext<'_>, outputs: &[ChainEvent]) {
+        self.calls.fetch_add(
+            outputs.iter().filter(|event| event.is_data()).count() as u64,
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -556,7 +499,10 @@ async fn transform_applies_stage_middleware() -> Result<()> {
             stages: {
                 source = source!(TransformStageEvent => source_handler);
                 mw_transform = transform!(TransformStageEvent -> TransformStageEvent => transform_handler, observers: [
-                    CountDataCommitFactory { calls: observer_calls_for_flow.clone() }
+                    handler_observer(
+                        "count_handler_outputs",
+                        CountHandlerOutputObserver { calls: observer_calls_for_flow.clone() }
+                    )
                 ]);
                 sink = sink!(TransformStageEvent => sink_handler);
             },
@@ -589,7 +535,7 @@ async fn transform_applies_stage_middleware() -> Result<()> {
     assert_eq!(
         observer_calls.load(Ordering::Relaxed),
         data_events.len() as u64,
-        "the typed output-commit observer sees every data event without mutating it"
+        "the handler observer sees every live data output"
     );
 
     Ok(())

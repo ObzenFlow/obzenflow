@@ -196,14 +196,24 @@ pub(super) async fn dispatch_hydrating<
                     let reference_stage_id = ctx.reference_stage_id;
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     let upstream_stage = subscription.last_delivered_upstream_stage();
-                    let delivery_snapshot = common::delivery_snapshot(
-                        crate::stages::observer::JoinSide::Reference,
-                        reference_stage_id,
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
                         subscription.last_delivered_stage_input_position(),
-                        &envelope,
-                        &ctx.reference_high_water_clock,
-                        None,
-                    )?;
+                        subscription.last_delivered_generation(),
+                    );
+                    let delivery_snapshot = (ctx.observers.has_join()
+                        && !scope.is_deterministic_replay())
+                    .then(|| {
+                        common::delivery_snapshot(
+                            crate::stages::observer::JoinSide::Reference,
+                            reference_stage_id,
+                            subscription.last_delivered_stage_input_position(),
+                            &envelope,
+                            &ctx.reference_high_water_clock,
+                            None,
+                        )
+                    })
+                    .transpose()?;
 
                     if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
                         heartbeat.state.record_data_read(upstream, event_id);
@@ -211,8 +221,9 @@ pub(super) async fn dispatch_hydrating<
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
                     common::observe_join_input(
                         ctx,
+                        scope,
                         &event,
-                        Some(&delivery_snapshot),
+                        delivery_snapshot.as_ref(),
                         None,
                         Some(&envelope),
                     )
@@ -240,16 +251,12 @@ pub(super) async fn dispatch_hydrating<
                             );
                         }
 
-                        let scope = ctx.runtime_execution.dispatch_scope(
-                            ctx.stage_id,
-                            subscription.last_delivered_stage_input_position(),
-                            subscription.last_delivered_generation(),
-                        );
                         let mut outputs = vec![event];
                         common::observe_join_outputs(
                             ctx,
+                            scope,
                             Some(&envelope.event),
-                            Some(&delivery_snapshot),
+                            delivery_snapshot.as_ref(),
                             None,
                             outputs.as_mut_slice(),
                             Some(&envelope),
@@ -278,13 +285,6 @@ pub(super) async fn dispatch_hydrating<
                     let _processing = heartbeat_state.as_ref().map(|state| {
                         HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
                     });
-                    // FLOWIP-120n: per-delivery execution scope, computed at
-                    // dispatch from the delivered position and generation.
-                    let scope = ctx.runtime_execution.dispatch_scope(
-                        ctx.stage_id,
-                        subscription.last_delivered_stage_input_position(),
-                        subscription.last_delivered_generation(),
-                    );
                     let result = ctx.handler.process_reference(
                         &mut ctx.handler_state,
                         event.clone(),
@@ -318,8 +318,9 @@ pub(super) async fn dispatch_hydrating<
 
                             common::observe_join_outputs(
                                 ctx,
+                                scope,
                                 Some(&event),
-                                Some(&delivery_snapshot),
+                                delivery_snapshot.as_ref(),
                                 None,
                                 events_produced.as_mut_slice(),
                                 Some(&envelope),
@@ -345,21 +346,23 @@ pub(super) async fn dispatch_hydrating<
                             }
                         }
                         Err(err) => {
-                            common::observe_join_outputs(
-                                ctx,
-                                Some(&event),
-                                Some(&delivery_snapshot),
-                                None,
-                                &[],
-                                Some(&envelope),
-                            )
-                            .await?;
                             if let Some(fatal) = err.as_fatal() {
                                 common::record_join_stage_fatal(
                                     ctx,
                                     fatal,
                                     Some(&envelope),
                                     subscription.last_delivered_stage_input_position(),
+                                )
+                                .await?;
+                            } else {
+                                common::observe_join_outputs(
+                                    ctx,
+                                    scope,
+                                    Some(&event),
+                                    delivery_snapshot.as_ref(),
+                                    None,
+                                    &[],
+                                    Some(&envelope),
                                 )
                                 .await?;
                             }

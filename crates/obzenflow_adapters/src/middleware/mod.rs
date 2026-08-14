@@ -11,17 +11,16 @@
 //!
 //! Attachments bind at named stage join points and split by capability:
 //!
-//! - **Observers** publish quantitative execution measurements and
-//!   structurally cannot steer control flow: their return type only carries
-//!   observation content.
+//! - **Observers** are synchronous, live-only interception points over
+//!   immutable runtime views. They return nothing and receive no framework
+//!   authority with which to steer or publish execution.
 //! - **Control** middleware (circuit breaker, rate limiter, and effect
 //!   resilience) admits, paces, or rejects at a live-I/O boundary. Retry exists
 //!   only inside effect resilience; it is not a standalone attachment.
 //!
-//! Built-in observers are constructed with `indicator()` / `latency()`;
-//! built-in control middleware with the checked
-//! `CircuitBreaker::builder()` and `rate_limit()`. In the DSL, middleware is
-//! attached per stage as an array.
+//! Custom observers use a surface-specific `*_observer("label", value)`
+//! helper. Built-in control middleware uses the checked
+//! `CircuitBreaker::builder()` and `rate_limit()`.
 //!
 //! ## Monitoring
 //!
@@ -44,49 +43,37 @@
 //!
 //! ## Common Middleware Utilities
 //!
-//! The `common` module provides pre-built middleware for rate limiting, circuit breaking,
-//! and observation; refer to the current control/observability modules for up-to-date builders.
+//! The control modules provide pre-built middleware for rate limiting, circuit
+//! breaking, and effect resilience. Ordinary observers are application-owned
+//! implementations attached through the surface-specific helpers below.
 //!
 //! ## Custom observers
 //!
-//! Author a custom observability or auditability aspect by implementing the
-//! observer hook for the surface you care about and exposing it through a small
-//! factory. The observer hook (`HandlerObserver`, `StatefulObserver`,
-//! `JoinObserver`, `SourcePollObserver`, `SinkDeliveryObserver`,
-//! `OutputCommitObserver`, ...) returns an `ObserverReport` carrying journalled
-//! evidence and nothing else, so it cannot pause, reject, retry, or otherwise
-//! steer control. It needs no downcasts and no execution-scope handling: the
-//! runtime suppresses a `LiveOnly` observer under strict replay by placement.
+//! Author a custom diagnostic aspect by implementing the observer hook for the
+//! surface you care about. Ordinary hooks return no value, receive immutable
+//! views, and are suppressed while recorded history is reconstructed.
 //!
 //! ```ignore
-//! use obzenflow_adapters::middleware::observer::{
-//!     HandlerObserver, HandlerObserverContext, ObserverReport,
-//! };
+//! use obzenflow_adapters::middleware::handler_observer;
+//! use obzenflow_runtime::stages::observer::{HandlerObserver, HandlerObserverContext};
 //!
 //! struct CountInputs;
 //!
 //! impl HandlerObserver for CountInputs {
-//!     fn label(&self) -> &'static str { "count_inputs" }
-//!
 //!     fn after_handle(
 //!         &self,
-//!         _ctx: &HandlerObserverContext<'_>,
-//!         _outputs: &[obzenflow_core::ChainEvent],
-//!     ) -> ObserverReport {
-//!         // Build and attach an evidence row, or return `ObserverReport::empty()`.
-//!         ObserverReport::empty()
+//!         ctx: &HandlerObserverContext<'_>,
+//!         outputs: &[obzenflow_core::ChainEvent],
+//!     ) {
+//!         tracing::debug!(stage = ctx.stage_name(), outputs = outputs.len());
 //!     }
 //! }
 //!
-//! // Expose it through a `MiddlewareFactory` whose `declaration()` names the
-//! // observer surface(s) and whose `materialize()` returns the observer
-//! // attachment, then attach `count_inputs()` to a stage in the DSL.
+//! let observer = handler_observer("count-inputs", CountInputs);
 //! ```
 //!
-//! The built-in `observability::indicator` module is the worked example of
-//! this factory + observer-hook shape, and
-//! FLOWIP-115f documents the authoring contract. To affect control flow instead,
-//! implement a control hook rather than an observer.
+//! Application diagnostics use the standard Rust `tracing` ecosystem. This
+//! observer layer defines no logging, measurement, journal, or exporter API.
 
 // Core types
 mod middleware_factory;
@@ -109,7 +96,6 @@ mod hints;
 
 // Middleware categories
 pub mod control;
-pub mod observability;
 pub mod observer;
 mod validation;
 // Dangerous middleware examples moved to examples/dangerous_examples.rs
@@ -148,8 +134,12 @@ pub use control::policy::{
     SourceAfterPoll, SourceBatchFacts, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 pub use hints::{BatchingHint, MiddlewareHints};
-pub use observability::indicator::{indicator, latency, IndicatorKind, IndicatorMiddlewareFactory};
-pub use observer::StageObserverSet;
+pub use observer::{
+    effect_observer, handler_observer, join_observer, sink_delivery_observer, source_poll_observer,
+    stage_lifecycle_observer, stateful_observer, EffectObserverFactory, HandlerObserverFactory,
+    JoinObserverFactory, SinkDeliveryObserverFactory, SourcePollObserverFactory,
+    StageLifecycleObserverFactory, StageObserverSet, StatefulObserverFactory,
+};
 
 // Control middleware
 pub use control::{

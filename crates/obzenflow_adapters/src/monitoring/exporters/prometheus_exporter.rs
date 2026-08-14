@@ -193,26 +193,6 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
-        if !snapshot.observer_diagnostics_dropped_total.is_empty() {
-            writeln!(
-                output,
-                "# HELP observer_diagnostics_dropped_total Observer diagnostics dropped before durable publication"
-            )?;
-            writeln!(output, "# TYPE observer_diagnostics_dropped_total counter")?;
-            for ((stage_id, reason), count) in &snapshot.observer_diagnostics_dropped_total {
-                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
-                    writeln!(
-                        output,
-                        "observer_diagnostics_dropped_total{{{},reason=\"{}\"}} {}",
-                        format_stage_labels(stage_id, metadata),
-                        escape_label(reason),
-                        count
-                    )?;
-                }
-            }
-            writeln!(output)?;
-        }
-
         // Exact named graph-cut traffic (FLOWIP-128a B3).
         if !snapshot.composite_port_traffic.is_empty() {
             writeln!(
@@ -2827,63 +2807,6 @@ mod tests {
             escape_label(&stage_id.to_string())
         );
         assert!(output.contains(&expected));
-    }
-
-    #[test]
-    fn observer_diagnostic_drop_metric_has_only_the_closed_reason_labels() {
-        let exporter = PrometheusExporter::new();
-        let stage_id = StageId::new();
-        let mut snapshot = AppMetricsSnapshot::default();
-        snapshot.stage_metadata.insert(
-            stage_id,
-            StageMetadata {
-                name: "manual_review".to_string(),
-                flow_name: "payment_gateway".to_string(),
-                stage_type: obzenflow_core::event::context::StageType::Sink,
-                reference_mode: None,
-                flow_id: None,
-            },
-        );
-        for (reason, count) in [
-            ("invalid", 2),
-            ("missing_flow_context", 3),
-            ("journal_append_failed", 5),
-        ] {
-            snapshot
-                .observer_diagnostics_dropped_total
-                .insert((stage_id, reason.to_string()), count);
-        }
-
-        exporter.update_app_metrics(snapshot).unwrap();
-        let output = exporter.render_metrics().unwrap();
-        let labels = format_stage_labels(
-            &stage_id,
-            &StageMetadata {
-                name: "manual_review".to_string(),
-                flow_name: "payment_gateway".to_string(),
-                stage_type: obzenflow_core::event::context::StageType::Sink,
-                reference_mode: None,
-                flow_id: None,
-            },
-        );
-
-        assert!(output.contains("# TYPE observer_diagnostics_dropped_total counter"));
-        for (reason, count) in [
-            ("invalid", 2),
-            ("missing_flow_context", 3),
-            ("journal_append_failed", 5),
-        ] {
-            assert!(output.contains(&format!(
-                "observer_diagnostics_dropped_total{{{labels},reason=\"{reason}\"}} {count}"
-            )));
-        }
-        assert_eq!(
-            output
-                .lines()
-                .filter(|line| line.starts_with("observer_diagnostics_dropped_total{"))
-                .count(),
-            3
-        );
     }
 
     #[test]

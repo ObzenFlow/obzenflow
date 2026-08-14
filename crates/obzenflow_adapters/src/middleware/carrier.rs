@@ -26,8 +26,8 @@ use obzenflow_core::{StageId, StageKey};
 use obzenflow_runtime::effects::EffectSafety;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::observer::{
-    EffectObserver, HandlerObserver, JoinObserver, OutputCommitObserver, SinkDeliveryObserver,
-    SourcePollObserver, StageLifecycleObserver, StatefulObserver,
+    EffectObserver, HandlerObserver, JoinObserver, SinkDeliveryObserver, SourcePollObserver,
+    StageLifecycleObserver, StatefulObserver,
 };
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use ring::digest::{Context, SHA256};
@@ -198,9 +198,6 @@ pub enum MiddlewareSurface {
     Join {
         stage_id: StageId,
     },
-    OutputCommit {
-        stage_id: StageId,
-    },
     StageLifecycle {
         stage_id: StageId,
     },
@@ -218,7 +215,6 @@ pub enum MiddlewareSurfaceKind {
     Handler,
     Stateful,
     Join,
-    OutputCommit,
     StageLifecycle,
 }
 
@@ -232,7 +228,6 @@ impl MiddlewareSurface {
             Self::Handler { .. } => MiddlewareSurfaceKind::Handler,
             Self::Stateful { .. } => MiddlewareSurfaceKind::Stateful,
             Self::Join { .. } => MiddlewareSurfaceKind::Join,
-            Self::OutputCommit { .. } => MiddlewareSurfaceKind::OutputCommit,
             Self::StageLifecycle { .. } => MiddlewareSurfaceKind::StageLifecycle,
         }
     }
@@ -250,7 +245,6 @@ impl MiddlewareSurface {
             Self::Handler { stage_id }
             | Self::Stateful { stage_id }
             | Self::Join { stage_id }
-            | Self::OutputCommit { stage_id }
             | Self::StageLifecycle { stage_id } => Some(*stage_id),
         }
     }
@@ -260,8 +254,7 @@ impl MiddlewareSurfaceKind {
     /// Whether a `Control`-capability middleware may attach to this surface in
     /// this slice. Control is legal on the live-I/O boundary surfaces (source
     /// poll, effect, sink delivery) and, since FLOWIP-115d, on hosted ingress;
-    /// `OutputCommit` is never a control surface, and the remaining reserved
-    /// surfaces are owned by later slices.
+    /// The remaining observer surfaces are never control surfaces.
     pub fn allows_control(self) -> bool {
         matches!(
             self,
@@ -315,7 +308,6 @@ pub enum ProtectedUnit {
     Handler,
     Stateful,
     Join,
-    OutputCommit,
     StageLifecycle,
 }
 
@@ -525,10 +517,6 @@ fn push_surface(context: &mut Context, surface: &MiddlewareSurface) {
             push_field(context, "surface.kind", "join");
             push_stage_id(context, "surface.stage_id", *stage_id);
         }
-        MiddlewareSurface::OutputCommit { stage_id } => {
-            push_field(context, "surface.kind", "output_commit");
-            push_stage_id(context, "surface.stage_id", *stage_id);
-        }
         MiddlewareSurface::StageLifecycle { stage_id } => {
             push_field(context, "surface.kind", "stage_lifecycle");
             push_stage_id(context, "surface.stage_id", *stage_id);
@@ -580,9 +568,6 @@ fn push_protected_unit(context: &mut Context, protected_unit: &ProtectedUnitId) 
         ProtectedUnit::Handler => push_field(context, "protected_unit.kind", "handler"),
         ProtectedUnit::Stateful => push_field(context, "protected_unit.kind", "stateful"),
         ProtectedUnit::Join => push_field(context, "protected_unit.kind", "join"),
-        ProtectedUnit::OutputCommit => {
-            push_field(context, "protected_unit.kind", "output_commit");
-        }
         ProtectedUnit::StageLifecycle => {
             push_field(context, "protected_unit.kind", "stage_lifecycle");
         }
@@ -1012,7 +997,6 @@ pub fn validate_attachment_request(
         (MiddlewareSurface::Handler { .. }, ProtectedUnit::Handler) => true,
         (MiddlewareSurface::Stateful { .. }, ProtectedUnit::Stateful) => true,
         (MiddlewareSurface::Join { .. }, ProtectedUnit::Join) => true,
-        (MiddlewareSurface::OutputCommit { .. }, ProtectedUnit::OutputCommit) => true,
         (MiddlewareSurface::StageLifecycle { .. }, ProtectedUnit::StageLifecycle) => true,
         _ => false,
     };
@@ -1282,7 +1266,6 @@ pub(crate) enum MiddlewareSurfaceAttachmentKind {
     HandlerObserver(Arc<dyn HandlerObserver>),
     StatefulObserver(Arc<dyn StatefulObserver>),
     JoinObserver(Arc<dyn JoinObserver>),
-    OutputCommitObserver(Arc<dyn OutputCommitObserver>),
     StageLifecycleObserver(Arc<dyn StageLifecycleObserver>),
 }
 
@@ -1368,12 +1351,6 @@ impl MiddlewareSurfaceAttachment {
         Self::ordinary(MiddlewareSurfaceAttachmentKind::JoinObserver(observer))
     }
 
-    pub fn output_commit_observer(observer: Arc<dyn OutputCommitObserver>) -> Self {
-        Self::ordinary(MiddlewareSurfaceAttachmentKind::OutputCommitObserver(
-            observer,
-        ))
-    }
-
     pub fn stage_lifecycle_observer(observer: Arc<dyn StageLifecycleObserver>) -> Self {
         Self::ordinary(MiddlewareSurfaceAttachmentKind::StageLifecycleObserver(
             observer,
@@ -1393,12 +1370,17 @@ impl MiddlewareSurfaceAttachment {
 /// token, and staged authority have passed the adapter-owned gateway. Only this
 /// checked carrier exposes payload extraction to the DSL.
 pub struct CheckedMiddlewareSurfaceAttachment {
+    label: &'static str,
     kind: MiddlewareSurfaceAttachmentKind,
 }
 
 impl CheckedMiddlewareSurfaceAttachment {
-    pub(crate) fn from_validated(attachment: MiddlewareSurfaceAttachment) -> Self {
+    pub(crate) fn from_validated(
+        label: &'static str,
+        attachment: MiddlewareSurfaceAttachment,
+    ) -> Self {
         Self {
+            label,
             kind: attachment.into_kind(),
         }
     }
@@ -1431,8 +1413,8 @@ impl CheckedMiddlewareSurfaceAttachment {
         }
     }
 
-    pub(crate) fn into_kind(self) -> MiddlewareSurfaceAttachmentKind {
-        self.kind
+    pub(crate) fn into_labelled_kind(self) -> (&'static str, MiddlewareSurfaceAttachmentKind) {
+        (self.label, self.kind)
     }
 }
 
@@ -1478,10 +1460,6 @@ fn capability_and_surface(
         MiddlewareSurfaceAttachmentKind::JoinObserver(_) => {
             (MiddlewareCapability::Observer, MiddlewareSurfaceKind::Join)
         }
-        MiddlewareSurfaceAttachmentKind::OutputCommitObserver(_) => (
-            MiddlewareCapability::Observer,
-            MiddlewareSurfaceKind::OutputCommit,
-        ),
         MiddlewareSurfaceAttachmentKind::StageLifecycleObserver(_) => (
             MiddlewareCapability::Observer,
             MiddlewareSurfaceKind::StageLifecycle,
@@ -1635,35 +1613,6 @@ mod tests {
             MiddlewareDeclaration::observer("observer", vec![MiddlewareSurfaceKind::Ingress]);
         assert!(matches!(
             validate_attachment_request(&observer, &request),
-            Err(MiddlewareAttachmentValidationError::UnsupportedCapability { .. })
-        ));
-    }
-
-    #[test]
-    fn output_commit_allows_observer_but_rejects_control() {
-        let stage_id = StageId::new();
-        let surface = MiddlewareSurface::OutputCommit { stage_id };
-        let protected_unit = ProtectedUnitId {
-            stage_id,
-            unit: ProtectedUnit::OutputCommit,
-        };
-        let request = MiddlewareAttachmentRequest {
-            surface: &surface,
-            protected_unit: &protected_unit,
-            declaration_index: MiddlewareDeclarationIndex::observers(0),
-        };
-
-        let observer =
-            MiddlewareDeclaration::observer("timing", vec![MiddlewareSurfaceKind::OutputCommit]);
-        validate_attachment_request(&observer, &request)
-            .expect("output commit observer should validate");
-
-        let control = MiddlewareDeclaration::control(
-            "bad_control",
-            vec![MiddlewareSurfaceKind::OutputCommit],
-        );
-        assert!(matches!(
-            validate_attachment_request(&control, &request),
             Err(MiddlewareAttachmentValidationError::UnsupportedCapability { .. })
         ));
     }
@@ -1827,13 +1776,6 @@ mod tests {
                     unit: ProtectedUnit::Join,
                 },
             ),
-            MiddlewareSurfaceKind::OutputCommit => (
-                MiddlewareSurface::OutputCommit { stage_id },
-                ProtectedUnitId {
-                    stage_id,
-                    unit: ProtectedUnit::OutputCommit,
-                },
-            ),
             MiddlewareSurfaceKind::StageLifecycle => (
                 MiddlewareSurface::StageLifecycle { stage_id },
                 ProtectedUnitId {
@@ -1906,7 +1848,6 @@ mod tests {
             MiddlewareSurfaceKind::Handler,
             MiddlewareSurfaceKind::Stateful,
             MiddlewareSurfaceKind::Join,
-            MiddlewareSurfaceKind::OutputCommit,
             MiddlewareSurfaceKind::StageLifecycle,
         ];
 

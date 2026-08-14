@@ -781,7 +781,6 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
             &mut pulse,
             &mut stall,
             Some(&output_contract),
-            None,
             &mut pending_outputs,
         )
         .await
@@ -866,7 +865,6 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
         &mut pulse,
         &mut stall,
         Some(&output_contract),
-        None,
         &mut pending_outputs,
     )
     .await
@@ -926,7 +924,6 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
         &mut pulse,
         &mut stall,
         Some(&output_contract),
-        None,
         &mut pending_outputs,
     )
     .await
@@ -983,7 +980,6 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
         &mut pulse,
         &mut stall,
         Some(&output_contract),
-        None,
         &mut pending_outputs,
     )
     .await
@@ -1044,7 +1040,6 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
         &writer,
         &mut pulse,
         &mut stall,
-        None,
         None,
         &mut pending_outputs,
     )
@@ -1113,7 +1108,6 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
         &writer,
         &mut pulse,
         &mut stall,
-        None,
         None,
         &mut pending_outputs,
     )
@@ -1205,7 +1199,6 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
         &mut pulse,
         &mut stall,
         None,
-        None,
         &mut pending_outputs,
     )
     .await
@@ -1251,7 +1244,6 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
         &writer,
         &mut pulse,
         &mut stall,
-        None,
         None,
         &mut pending_outputs,
     )
@@ -1312,7 +1304,6 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
         &writer,
         &mut pulse,
         &mut stall,
-        None,
         None,
         &mut pending_outputs,
     )
@@ -1396,7 +1387,6 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(
         &mut pulse,
         &mut stall,
         Some(&output_contract),
-        None,
         &mut pending_outputs,
     )
     .await
@@ -1464,7 +1454,6 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(
         &mut pulse,
         &mut stall,
         Some(&output_contract),
-        None,
         &mut pending_outputs,
     )
     .await
@@ -1548,7 +1537,6 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
             &mut pulse,
             &mut stall,
             Some(&output_contract),
-            None,
             &mut pending_outputs,
         )
         .await
@@ -1584,7 +1572,6 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
         &mut pulse,
         &mut stall,
         Some(&output_contract),
-        None,
         &mut pending_outputs,
     )
     .await

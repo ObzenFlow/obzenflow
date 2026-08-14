@@ -636,66 +636,65 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             }
         }
 
-        let observer_outcome = match &outcome {
-            SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(
-                report,
-            ))) => SinkDeliveryObserverOutcome::Attempted {
-                result: match &report.primary.result {
-                    DeliveryResult::Success { .. } => SinkDeliveryAttemptResult::ReportedSuccess,
-                    DeliveryResult::Partial {
-                        successful_count,
-                        failed_count,
-                        ..
-                    } => SinkDeliveryAttemptResult::ReportedPartial {
-                        successful_count: *successful_count,
-                        failed_count: *failed_count,
-                    },
-                    DeliveryResult::Buffered { .. } => SinkDeliveryAttemptResult::ReportedBuffered,
-                    DeliveryResult::Failed { final_attempt, .. } => {
-                        SinkDeliveryAttemptResult::ReportedFailure {
-                            final_attempt: *final_attempt,
+        if ctx.observers.has_sink_delivery() && !scope.is_deterministic_replay() {
+            let observer_outcome = match &outcome {
+                SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(
+                    Ok(report),
+                )) => SinkDeliveryObserverOutcome::Attempted {
+                    result: match &report.primary.result {
+                        DeliveryResult::Success { .. } => {
+                            SinkDeliveryAttemptResult::ReportedSuccess
                         }
-                    }
+                        DeliveryResult::Partial {
+                            successful_count,
+                            failed_count,
+                            ..
+                        } => SinkDeliveryAttemptResult::ReportedPartial {
+                            successful_count: *successful_count,
+                            failed_count: *failed_count,
+                        },
+                        DeliveryResult::Buffered { .. } => {
+                            SinkDeliveryAttemptResult::ReportedBuffered
+                        }
+                        DeliveryResult::Failed { final_attempt, .. } => {
+                            SinkDeliveryAttemptResult::ReportedFailure {
+                                final_attempt: *final_attempt,
+                            }
+                        }
+                    },
                 },
-            },
-            SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Err(
-                err,
-            ))) => SinkDeliveryObserverOutcome::Attempted {
-                result: SinkDeliveryAttemptResult::HandlerError { kind: err.kind() },
-            },
-            SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Panicked {
-                ..
-            }) => SinkDeliveryObserverOutcome::Attempted {
-                result: SinkDeliveryAttemptResult::HandlerPanicked,
-            },
-            SinkDeliveryBoundaryOutcome::Rejected(rejection) => {
-                SinkDeliveryObserverOutcome::Rejected {
-                    policy: Some(rejection.policy.clone()),
+                SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(
+                    Err(err),
+                )) => SinkDeliveryObserverOutcome::Attempted {
+                    result: SinkDeliveryAttemptResult::HandlerError { kind: err.kind() },
+                },
+                SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Panicked {
+                    ..
+                }) => SinkDeliveryObserverOutcome::Attempted {
+                    result: SinkDeliveryAttemptResult::HandlerPanicked,
+                },
+                SinkDeliveryBoundaryOutcome::Rejected(rejection) => {
+                    SinkDeliveryObserverOutcome::Rejected {
+                        policy: Some(rejection.policy.clone()),
+                    }
                 }
-            }
-        };
-        let flow_context = make_flow_context(
-            &ctx.flow_name,
-            &ctx.flow_id.to_string(),
-            &ctx.stage_name,
-            ctx.stage_id,
-            StageType::Sink,
-        );
-        run_sink_delivery_observers(
-            &ctx.observers,
-            ctx.stage_id,
-            &ctx.stage_name,
-            &flow_context,
-            scope,
-            &envelope.event,
-            stage_input_position.map(|position| position.0),
-            observer_outcome,
-            ctx.lineage_policy,
-            &ctx.data_journal,
-            &ctx.instrumentation,
-            envelope,
-        )
-        .await;
+            };
+            let flow_context = make_flow_context(
+                &ctx.flow_name,
+                &ctx.flow_id.to_string(),
+                &ctx.stage_name,
+                ctx.stage_id,
+                StageType::Sink,
+            );
+            run_sink_delivery_observers(
+                &ctx.observers,
+                &flow_context,
+                scope,
+                &envelope.event,
+                stage_input_position.map(|position| position.0),
+                observer_outcome,
+            );
+        }
 
         let mapped = match outcome {
             SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(

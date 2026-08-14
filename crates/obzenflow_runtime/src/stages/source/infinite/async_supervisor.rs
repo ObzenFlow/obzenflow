@@ -399,10 +399,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                     &mut ctx.backpressure_pulse,
                     &mut ctx.backpressure_stall,
                     Some(&ctx.output_contract),
-                    Some((
-                        &ctx.observers,
-                        obzenflow_core::config::LineagePolicy::default(),
-                    )),
                     &mut self.external_events,
                     || InfiniteSourceEvent::Error("External control channel closed".to_string()),
                 )
@@ -756,10 +752,8 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
 
                     let source_poll_observation = SourcePollObservation::new(
                         &stage_flow_context,
-                        &ctx.instrumentation,
                         &ctx.observers,
                         obzenflow_core::MiddlewareExecutionScope::LiveHandler,
-                        &ctx.data_journal,
                     );
 
                     match report.outcome {

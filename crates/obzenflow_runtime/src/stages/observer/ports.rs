@@ -2,111 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Runtime-owned observer middleware ports.
+//! Runtime-owned, observe-only stage interception ports.
 //!
-//! These traits are intentionally observe-only. Ordinary hooks can return
-//! diagnostics, but they cannot return control decisions. The output-commit hook
-//! may fail only as a commit/invariant failure.
-//!
-//! The ports live under `stages::observer` instead of `obzenflow_core` or the
-//! runtime crate root because they describe runtime stage and boundary
-//! observation surfaces. Core provides the domain primitives used by those
-//! surfaces, but it must not own runtime middleware contracts.
+//! The runtime constructs every context and lends only immutable execution
+//! views. Ordinary observers return no value and receive no framework writer,
+//! control boundary, continuation, executor, resolver, or settlement handle.
 
-use obzenflow_core::config::LineagePolicy;
-use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
-use obzenflow_core::event::payloads::observability_payload::IndicatorSample;
+use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::{ChainEvent, EventEnvelope, StageId};
-use std::fmt;
-use std::sync::Arc;
-use std::time::Duration;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ObserverDeterminism {
-    Deterministic,
-    LiveOnly,
-}
-
-impl ObserverDeterminism {
-    pub fn should_run(self, scope: MiddlewareExecutionScope) -> bool {
-        !matches!(self, Self::LiveOnly) || !scope.is_deterministic_replay()
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ObserverReport {
-    pub diagnostics: Vec<ObserverDiagnostic>,
-}
-
-impl ObserverReport {
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    pub fn with_diagnostic(mut self, diagnostic: ObserverDiagnostic) -> Self {
-        self.diagnostics.push(diagnostic);
-        self
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.diagnostics.is_empty()
-    }
-}
-
-/// The only durable evidence families an observer may ask the runtime to
-/// author. The surrounding `ChainEvent` remains entirely runtime-owned.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum ObserverEvidence {
-    Indicator(IndicatorSample),
-}
-
-/// One content-only observer publication request.
-#[derive(Debug, Clone)]
-pub struct ObserverDiagnostic {
-    pub evidence: ObserverEvidence,
-}
-
-impl ObserverDiagnostic {
-    pub fn new(evidence: ObserverEvidence) -> Self {
-        Self { evidence }
-    }
-}
-
-/// Runtime-selected semantic and envelope provenance for diagnostics.
-#[derive(Debug, Clone, Copy)]
-pub enum DiagnosticProvenance<'a> {
-    Root,
-    Derived {
-        parent: &'a EventEnvelope<ChainEvent>,
-        lineage: LineagePolicy,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub struct ObserverCommitError {
-    message: String,
-}
-
-impl ObserverCommitError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl fmt::Display for ObserverCommitError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.message.fmt(f)
-    }
-}
-
-impl std::error::Error for ObserverCommitError {}
-
-pub type ObserverCommitResult = Result<ObserverReport, ObserverCommitError>;
+use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, StageId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinSide {
@@ -116,18 +21,79 @@ pub enum JoinSide {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinCanonicalMergeMetadata {
-    pub selected_feed: Option<String>,
-    pub reader_index: Option<usize>,
+    selected_feed: Option<String>,
+    reader_index: Option<usize>,
+}
+
+impl JoinCanonicalMergeMetadata {
+    pub(crate) fn new(selected_feed: Option<String>, reader_index: Option<usize>) -> Self {
+        Self {
+            selected_feed,
+            reader_index,
+        }
+    }
+
+    pub fn selected_feed(&self) -> Option<&str> {
+        self.selected_feed.as_deref()
+    }
+
+    pub fn reader_index(&self) -> Option<usize> {
+        self.reader_index
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct JoinDeliverySnapshot {
-    pub side: JoinSide,
-    pub delivered_source_stage_id: StageId,
-    pub delivered_stage_input_position: u64,
-    pub input_envelope: EventEnvelope<ChainEvent>,
-    pub reference_high_water: VectorClock,
-    pub canonical_merge: Option<JoinCanonicalMergeMetadata>,
+    side: JoinSide,
+    delivered_source_stage_id: StageId,
+    delivered_stage_input_position: u64,
+    input_envelope: EventEnvelope<ChainEvent>,
+    reference_high_water: VectorClock,
+    canonical_merge: Option<JoinCanonicalMergeMetadata>,
+}
+
+impl JoinDeliverySnapshot {
+    pub(crate) fn new(
+        side: JoinSide,
+        delivered_source_stage_id: StageId,
+        delivered_stage_input_position: u64,
+        input_envelope: EventEnvelope<ChainEvent>,
+        reference_high_water: VectorClock,
+        canonical_merge: Option<JoinCanonicalMergeMetadata>,
+    ) -> Self {
+        Self {
+            side,
+            delivered_source_stage_id,
+            delivered_stage_input_position,
+            input_envelope,
+            reference_high_water,
+            canonical_merge,
+        }
+    }
+
+    pub fn side(&self) -> JoinSide {
+        self.side
+    }
+
+    pub fn delivered_source_stage_id(&self) -> StageId {
+        self.delivered_source_stage_id
+    }
+
+    pub fn delivered_stage_input_position(&self) -> u64 {
+        self.delivered_stage_input_position
+    }
+
+    pub fn input(&self) -> &ChainEvent {
+        &self.input_envelope.event
+    }
+
+    pub fn reference_high_water(&self) -> &VectorClock {
+        &self.reference_high_water
+    }
+
+    pub fn canonical_merge(&self) -> Option<&JoinCanonicalMergeMetadata> {
+        self.canonical_merge.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,36 +105,181 @@ pub enum JoinSignalKind {
 
 #[derive(Debug, Clone)]
 pub struct JoinSignalSnapshot {
-    pub side: Option<JoinSide>,
-    pub signal: JoinSignalKind,
+    side: Option<JoinSide>,
+    signal: JoinSignalKind,
+}
+
+impl JoinSignalSnapshot {
+    pub(crate) fn new(side: Option<JoinSide>, signal: JoinSignalKind) -> Self {
+        Self { side, signal }
+    }
+
+    pub fn side(&self) -> Option<JoinSide> {
+        self.side
+    }
+
+    pub fn signal(&self) -> JoinSignalKind {
+        self.signal
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum JoinObserverOccurrence<'a> {
+    Delivery(&'a JoinDeliverySnapshot),
+    Signal(&'a JoinSignalSnapshot),
 }
 
 pub struct HandlerObserverContext<'a> {
-    pub stage_id: StageId,
-    pub stage_name: &'a str,
-    pub flow_context: &'a FlowContext,
-    pub scope: MiddlewareExecutionScope,
-    pub input: &'a ChainEvent,
-    pub stage_input_position: Option<u64>,
+    flow_context: &'a FlowContext,
+    input: &'a ChainEvent,
+    stage_input_position: Option<u64>,
+}
+
+impl<'a> HandlerObserverContext<'a> {
+    pub(crate) fn new(
+        flow_context: &'a FlowContext,
+        input: &'a ChainEvent,
+        stage_input_position: Option<u64>,
+    ) -> Self {
+        Self {
+            flow_context,
+            input,
+            stage_input_position,
+        }
+    }
+
+    pub fn flow_name(&self) -> &str {
+        &self.flow_context.flow_name
+    }
+
+    pub fn flow_id(&self) -> &str {
+        &self.flow_context.flow_id
+    }
+
+    pub fn stage_id(&self) -> StageId {
+        self.flow_context.stage_id
+    }
+
+    pub fn stage_name(&self) -> &str {
+        &self.flow_context.stage_name
+    }
+
+    pub fn stage_type(&self) -> StageType {
+        self.flow_context.stage_type
+    }
+
+    pub fn input(&self) -> &ChainEvent {
+        self.input
+    }
+
+    pub fn stage_input_position(&self) -> Option<u64> {
+        self.stage_input_position
+    }
 }
 
 pub struct StatefulObserverContext<'a> {
-    pub stage_id: StageId,
-    pub stage_name: &'a str,
-    pub flow_context: &'a FlowContext,
-    pub scope: MiddlewareExecutionScope,
-    pub input: Option<&'a ChainEvent>,
-    pub stage_input_position: Option<u64>,
+    flow_context: &'a FlowContext,
+    input: Option<&'a ChainEvent>,
+    stage_input_position: Option<u64>,
+}
+
+impl<'a> StatefulObserverContext<'a> {
+    pub(crate) fn new(
+        flow_context: &'a FlowContext,
+        input: Option<&'a ChainEvent>,
+        stage_input_position: Option<u64>,
+    ) -> Self {
+        Self {
+            flow_context,
+            input,
+            stage_input_position,
+        }
+    }
+
+    pub fn flow_name(&self) -> &str {
+        &self.flow_context.flow_name
+    }
+
+    pub fn flow_id(&self) -> &str {
+        &self.flow_context.flow_id
+    }
+
+    pub fn stage_id(&self) -> StageId {
+        self.flow_context.stage_id
+    }
+
+    pub fn stage_name(&self) -> &str {
+        &self.flow_context.stage_name
+    }
+
+    pub fn stage_type(&self) -> StageType {
+        self.flow_context.stage_type
+    }
+
+    pub fn input(&self) -> Option<&ChainEvent> {
+        self.input
+    }
+
+    pub fn stage_input_position(&self) -> Option<u64> {
+        self.stage_input_position
+    }
 }
 
 pub struct JoinObserverContext<'a> {
-    pub stage_id: StageId,
-    pub stage_name: &'a str,
-    pub flow_context: &'a FlowContext,
-    pub scope: MiddlewareExecutionScope,
-    pub input: Option<&'a ChainEvent>,
-    pub delivery: Option<&'a JoinDeliverySnapshot>,
-    pub signal: Option<&'a JoinSignalSnapshot>,
+    flow_context: &'a FlowContext,
+    occurrence: JoinObserverOccurrence<'a>,
+}
+
+impl<'a> JoinObserverContext<'a> {
+    pub(crate) fn new(
+        flow_context: &'a FlowContext,
+        occurrence: JoinObserverOccurrence<'a>,
+    ) -> Self {
+        Self {
+            flow_context,
+            occurrence,
+        }
+    }
+
+    pub fn flow_name(&self) -> &str {
+        &self.flow_context.flow_name
+    }
+
+    pub fn flow_id(&self) -> &str {
+        &self.flow_context.flow_id
+    }
+
+    pub fn stage_id(&self) -> StageId {
+        self.flow_context.stage_id
+    }
+
+    pub fn stage_name(&self) -> &str {
+        &self.flow_context.stage_name
+    }
+
+    pub fn stage_type(&self) -> StageType {
+        self.flow_context.stage_type
+    }
+
+    pub fn occurrence(&self) -> JoinObserverOccurrence<'_> {
+        self.occurrence
+    }
+
+    pub fn input(&self) -> Option<&ChainEvent> {
+        match self.occurrence {
+            JoinObserverOccurrence::Delivery(delivery) => Some(delivery.input()),
+            JoinObserverOccurrence::Signal(_) => None,
+        }
+    }
+
+    pub fn stage_input_position(&self) -> Option<u64> {
+        match self.occurrence {
+            JoinObserverOccurrence::Delivery(delivery) => {
+                Some(delivery.delivered_stage_input_position())
+            }
+            JoinObserverOccurrence::Signal(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,28 +291,93 @@ pub enum SourcePollObserverOutcome {
 }
 
 pub struct SourcePollObserverContext<'a> {
-    pub stage_id: StageId,
-    pub stage_name: &'a str,
-    pub flow_context: &'a FlowContext,
-    pub scope: MiddlewareExecutionScope,
-    pub poll_duration: Duration,
-    pub outcome: SourcePollObserverOutcome,
+    flow_context: &'a FlowContext,
+    outcome: SourcePollObserverOutcome,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl<'a> SourcePollObserverContext<'a> {
+    pub(crate) fn new(flow_context: &'a FlowContext, outcome: SourcePollObserverOutcome) -> Self {
+        Self {
+            flow_context,
+            outcome,
+        }
+    }
+
+    pub fn flow_name(&self) -> &str {
+        &self.flow_context.flow_name
+    }
+
+    pub fn flow_id(&self) -> &str {
+        &self.flow_context.flow_id
+    }
+
+    pub fn stage_id(&self) -> StageId {
+        self.flow_context.stage_id
+    }
+
+    pub fn stage_name(&self) -> &str {
+        &self.flow_context.stage_name
+    }
+
+    pub fn stage_type(&self) -> StageType {
+        self.flow_context.stage_type
+    }
+
+    pub fn outcome(&self) -> &SourcePollObserverOutcome {
+        &self.outcome
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectObserverOutcome {
     Succeeded,
-    Failed { message: String },
-    SuppressedByReplay,
+    Failed,
 }
 
 pub struct EffectObserverContext<'a> {
-    pub stage_id: StageId,
-    pub stage_name: &'a str,
-    pub flow_context: Option<&'a FlowContext>,
-    pub scope: MiddlewareExecutionScope,
-    pub effect_type: &'a str,
-    pub outcome: EffectObserverOutcome,
+    flow_id: FlowId,
+    stage_id: StageId,
+    stage_name: &'a str,
+    effect_type: &'a str,
+    outcome: EffectObserverOutcome,
+}
+
+impl<'a> EffectObserverContext<'a> {
+    pub(crate) fn new(
+        flow_id: FlowId,
+        stage_id: StageId,
+        stage_name: &'a str,
+        effect_type: &'a str,
+        outcome: EffectObserverOutcome,
+    ) -> Self {
+        Self {
+            flow_id,
+            stage_id,
+            stage_name,
+            effect_type,
+            outcome,
+        }
+    }
+
+    pub fn flow_id(&self) -> FlowId {
+        self.flow_id
+    }
+
+    pub fn stage_id(&self) -> StageId {
+        self.stage_id
+    }
+
+    pub fn stage_name(&self) -> &str {
+        self.stage_name
+    }
+
+    pub fn effect_type(&self) -> &str {
+        self.effect_type
+    }
+
+    pub fn outcome(&self) -> EffectObserverOutcome {
+        self.outcome
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,206 +404,137 @@ pub enum SinkDeliveryAttemptResult {
 }
 
 pub struct SinkDeliveryObserverContext<'a> {
-    pub stage_id: StageId,
-    pub stage_name: &'a str,
-    pub scope: MiddlewareExecutionScope,
-    pub input: &'a ChainEvent,
-    pub stage_input_position: Option<u64>,
-    pub outcome: SinkDeliveryObserverOutcome,
+    flow_context: &'a FlowContext,
+    input: &'a ChainEvent,
+    stage_input_position: Option<u64>,
+    outcome: SinkDeliveryObserverOutcome,
 }
 
-pub struct OutputCommitObserverContext<'a> {
-    pub stage_id: StageId,
-    pub stage_name: &'a str,
-    pub flow_context: &'a FlowContext,
-    pub scope: MiddlewareExecutionScope,
-    pub parent: Option<&'a ChainEvent>,
+impl<'a> SinkDeliveryObserverContext<'a> {
+    pub(crate) fn new(
+        flow_context: &'a FlowContext,
+        input: &'a ChainEvent,
+        stage_input_position: Option<u64>,
+        outcome: SinkDeliveryObserverOutcome,
+    ) -> Self {
+        Self {
+            flow_context,
+            input,
+            stage_input_position,
+            outcome,
+        }
+    }
+
+    pub fn flow_name(&self) -> &str {
+        &self.flow_context.flow_name
+    }
+
+    pub fn flow_id(&self) -> &str {
+        &self.flow_context.flow_id
+    }
+
+    pub fn stage_id(&self) -> StageId {
+        self.flow_context.stage_id
+    }
+
+    pub fn stage_name(&self) -> &str {
+        &self.flow_context.stage_name
+    }
+
+    pub fn stage_type(&self) -> StageType {
+        self.flow_context.stage_type
+    }
+
+    pub fn input(&self) -> &ChainEvent {
+        self.input
+    }
+
+    pub fn stage_input_position(&self) -> Option<u64> {
+        self.stage_input_position
+    }
+
+    pub fn outcome(&self) -> &SinkDeliveryObserverOutcome {
+        &self.outcome
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageLifecyclePhase {
     Running,
-    Draining,
     Completed,
     Failed,
 }
 
 pub struct StageLifecycleObserverContext<'a> {
-    pub stage_id: StageId,
-    pub stage_name: &'a str,
-    pub scope: MiddlewareExecutionScope,
-    pub phase: StageLifecyclePhase,
+    flow_context: &'a FlowContext,
+    phase: StageLifecyclePhase,
+}
+
+impl<'a> StageLifecycleObserverContext<'a> {
+    pub(crate) fn new(flow_context: &'a FlowContext, phase: StageLifecyclePhase) -> Self {
+        Self {
+            flow_context,
+            phase,
+        }
+    }
+
+    pub fn flow_name(&self) -> &str {
+        &self.flow_context.flow_name
+    }
+
+    pub fn flow_id(&self) -> &str {
+        &self.flow_context.flow_id
+    }
+
+    pub fn stage_id(&self) -> StageId {
+        self.flow_context.stage_id
+    }
+
+    pub fn stage_name(&self) -> &str {
+        &self.flow_context.stage_name
+    }
+
+    pub fn stage_type(&self) -> StageType {
+        self.flow_context.stage_type
+    }
+
+    pub fn phase(&self) -> StageLifecyclePhase {
+        self.phase
+    }
 }
 
 pub trait HandlerObserver: Send + Sync {
-    fn label(&self) -> &'static str;
+    fn before_handle(&self, _ctx: &HandlerObserverContext<'_>) {}
 
-    fn determinism(&self) -> ObserverDeterminism {
-        ObserverDeterminism::Deterministic
-    }
-
-    fn before_handle(&self, _ctx: &HandlerObserverContext<'_>) -> ObserverReport {
-        ObserverReport::empty()
-    }
-
-    fn after_handle(
-        &self,
-        _ctx: &HandlerObserverContext<'_>,
-        _outputs: &[ChainEvent],
-    ) -> ObserverReport {
-        ObserverReport::empty()
-    }
+    fn after_handle(&self, _ctx: &HandlerObserverContext<'_>, _outputs: &[ChainEvent]) {}
 }
 
 pub trait StatefulObserver: Send + Sync {
-    fn label(&self) -> &'static str;
+    fn before_state_accumulate(&self, _ctx: &StatefulObserverContext<'_>) {}
 
-    fn determinism(&self) -> ObserverDeterminism {
-        ObserverDeterminism::Deterministic
-    }
+    fn after_state_accumulate(&self, _ctx: &StatefulObserverContext<'_>) {}
 
-    fn before_state_accumulate(&self, _ctx: &StatefulObserverContext<'_>) -> ObserverReport {
-        ObserverReport::empty()
-    }
-
-    fn after_state_accumulate(&self, _ctx: &StatefulObserverContext<'_>) -> ObserverReport {
-        ObserverReport::empty()
-    }
-
-    fn after_state_emit(
-        &self,
-        _ctx: &StatefulObserverContext<'_>,
-        _outputs: &[ChainEvent],
-    ) -> ObserverReport {
-        ObserverReport::empty()
-    }
+    fn after_state_emit(&self, _ctx: &StatefulObserverContext<'_>, _outputs: &[ChainEvent]) {}
 }
 
 pub trait JoinObserver: Send + Sync {
-    fn label(&self) -> &'static str;
+    fn before_join_input(&self, _ctx: &JoinObserverContext<'_>) {}
 
-    fn determinism(&self) -> ObserverDeterminism {
-        ObserverDeterminism::Deterministic
-    }
-
-    fn before_join_input(&self, _ctx: &JoinObserverContext<'_>) -> ObserverReport {
-        ObserverReport::empty()
-    }
-
-    fn after_join_output(
-        &self,
-        _ctx: &JoinObserverContext<'_>,
-        _outputs: &[ChainEvent],
-    ) -> ObserverReport {
-        ObserverReport::empty()
-    }
+    fn after_join_output(&self, _ctx: &JoinObserverContext<'_>, _outputs: &[ChainEvent]) {}
 }
 
 pub trait SourcePollObserver: Send + Sync {
-    fn label(&self) -> &'static str;
-
-    fn determinism(&self) -> ObserverDeterminism {
-        ObserverDeterminism::Deterministic
-    }
-
-    fn after_source_poll(
-        &self,
-        _ctx: &SourcePollObserverContext<'_>,
-        _outputs: &[ChainEvent],
-    ) -> ObserverReport {
-        ObserverReport::empty()
-    }
+    fn after_source_poll(&self, _ctx: &SourcePollObserverContext<'_>, _outputs: &[ChainEvent]) {}
 }
 
 pub trait EffectObserver: Send + Sync {
-    fn label(&self) -> &'static str;
-
-    fn determinism(&self) -> ObserverDeterminism {
-        ObserverDeterminism::Deterministic
-    }
-
-    fn after_effect(&self, _ctx: &EffectObserverContext<'_>) -> ObserverReport {
-        ObserverReport::empty()
-    }
+    fn after_effect(&self, _ctx: &EffectObserverContext<'_>) {}
 }
 
 pub trait SinkDeliveryObserver: Send + Sync {
-    fn label(&self) -> &'static str;
-
-    fn determinism(&self) -> ObserverDeterminism {
-        ObserverDeterminism::Deterministic
-    }
-
-    fn after_sink_delivery(&self, _ctx: &SinkDeliveryObserverContext<'_>) -> ObserverReport {
-        ObserverReport::empty()
-    }
-}
-
-pub trait OutputCommitObserver: Send + Sync {
-    fn label(&self) -> &'static str;
-
-    fn determinism(&self) -> ObserverDeterminism {
-        ObserverDeterminism::Deterministic
-    }
-
-    fn before_output_commit(
-        &self,
-        _ctx: &OutputCommitObserverContext<'_>,
-        _event: &mut ChainEvent,
-    ) -> ObserverCommitResult {
-        Ok(ObserverReport::empty())
-    }
+    fn after_sink_delivery(&self, _ctx: &SinkDeliveryObserverContext<'_>) {}
 }
 
 pub trait StageLifecycleObserver: Send + Sync {
-    fn label(&self) -> &'static str;
-
-    fn determinism(&self) -> ObserverDeterminism {
-        ObserverDeterminism::Deterministic
-    }
-
-    fn on_stage_lifecycle(&self, _ctx: &StageLifecycleObserverContext<'_>) -> ObserverReport {
-        ObserverReport::empty()
-    }
-}
-
-/// Composed, per-surface observer ports for one stage.
-///
-/// Each field is a single neutral port. The adapter folds the resolved observer
-/// list for a surface into one composed port (mirroring how control policies
-/// fold into one `Per*PolicyBoundary`), so the runtime calls one port per
-/// surface and never iterates an observer list or evaluates observer
-/// determinism itself. The composed port owns iteration, the determinism gate,
-/// and report merging.
-#[derive(Clone, Default)]
-pub struct StageObserverBundle {
-    pub handler: Option<Arc<dyn HandlerObserver>>,
-    pub stateful: Option<Arc<dyn StatefulObserver>>,
-    pub join: Option<Arc<dyn JoinObserver>>,
-    pub source_poll: Option<Arc<dyn SourcePollObserver>>,
-    pub effect: Option<Arc<dyn EffectObserver>>,
-    pub sink_delivery: Option<Arc<dyn SinkDeliveryObserver>>,
-    pub output_commit: Option<Arc<dyn OutputCommitObserver>>,
-    pub stage_lifecycle: Option<Arc<dyn StageLifecycleObserver>>,
-}
-
-impl StageObserverBundle {
-    pub fn is_empty(&self) -> bool {
-        self.handler.is_none()
-            && self.stateful.is_none()
-            && self.join.is_none()
-            && self.source_poll.is_none()
-            && self.effect.is_none()
-            && self.sink_delivery.is_none()
-            && self.output_commit.is_none()
-            && self.stage_lifecycle.is_none()
-    }
-}
-
-impl fmt::Debug for StageObserverBundle {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StageObserverBundle")
-            .field("has_observers", &!self.is_empty())
-            .finish()
-    }
+    fn on_stage_lifecycle(&self, _ctx: &StageLifecycleObserverContext<'_>) {}
 }

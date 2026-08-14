@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::messaging::PollResult;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
@@ -132,6 +131,11 @@ pub(super) async fn dispatch_enriching<
                     ) {
                         common::observe_join_input(
                             ctx,
+                            ctx.runtime_execution.dispatch_scope(
+                                ctx.stage_id,
+                                None,
+                                subscription.last_delivered_generation(),
+                            ),
                             &envelope.event,
                             None,
                             Some(&signal_snapshot),
@@ -218,14 +222,24 @@ pub(super) async fn dispatch_enriching<
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     let event = envelope.event.clone();
                     let event_id = event.id;
-                    let delivery_snapshot = common::delivery_snapshot(
-                        crate::stages::observer::JoinSide::Stream,
-                        source_id,
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
                         subscription.last_delivered_stage_input_position(),
-                        &envelope,
-                        &ctx.reference_high_water_clock,
-                        None,
-                    )?;
+                        subscription.last_delivered_generation(),
+                    );
+                    let delivery_snapshot = (ctx.observers.has_join()
+                        && !scope.is_deterministic_replay())
+                    .then(|| {
+                        common::delivery_snapshot(
+                            crate::stages::observer::JoinSide::Stream,
+                            source_id,
+                            subscription.last_delivered_stage_input_position(),
+                            &envelope,
+                            &ctx.reference_high_water_clock,
+                            None,
+                        )
+                    })
+                    .transpose()?;
 
                     if let Some(heartbeat) = &ctx.heartbeat {
                         heartbeat.state.record_data_read(source_id, event_id);
@@ -233,8 +247,9 @@ pub(super) async fn dispatch_enriching<
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
                     common::observe_join_input(
                         ctx,
+                        scope,
                         &event,
-                        Some(&delivery_snapshot),
+                        delivery_snapshot.as_ref(),
                         None,
                         Some(&envelope),
                     )
@@ -253,8 +268,9 @@ pub(super) async fn dispatch_enriching<
                         let mut outputs = vec![event.clone()];
                         common::observe_join_outputs(
                             ctx,
+                            scope,
                             Some(&event),
-                            Some(&delivery_snapshot),
+                            delivery_snapshot.as_ref(),
                             None,
                             outputs.as_mut_slice(),
                             Some(&envelope),
@@ -292,15 +308,6 @@ pub(super) async fn dispatch_enriching<
                     let _processing = heartbeat_state.as_ref().map(|state| {
                         HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
                     });
-                    // FLOWIP-120n: per-delivery execution scope, computed at
-                    // dispatch from the delivered position and generation.
-                    let scope = ctx.runtime_execution.dispatch_scope(
-                        ctx.stage_id,
-                        Some(StageInputPosition(
-                            delivery_snapshot.delivered_stage_input_position,
-                        )),
-                        subscription.last_delivered_generation(),
-                    );
                     let result = ctx.handler.process_stream(
                         &mut ctx.handler_state,
                         event.clone(),
@@ -334,8 +341,9 @@ pub(super) async fn dispatch_enriching<
                                 .fetch_add(1, Ordering::Relaxed);
                             common::observe_join_outputs(
                                 ctx,
+                                scope,
                                 Some(&event),
-                                Some(&delivery_snapshot),
+                                delivery_snapshot.as_ref(),
                                 None,
                                 events.as_mut_slice(),
                                 Some(&merged_parent),
@@ -376,8 +384,9 @@ pub(super) async fn dispatch_enriching<
                             ctx.instrumentation.record_error(err.kind());
                             common::observe_join_outputs(
                                 ctx,
+                                scope,
                                 Some(&event),
-                                Some(&delivery_snapshot),
+                                delivery_snapshot.as_ref(),
                                 None,
                                 std::slice::from_mut(&mut error_event),
                                 Some(&merged_parent),
@@ -542,7 +551,6 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
-            Some((&ctx.observers, ctx.lineage_policy)),
             &mut outputs,
         )
         .await?

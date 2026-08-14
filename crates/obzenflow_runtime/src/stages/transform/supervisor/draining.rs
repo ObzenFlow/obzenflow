@@ -80,7 +80,6 @@ async fn dispatch_draining_inner<
                 &mut ctx.backpressure_pulse,
                 &mut ctx.backpressure_stall,
                 Some(&ctx.output_contract),
-                Some((&ctx.observers, ctx.lineage_policy)),
                 &mut ctx.pending_outputs,
             )
             .await?
@@ -234,20 +233,19 @@ async fn dispatch_draining_inner<
             });
 
             // FLOWIP-120c H3: per-event scope, same as the running path.
-            run_before_handler_observers(
-                &ctx.observers,
-                ctx.stage_id,
-                &ctx.stage_name,
-                flow_context,
-                scope,
-                &envelope.event,
-                stage_input_position.map(|position| position.0),
-                ctx.lineage_policy,
-                &ctx.data_journal,
-                &ctx.instrumentation,
-                &envelope,
-            )
-            .await;
+            let handler_invoked = !matches!(
+                envelope.event.processing_info.status,
+                ProcessingStatus::Error { .. }
+            );
+            if handler_invoked {
+                run_before_handler_observers(
+                    &ctx.observers,
+                    flow_context,
+                    scope,
+                    &envelope.event,
+                    stage_input_position.map(|position| position.0),
+                );
+            }
             let transformed_result =
                 process_with_instrumentation(&ctx.instrumentation, || async move {
                     let event = envelope_clone.event.clone();
@@ -329,21 +327,16 @@ async fn dispatch_draining_inner<
                     return Err(error);
                 }
             };
-            run_after_handler_observers(
-                &ctx.observers,
-                ctx.stage_id,
-                &ctx.stage_name,
-                flow_context,
-                scope,
-                &envelope.event,
-                stage_input_position.map(|position| position.0),
-                ctx.lineage_policy,
-                transformed_events.as_slice(),
-                &ctx.data_journal,
-                &ctx.instrumentation,
-                &envelope,
-            )
-            .await;
+            if handler_invoked {
+                run_after_handler_observers(
+                    &ctx.observers,
+                    flow_context,
+                    scope,
+                    &envelope.event,
+                    stage_input_position.map(|position| position.0),
+                    transformed_events.as_slice(),
+                );
+            }
             // Error-journal events are written immediately; stage-journal outputs are gated by backpressure.
             let mut stage_outputs = std::collections::VecDeque::<
                 crate::stages::common::supervision::backpressure_drain::PendingOutput,
@@ -410,7 +403,6 @@ async fn dispatch_draining_inner<
                     &mut ctx.backpressure_pulse,
                     &mut ctx.backpressure_stall,
                     Some(&ctx.output_contract),
-                    Some((&ctx.observers, ctx.lineage_policy)),
                     &mut stage_outputs,
                 )
                 .await?

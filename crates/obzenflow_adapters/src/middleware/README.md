@@ -6,8 +6,8 @@ generic handler wrapper or `pre_handle`/`post_handle` chain.
 ## Observer hooks
 
 Observe-only behaviour implements a surface-specific trait from
-`obzenflow_adapters::middleware::observer` and is returned by a
-`MiddlewareFactory` as a typed observer attachment.
+`obzenflow_runtime::stages::observer` and attaches through its matching
+`*_observer("label", value)` helper.
 
 Supported observer surfaces are:
 
@@ -17,13 +17,18 @@ Supported observer surfaces are:
 - `Join`
 - `Effect`
 - `SinkDelivery`
-- `OutputCommit`
 - `StageLifecycle`
 
-Observers can inspect the surface-shaped context and return journalled
-diagnostic evidence. They cannot skip, reject, retry, pause, or abort.
-`ObserverDeterminism` declares whether runtime dispatch executes the observer
-during replay.
+Observers receive immutable, runtime-constructed views and return nothing.
+They cannot use this contract to replace outputs, publish framework records,
+skip, reject, retry, pause, or abort. Runtime dispatches them only for live
+occurrences, never while recorded history is reconstructed.
+
+Each attachment is independently protected by an unwind boundary. Its first
+panic quarantines it for the rest of the stage run; sibling observers and the
+business operation continue. This is not a process or resource sandbox:
+blocking, deadlock, abort, process exit, excessive resource use, and side
+effects through independently held application capabilities remain possible.
 
 ## Control policies
 
@@ -58,44 +63,29 @@ The context contains:
 It is not persisted, shared between concurrent invocations, passed to handlers
 or supervisors, or exposed as a replacement generic middleware API.
 
-## Factory shape
+## Observer shape
 
 ```rust,ignore
-use obzenflow_adapters::middleware::{
-    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory,
-    MiddlewareFactoryResult, MiddlewareMaterializationContext,
-    MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+use obzenflow_adapters::middleware::sink_delivery_observer;
+use obzenflow_runtime::stages::observer::{
+    SinkDeliveryObserver, SinkDeliveryObserverContext,
 };
 
-struct MyObserverFactory;
+struct DeliveryTrace;
 
-impl MiddlewareFactory for MyObserverFactory {
-    fn label(&self) -> &'static str {
-        "my_observer"
-    }
-
-    fn override_key(&self) -> MiddlewareOverrideKey {
-        MiddlewareOverrideKey::of::<Self>(self.label())
-    }
-
-    fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::observer(
-            self.label(),
-            vec![MiddlewareSurfaceKind::Handler],
-        )
-    }
-
-    fn materialize(
-        &self,
-        request: MiddlewareAttachmentRequest<'_>,
-        context: &MiddlewareMaterializationContext<'_>,
-    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
-        // Validate the requested typed surface and return its attachment.
-        todo!()
+impl SinkDeliveryObserver for DeliveryTrace {
+    fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
+        tracing::info!(
+            stage = ctx.stage_name(),
+            outcome = ?ctx.outcome(),
+            "sink delivery classified"
+        );
     }
 }
+
+let observer = sink_delivery_observer("delivery-trace", DeliveryTrace);
 ```
 
-The built-in indicator, rate-limiter, circuit-breaker, and effect resilience
-factories are complete production examples. Application logging uses standard
-Rust `tracing` rather than observer middleware.
+The observer layer has no logging, measurement, journal, storage, or exporter
+API. Application diagnostics use standard Rust `tracing`. Any future telemetry
+or SLI producers are owned by the FLOWIP-135 series.

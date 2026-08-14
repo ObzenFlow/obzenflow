@@ -54,7 +54,6 @@ use super::fixtures;
 use super::gateway::{AuthorizePayment, GatewayTransform};
 use super::validation;
 use obzenflow::typed::sources as typed_sources;
-use obzenflow_adapters::middleware::observability::{indicator, IndicatorKind};
 use obzenflow_adapters::middleware::{
     CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder, Retry,
 };
@@ -258,23 +257,6 @@ pub fn assemble_flow(
                         PaymentAuthorizationUnavailable
                     } => gateway_transform,
                     effects: [AuthorizePayment with gateway_resilience],
-                    // Record a per-execution service-level-indicator sample for the
-                    // authorization handler. This is end-to-end handler wall time, so it
-                    // includes effect-boundary admission, dependency execution, recovery,
-                    // rejection routing, and the demo's first-Recovery quiet period.
-                    // Breaker attempt rows separately report raw dependency and
-                    // admission-wait time. This sample is observe-only; it never changes
-                    // whether the payment succeeds, retries, or routes. The objective
-                    // (e.g. "under five seconds"), and aggregation into percentiles and
-                    // SLOs, are the FLOWIP-135 read side's job, applied over the
-                    // raw measurements rather than baked into each sample.
-                    observers: [
-                        indicator()
-                            .operation("payment.authorization")
-                            .kind(IndicatorKind::Latency)
-                            .indicator("authorization.latency")
-                            .tag("dependency", "payment_gateway")
-                    ]
                 );
 
                 // Paid-order sink: a tiny in-process console integration. Its

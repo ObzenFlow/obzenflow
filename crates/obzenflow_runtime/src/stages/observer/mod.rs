@@ -8,17 +8,19 @@
 //! middleware layer. It is intentionally placed beside the stage dispatch sites
 //! instead of at the runtime crate root.
 
+mod composition;
 pub(crate) mod dispatch;
 pub mod ports;
 
+pub use composition::StageObserverBundle;
+#[doc(hidden)]
+pub use composition::StageObserverBundleBuilder;
 pub use ports::{
-    DiagnosticProvenance, EffectObserver, EffectObserverContext, EffectObserverOutcome,
-    HandlerObserver, HandlerObserverContext, JoinCanonicalMergeMetadata, JoinDeliverySnapshot,
-    JoinObserver, JoinObserverContext, JoinSide, JoinSignalKind, JoinSignalSnapshot,
-    ObserverCommitError, ObserverCommitResult, ObserverDeterminism, ObserverDiagnostic,
-    ObserverEvidence, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
+    EffectObserver, EffectObserverContext, EffectObserverOutcome, HandlerObserver,
+    HandlerObserverContext, JoinCanonicalMergeMetadata, JoinDeliverySnapshot, JoinObserver,
+    JoinObserverContext, JoinObserverOccurrence, JoinSide, JoinSignalKind, JoinSignalSnapshot,
     SinkDeliveryAttemptResult, SinkDeliveryObserver, SinkDeliveryObserverContext,
     SinkDeliveryObserverOutcome, SourcePollObserver, SourcePollObserverContext,
     SourcePollObserverOutcome, StageLifecycleObserver, StageLifecycleObserverContext,
-    StageLifecyclePhase, StageObserverBundle, StatefulObserver, StatefulObserverContext,
+    StageLifecyclePhase, StatefulObserver, StatefulObserverContext,
 };

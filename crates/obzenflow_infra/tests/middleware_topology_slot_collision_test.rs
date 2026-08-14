@@ -26,11 +26,7 @@ impl TypedPayload for TestEvent {
 
 #[derive(Debug)]
 struct NoopObserver;
-impl StageLifecycleObserver for NoopObserver {
-    fn label(&self) -> &'static str {
-        "noop"
-    }
-}
+impl StageLifecycleObserver for NoopObserver {}
 
 struct FamilyA;
 struct FamilyB;

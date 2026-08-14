@@ -32,7 +32,7 @@ pub use chain_event::{
     CorrelationContext, SourceContractEventParams,
 };
 pub use event_envelope::EventEnvelope;
-pub use journal_event::{JournalAdmissionRole, JournalCausalLane, JournalEvent};
+pub use journal_event::JournalEvent;
 pub use payloads::effect_payload::{
     effect_escape_controls_group_id, CanonicalInputHash, EffectAttemptOrdinal,
     EffectAttemptStarted, EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOrigin,

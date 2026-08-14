@@ -86,7 +86,6 @@ pub(super) async fn dispatch_accumulating<
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
-            Some((&ctx.observers, ctx.lineage_policy)),
             &mut ctx.pending_outputs,
         )
         .await?
@@ -363,35 +362,22 @@ pub(super) async fn dispatch_accumulating<
                         stage_input_position,
                         delivered_generation,
                     );
-                    let observer_ctx = StatefulObserverContext {
-                        stage_id: ctx.stage_id,
-                        stage_name: &ctx.stage_name,
-                        flow_context: &flow_context,
-                        scope,
-                        input: Some(&event),
-                        stage_input_position: stage_input_position.map(|position| position.0),
-                    };
-                    run_stateful_before_accumulate_observers(
-                        &ctx.observers,
-                        &observer_ctx,
-                        ctx.lineage_policy,
-                        &ctx.data_journal,
-                        &ctx.instrumentation,
-                        Some(&envelope),
-                    )
-                    .await;
-
-                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
-                        run_stateful_after_accumulate_observers(
+                    let observer_ctx = StatefulObserverContext::new(
+                        &flow_context,
+                        Some(&event),
+                        stage_input_position.map(|position| position.0),
+                    );
+                    let accumulate_invoked =
+                        !matches!(event.processing_info.status, ProcessingStatus::Error { .. });
+                    if accumulate_invoked {
+                        run_stateful_before_accumulate_observers(
                             &ctx.observers,
+                            scope,
                             &observer_ctx,
-                            ctx.lineage_policy,
-                            &ctx.data_journal,
-                            &ctx.instrumentation,
-                            Some(&envelope),
-                        )
-                        .await;
+                        );
+                    }
 
+                    if !accumulate_invoked {
                         if let Some(state) = &heartbeat_state {
                             state.record_last_consumed(event_id);
                         }
@@ -458,15 +444,6 @@ pub(super) async fn dispatch_accumulating<
                     let accumulate_result = handler
                         .accumulate(&mut ctx.current_state, event.clone(), effect_context, scope)
                         .await;
-                    run_stateful_after_accumulate_observers(
-                        &ctx.observers,
-                        &observer_ctx,
-                        ctx.lineage_policy,
-                        &ctx.data_journal,
-                        &ctx.instrumentation,
-                        Some(&envelope),
-                    )
-                    .await;
                     if let Err(err) = &accumulate_result {
                         if let Some(fatal) = err.as_fatal() {
                             let duration = start.elapsed();
@@ -523,6 +500,7 @@ pub(super) async fn dispatch_accumulating<
                             return Ok(directive);
                         }
                     }
+                    run_stateful_after_accumulate_observers(&ctx.observers, scope, &observer_ctx);
 
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
@@ -801,7 +779,6 @@ pub(super) async fn dispatch_emitting<
                 &mut ctx.backpressure_pulse,
                 &mut ctx.backpressure_stall,
                 Some(&ctx.output_contract),
-                Some((&ctx.observers, ctx.lineage_policy)),
                 &mut ctx.pending_outputs,
             )
             .await?
@@ -878,27 +855,19 @@ pub(super) async fn dispatch_emitting<
     match emit_result {
         Ok(events) if !events.is_empty() => {
             let stage_writer_id = ctx.writer_id.ok_or("No writer ID available")?;
-            let observer_ctx = StatefulObserverContext {
-                stage_id: ctx.stage_id,
-                stage_name: &ctx.stage_name,
-                flow_context: &flow_context,
-                scope: observer_scope,
-                input: ctx
-                    .last_consumed_envelope
+            let observer_ctx = StatefulObserverContext::new(
+                &flow_context,
+                ctx.last_consumed_envelope
                     .as_ref()
                     .map(|envelope| &envelope.event),
-                stage_input_position: ctx.last_input_position.map(|position| position.0),
-            };
+                ctx.last_input_position.map(|position| position.0),
+            );
             run_stateful_after_emit_observers(
                 &ctx.observers,
+                observer_scope,
                 &observer_ctx,
-                ctx.lineage_policy,
                 events.as_slice(),
-                &ctx.data_journal,
-                &ctx.instrumentation,
-                ctx.last_consumed_envelope.as_ref(),
-            )
-            .await;
+            );
 
             for mut event in events {
                 event.writer_id = stage_writer_id;

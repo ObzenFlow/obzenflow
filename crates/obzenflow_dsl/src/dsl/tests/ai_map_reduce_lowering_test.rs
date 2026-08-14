@@ -404,18 +404,14 @@ mod tests {
                     at_least_once(ChatCompletion)
                         via chat
                         with Box::new(
-                            obzenflow_adapters::middleware::IndicatorMiddlewareFactory::new()
-                                .operation("test.map_effect")
-                                .indicator("test.latency")
+                            obzenflow_adapters::middleware::RateLimiterFactory::new(1.0)
                         )
                 } TestPartial => TestMapRole,
                 reduce: (TestSeed, [TestPartial]) ->{
                     at_least_once(ChatCompletion)
                         via chat
                         with Box::new(
-                            obzenflow_adapters::middleware::IndicatorMiddlewareFactory::new()
-                                .operation("test.reduce_effect")
-                                .indicator("test.latency")
+                            obzenflow_adapters::middleware::RateLimiterFactory::new(1.0)
                         )
                 } TestOut => TestFinaliseRole,
             },

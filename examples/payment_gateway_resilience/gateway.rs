@@ -95,12 +95,8 @@ impl Effect for AuthorizePayment {
 
         if matches!(self.order.phase, TrafficPhase::Outage) {
             // A degraded gateway hangs before timing out, so the enclosing
-            // authorization-handler latency sample is large (and the outcome is a
-            // failure). The hang is drawn from the same seeded RNG as the base
-            // latency. The breaker attempt row records raw dependency time, while
-            // the handler indicator records the wider operation duration; whether
-            // either counts as "slow" against an objective is a read-side question
-            // (FLOWIP-135), not baked into the measurement.
+            // authorization attempt is visibly slow (and the outcome is a failure).
+            // The hang is drawn from the same seeded RNG as the base latency.
             let timeout_ms: u64 = ctx.rng("gateway_outage_hang").u64(2_000..=3_000);
             ctx.sleep(std::time::Duration::from_millis(timeout_ms))
                 .await;

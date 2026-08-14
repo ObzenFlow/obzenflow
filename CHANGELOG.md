@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- (FLOWIP-115m Part 2) Seven surface-specific, live-only observer interception helpers with immutable runtime-owned views and checked labelled composition. Each observer attachment is independently panic-quarantined so an unwind cannot suppress siblings or fail the protected business operation.
 - (FLOWIP-128a B4) Stable first-class composite read contracts: the pure Moore lifecycle projection now lives at `obzenflow_core::composite`; `CompositeActivationContext` is pinned as additive durable integration metadata; exporter-facing composite snapshot DTOs have constructors; `composite_status` SSE schema v1 and the exact named-port Prometheus families have producer/consumer goldens.
 - (FLOWIP-120m) New `obzenflow_derive` crate with `#[derive(EffectOutcomeFacts)]`, re-exported through `obzenflow_core` serde-style: define an effect outcome carrier as an enum (closed sum, one persisted fact per variant) or named-field struct (product, one fact per field) and get an exact, fail-closed `TypedFactSet` implementation. Malformed shapes, generics, and repeated member types fail at compile time with span-precise errors; distinct types colliding on `EVENT_TYPE` are rejected at flow build. A `#[effect_outcome(crate = ...)]` attribute redirects the generated paths when core is reached through a re-export (for example `obzenflow_runtime::obzenflow_core`, a hidden re-export added for this).
 - (FLOWIP-120m) `EffectOutcomeFacts`: public supertrait alias over `TypedFactSet`, now the `Effect::Outcome` bound, with `#[diagnostic::on_unimplemented]` notes pointing plain enums at the derive.
@@ -25,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - (FLOWIP-114p) DSL middleware resolution is now fallible on same-scope duplicate override families, and topology/backpressure extraction uses the resolved middleware list plus typed factory contributions/slots instead of label matching.
 
 ### Removed
-- (FLOWIP-115m) The built-in observer logger, its durable logging schema, and the generic user-middleware event authoring escape hatch. Application logging now uses standard Rust `tracing`; `indicator()` remains the only public ordinary-observation producer while the separate observation rail is designed and implemented.
+- (FLOWIP-115m Part 2) Observer reports/evidence, mutable output-commit observers, replay-time observer dispatch, the built-in observer logger, generic user-middleware event authoring, and the premature indicator/latency/measurement and durable-observation-rail APIs. Ordinary observers now return unit and application diagnostics use standard Rust `tracing`; the FLOWIP-135 series owns any future telemetry and SLI product.
 - (FLOWIP-120m) String-only `EffectDeclaration` constructors (`idempotent`, `non_idempotent_with_key`, string `transactional`): their empty fact sets bypassed containment validation; use `EffectDeclaration::of::<E>()`.
 - (FLOWIP-115n) Breaker-authored branch facts, typed wrappers, outcome synthesis, time windows, and sentence-shaped opening criteria.
 
