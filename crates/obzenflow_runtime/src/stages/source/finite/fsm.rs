@@ -594,20 +594,23 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                         );
                     }
                 }
-                let flow_context = FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: ctx.flow_id.to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_id: ctx.stage_id,
-                    stage_type: StageType::FiniteSource,
-                };
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.flow_id,
-                    &flow_context,
                     scope,
                     StageLifecyclePhase::Failed,
+                    || {
+                        (
+                            ctx.flow_id,
+                            FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: ctx.stage_id,
+                                stage_type: StageType::FiniteSource,
+                            },
+                        )
+                    },
                 );
                 Ok(())
             }
@@ -656,20 +659,23 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     stage_name = %ctx.stage_name,
                     "Finite source published running event and source_contract"
                 );
-                let flow_context = FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: ctx.flow_id.to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_id: ctx.stage_id,
-                    stage_type: StageType::FiniteSource,
-                };
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.flow_id,
-                    &flow_context,
                     scope,
                     StageLifecyclePhase::Running,
+                    || {
+                        (
+                            ctx.flow_id,
+                            FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: ctx.stage_id,
+                                stage_type: StageType::FiniteSource,
+                            },
+                        )
+                    },
                 );
                 Ok(())
             }
@@ -705,20 +711,23 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     stage_name = %ctx.stage_name,
                     "Finite source sent completion event"
                 );
-                let flow_context = FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: ctx.flow_id.to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_id: ctx.stage_id,
-                    stage_type: StageType::FiniteSource,
-                };
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.flow_id,
-                    &flow_context,
                     scope,
                     StageLifecyclePhase::Completed,
+                    || {
+                        (
+                            ctx.flow_id,
+                            FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: ctx.stage_id,
+                                stage_type: StageType::FiniteSource,
+                            },
+                        )
+                    },
                 );
                 Ok(())
             }

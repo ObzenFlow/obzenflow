@@ -167,15 +167,15 @@ pub(crate) fn run_effect_observers(
 
 pub(crate) fn run_stage_lifecycle_observers(
     observers: &StageObserverBundle,
-    flow_id: FlowId,
-    flow_context: &FlowContext,
     scope: MiddlewareExecutionScope,
     phase: StageLifecyclePhase,
+    context: impl FnOnce() -> (FlowId, FlowContext),
 ) {
     let Some(observer) = observers.stage_lifecycle().filter(|_| is_live(scope)) else {
         return;
     };
-    let ctx = StageLifecycleObserverContext::new(flow_id, flow_context, phase);
+    let (flow_id, flow_context) = context();
+    let ctx = StageLifecycleObserverContext::new(flow_id, &flow_context, phase);
     observer.invoke(
         ctx.stage_name(),
         "stage_lifecycle",
@@ -215,17 +215,81 @@ pub(crate) fn run_join_before_input_observers(
 mod tests {
     use super::*;
     use crate::stages::observer::composition::StageObserverBundleBuilder;
-    use crate::stages::observer::{HandlerObserver, HandlerObserverContext};
+    use crate::stages::observer::{
+        HandlerObserver, HandlerObserverContext, StageLifecycleObserver,
+        StageLifecycleObserverContext,
+    };
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::WriterId;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    thread_local! {
+        static THREAD_ALLOCATION_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    struct CountingTestAllocator;
+
+    #[global_allocator]
+    static TEST_ALLOCATOR: CountingTestAllocator = CountingTestAllocator;
+
+    fn record_test_allocation() {
+        let _ = THREAD_ALLOCATION_COUNT.try_with(|counter| {
+            if let Some(count) = counter.get() {
+                counter.set(Some(count + 1));
+            }
+        });
+    }
+
+    // SAFETY: every operation delegates unchanged to the system allocator. The
+    // wrapper only increments a thread-local counter before allocation calls.
+    unsafe impl GlobalAlloc for CountingTestAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record_test_allocation();
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record_test_allocation();
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record_test_allocation();
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    fn count_thread_allocations(run: impl FnOnce()) -> usize {
+        THREAD_ALLOCATION_COUNT.with(|counter| {
+            assert!(counter.get().is_none(), "allocation counter is not nested");
+            counter.set(Some(0));
+        });
+        run();
+        THREAD_ALLOCATION_COUNT.with(|counter| {
+            let count = counter.get().expect("allocation counter is enabled");
+            counter.set(None);
+            count
+        })
+    }
 
     struct Counts(Arc<AtomicUsize>);
 
     impl HandlerObserver for Counts {
         fn before_handle(&self, _ctx: &HandlerObserverContext<'_>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl StageLifecycleObserver for Counts {
+        fn on_stage_lifecycle(&self, _ctx: &StageLifecycleObserverContext<'_>) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -275,5 +339,44 @@ mod tests {
             StageInputPosition(1),
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn lifecycle_context_is_not_constructed_without_a_live_observer() {
+        let empty_observers = StageObserverBundleBuilder::default().build();
+        let context_constructions = AtomicUsize::new(0);
+
+        let empty_allocations = count_thread_allocations(|| {
+            run_stage_lifecycle_observers(
+                &empty_observers,
+                MiddlewareExecutionScope::LiveHandler,
+                StageLifecyclePhase::Running,
+                || {
+                    context_constructions.fetch_add(1, Ordering::SeqCst);
+                    panic!("an empty bundle must not construct lifecycle context")
+                },
+            );
+        });
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut builder = StageObserverBundleBuilder::default();
+        builder.push_stage_lifecycle("counts", Arc::new(Counts(calls.clone())));
+        let observers = builder.build();
+        let replay_allocations = count_thread_allocations(|| {
+            run_stage_lifecycle_observers(
+                &observers,
+                MiddlewareExecutionScope::StrictReplayHandler,
+                StageLifecyclePhase::Running,
+                || {
+                    context_constructions.fetch_add(1, Ordering::SeqCst);
+                    panic!("replay must not construct lifecycle context")
+                },
+            );
+        });
+
+        assert_eq!(context_constructions.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(empty_allocations, 0);
+        assert_eq!(replay_allocations, 0);
     }
 }

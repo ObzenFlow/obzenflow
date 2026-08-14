@@ -4,11 +4,12 @@
 
 //! Safe observer interception demo.
 //!
-//! The observer receives a framework-owned sink-delivery classification and
-//! uses ordinary Rust `tracing` for an application diagnostic. It cannot
-//! replace the input, change settlement, publish a framework fact, or fail the
-//! delivery through its observer return type. The panic treatment also shows
-//! per-attachment quarantine: delivery and the following observer continue.
+//! The sink-delivery observer receives a framework-owned classification and
+//! the lifecycle observer receives framework-owned stage phases. Both use
+//! ordinary Rust `tracing` for application diagnostics. Neither can replace
+//! input, change settlement, publish a framework fact, or fail the operation
+//! through its return type. The panic treatment also shows per-attachment
+//! quarantine: delivery and the following observer continue.
 //!
 //! ```text
 //! cargo run -p obzenflow --example observer_interception_points -- --mode control
@@ -16,42 +17,13 @@
 //! cargo run -p obzenflow --example observer_interception_points -- --mode panic
 //! ```
 
+#[path = "observer_interception_points/support.rs"]
+mod support;
+
 use anyhow::{bail, Result};
-use obzenflow::typed::{sinks, sources};
-use obzenflow_adapters::middleware::sink_delivery_observer;
-use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::observer::{SinkDeliveryObserver, SinkDeliveryObserverContext};
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-
-#[derive(Debug, Clone, Copy)]
-enum Mode {
-    Control,
-    Trace,
-    Panic,
-}
-
-impl Mode {
-    fn parse(value: &str) -> Result<Self> {
-        match value {
-            "control" => Ok(Self::Control),
-            "trace" => Ok(Self::Trace),
-            "panic" => Ok(Self::Panic),
-            other => bail!("unknown mode {other:?}; expected control, trace, or panic"),
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Control => "control",
-            Self::Trace => "trace",
-            Self::Panic => "panic",
-        }
-    }
-}
+use support::{build_flow, Mode, Probe};
 
 fn requested_mode() -> Result<Mode> {
     let mut args = std::env::args().skip(1);
@@ -71,92 +43,34 @@ fn requested_mode() -> Result<Mode> {
     Ok(mode)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OrderAccepted {
-    order_id: u64,
-}
-
-impl TypedPayload for OrderAccepted {
-    const EVENT_TYPE: &'static str = "order.accepted";
-    const SCHEMA_VERSION: u32 = 1;
-}
-
-struct DeliveryTrace;
-
-impl SinkDeliveryObserver for DeliveryTrace {
-    fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
-        tracing::info!(
-            flow_id = %ctx.flow_id(),
-            stage = ctx.stage_name(),
-            stage_input_position = ?ctx.stage_input_position(),
-            outcome = ?ctx.outcome(),
-            "sink delivery classified"
-        );
-    }
-}
-
-struct PanickingDeliveryTrace;
-
-impl SinkDeliveryObserver for PanickingDeliveryTrace {
-    fn after_sink_delivery(&self, _ctx: &SinkDeliveryObserverContext<'_>) {
-        panic!("intentional observer panic; the runtime will quarantine this attachment");
-    }
-}
-
 fn main() -> Result<()> {
     let mode = requested_mode()?;
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", "info");
     }
 
+    let probe = Probe::default();
     FlowApplication::builder()
         // `--mode` belongs to this example, not the framework CLI.
         .with_cli_args(["obzenflow"])
-        .run_blocking(FlowDefinition::materialize(move |_runtime_config| {
-            let orders = sources::finite(vec![
-                OrderAccepted { order_id: 1001 },
-                OrderAccepted { order_id: 1002 },
-            ]);
-            let shipping_handoff = sinks::console::<OrderAccepted, _>(|order: &OrderAccepted| {
-                format!("shipping accepted order {}", order.order_id)
-            });
-            let delivered = match mode {
-                Mode::Control => sink!(
-                    OrderAccepted => shipping_handoff,
-                    delivery: idempotent
-                ),
-                Mode::Trace => sink!(
-                    OrderAccepted => shipping_handoff,
-                    delivery: idempotent,
-                    observers: [sink_delivery_observer("delivery-trace", DeliveryTrace)]
-                ),
-                Mode::Panic => sink!(
-                    OrderAccepted => shipping_handoff,
-                    delivery: idempotent,
-                    observers: [
-                        sink_delivery_observer("panicking-trace", PanickingDeliveryTrace),
-                        sink_delivery_observer("delivery-trace", DeliveryTrace)
-                    ]
-                ),
-            };
+        .run_blocking(build_flow(
+            PathBuf::from(format!(
+                "target/observer-interception-points-{}",
+                mode.label()
+            )),
+            mode,
+            probe.clone(),
+        ))?;
 
-            Ok(flow! {
-                name: "observer_interception_points",
-                journals: disk_journals(PathBuf::from(format!(
-                    "target/observer-interception-points-{}",
-                    mode.label()
-                ))),
-
-                stages: {
-                    accepted = source!(OrderAccepted => orders);
-                    delivered = delivered;
-                },
-
-                topology: {
-                    accepted |> delivered;
-                }
-            })
-        }))?;
-
+    let snapshot = probe.snapshot();
+    tracing::info!(
+        mode = mode.label(),
+        source_polls = snapshot.source_polls,
+        sink_writes = snapshot.sink_writes,
+        delivery_callbacks = snapshot.delivery_callbacks,
+        lifecycle_callbacks = snapshot.lifecycle_callbacks,
+        panicking_callbacks = snapshot.panicking_callbacks,
+        "observer interception example complete"
+    );
     Ok(())
 }

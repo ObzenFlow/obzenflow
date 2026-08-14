@@ -111,6 +111,48 @@ fn observer_shell_surfaces_for_stage(stage_type: StageType) -> &'static [Observe
     runtime_observer_shell_surfaces_for_stage(stage_type)
 }
 
+fn observer_surface_name(surface: MiddlewareSurfaceKind) -> &'static str {
+    match surface {
+        MiddlewareSurfaceKind::SourcePoll => "source_poll",
+        MiddlewareSurfaceKind::Effect => "effect",
+        MiddlewareSurfaceKind::SinkDelivery => "sink_delivery",
+        MiddlewareSurfaceKind::Ingress => "ingress",
+        MiddlewareSurfaceKind::Handler => "handler",
+        MiddlewareSurfaceKind::Stateful => "stateful",
+        MiddlewareSurfaceKind::Join => "join",
+        MiddlewareSurfaceKind::StageLifecycle => "stage_lifecycle",
+    }
+}
+
+fn quoted_observer_surfaces(surfaces: impl IntoIterator<Item = MiddlewareSurfaceKind>) -> String {
+    surfaces
+        .into_iter()
+        .map(|surface| format!("'{}'", observer_surface_name(surface)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn incompatible_observer_surface_message(
+    declaration: &MiddlewareDeclaration,
+    stage_name: &str,
+    stage_type: StageType,
+    exposed_surfaces: impl IntoIterator<Item = MiddlewareSurfaceKind>,
+) -> String {
+    let required = quoted_observer_surfaces(declaration.surfaces.iter().copied());
+    let exposed = quoted_observer_surfaces(exposed_surfaces);
+    if declaration.surfaces.len() == 1 {
+        format!(
+            "observer '{}' requires surface {required}, but stage '{stage_name}' ({stage_type:?}) does not expose it; exposed observer surfaces: [{exposed}]",
+            declaration.label
+        )
+    } else {
+        format!(
+            "observer '{}' requires one of surfaces [{required}], but stage '{stage_name}' ({stage_type:?}) exposes none of them; exposed observer surfaces: [{exposed}]",
+            declaration.label
+        )
+    }
+}
+
 fn push_observer_attachment(
     observers: &mut StageObserverSet,
     attachment: CheckedMiddlewareSurfaceAttachment,
@@ -227,12 +269,13 @@ fn plan_positioned_stage_observers(
             placed = true;
         }
         if !placed {
-            return Err(format!(
-                "observer middleware '{}' declares capability {:?} and surfaces {:?}, but stage '{}' ({stage_type:?}) has no compatible observer surface",
-                declaration.label,
-                declaration.capability,
-                declaration.surfaces,
-                config.name
+            return Err(incompatible_observer_surface_message(
+                &declaration,
+                &config.name,
+                stage_type,
+                observer_surfaces
+                    .iter()
+                    .map(|surface| middleware_surface_kind(*surface)),
             )
             .into());
         }
@@ -1617,9 +1660,15 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             if observes_shell {
                 shell_specs.push((observer_index, factory));
             } else if !observes_effect {
-                return Err(format!(
-                    "observer middleware '{}' has no compatible surface on effectful stage '{}'",
-                    declaration.label, self.name
+                let exposed_surfaces = observer_shell_surfaces_for_stage(StageType::Transform)
+                    .iter()
+                    .map(|surface| middleware_surface_kind(*surface))
+                    .chain(std::iter::once(MiddlewareSurfaceKind::Effect));
+                return Err(incompatible_observer_surface_message(
+                    &declaration,
+                    &self.name,
+                    StageType::Transform,
+                    exposed_surfaces,
                 )
                 .into());
             }
@@ -3552,8 +3601,8 @@ mod tests {
 mod observer_placement_negative_tests {
     use super::*;
     use obzenflow_adapters::middleware::{
-        validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
-        MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
+        sink_delivery_observer, validate_attachment_request, MiddlewareAttachmentRequest,
+        MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
         MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurface,
         MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, SourceAdmission, SourcePolicy,
         SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome,
@@ -4191,5 +4240,37 @@ mod observer_placement_negative_tests {
             Err(error) => error,
         };
         assert!(wrong_capability.contains("returned Control/Effect"));
+    }
+
+    #[test]
+    fn incompatible_observer_diagnostic_names_required_and_exposed_surfaces() {
+        let config = StageConfig {
+            stage_id: StageId::new(),
+            name: "authorize_payment".to_string(),
+            flow_name: "observer_placement_negative".to_string(),
+            cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            effective_config: Arc::new(
+                obzenflow_runtime::runtime_config::FlowEffectiveConfig::default(),
+            ),
+        };
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let error = match plan_stage_observers(
+            &config,
+            StageType::Transform,
+            vec![Box::new(sink_delivery_observer(
+                "delivery-trace",
+                NoopObserver,
+            ))],
+            &control,
+        ) {
+            Ok(_) => panic!("sink-delivery observer cannot attach to a transform"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "observer 'delivery-trace' requires surface 'sink_delivery', but stage 'authorize_payment' (Transform) does not expose it; exposed observer surfaces: ['handler', 'stage_lifecycle']"
+        );
     }
 }

@@ -2,9 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use obzenflow_adapters::middleware::stateful_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
@@ -15,6 +17,7 @@ use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
+use obzenflow_runtime::stages::observer::{StatefulObserver, StatefulObserverContext};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 
@@ -275,6 +278,20 @@ impl TypedStatefulHandler for SumHandler {
 #[derive(Debug, Clone)]
 struct ImmediateEmitter;
 
+struct CountsNonEmptyStatefulEmits {
+    calls: Arc<AtomicUsize>,
+}
+
+impl StatefulObserver for CountsNonEmptyStatefulEmits {
+    fn after_state_emit(&self, _ctx: &StatefulObserverContext<'_>, outputs: &[ChainEvent]) {
+        assert!(
+            !outputs.is_empty(),
+            "after_state_emit is defined only for non-empty emitted batches"
+        );
+        self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 impl ImmediateEmitter {
     fn new() -> Self {
         Self
@@ -437,6 +454,8 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
 async fn immediate_emitter_emits_during_accumulating() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_for_flow = events.clone();
+    let observer_calls = Arc::new(AtomicUsize::new(0));
+    let observer_calls_for_flow = observer_calls.clone();
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
@@ -451,7 +470,14 @@ async fn immediate_emitter_emits_during_accumulating() {
 
                 stages: {
                     src = source!(NumberEvent => source_handler);
-                    emitter = stateful!(NumberEvent -> ProgressUpdate => emitter_handler);
+                    emitter = stateful!(NumberEvent -> ProgressUpdate => emitter_handler, observers: [
+                        stateful_observer(
+                            "non-empty-stateful-emits",
+                            CountsNonEmptyStatefulEmits {
+                                calls: observer_calls_for_flow,
+                            }
+                        )
+                    ]);
                     sink = sink!(ProgressUpdate => sink_handler);
                 },
 
@@ -468,7 +494,12 @@ async fn immediate_emitter_emits_during_accumulating() {
         .iter()
         .filter(|e| e.event_type() == ProgressUpdate::versioned_event_type())
         .collect();
-    assert!(!results.is_empty());
+    assert_eq!(results.len(), 5);
+    assert_eq!(
+        observer_calls.load(Ordering::SeqCst),
+        results.len(),
+        "the empty final drain must not manufacture an after_state_emit occurrence"
+    );
 }
 
 #[tokio::test]

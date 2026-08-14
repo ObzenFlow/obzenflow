@@ -576,20 +576,23 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     &ctx.system_journal,
                 )
                 .await;
-                let flow_context = FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: ctx.flow_id.to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_id: ctx.stage_id,
-                    stage_type: StageType::Stateful,
-                };
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.flow_id,
-                    &flow_context,
                     scope,
                     StageLifecyclePhase::Running,
+                    || {
+                        (
+                            ctx.flow_id,
+                            FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: ctx.stage_id,
+                                stage_type: StageType::Stateful,
+                            },
+                        )
+                    },
                 );
                 Ok(())
             }
@@ -708,20 +711,23 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     ctx.instrumentation.as_ref(),
                 )
                 .await;
-                let flow_context = FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: ctx.flow_id.to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_id: ctx.stage_id,
-                    stage_type: StageType::Stateful,
-                };
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.flow_id,
-                    &flow_context,
                     scope,
                     StageLifecyclePhase::Completed,
+                    || {
+                        (
+                            ctx.flow_id,
+                            FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: ctx.stage_id,
+                                stage_type: StageType::Stateful,
+                            },
+                        )
+                    },
                 );
                 Ok(())
             }
@@ -738,20 +744,23 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     ctx.instrumentation.as_ref(),
                 )
                 .await;
-                let flow_context = FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: ctx.flow_id.to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_id: ctx.stage_id,
-                    stage_type: StageType::Stateful,
-                };
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.flow_id,
-                    &flow_context,
                     scope,
                     StageLifecyclePhase::Failed,
+                    || {
+                        (
+                            ctx.flow_id,
+                            FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: ctx.stage_id,
+                                stage_type: StageType::Stateful,
+                            },
+                        )
+                    },
                 );
                 Ok(())
             }

@@ -834,20 +834,22 @@ pub(super) async fn dispatch_draining<
     match drain_result {
         Ok(drain_events) => {
             let stage_writer_id = ctx.writer_id.ok_or("No writer ID available")?;
-            let observer_ctx = StatefulObserverContext::new(
-                ctx.flow_id,
-                &flow_context,
-                ctx.last_consumed_envelope
-                    .as_ref()
-                    .map(|envelope| &envelope.event),
-                ctx.last_input_position,
-            );
-            run_stateful_after_emit_observers(
-                &ctx.observers,
-                observer_scope,
-                &observer_ctx,
-                drain_events.as_slice(),
-            );
+            if !drain_events.is_empty() {
+                let observer_ctx = StatefulObserverContext::new(
+                    ctx.flow_id,
+                    &flow_context,
+                    ctx.last_consumed_envelope
+                        .as_ref()
+                        .map(|envelope| &envelope.event),
+                    ctx.last_input_position,
+                );
+                run_stateful_after_emit_observers(
+                    &ctx.observers,
+                    observer_scope,
+                    &observer_ctx,
+                    drain_events.as_slice(),
+                );
+            }
 
             for mut event in drain_events {
                 event.writer_id = stage_writer_id;

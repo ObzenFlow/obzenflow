@@ -5,6 +5,10 @@
 use super::*;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
 use crate::id_conversions::StageIdExt;
+use crate::stages::observer::{
+    EffectObserver, EffectObserverContext, EffectObserverOutcome, ObserverBinding, ObserverTarget,
+    StageObserverBindings, StageObserverBundle,
+};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::event_envelope::JournalGroupMember;
 use obzenflow_core::event::{EventEnvelope, JournalEvent};
@@ -3937,6 +3941,42 @@ async fn capture_replays_recorded_value_without_using_live_value() {
 
 struct AbortingBoundary;
 
+#[derive(Default)]
+struct EffectObserverLog {
+    outcomes: Mutex<Vec<(String, EffectObserverOutcome)>>,
+}
+
+impl EffectObserver for EffectObserverLog {
+    fn after_effect(&self, ctx: &EffectObserverContext<'_>) {
+        self.outcomes
+            .lock()
+            .expect("effect observer log lock poisoned")
+            .push((ctx.effect_type().to_string(), ctx.outcome()));
+    }
+}
+
+fn attach_effect_observer(
+    ctx: &mut EffectInvocationContext,
+    effect_type: &'static str,
+    observer: Arc<dyn EffectObserver>,
+) {
+    let mut bindings = StageObserverBindings::default();
+    bindings.push(
+        ObserverBinding::effect("effect-outcome-proof", effect_type, observer)
+            .expect("effect observer binding is valid"),
+    );
+    ctx.observers = Some(
+        StageObserverBundle::compose_checked(
+            &ctx.stage_key,
+            ObserverTarget::Transform {
+                effects: &ctx.effect_declarations,
+            },
+            bindings,
+        )
+        .expect("effect observer matches the declared subject"),
+    );
+}
+
 #[async_trait]
 impl EffectBoundary for AbortingBoundary {
     async fn around_repeatable_effect(
@@ -3964,6 +4004,25 @@ impl EffectBoundary for AbortingBoundary {
         _event: &ChainEvent,
         operation: SingleUseEffectOperation,
     ) -> SingleUseEffectBoundaryReport {
+        operation.abort(
+            EffectAbortReason {
+                cause: EffectFailureCause {
+                    source: "circuit_breaker".into(),
+                    code: "circuit_open".into(),
+                },
+                message: "circuit breaker rejected effect execution".to_string(),
+                retry: RetryDisposition::Retryable,
+            },
+            Vec::new(),
+        )
+    }
+
+    async fn around_affine_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: AffineEffectOperation,
+    ) -> AffineEffectBoundaryReport {
         operation.abort(
             EffectAbortReason {
                 cause: EffectFailureCause {
@@ -4414,12 +4473,18 @@ async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_b
     let recovery_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let recovery_calls = Arc::new(AtomicUsize::new(0));
     let recovery_consults = Arc::new(AtomicUsize::new(0));
+    let recovery_observations = Arc::new(EffectObserverLog::default());
     let mut recovery_ctx = invocation_context_with_mode(
         recovery_journal.clone(),
         recovery_parent.clone(),
         Some(in_doubt_history),
         EffectRuntimeMode::ResumeIncomplete,
         EffectPortRegistry::new(),
+    );
+    attach_effect_observer(
+        &mut recovery_ctx,
+        AffineCountingEffect::EFFECT_TYPE,
+        recovery_observations.clone(),
     );
     recovery_ctx.effect_boundary = Some(Arc::new(RecoveryRejectingBoundary {
         consults: recovery_consults.clone(),
@@ -4444,6 +4509,17 @@ async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_b
     ));
     assert_eq!(recovery_calls.load(Ordering::SeqCst), 0);
     assert_eq!(recovery_consults.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *recovery_observations
+            .outcomes
+            .lock()
+            .expect("recovery observer assertion lock"),
+        [(
+            AffineCountingEffect::EFFECT_TYPE.to_string(),
+            EffectObserverOutcome::Failed,
+        )],
+        "a live recovery abandonment is one failed affine-effect result"
+    );
 
     let recovery_events = recovery_journal.events();
     let starts = recovery_events
@@ -4496,12 +4572,18 @@ async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_b
     ] {
         let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
         let replay_calls = Arc::new(AtomicUsize::new(0));
+        let replay_observations = Arc::new(EffectObserverLog::default());
         let mut replay_ctx = invocation_context_with_mode(
             replay_journal.clone(),
             recovery_parent.clone(),
             Some(settled_history.clone()),
             mode,
             EffectPortRegistry::new(),
+        );
+        attach_effect_observer(
+            &mut replay_ctx,
+            AffineCountingEffect::EFFECT_TYPE,
+            replay_observations.clone(),
         );
         replay_ctx.effect_boundary = Some(Arc::new(PanicBoundary));
         let mut replay = EffectsCore::new(replay_ctx);
@@ -4519,12 +4601,55 @@ async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_b
             } if last_started_attempt == EffectAttemptOrdinal::new(1)
         ));
         assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            replay_observations
+                .outcomes
+                .lock()
+                .expect("replay observer assertion lock")
+                .is_empty(),
+            "replaying an archived abandonment must not dispatch an observer"
+        );
         assert_eq!(
             comparable_effect_journal(&recovery_journal),
             comparable_effect_journal(&replay_journal),
             "strict replay and resume-of-resume reproduce the abandonment byte-for-byte"
         );
     }
+}
+
+#[tokio::test]
+async fn affine_boundary_abort_notifies_effect_observer_once() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let effect_calls = Arc::new(AtomicUsize::new(0));
+    let observations = Arc::new(EffectObserverLog::default());
+    let mut ctx = invocation_context(journal, parent_envelope(WriterId::from(stage_id)), None);
+    attach_effect_observer(
+        &mut ctx,
+        AffineCountingEffect::EFFECT_TYPE,
+        observations.clone(),
+    );
+    ctx.effect_boundary = Some(Arc::new(AbortingBoundary));
+    let mut effects = EffectsCore::new(ctx);
+
+    let result = effects
+        .perform(AffineCountingEffect {
+            calls: effect_calls.clone(),
+        })
+        .await;
+
+    assert!(matches!(result, Err(EffectError::BoundaryRejected { .. })));
+    assert_eq!(effect_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        *observations
+            .outcomes
+            .lock()
+            .expect("affine observer assertion lock"),
+        [(
+            AffineCountingEffect::EFFECT_TYPE.to_string(),
+            EffectObserverOutcome::Failed,
+        )]
+    );
 }
 
 #[tokio::test]

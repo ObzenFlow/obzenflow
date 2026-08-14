@@ -987,32 +987,34 @@ impl EffectsCore {
                 }
             }
             SingleUseEffectBoundaryOutcome::Aborted(reason) => {
-                if highest_prior_attempt == 0 {
-                    return self
-                        .record_boundary_abort_with_control_events(
-                            cursor,
-                            descriptor_hash,
-                            descriptor,
-                            reason,
-                            control_events,
-                        )
-                        .await;
-                }
-                let causal_input_id = recovery_causal_input_id.ok_or_else(|| {
-                    EffectError::EffectProvenanceMismatch(format!(
-                        "effect cursor {cursor:?} selected recovery abandonment without an archived Start identity"
-                    ))
-                })?;
-                self.record_recovery_abandonment(RecoveryAbandonment {
-                    cursor,
-                    descriptor_hash,
-                    descriptor,
-                    highest_started_attempt: EffectAttemptOrdinal::new(highest_prior_attempt),
-                    causal_input_id,
-                    reason,
-                    control_events,
-                })
-                .await
+                let result = if highest_prior_attempt == 0 {
+                    self.record_boundary_abort_with_control_events(
+                        cursor,
+                        descriptor_hash,
+                        descriptor,
+                        reason,
+                        control_events,
+                    )
+                    .await
+                } else {
+                    let causal_input_id = recovery_causal_input_id.ok_or_else(|| {
+                        EffectError::EffectProvenanceMismatch(format!(
+                            "effect cursor {cursor:?} selected recovery abandonment without an archived Start identity"
+                        ))
+                    })?;
+                    self.record_recovery_abandonment(RecoveryAbandonment {
+                        cursor,
+                        descriptor_hash,
+                        descriptor,
+                        highest_started_attempt: EffectAttemptOrdinal::new(highest_prior_attempt),
+                        causal_input_id,
+                        reason,
+                        control_events,
+                    })
+                    .await
+                };
+                self.observe_effect_result(E::EFFECT_TYPE, &result);
+                result
             }
         }
     }

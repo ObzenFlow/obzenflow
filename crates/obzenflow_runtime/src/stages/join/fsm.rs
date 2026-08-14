@@ -575,20 +575,25 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                     &ctx.system_journal,
                 )
                 .await;
-                let flow_context = FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: ctx.flow_id.to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_id: ctx.stage_id,
-                    stage_type: StageType::Join,
-                };
+                let scope = ctx
+                    .runtime_execution
+                    .dispatch_scope(ctx.stage_id, None, None);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.flow_id,
-                    &flow_context,
-                    ctx.runtime_execution
-                        .dispatch_scope(ctx.stage_id, None, None),
+                    scope,
                     StageLifecyclePhase::Running,
+                    || {
+                        (
+                            ctx.flow_id,
+                            FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: ctx.stage_id,
+                                stage_type: StageType::Join,
+                            },
+                        )
+                    },
                 );
                 Ok(())
             }
@@ -713,20 +718,25 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                     ctx.instrumentation.as_ref(),
                 )
                 .await;
-                let flow_context = FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: ctx.flow_id.to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_id: ctx.stage_id,
-                    stage_type: StageType::Join,
-                };
+                let scope = ctx
+                    .runtime_execution
+                    .dispatch_scope(ctx.stage_id, None, None);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.flow_id,
-                    &flow_context,
-                    ctx.runtime_execution
-                        .dispatch_scope(ctx.stage_id, None, None),
+                    scope,
                     StageLifecyclePhase::Completed,
+                    || {
+                        (
+                            ctx.flow_id,
+                            FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: ctx.stage_id,
+                                stage_type: StageType::Join,
+                            },
+                        )
+                    },
                 );
                 Ok(())
             }
@@ -743,20 +753,25 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                     ctx.instrumentation.as_ref(),
                 )
                 .await;
-                let flow_context = FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: ctx.flow_id.to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_id: ctx.stage_id,
-                    stage_type: StageType::Join,
-                };
+                let scope = ctx
+                    .runtime_execution
+                    .dispatch_scope(ctx.stage_id, None, None);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.flow_id,
-                    &flow_context,
-                    ctx.runtime_execution
-                        .dispatch_scope(ctx.stage_id, None, None),
+                    scope,
                     StageLifecyclePhase::Failed,
+                    || {
+                        (
+                            ctx.flow_id,
+                            FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: ctx.stage_id,
+                                stage_type: StageType::Join,
+                            },
+                        )
+                    },
                 );
                 Ok(())
             }
