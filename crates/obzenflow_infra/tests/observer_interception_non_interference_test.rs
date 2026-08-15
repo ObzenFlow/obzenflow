@@ -176,42 +176,49 @@ async fn observer_interception_non_interference() {
     let observers = run_live(&live_root, ObserverTreatment::Observers).await;
     let panicking_observer = run_live(&live_root, ObserverTreatment::PanickingObserver).await;
 
-    let expected_external_calls = (ORDER_COUNT + 1, ORDER_COUNT);
+    let expected_external_calls = (ORDER_COUNT + 1, ORDER_COUNT, ORDER_COUNT);
     for (label, snapshot) in [
         ("without observers", without_observers.snapshot),
         ("observers", observers.snapshot),
         ("panicking observer", panicking_observer.snapshot),
     ] {
         assert_eq!(
-            (snapshot.source_polls, snapshot.sink_writes),
+            (
+                snapshot.source_polls,
+                snapshot.effect_calls,
+                snapshot.sink_writes,
+            ),
             expected_external_calls,
-            "{label} must make the same source and sink calls"
+            "{label} must make the same source, effect, and sink calls"
         );
     }
     assert_eq!(
         (
+            without_observers.snapshot.effect_callbacks,
             without_observers.snapshot.delivery_callbacks,
             without_observers.snapshot.lifecycle_callbacks,
             without_observers.snapshot.panicking_callbacks,
         ),
-        (0, 0, 0)
+        (0, 0, 0, 0)
     );
     assert_eq!(
         (
+            observers.snapshot.effect_callbacks,
             observers.snapshot.delivery_callbacks,
             observers.snapshot.lifecycle_callbacks,
             observers.snapshot.panicking_callbacks,
         ),
-        (ORDER_COUNT, 2, 0),
-        "observer treatment must observe every delivery and both sink lifecycle phases"
+        (ORDER_COUNT, ORDER_COUNT, 2, 0),
+        "observer treatment must observe every effect and delivery plus both sink lifecycle phases"
     );
     assert_eq!(
         (
+            panicking_observer.snapshot.effect_callbacks,
             panicking_observer.snapshot.delivery_callbacks,
             panicking_observer.snapshot.lifecycle_callbacks,
             panicking_observer.snapshot.panicking_callbacks,
         ),
-        (ORDER_COUNT, 2, 1),
+        (ORDER_COUNT, ORDER_COUNT, 2, 1),
         "the panicking attachment is quarantined while its siblings continue"
     );
 
@@ -239,8 +246,13 @@ async fn observer_interception_non_interference() {
 
     let expected_effect_facts = effect_facts(&without_observers.run_dir).await;
     assert!(
-        expected_effect_facts.is_empty(),
-        "the focused sink example performs no effects"
+        !expected_effect_facts.is_empty(),
+        "the authority comparison requires real, non-empty effect facts"
+    );
+    assert_eq!(
+        expected_effect_facts.len(),
+        ORDER_COUNT,
+        "each accepted order must author one durable effect outcome fact"
     );
     assert_eq!(
         effect_facts(&observers.run_dir).await,
@@ -280,7 +292,9 @@ async fn observer_interception_non_interference() {
             replay.snapshot,
             ProbeSnapshot {
                 source_polls: 0,
+                effect_calls: 0,
                 sink_writes: ORDER_COUNT,
+                effect_callbacks: 0,
                 delivery_callbacks: 0,
                 lifecycle_callbacks: 0,
                 panicking_callbacks: 0,

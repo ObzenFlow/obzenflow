@@ -14,7 +14,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::CircuitBreaker;
+use obzenflow_adapters::middleware::{sink_delivery_observer, CircuitBreaker};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -22,11 +22,14 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkWriteContext, SinkWriteReport, TypedFiniteSourceHandler,
 };
+use obzenflow_runtime::stages::observer::{
+    SinkDeliveryObserver, SinkDeliveryObserverContext, SinkDeliveryObserverOutcome,
+};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 fn breaker(failures: usize) -> CircuitBreaker {
@@ -99,6 +102,19 @@ impl InlineSink for AlwaysFailingSink {
     }
 }
 
+struct RecordsDeliveryClassifications {
+    outcomes: Arc<Mutex<Vec<SinkDeliveryObserverOutcome>>>,
+}
+
+impl SinkDeliveryObserver for RecordsDeliveryClassifications {
+    fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
+        self.outcomes
+            .lock()
+            .expect("sink observer outcome lock")
+            .push(ctx.outcome().clone());
+    }
+}
+
 #[tokio::test]
 async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
     let _ = tracing_subscriber::fmt()
@@ -111,6 +127,8 @@ async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
 
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_for_flow = Arc::clone(&calls);
+    let outcomes = Arc::new(Mutex::new(Vec::new()));
+    let outcomes_for_flow = Arc::clone(&outcomes);
 
     let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
         let source = BurstSource::new(TOTAL_EVENTS);
@@ -126,7 +144,12 @@ async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
                 cb_source = source!(SinkBreakerEvent => source);
                 cb_sink = sink!(SinkBreakerEvent => sink_handler with [
                     breaker(THRESHOLD)
-                ]);
+                ], observers: [sink_delivery_observer(
+                    "delivery-classifications",
+                    RecordsDeliveryClassifications {
+                        outcomes: outcomes_for_flow,
+                    }
+                )]);
             },
 
             topology: {
@@ -164,6 +187,35 @@ async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
         (invoked as u64) < TOTAL_EVENTS,
         "expected the breaker to reject some deliveries (invoked {invoked} < {TOTAL_EVENTS}); \
          the sink-delivery boundary did not short-circuit"
+    );
+
+    let outcomes = outcomes.lock().expect("sink outcome assertion lock");
+    let attempted = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, SinkDeliveryObserverOutcome::Attempted { .. }))
+        .count();
+    let rejected = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome,
+                SinkDeliveryObserverOutcome::Rejected { policy: Some(policy) }
+                    if policy == "circuit_breaker"
+            )
+        })
+        .count();
+    assert_eq!(
+        attempted, invoked,
+        "every live sink attempt receives exactly one observer classification"
+    );
+    assert!(
+        rejected > 0,
+        "the observer must receive the circuit breaker's control rejection"
+    );
+    assert_eq!(
+        outcomes.len(),
+        attempted + rejected,
+        "every observed sink delivery is exactly one attempt or rejection"
     );
 
     Ok(())
