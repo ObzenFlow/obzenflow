@@ -186,10 +186,6 @@ name = "char_transform_skeleton"
 path = "examples/char_transform_skeleton.rs"
 
 [[example]]
-name = "observer_interception_points"
-path = "examples/observer_interception_points.rs"
-
-[[example]]
 name = "flow_middleware_config"
 path = "examples/flow_middleware_config/main.rs"
 

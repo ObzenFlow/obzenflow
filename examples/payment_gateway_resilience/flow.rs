@@ -45,7 +45,7 @@
 //! review. See `README.md`.
 
 use super::console;
-use super::deliveries::ShippingHandoff;
+use super::deliveries::{ShippingDeliveryLog, ShippingHandoff};
 use super::domain::{
     CustomerOrderPlaced, InvalidOrder, OrderCancelled, PaymentAuthorizationUnavailable,
     PaymentAuthorized, PaymentDeclined, ValidatedOrder,
@@ -55,7 +55,8 @@ use super::gateway::{AuthorizePayment, GatewayTransform};
 use super::validation;
 use obzenflow::typed::sources as typed_sources;
 use obzenflow_adapters::middleware::{
-    CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder, Retry,
+    sink_delivery_observer, CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder,
+    Retry,
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -262,7 +263,16 @@ pub fn assemble_flow(
                 // Paid-order sink: a tiny in-process console integration. Its
                 // implementation only writes and reports what it actually did;
                 // the site-level clause classifies repeat delivery for resume.
-                paid_orders = sink!(PaymentAuthorized => shipping_handoff, delivery: idempotent);
+                // One passive observer logs the runtime's immutable delivery
+                // classification. It cannot alter settlement or emit flow facts.
+                paid_orders = sink!(
+                    PaymentAuthorized => shipping_handoff,
+                    delivery: idempotent,
+                    observers: [sink_delivery_observer(
+                        "shipping-delivery-log",
+                        ShippingDeliveryLog
+                    )]
+                );
 
                 // Cancelled-order sink, tier 2: a declared closure. The order's
                 // fate converges from both producers (local validation failures

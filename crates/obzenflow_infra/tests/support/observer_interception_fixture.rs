@@ -2,9 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Shared deterministic fixture for the executable example and its journal verifier.
+//! Private deterministic fixture for observer non-interference verification.
 
-use anyhow::{bail, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{sink_delivery_observer, stage_lifecycle_observer};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
@@ -29,28 +28,18 @@ use std::sync::Arc;
 pub(crate) const ORDER_COUNT: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Mode {
-    Control,
-    Trace,
-    Panic,
+pub(crate) enum ObserverTreatment {
+    WithoutObservers,
+    Observers,
+    PanickingObserver,
 }
 
-impl Mode {
-    #[allow(dead_code)]
-    pub(crate) fn parse(value: &str) -> Result<Self> {
-        match value {
-            "control" => Ok(Self::Control),
-            "trace" => Ok(Self::Trace),
-            "panic" => Ok(Self::Panic),
-            other => bail!("unknown mode {other:?}; expected control, trace, or panic"),
-        }
-    }
-
+impl ObserverTreatment {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Control => "control",
-            Self::Trace => "trace",
-            Self::Panic => "panic",
+            Self::WithoutObservers => "without-observers",
+            Self::Observers => "observers",
+            Self::PanickingObserver => "panicking-observer",
         }
     }
 }
@@ -142,11 +131,11 @@ impl InlineSink for ShippingHandoff {
     }
 }
 
-struct DeliveryTrace {
+struct DeliveryProbeObserver {
     calls: Arc<AtomicUsize>,
 }
 
-impl SinkDeliveryObserver for DeliveryTrace {
+impl SinkDeliveryObserver for DeliveryProbeObserver {
     fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
         self.calls.fetch_add(1, Ordering::SeqCst);
         tracing::info!(
@@ -159,11 +148,11 @@ impl SinkDeliveryObserver for DeliveryTrace {
     }
 }
 
-struct LifecycleTrace {
+struct LifecycleProbeObserver {
     calls: Arc<AtomicUsize>,
 }
 
-impl StageLifecycleObserver for LifecycleTrace {
+impl StageLifecycleObserver for LifecycleProbeObserver {
     fn on_stage_lifecycle(&self, ctx: &StageLifecycleObserverContext<'_>) {
         self.calls.fetch_add(1, Ordering::SeqCst);
         tracing::info!(
@@ -175,18 +164,22 @@ impl StageLifecycleObserver for LifecycleTrace {
     }
 }
 
-struct PanickingDeliveryTrace {
+struct PanickingDeliveryObserver {
     calls: Arc<AtomicUsize>,
 }
 
-impl SinkDeliveryObserver for PanickingDeliveryTrace {
+impl SinkDeliveryObserver for PanickingDeliveryObserver {
     fn after_sink_delivery(&self, _ctx: &SinkDeliveryObserverContext<'_>) {
         self.calls.fetch_add(1, Ordering::SeqCst);
         panic!("intentional observer panic; the runtime will quarantine this attachment");
     }
 }
 
-pub(crate) fn build_flow(journal_root: PathBuf, mode: Mode, probe: Probe) -> FlowDefinition {
+pub(crate) fn build_flow(
+    journal_root: PathBuf,
+    treatment: ObserverTreatment,
+    probe: Probe,
+) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let orders = OrderSource {
             next: 0,
@@ -195,48 +188,48 @@ pub(crate) fn build_flow(journal_root: PathBuf, mode: Mode, probe: Probe) -> Flo
         let shipping_handoff = ShippingHandoff {
             writes: probe.sink_writes.clone(),
         };
-        let delivered = match mode {
-            Mode::Control => sink!(
+        let delivered = match treatment {
+            ObserverTreatment::WithoutObservers => sink!(
                 OrderAccepted => shipping_handoff,
                 delivery: idempotent
             ),
-            Mode::Trace => sink!(
+            ObserverTreatment::Observers => sink!(
                 OrderAccepted => shipping_handoff,
                 delivery: idempotent,
                 observers: [
                     stage_lifecycle_observer(
-                        "lifecycle-trace",
-                        LifecycleTrace {
+                        "lifecycle-probe",
+                        LifecycleProbeObserver {
                             calls: probe.lifecycle_callbacks.clone(),
                         }
                     ),
                     sink_delivery_observer(
-                        "delivery-trace",
-                        DeliveryTrace {
+                        "delivery-probe",
+                        DeliveryProbeObserver {
                             calls: probe.delivery_callbacks.clone(),
                         }
                     )
                 ]
             ),
-            Mode::Panic => sink!(
+            ObserverTreatment::PanickingObserver => sink!(
                 OrderAccepted => shipping_handoff,
                 delivery: idempotent,
                 observers: [
                     stage_lifecycle_observer(
-                        "lifecycle-trace",
-                        LifecycleTrace {
+                        "lifecycle-probe",
+                        LifecycleProbeObserver {
                             calls: probe.lifecycle_callbacks.clone(),
                         }
                     ),
                     sink_delivery_observer(
-                        "panicking-trace",
-                        PanickingDeliveryTrace {
+                        "panicking-delivery-probe",
+                        PanickingDeliveryObserver {
                             calls: probe.panicking_callbacks.clone(),
                         }
                     ),
                     sink_delivery_observer(
-                        "delivery-trace",
-                        DeliveryTrace {
+                        "delivery-probe",
+                        DeliveryProbeObserver {
                             calls: probe.delivery_callbacks.clone(),
                         }
                     )
@@ -245,7 +238,7 @@ pub(crate) fn build_flow(journal_root: PathBuf, mode: Mode, probe: Probe) -> Flo
         };
 
         Ok(flow! {
-            name: "observer_interception_points",
+            name: "observer_interception_non_interference_fixture",
             journals: disk_journals(journal_root),
 
             stages: {

@@ -2,14 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-115m Part 2: execute the shipped observer example's exact flow in
-//! control, tracing, and panicking treatments, then compare authoritative
-//! journals and strict replay.
+//! FLOWIP-115m Part 2: execute a private observer fixture without observers,
+//! with heterogeneous observers, and with a panicking attachment, then compare
+//! authoritative journals and strict replay.
 
-#[path = "../../../examples/observer_interception_points/support.rs"]
+#[path = "support/observer_interception_fixture.rs"]
 mod fixture;
 
-use fixture::{build_flow, Mode, Probe, ProbeSnapshot, ORDER_COUNT};
+use fixture::{build_flow, ObserverTreatment, Probe, ProbeSnapshot, ORDER_COUNT};
 use obzenflow_core::event::{ChainEventContent, EventEnvelope};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::run_manifest::{RunManifest, RUN_MANIFEST_FILENAME};
@@ -130,22 +130,26 @@ struct CompletedRun {
     snapshot: ProbeSnapshot,
 }
 
-async fn run_live(base: &Path, mode: Mode) -> CompletedRun {
-    let journal_root = base.join(mode.label());
+async fn run_live(base: &Path, treatment: ObserverTreatment) -> CompletedRun {
+    let journal_root = base.join(treatment.label());
     let probe = Probe::default();
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_flow(journal_root.clone(), mode, probe.clone()))
+        .run_async(build_flow(journal_root.clone(), treatment, probe.clone()))
         .await
-        .unwrap_or_else(|error| panic!("{} treatment completes: {error}", mode.label()));
+        .unwrap_or_else(|error| panic!("{} treatment completes: {error}", treatment.label()));
     CompletedRun {
         run_dir: flow_dir(&journal_root),
         snapshot: probe.snapshot(),
     }
 }
 
-async fn run_strict_replay(base: &Path, mode: Mode, recorded_run: &Path) -> CompletedRun {
-    let journal_root = base.join(format!("{}-replay", mode.label()));
+async fn run_strict_replay(
+    base: &Path,
+    treatment: ObserverTreatment,
+    recorded_run: &Path,
+) -> CompletedRun {
+    let journal_root = base.join(format!("{}-replay", treatment.label()));
     let probe = Probe::default();
     FlowApplication::builder()
         .with_cli_args(vec![
@@ -153,9 +157,9 @@ async fn run_strict_replay(base: &Path, mode: Mode, recorded_run: &Path) -> Comp
             OsString::from("--replay-from"),
             recorded_run.as_os_str().to_os_string(),
         ])
-        .run_async(build_flow(journal_root.clone(), mode, probe.clone()))
+        .run_async(build_flow(journal_root.clone(), treatment, probe.clone()))
         .await
-        .unwrap_or_else(|error| panic!("{} strict replay completes: {error}", mode.label()));
+        .unwrap_or_else(|error| panic!("{} strict replay completes: {error}", treatment.label()));
     CompletedRun {
         run_dir: flow_dir(&journal_root),
         snapshot: probe.snapshot(),
@@ -168,15 +172,15 @@ async fn observer_interception_non_interference() {
     let live_root = temp.path().join("live");
     let replay_root = temp.path().join("replay");
 
-    let control = run_live(&live_root, Mode::Control).await;
-    let trace = run_live(&live_root, Mode::Trace).await;
-    let panic = run_live(&live_root, Mode::Panic).await;
+    let without_observers = run_live(&live_root, ObserverTreatment::WithoutObservers).await;
+    let observers = run_live(&live_root, ObserverTreatment::Observers).await;
+    let panicking_observer = run_live(&live_root, ObserverTreatment::PanickingObserver).await;
 
     let expected_external_calls = (ORDER_COUNT + 1, ORDER_COUNT);
     for (label, snapshot) in [
-        ("control", control.snapshot),
-        ("trace", trace.snapshot),
-        ("panic", panic.snapshot),
+        ("without observers", without_observers.snapshot),
+        ("observers", observers.snapshot),
+        ("panicking observer", panicking_observer.snapshot),
     ] {
         assert_eq!(
             (snapshot.source_polls, snapshot.sink_writes),
@@ -186,66 +190,92 @@ async fn observer_interception_non_interference() {
     }
     assert_eq!(
         (
-            control.snapshot.delivery_callbacks,
-            control.snapshot.lifecycle_callbacks,
-            control.snapshot.panicking_callbacks,
+            without_observers.snapshot.delivery_callbacks,
+            without_observers.snapshot.lifecycle_callbacks,
+            without_observers.snapshot.panicking_callbacks,
         ),
         (0, 0, 0)
     );
     assert_eq!(
         (
-            trace.snapshot.delivery_callbacks,
-            trace.snapshot.lifecycle_callbacks,
-            trace.snapshot.panicking_callbacks,
+            observers.snapshot.delivery_callbacks,
+            observers.snapshot.lifecycle_callbacks,
+            observers.snapshot.panicking_callbacks,
         ),
         (ORDER_COUNT, 2, 0),
-        "trace treatment must observe every delivery and both sink lifecycle phases"
+        "observer treatment must observe every delivery and both sink lifecycle phases"
     );
     assert_eq!(
         (
-            panic.snapshot.delivery_callbacks,
-            panic.snapshot.lifecycle_callbacks,
-            panic.snapshot.panicking_callbacks,
+            panicking_observer.snapshot.delivery_callbacks,
+            panicking_observer.snapshot.lifecycle_callbacks,
+            panicking_observer.snapshot.panicking_callbacks,
         ),
         (ORDER_COUNT, 2, 1),
         "the panicking attachment is quarantined while its siblings continue"
     );
 
-    assert_certified_match(&control.run_dir, &trace.run_dir, "control versus trace");
-    assert_certified_match(&control.run_dir, &panic.run_dir, "control versus panic");
+    assert_certified_match(
+        &without_observers.run_dir,
+        &observers.run_dir,
+        "without observers versus observers",
+    );
+    assert_certified_match(
+        &without_observers.run_dir,
+        &panicking_observer.run_dir,
+        "without observers versus panicking observer",
+    );
 
-    let control_receipts = delivery_receipts(&control.run_dir).await;
-    assert_eq!(control_receipts.len(), ORDER_COUNT);
-    assert_eq!(delivery_receipts(&trace.run_dir).await, control_receipts);
-    assert_eq!(delivery_receipts(&panic.run_dir).await, control_receipts);
+    let expected_receipts = delivery_receipts(&without_observers.run_dir).await;
+    assert_eq!(expected_receipts.len(), ORDER_COUNT);
+    assert_eq!(
+        delivery_receipts(&observers.run_dir).await,
+        expected_receipts
+    );
+    assert_eq!(
+        delivery_receipts(&panicking_observer.run_dir).await,
+        expected_receipts
+    );
 
-    let control_effect_facts = effect_facts(&control.run_dir).await;
+    let expected_effect_facts = effect_facts(&without_observers.run_dir).await;
     assert!(
-        control_effect_facts.is_empty(),
+        expected_effect_facts.is_empty(),
         "the focused sink example performs no effects"
     );
-    assert_eq!(effect_facts(&trace.run_dir).await, control_effect_facts);
-    assert_eq!(effect_facts(&panic.run_dir).await, control_effect_facts);
-
     assert_eq!(
-        terminal_status(&control.run_dir).await,
-        ArchiveStatus::Completed
+        effect_facts(&observers.run_dir).await,
+        expected_effect_facts
     );
     assert_eq!(
-        terminal_status(&trace.run_dir).await,
-        ArchiveStatus::Completed
-    );
-    assert_eq!(
-        terminal_status(&panic.run_dir).await,
-        ArchiveStatus::Completed
+        effect_facts(&panicking_observer.run_dir).await,
+        expected_effect_facts
     );
 
-    for (mode, recorded) in [
-        (Mode::Control, &control.run_dir),
-        (Mode::Trace, &trace.run_dir),
-        (Mode::Panic, &panic.run_dir),
+    assert_eq!(
+        terminal_status(&without_observers.run_dir).await,
+        ArchiveStatus::Completed
+    );
+    assert_eq!(
+        terminal_status(&observers.run_dir).await,
+        ArchiveStatus::Completed
+    );
+    assert_eq!(
+        terminal_status(&panicking_observer.run_dir).await,
+        ArchiveStatus::Completed
+    );
+
+    for (treatment, recorded) in [
+        (
+            ObserverTreatment::WithoutObservers,
+            &without_observers.run_dir,
+        ),
+        (ObserverTreatment::Observers, &observers.run_dir),
+        (
+            ObserverTreatment::PanickingObserver,
+            &panicking_observer.run_dir,
+        ),
     ] {
-        let replay = run_strict_replay(&replay_root, mode, recorded).await;
+        let replay = run_strict_replay(&replay_root, treatment, recorded).await;
         assert_eq!(
             replay.snapshot,
             ProbeSnapshot {
@@ -256,7 +286,7 @@ async fn observer_interception_non_interference() {
                 panicking_callbacks: 0,
             },
             "{} strict replay must suppress source polling and every observer callback while re-driving the idempotent sink identically",
-            mode.label()
+            treatment.label()
         );
         assert_eq!(
             terminal_status(&replay.run_dir).await,
@@ -265,9 +295,9 @@ async fn observer_interception_non_interference() {
         assert_certified_match(
             recorded,
             &replay.run_dir,
-            &format!("{} live versus strict replay", mode.label()),
+            &format!("{} live versus strict replay", treatment.label()),
         );
-        assert_eq!(delivery_receipts(&replay.run_dir).await, control_receipts);
-        assert_eq!(effect_facts(&replay.run_dir).await, control_effect_facts);
+        assert_eq!(delivery_receipts(&replay.run_dir).await, expected_receipts);
+        assert_eq!(effect_facts(&replay.run_dir).await, expected_effect_facts);
     }
 }
