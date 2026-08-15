@@ -235,17 +235,7 @@ pub(super) async fn dispatch_draining<
                         Some(&event),
                         stage_input_position,
                     );
-                    let accumulate_invoked =
-                        !matches!(event.processing_info.status, ProcessingStatus::Error { .. });
-                    if accumulate_invoked {
-                        run_stateful_before_accumulate_observers(
-                            &ctx.observers,
-                            scope,
-                            &observer_ctx,
-                        );
-                    }
-
-                    if !accumulate_invoked {
+                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
                         if let Some(state) = &heartbeat_state {
                             state.record_last_consumed(event_id);
                         }
@@ -277,6 +267,8 @@ pub(super) async fn dispatch_draining<
                         acknowledge_consumed_drain_input(&ctx.backpressure_readers, upstream_stage);
                         return Ok(EventLoopDirective::Continue);
                     }
+
+                    run_stateful_before_accumulate_observers(&ctx.observers, scope, &observer_ctx);
 
                     let mut handler = (*ctx.handler).clone();
                     let effect_context = stage_input_position.and_then(|input_seq| {

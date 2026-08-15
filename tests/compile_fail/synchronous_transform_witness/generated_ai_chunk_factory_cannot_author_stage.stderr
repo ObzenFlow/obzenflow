@@ -4,7 +4,7 @@ error[E0277]: this transform handler does not witness its arrow contract
 22 |     let _ = obzenflow_dsl::transform!(Input -> First => raw);
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this handler does not implement the typed synchronous transform contract
    |
-   = help: the trait `TypedTransformHandler` is not implemented for `impl TransformHandler + Clone + std::fmt::Debug`
+   = help: the trait `TypedTransformHandler` is not implemented for `impl TransformHandler + Clone + Debug`
    = note: implement TypedTransformHandler with Input and Output matching the transform! arrow (FLOWIP-134b)
    = help: the following other types implement trait `TypedTransformHandler`:
              ChunkByBudgetTyped<In, Item>
