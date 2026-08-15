@@ -6,7 +6,6 @@
 //! over the complete stage-plus-inline declaration set before materialisation.
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::observer::EffectObserver;
 use obzenflow_adapters::middleware::{
     validate_attachment_request, CircuitBreaker, EffectAttemptOutcome, EffectPolicy,
     EffectResilience, MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration,
@@ -28,6 +27,7 @@ use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::DslConfigDefault;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+use obzenflow_runtime::stages::observer::EffectObserver;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -347,11 +347,7 @@ impl MiddlewareFactory for ProofObserverFactory {
 
 struct ProofObserver;
 
-impl EffectObserver for ProofObserver {
-    fn label(&self) -> &'static str {
-        "a4_effect_observer"
-    }
-}
+impl EffectObserver for ProofObserver {}
 
 struct OrdinaryControlFamily;
 

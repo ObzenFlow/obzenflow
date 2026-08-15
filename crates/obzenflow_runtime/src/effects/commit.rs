@@ -181,7 +181,6 @@ where
                 heartbeat_state: self.inner.heartbeat_state.as_ref(),
                 output_contract: Some(&self.inner.output_contract),
                 backpressure_writer: Some(&self.inner.backpressure_writer),
-                observers: None,
                 observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
             };
             let entries = events
@@ -276,7 +275,6 @@ where
                 heartbeat_state: None,
                 output_contract: None,
                 backpressure_writer: Some(&self.inner.backpressure_writer),
-                observers: None,
                 observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
             };
             if let Err(error) = committer
@@ -567,7 +565,6 @@ pub(super) async fn append_domain_effect_success_facts(
         heartbeat_state,
         output_contract,
         backpressure_writer: Some(backpressure_writer),
-        observers: None,
         observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
     };
 
@@ -622,7 +619,6 @@ pub(super) async fn append_effect_record(
         heartbeat_state: None,
         output_contract: None,
         backpressure_writer: Some(backpressure_writer),
-        observers: None,
         observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
     };
     committer

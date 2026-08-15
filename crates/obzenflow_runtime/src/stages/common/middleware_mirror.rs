@@ -46,7 +46,6 @@ pub async fn mirror_middleware_event_to_system_journal(
                     | RateLimiterEvent::WindowUtilization { .. }
             )
         }
-        _ => false,
     };
     if !should_mirror {
         return;

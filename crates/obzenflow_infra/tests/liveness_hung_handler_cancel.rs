@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
+use obzenflow_adapters::middleware::{handler_observer, stage_lifecycle_observer};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
@@ -18,6 +19,10 @@ use obzenflow_runtime::stages::common::handlers::{
     SinkWriteReport, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
+use obzenflow_runtime::stages::observer::{
+    HandlerObserver, HandlerObserverContext, StageLifecycleObserver, StageLifecycleObserverContext,
+    StageLifecyclePhase,
+};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +38,7 @@ impl TypedPayload for ProbeEvent {
     const EVENT_TYPE: &'static str = "probe.event";
 }
 use std::future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -134,6 +139,38 @@ impl InlineSink for NoopSink {
     }
 }
 
+struct CountsHungHandlerOccurrences {
+    before: Arc<AtomicUsize>,
+    after: Arc<AtomicUsize>,
+}
+
+impl HandlerObserver for CountsHungHandlerOccurrences {
+    fn before_handle(&self, _ctx: &HandlerObserverContext<'_>) {
+        self.before.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn after_handle(
+        &self,
+        _ctx: &HandlerObserverContext<'_>,
+        _outputs: &[obzenflow_core::ChainEvent],
+    ) {
+        self.after.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct RecordsHungLifecycle {
+    phases: Arc<Mutex<Vec<StageLifecyclePhase>>>,
+}
+
+impl StageLifecycleObserver for RecordsHungLifecycle {
+    fn on_stage_lifecycle(&self, ctx: &StageLifecycleObserverContext<'_>) {
+        self.phases
+            .lock()
+            .expect("hung lifecycle observation lock")
+            .push(ctx.phase());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
     let flow_handle_slot: Arc<Mutex<Option<Arc<FlowHandle>>>> = Arc::new(Mutex::new(None));
@@ -147,6 +184,12 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
     let handler_entered_for_flow = handler_entered.clone();
     let handler_dropped_for_flow = handler_dropped.clone();
     let handler_drop_observed_for_flow = handler_drop_observed.clone();
+    let before_callbacks = Arc::new(AtomicUsize::new(0));
+    let after_callbacks = Arc::new(AtomicUsize::new(0));
+    let lifecycle_phases = Arc::new(Mutex::new(Vec::new()));
+    let before_callbacks_for_flow = before_callbacks.clone();
+    let after_callbacks_for_flow = after_callbacks.clone();
+    let lifecycle_phases_for_flow = lifecycle_phases.clone();
 
     let hook = Box::new(move |handle: &Arc<FlowHandle>| {
         *flow_handle_slot_hook.lock().expect("flow_handle_slot lock") = Some(handle.clone());
@@ -175,7 +218,21 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
                 hung = effectful_transform!(
                     ProbeEvent -> ProbeEvent => hung_transform,
                     effects: [],
-                    observers: [],
+                    observers: [
+                        handler_observer(
+                            "hung-handler-occurrences",
+                            CountsHungHandlerOccurrences {
+                                before: before_callbacks_for_flow,
+                                after: after_callbacks_for_flow,
+                            }
+                        ),
+                        stage_lifecycle_observer(
+                            "hung-lifecycle-occurrences",
+                            RecordsHungLifecycle {
+                                phases: lifecycle_phases_for_flow,
+                            }
+                        )
+                    ],
                 );
                 snk = sink!(ProbeEvent => noop_sink);
             },
@@ -295,5 +352,22 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
     assert!(
         handler_dropped.load(Ordering::SeqCst),
         "cancelling the stage must drop the directly awaited handler invocation"
+    );
+    assert_eq!(
+        before_callbacks.load(Ordering::SeqCst),
+        1,
+        "the live handler invocation receives one before callback"
+    );
+    assert_eq!(
+        after_callbacks.load(Ordering::SeqCst),
+        0,
+        "cancelling an in-flight handler invocation must not manufacture an after callback"
+    );
+    assert_eq!(
+        *lifecycle_phases
+            .lock()
+            .expect("hung lifecycle assertion lock"),
+        [StageLifecyclePhase::Running],
+        "force cancellation aborts the stage task and must not manufacture a terminal lifecycle transition"
     );
 }

@@ -1,0 +1,15 @@
+error[E0624]: associated function `new` is private
+ --> tests/compile_fail/observer_context_constructor_is_private.rs:8:48
+  |
+8 |       let _constructor = HandlerObserverContext::new;
+  |                                                  ^^^ private associated function
+  |
+ ::: src/stages/observer/ports.rs
+  |
+  | /     pub(crate) fn new(
+  | |         flow_id: FlowId,
+  | |         flow_context: &'a FlowContext,
+  | |         input: &'a ChainEvent,
+  | |         stage_input_position: StageInputPosition,
+  | |     ) -> Self {
+  | |_____________- private associated function defined here

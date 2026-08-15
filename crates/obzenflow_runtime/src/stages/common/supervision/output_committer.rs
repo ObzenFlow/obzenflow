@@ -39,7 +39,6 @@
 
 use std::sync::Arc;
 
-use crate::stages::observer::{ObserverReport, StageObserverBundle};
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -56,7 +55,6 @@ use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal;
-use crate::stages::observer::dispatch::run_output_commit_observers;
 
 fn output_contract_summary(output_contract: &StageOutputContract) -> String {
     output_contract
@@ -180,8 +178,8 @@ pub(crate) enum MirrorPolicy {
     FrameworkMiddlewareAllowlist,
 }
 
-/// The kind of stage-runtime journal append, used to gate the
-/// `before_output_commit` observer hook and the framework system-journal mirror.
+/// The kind of stage-runtime journal append, used to gate runtime enrichment
+/// and the framework system-journal mirror.
 ///
 /// Only the five wired variants exist. Other stage-runtime appends are
 /// out-of-surface raw appends today: error-journal and error-routed-data writes,
@@ -190,16 +188,13 @@ pub(crate) enum MirrorPolicy {
 /// `fx.emit` / domain-effect-outcome / framework-effect-record facts (which flow
 /// through `NonDataStageFact`) each append directly to their journal (and mirror
 /// directly where applicable) rather than through this seam. Routing them through
-/// named intents is deferred to a committer-consolidation slice (FLOWIP-120b);
-/// it is not required for the `before_output_commit` boundary, which only the
-/// `NormalStageData` path reaches.
+/// named intents is deferred to a committer-consolidation slice (FLOWIP-120b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StageAppendIntent {
     NormalStageData,
     NonDataStageFact,
     FrameworkTerminal,
     FrameworkObservability,
-    ObserverDiagnostic,
 }
 
 /// One member of a policy-neutral atomic journal group.
@@ -213,14 +208,13 @@ impl StageAppendIntent {
     pub(crate) fn mirror_policy(self) -> MirrorPolicy {
         match self {
             Self::FrameworkObservability => MirrorPolicy::FrameworkMiddlewareAllowlist,
-            Self::NormalStageData
-            | Self::NonDataStageFact
-            | Self::FrameworkTerminal
-            | Self::ObserverDiagnostic => MirrorPolicy::None,
+            Self::NormalStageData | Self::NonDataStageFact | Self::FrameworkTerminal => {
+                MirrorPolicy::None
+            }
         }
     }
 
-    pub(crate) fn runs_output_commit_hooks(self) -> bool {
+    pub(crate) fn receives_runtime_data_enrichment(self) -> bool {
         matches!(self, Self::NormalStageData)
     }
 }
@@ -252,9 +246,7 @@ pub(crate) struct OutputCommitter<'a> {
     /// leave this absent because they own an enforced or replay-scoped
     /// reservation outside the commit helper.
     pub backpressure_writer: Option<&'a BackpressureWriter>,
-    /// Observer bundle for stage output commit hooks.
-    pub observers: Option<&'a StageObserverBundle>,
-    /// Per-event observer execution scope for replay suppression.
+    /// Per-event execution scope for replay-sensitive runtime enrichment.
     pub observer_scope: MiddlewareExecutionScope,
 }
 
@@ -409,14 +401,6 @@ impl OutputCommitter<'_> {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
-        if self.observers.is_some()
-            && entries
-                .iter()
-                .any(|entry| entry.intent.runs_output_commit_hooks())
-        {
-            return Err("atomic journal groups cannot run output-commit observers before their commit point".into());
-        }
-
         let mut prepared = Vec::with_capacity(entries.len());
         let mut metadata = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -526,7 +510,9 @@ impl OutputCommitter<'_> {
                 event.writer_id = WriterId::from(flow_context.stage_id);
             }
             event = event.with_flow_context(flow_context.clone());
-            if intent.runs_output_commit_hooks() && !self.observer_scope.is_deterministic_replay() {
+            if intent.receives_runtime_data_enrichment()
+                && !self.observer_scope.is_deterministic_replay()
+            {
                 apply_runtime_journey_identity(&mut event, flow_context);
             }
         }
@@ -539,36 +525,12 @@ impl OutputCommitter<'_> {
             // field is excluded from replay equivalence by the value-preserving
             // projection, like runtime_context telemetry; the authoritative original
             // journal holds the live measurement.
-            if intent.runs_output_commit_hooks() && !self.observer_scope.is_deterministic_replay() {
+            if intent.receives_runtime_data_enrichment()
+                && !self.observer_scope.is_deterministic_replay()
+            {
                 event.processing_info.processing_time = instrumentation.last_processing_time();
             }
             event = event.with_runtime_context(instrumentation.snapshot_with_control());
-        }
-
-        if intent.runs_output_commit_hooks() {
-            if let (Some(observers), Some(flow_context)) = (self.observers, self.flow_context) {
-                let before = value_preserving_projection(&event)?;
-                let parent_event = parent.map(|envelope| &envelope.event);
-                let report = run_output_commit_observers(
-                    observers,
-                    flow_context.stage_id,
-                    &flow_context.stage_name,
-                    flow_context,
-                    self.observer_scope,
-                    parent_event,
-                    &mut event,
-                )
-                .map_err(|e| -> CommitError { e.to_string().into() })?;
-                ensure_value_preserving(before, &event)?;
-                append_observer_diagnostics(
-                    report,
-                    flow_context,
-                    self.instrumentation,
-                    self.data_journal,
-                    parent,
-                )
-                .await?;
-            }
         }
 
         Ok(event)
@@ -605,44 +567,6 @@ impl OutputCommitter<'_> {
                 mirror_middleware_event_to_system_journal(written, system_journal).await;
             }
         }
-    }
-
-    async fn append_no_hook_prebuilt(
-        &self,
-        mut event: ChainEvent,
-        parent: Option<&EventEnvelope<ChainEvent>>,
-        intent: StageAppendIntent,
-    ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
-        debug_assert!(!intent.runs_output_commit_hooks());
-
-        if let Some(flow_context) = self.flow_context {
-            event = event.with_flow_context(flow_context.clone());
-        }
-
-        if let Some(instrumentation) = self.instrumentation {
-            event = event.with_runtime_context(instrumentation.snapshot_with_control());
-        }
-
-        let written = self
-            .data_journal
-            .append(event, parent)
-            .await
-            .map_err(|e| -> CommitError { e.to_string().into() })?;
-
-        if let Some(heartbeat) = self.heartbeat_state {
-            heartbeat.record_last_output(written.event.id);
-        }
-
-        if matches!(
-            intent.mirror_policy(),
-            MirrorPolicy::FrameworkMiddlewareAllowlist
-        ) {
-            if let Some(system_journal) = self.system_journal {
-                mirror_middleware_event_to_system_journal(&written, system_journal).await;
-            }
-        }
-
-        Ok(written)
     }
 
     /// Validate a prebuilt event before a caller performs any external gating
@@ -720,7 +644,6 @@ pub(crate) async fn commit_framework_observability_events(
         heartbeat_state: context.heartbeat_state,
         output_contract: None,
         backpressure_writer: Some(context.backpressure_writer),
-        observers: None,
         observer_scope: context.observer_scope,
     };
 
@@ -745,79 +668,6 @@ pub(crate) fn is_framework_middleware_observability_event(event: &ChainEvent) ->
             MiddlewareLifecycle::CircuitBreaker(_) | MiddlewareLifecycle::RateLimiter(_)
         ))
     )
-}
-
-pub(crate) async fn append_observer_diagnostics(
-    report: ObserverReport,
-    flow_context: &FlowContext,
-    instrumentation: Option<&Arc<StageInstrumentation>>,
-    data_journal: &Arc<dyn Journal<ChainEvent>>,
-    parent: Option<&EventEnvelope<ChainEvent>>,
-) -> Result<(), CommitError> {
-    if report.is_empty() {
-        return Ok(());
-    }
-    validate_observer_diagnostics(&report)?;
-
-    let committer = OutputCommitter {
-        data_journal,
-        flow_context: Some(flow_context),
-        system_journal: None,
-        instrumentation,
-        heartbeat_state: None,
-        output_contract: None,
-        backpressure_writer: None,
-        observers: None,
-        observer_scope: MiddlewareExecutionScope::LiveHandler,
-    };
-
-    for diagnostic in report.diagnostics {
-        committer
-            .append_no_hook_prebuilt(diagnostic, parent, StageAppendIntent::ObserverDiagnostic)
-            .await
-            .map_err(|e| format!("Failed to append observer diagnostic: {e}"))?;
-    }
-
-    Ok(())
-}
-
-fn validate_observer_diagnostics(report: &ObserverReport) -> Result<(), CommitError> {
-    for diagnostic in &report.diagnostics {
-        if diagnostic.is_data() || diagnostic.is_control() {
-            return Err(format!(
-                "observer diagnostic '{}' cannot author Data or flow-control events",
-                diagnostic.event_type()
-            )
-            .into());
-        }
-    }
-    Ok(())
-}
-
-fn value_preserving_projection(event: &ChainEvent) -> Result<serde_json::Value, CommitError> {
-    let mut value = serde_json::to_value(event).map_err(|e| -> CommitError { e.into() })?;
-    if let Some(processing) = value
-        .as_object_mut()
-        .and_then(|object| object.get_mut("processing_info"))
-        .and_then(|value| value.as_object_mut())
-    {
-        processing.remove("processing_time");
-    }
-    if let Some(object) = value.as_object_mut() {
-        object.remove("observability");
-    }
-    Ok(value)
-}
-
-fn ensure_value_preserving(
-    before: serde_json::Value,
-    event: &ChainEvent,
-) -> Result<(), CommitError> {
-    let after = value_preserving_projection(event)?;
-    if before == after {
-        return Ok(());
-    }
-    Err("output-commit observer changed non-observability event fields".into())
 }
 
 fn apply_runtime_journey_identity(event: &mut ChainEvent, flow: &FlowContext) {
@@ -845,85 +695,5 @@ fn apply_runtime_journey_identity(event: &mut ChainEvent, flow: &FlowContext) {
             stage_name = %flow.stage_name,
             "Non-source derived data event missing correlation_id"
         );
-    }
-}
-
-#[cfg(test)]
-mod observer_diagnostic_tests {
-    use super::*;
-    use obzenflow_core::event::context::ReplayContext;
-    use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::{StageId, WriterId};
-
-    #[test]
-    fn observer_reports_reject_data_and_flow_control_before_append() {
-        let writer = WriterId::from(StageId::new());
-        let reports = [
-            ObserverReport::empty().with_diagnostic(ChainEventFactory::data_event(
-                writer,
-                "test.rogue",
-                serde_json::json!({ "value": 1 }),
-            )),
-            ObserverReport::empty().with_diagnostic(ChainEventFactory::eof_event(writer, true)),
-        ];
-
-        for report in reports {
-            let diagnostic = &report.diagnostics[0];
-            assert!(
-                diagnostic.is_data() || diagnostic.is_control(),
-                "fixture must exercise a prohibited observer side channel"
-            );
-            assert!(
-                validate_observer_diagnostics(&report).is_err(),
-                "prohibited diagnostics must fail before any journal append"
-            );
-        }
-    }
-
-    #[test]
-    fn source_commit_boundary_is_structural_authorship_proof() {
-        let current = StageId::new();
-        let archived = StageId::new();
-        let mut event = ChainEventFactory::data_event(
-            WriterId::from(archived),
-            "test.replayed.v1",
-            serde_json::json!({ "value": 1 }),
-        );
-        event.replay_context = Some(ReplayContext {
-            original_event_id: event.id,
-            original_flow_id: "archived-flow".to_string(),
-            original_stage_id: archived,
-            archive_path: "archive".into(),
-            replayed_at: chrono::Utc::now(),
-        });
-        let source_context = FlowContext {
-            flow_name: "flow".to_string(),
-            flow_id: "current-flow".to_string(),
-            stage_name: "source".to_string(),
-            stage_id: current,
-            stage_type: StageType::FiniteSource,
-        };
-
-        assert!(event_is_authored_by_stage(
-            &event,
-            &source_context,
-            MiddlewareExecutionScope::StrictReplayHandler,
-        ));
-        assert!(event_is_authored_by_stage(
-            &event,
-            &source_context,
-            MiddlewareExecutionScope::LiveHandler,
-        ));
-
-        let derived_context = FlowContext {
-            stage_name: "transform".to_string(),
-            stage_type: StageType::Transform,
-            ..source_context
-        };
-        assert!(!event_is_authored_by_stage(
-            &event,
-            &derived_context,
-            MiddlewareExecutionScope::StrictReplayHandler,
-        ));
     }
 }

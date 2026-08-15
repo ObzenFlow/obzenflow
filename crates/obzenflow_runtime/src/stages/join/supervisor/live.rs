@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::messaging::PollResult;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
@@ -119,7 +118,7 @@ async fn poll_live_reference<
     };
 
     match poll {
-        PollResult::Event(envelope) => handle_reference_envelope(sup, ctx, envelope, None).await,
+        PollResult::Event(envelope) => handle_reference_envelope(sup, ctx, envelope).await,
         PollResult::CursorAdvanced {
             upstream,
             completed_data_rows,
@@ -149,7 +148,6 @@ async fn handle_reference_envelope<
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
     envelope: EventEnvelope<ChainEvent>,
-    canonical_merge: Option<crate::stages::observer::JoinCanonicalMergeMetadata>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.reference_subscription.as_mut() else {
         return Ok(None);
@@ -225,6 +223,11 @@ async fn handle_reference_envelope<
             ) {
                 common::observe_join_input(
                     ctx,
+                    ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        None,
+                        subscription.last_delivered_generation(),
+                    ),
                     &envelope.event,
                     None,
                     Some(&signal_snapshot),
@@ -278,22 +281,31 @@ async fn handle_reference_envelope<
             let event_id = event.id;
             let source_id = ctx.reference_stage_id;
             let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
-            let delivery_snapshot = common::delivery_snapshot(
-                crate::stages::observer::JoinSide::Reference,
-                source_id,
+            let scope = ctx.runtime_execution.dispatch_scope(
+                ctx.stage_id,
                 subscription.last_delivered_stage_input_position(),
-                &envelope,
-                &ctx.reference_high_water_clock,
-                canonical_merge.clone(),
-            )?;
+                subscription.last_delivered_generation(),
+            );
+            let delivery_snapshot = (ctx.observers.has_join() && !scope.is_deterministic_replay())
+                .then(|| {
+                    common::delivery_snapshot(
+                        crate::stages::observer::JoinSide::Reference,
+                        source_id,
+                        subscription.last_delivered_stage_input_position(),
+                        &envelope,
+                        &ctx.reference_high_water_clock,
+                    )
+                })
+                .transpose()?;
             if let Some(heartbeat) = &ctx.heartbeat {
                 heartbeat.state.record_data_read(source_id, event_id);
             }
             let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
             common::observe_join_input(
                 ctx,
+                scope,
                 &event,
-                Some(&delivery_snapshot),
+                delivery_snapshot.as_ref(),
                 None,
                 Some(&envelope),
             )
@@ -306,8 +318,9 @@ async fn handle_reference_envelope<
                 let mut outputs = vec![event.clone()];
                 common::observe_join_outputs(
                     ctx,
+                    scope,
                     Some(&event),
-                    Some(&delivery_snapshot),
+                    delivery_snapshot.as_ref(),
                     None,
                     outputs.as_mut_slice(),
                     Some(&envelope),
@@ -340,15 +353,6 @@ async fn handle_reference_envelope<
             let _processing = heartbeat_state.as_ref().map(|state| {
                 HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
             });
-            // FLOWIP-120n: per-delivery execution scope, computed at dispatch
-            // from the delivered position and generation.
-            let scope = ctx.runtime_execution.dispatch_scope(
-                ctx.stage_id,
-                Some(StageInputPosition(
-                    delivery_snapshot.delivered_stage_input_position,
-                )),
-                subscription.last_delivered_generation(),
-            );
             let result = ctx.handler.process_reference(
                 &mut ctx.handler_state,
                 event.clone(),
@@ -381,8 +385,9 @@ async fn handle_reference_envelope<
                         .fetch_add(1, Ordering::Relaxed);
                     common::observe_join_outputs(
                         ctx,
+                        scope,
                         Some(&event),
-                        Some(&delivery_snapshot),
+                        delivery_snapshot.as_ref(),
                         None,
                         events.as_mut_slice(),
                         Some(&envelope),
@@ -419,8 +424,9 @@ async fn handle_reference_envelope<
                     ctx.instrumentation.record_error(err.kind());
                     common::observe_join_outputs(
                         ctx,
+                        scope,
                         Some(&event),
-                        Some(&delivery_snapshot),
+                        delivery_snapshot.as_ref(),
                         None,
                         std::slice::from_mut(&mut error_event),
                         Some(&envelope),
@@ -482,7 +488,7 @@ async fn poll_live_stream<
     };
 
     match poll {
-        PollResult::Event(envelope) => handle_stream_envelope(sup, ctx, envelope, None).await,
+        PollResult::Event(envelope) => handle_stream_envelope(sup, ctx, envelope).await,
         PollResult::CursorAdvanced {
             upstream,
             completed_data_rows,
@@ -512,7 +518,6 @@ async fn handle_stream_envelope<
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
     envelope: EventEnvelope<ChainEvent>,
-    canonical_merge: Option<crate::stages::observer::JoinCanonicalMergeMetadata>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.stream_subscription.as_mut() else {
         return Ok(None);
@@ -587,6 +592,11 @@ async fn handle_stream_envelope<
             ) {
                 common::observe_join_input(
                     ctx,
+                    ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        None,
+                        subscription.last_delivered_generation(),
+                    ),
                     &envelope.event,
                     None,
                     Some(&signal_snapshot),
@@ -661,14 +671,22 @@ async fn handle_stream_envelope<
             let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
             let event = envelope.event.clone();
             let event_id = event.id;
-            let delivery_snapshot = common::delivery_snapshot(
-                crate::stages::observer::JoinSide::Stream,
-                source_id,
+            let scope = ctx.runtime_execution.dispatch_scope(
+                ctx.stage_id,
                 subscription.last_delivered_stage_input_position(),
-                &envelope,
-                &ctx.reference_high_water_clock,
-                canonical_merge.clone(),
-            )?;
+                subscription.last_delivered_generation(),
+            );
+            let delivery_snapshot = (ctx.observers.has_join() && !scope.is_deterministic_replay())
+                .then(|| {
+                    common::delivery_snapshot(
+                        crate::stages::observer::JoinSide::Stream,
+                        source_id,
+                        subscription.last_delivered_stage_input_position(),
+                        &envelope,
+                        &ctx.reference_high_water_clock,
+                    )
+                })
+                .transpose()?;
 
             if let Some(heartbeat) = &ctx.heartbeat {
                 heartbeat.state.record_data_read(source_id, event_id);
@@ -676,8 +694,9 @@ async fn handle_stream_envelope<
             let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
             common::observe_join_input(
                 ctx,
+                scope,
                 &event,
-                Some(&delivery_snapshot),
+                delivery_snapshot.as_ref(),
                 None,
                 Some(&envelope),
             )
@@ -690,8 +709,9 @@ async fn handle_stream_envelope<
                 let mut outputs = vec![event.clone()];
                 common::observe_join_outputs(
                     ctx,
+                    scope,
                     Some(&event),
-                    Some(&delivery_snapshot),
+                    delivery_snapshot.as_ref(),
                     None,
                     outputs.as_mut_slice(),
                     Some(&envelope),
@@ -730,15 +750,6 @@ async fn handle_stream_envelope<
             let _processing = heartbeat_state.as_ref().map(|state| {
                 HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
             });
-            // FLOWIP-120n: per-delivery execution scope, computed at dispatch
-            // from the delivered position and generation.
-            let scope = ctx.runtime_execution.dispatch_scope(
-                ctx.stage_id,
-                Some(StageInputPosition(
-                    delivery_snapshot.delivered_stage_input_position,
-                )),
-                subscription.last_delivered_generation(),
-            );
             let result = ctx.handler.process_stream(
                 &mut ctx.handler_state,
                 event.clone(),
@@ -772,8 +783,9 @@ async fn handle_stream_envelope<
                         .fetch_add(1, Ordering::Relaxed);
                     common::observe_join_outputs(
                         ctx,
+                        scope,
                         Some(&event),
-                        Some(&delivery_snapshot),
+                        delivery_snapshot.as_ref(),
                         None,
                         events.as_mut_slice(),
                         Some(&merged_parent),
@@ -813,8 +825,9 @@ async fn handle_stream_envelope<
                     ctx.instrumentation.record_error(err.kind());
                     common::observe_join_outputs(
                         ctx,
+                        scope,
                         Some(&event),
-                        Some(&delivery_snapshot),
+                        delivery_snapshot.as_ref(),
                         None,
                         std::slice::from_mut(&mut error_event),
                         Some(&merged_parent),
@@ -1109,16 +1122,7 @@ async fn dispatch_live_canonical<
             };
             match poll {
                 PollResult::Event(envelope) => {
-                    handle_reference_envelope(
-                        sup,
-                        ctx,
-                        envelope,
-                        Some(crate::stages::observer::JoinCanonicalMergeMetadata {
-                            selected_feed: Some("reference".to_string()),
-                            reader_index: None,
-                        }),
-                    )
-                    .await?
+                    handle_reference_envelope(sup, ctx, envelope).await?
                 }
                 PollResult::CursorAdvanced {
                     upstream,
@@ -1145,18 +1149,7 @@ async fn dispatch_live_canonical<
                 subscription.take_merge_candidate("Live", Some(&mut ctx.stream_contract_state[..]))
             };
             match poll {
-                PollResult::Event(envelope) => {
-                    handle_stream_envelope(
-                        sup,
-                        ctx,
-                        envelope,
-                        Some(crate::stages::observer::JoinCanonicalMergeMetadata {
-                            selected_feed: Some("stream".to_string()),
-                            reader_index: None,
-                        }),
-                    )
-                    .await?
-                }
+                PollResult::Event(envelope) => handle_stream_envelope(sup, ctx, envelope).await?,
                 PollResult::CursorAdvanced {
                     upstream,
                     completed_data_rows,
@@ -1238,7 +1231,6 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
-            Some(&ctx.observers),
             &mut outputs,
         )
         .await?

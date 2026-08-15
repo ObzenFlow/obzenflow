@@ -100,7 +100,6 @@ async fn dispatch_running_inner<
                 &mut ctx.backpressure_pulse,
                 &mut ctx.backpressure_stall,
                 Some(&ctx.output_contract),
-                Some(&ctx.observers),
                 &mut ctx.pending_outputs,
             )
             .await?
@@ -468,6 +467,8 @@ async fn dispatch_running_inner<
                     }
                 }
                 obzenflow_core::event::ChainEventContent::Data { .. } => {
+                    let observer_input_position = stage_input_position
+                        .ok_or("transform delivered data input without StageInputPosition")?;
                     // FLOWIP-120c H3: the middleware execution scope is
                     // computed per dispatched event from the delivered
                     // position, not baked into the wrapper at build time.
@@ -521,19 +522,20 @@ async fn dispatch_running_inner<
                         })
                     });
 
-                    run_before_handler_observers(
-                        &ctx.observers,
-                        ctx.stage_id,
-                        &ctx.stage_name,
-                        flow_context,
-                        scope,
-                        &envelope.event,
-                        stage_input_position.map(|position| position.0),
-                        &ctx.data_journal,
-                        &ctx.instrumentation,
-                        &envelope,
-                    )
-                    .await?;
+                    let handler_invoked = !matches!(
+                        envelope.event.processing_info.status,
+                        ProcessingStatus::Error { .. }
+                    );
+                    if handler_invoked {
+                        run_before_handler_observers(
+                            &ctx.observers,
+                            ctx.flow_id,
+                            flow_context,
+                            scope,
+                            &envelope.event,
+                            observer_input_position,
+                        );
+                    }
                     let result =
                         process_with_instrumentation(&ctx.instrumentation, || async move {
                             let event = envelope_clone.event.clone();
@@ -589,21 +591,18 @@ async fn dispatch_running_inner<
                         .await;
 
                     match result {
-                        Ok(mut transformed_events) => {
-                            run_after_handler_observers(
-                                &ctx.observers,
-                                ctx.stage_id,
-                                &ctx.stage_name,
-                                flow_context,
-                                scope,
-                                &envelope.event,
-                                stage_input_position.map(|position| position.0),
-                                transformed_events.as_mut_slice(),
-                                &ctx.data_journal,
-                                &ctx.instrumentation,
-                                &envelope,
-                            )
-                            .await?;
+                        Ok(transformed_events) => {
+                            if handler_invoked {
+                                run_after_handler_observers(
+                                    &ctx.observers,
+                                    ctx.flow_id,
+                                    flow_context,
+                                    scope,
+                                    &envelope.event,
+                                    observer_input_position,
+                                    transformed_events.as_slice(),
+                                );
+                            }
                             // Error-journal events are written immediately; stage-journal
                             // outputs are gated by backpressure.
                             let mut stage_outputs = std::collections::VecDeque::<
@@ -678,7 +677,6 @@ async fn dispatch_running_inner<
                                     &mut ctx.backpressure_pulse,
                                     &mut ctx.backpressure_stall,
                                     Some(&ctx.output_contract),
-                                    Some(&ctx.observers),
                                     &mut stage_outputs,
                                 )
                                 .await?

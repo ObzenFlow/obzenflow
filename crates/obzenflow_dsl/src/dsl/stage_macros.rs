@@ -2282,6 +2282,47 @@ macro_rules! __obzenflow_effectful_transform_exact_contract {
             )
         ])
     };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
+            $crate::__obzenflow_effectful_transform_typed!(
+                input = exact($($in)+),
+                output = $first,
+                output_contract = [$first $(, $member)*],
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)*],
+                middleware = []
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
+            $crate::__obzenflow_effectful_transform_typed!(
+                input = exact($($in)+),
+                output = $out,
+                output_contract = [$($member),+],
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)*],
+                middleware = []
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
+            $crate::__obzenflow_effectful_transform_typed!(
+                input = exact($($in)+),
+                output = $out,
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)*],
+                middleware = []
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
     (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "effectful_transform!",

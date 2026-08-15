@@ -213,6 +213,27 @@ The pattern generalizes: domain outcomes are typed events downstream stages can
 subscribe to, and framework errors are reserved for work the flow itself could
 not correctly process.
 
+### One passive delivery observer
+
+The paid-orders sink attaches one application-owned observer after the shipping
+handoff. The runtime supplies an immutable delivery classification and the
+observer emits an ordinary `tracing` diagnostic:
+
+```rust
+paid_orders = sink!(
+    PaymentAuthorized => shipping_handoff,
+    delivery: idempotent,
+    observers: [sink_delivery_observer(
+        "shipping-delivery-log",
+        ShippingDeliveryLog
+    )]
+);
+```
+
+The observer cannot change the input, settlement, or journal. It is invoked for
+live work and suppressed while strict replay reconstructs recorded history;
+durable delivery evidence remains the sink receipt in the journal.
+
 ## 4. Deterministic Replay
 
 Run the flow once. Each locally valid payment enters one logical gateway
@@ -324,7 +345,7 @@ is covered by its own example rather than this one.
 | `validation.rs` | One multi-type validation stage that classifies each order exactly once. |
 | `gateway.rs`  | Gateway authorization as a replay-suppressed effect, deriving cancellations from declines. |
 | `fixtures.rs` | The scripted upstream order-event sequence. |
-| `deliveries.rs` | The small `ShippingHandoff` console integration implemented as an `InlineSink`; the flow row adds its repeat-delivery classification. |
+| `deliveries.rs` | The `ShippingHandoff` console integration and its passive delivery logging observer. |
 | `console.rs`  | Console projection helpers with replay-provenance labels for the demo output. |
 | `flow.rs`     | The flow wiring and its breaker, retry, and per-attempt limiter configuration. |
 | `main.rs`     | The entry point and CLI banner. |

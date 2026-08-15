@@ -198,9 +198,6 @@ pub(crate) fn materialize_observer(
         MiddlewareSurfaceKind::Join => MiddlewareSurface::Join {
             stage_id: config.stage_id,
         },
-        MiddlewareSurfaceKind::OutputCommit => MiddlewareSurface::OutputCommit {
-            stage_id: config.stage_id,
-        },
         MiddlewareSurfaceKind::StageLifecycle => MiddlewareSurface::StageLifecycle {
             stage_id: config.stage_id,
         },
@@ -224,7 +221,6 @@ pub(crate) fn materialize_observer(
             MiddlewareSurfaceKind::Handler => ProtectedUnit::Handler,
             MiddlewareSurfaceKind::Stateful => ProtectedUnit::Stateful,
             MiddlewareSurfaceKind::Join => ProtectedUnit::Join,
-            MiddlewareSurfaceKind::OutputCommit => ProtectedUnit::OutputCommit,
             MiddlewareSurfaceKind::StageLifecycle => ProtectedUnit::StageLifecycle,
             MiddlewareSurfaceKind::Effect | MiddlewareSurfaceKind::Ingress => unreachable!(),
         },

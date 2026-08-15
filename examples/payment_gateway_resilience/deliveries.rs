@@ -9,6 +9,7 @@ use super::domain::PaymentAuthorized;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::observer::{SinkDeliveryObserver, SinkDeliveryObserverContext};
 use obzenflow_runtime::stages::sink::{
     InlineSink, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
 };
@@ -34,6 +35,20 @@ impl InlineSink for ShippingHandoff {
             )
             .with_items(1),
         ))
+    }
+}
+
+/// Emits an application diagnostic after the runtime classifies a shipping
+/// delivery. It receives an immutable view and cannot alter settlement.
+pub struct ShippingDeliveryLog;
+
+impl SinkDeliveryObserver for ShippingDeliveryLog {
+    fn after_sink_delivery(&self, ctx: &SinkDeliveryObserverContext<'_>) {
+        tracing::info!(
+            stage = ctx.stage_name(),
+            outcome = ?ctx.outcome(),
+            "shipping delivery observed"
+        );
     }
 }
 

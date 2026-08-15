@@ -112,6 +112,18 @@ pub trait SinkHandler: Send + Sync {
         Ok(SinkConsumeReport::new(self.consume(event).await?))
     }
 
+    /// Consume with the runtime-owned execution phase available to adapters
+    /// that expose replay provenance. Legacy/raw handlers keep the smaller
+    /// contract through this default delegation.
+    #[doc(hidden)]
+    async fn consume_report_with_scope(
+        &mut self,
+        event: ChainEvent,
+        _scope: obzenflow_core::MiddlewareExecutionScope,
+    ) -> Result<SinkConsumeReport, HandlerError> {
+        self.consume_report(event).await
+    }
+
     /// Flush in‑memory buffers **and optionally** emit a `DeliveryPayload`
     /// capturing the flush action (e.g., `DeliveryResult::Success` for a batch
     /// commit).  Default impl returns `Ok(None)` so simple sinks can ignore it.
@@ -183,9 +195,9 @@ impl<T: SinkHandler + Send + Sync> UnifiedSinkHandler for T {
         &mut self,
         event: ChainEvent,
         _effect_context: Option<EffectInvocationContext>,
-        _scope: obzenflow_core::MiddlewareExecutionScope,
+        scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> Result<SinkConsumeReport, HandlerError> {
-        SinkHandler::consume_report(self, event).await
+        SinkHandler::consume_report_with_scope(self, event, scope).await
     }
 
     async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {

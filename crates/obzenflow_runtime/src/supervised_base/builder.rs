@@ -85,6 +85,9 @@ pub trait SupervisorBuilder: Sized {
 /// Common error types for builder operations
 #[derive(Debug, thiserror::Error)]
 pub enum BuilderError {
+    #[error(transparent)]
+    ObserverBinding(#[from] crate::stages::observer::ObserverBindingError),
+
     #[error("Failed to register writer: {0}")]
     WriterRegistrationError(String),
 

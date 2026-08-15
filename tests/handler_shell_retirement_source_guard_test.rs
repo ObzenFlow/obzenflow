@@ -460,7 +460,7 @@ fn eof_and_boundary_rejection_cannot_schedule_idle_delay() {
         let source = fs::read_to_string(root.join(relative)).expect("read source supervisor");
 
         let rejection_start = source
-            .find("SourceBoundaryOutcome::Rejected { reason } =>")
+            .find("SourceBoundaryOutcome::Rejected {")
             .unwrap_or_else(|| panic!("{relative} must handle boundary rejection"));
         let rejection_end = source[rejection_start..]
             .find("SourceBoundaryOutcome::Polled(poll) =>")

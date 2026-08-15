@@ -6,8 +6,12 @@ error[E0277]: the trait bound `CheckedCircuitBreakerBuilder: MiddlewareFactory` 
    |
    = help: the following other types implement trait `MiddlewareFactory`:
              Box<F>
-             IndicatorMiddlewareFactory
-             LoggingMiddlewareFactory
+             EffectObserverFactory<T>
+             HandlerObserverFactory<T>
+             JoinObserverFactory<T>
              RateLimiterFactory
-             obzenflow_adapters::middleware::CircuitBreaker
+             SinkDeliveryObserverFactory<T>
+             SourcePollObserverFactory<T>
+             StageLifecycleObserverFactory<T>
+           and $N others
    = note: required for the cast from `&CheckedCircuitBreakerBuilder` to `&dyn MiddlewareFactory`

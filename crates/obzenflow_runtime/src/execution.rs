@@ -128,6 +128,17 @@ pub trait ExecutionStrategy: std::fmt::Debug + Send + Sync {
     /// Middleware execution scope for position-less work (lifecycle, causeless
     /// flow control).
     fn stage_scope(&self, stage: StageId) -> MiddlewareExecutionScope;
+    /// Middleware execution scope for a position-less occurrence that still
+    /// carries an in-band reader generation (for example a delivered control
+    /// signal). Implementations that do not distinguish generations inherit
+    /// their stage-level answer.
+    fn scope_for_generation(
+        &self,
+        stage: StageId,
+        _generation: ReaderGeneration,
+    ) -> MiddlewareExecutionScope {
+        self.stage_scope(stage)
+    }
     /// Whether a missing recorded effect outcome at this position is corruption
     /// (fail loud) rather than a live gap (run the effect).
     fn missing_outcome_is_corruption(&self, at: ExecutionPosition) -> bool;
@@ -393,6 +404,18 @@ impl ExecutionStrategy for Resume {
             MiddlewareExecutionScope::ResumeHandler
         }
     }
+
+    fn scope_for_generation(
+        &self,
+        _stage: StageId,
+        generation: ReaderGeneration,
+    ) -> MiddlewareExecutionScope {
+        if generation >= self.state.resume_generation {
+            MiddlewareExecutionScope::LiveHandler
+        } else {
+            MiddlewareExecutionScope::ResumeHandler
+        }
+    }
     fn missing_outcome_is_corruption(&self, at: ExecutionPosition) -> bool {
         // The effect-miss decision is positional, never generational (F7): a
         // miss at or below the stage's recorded mark is a torn prefix, beyond
@@ -565,24 +588,25 @@ impl RuntimeExecution {
         }
     }
 
-    /// Scope for a dispatch that may carry a delivered position. A positioned
-    /// dispatch is judged at its position; a position-less one (for example a
-    /// join observer in 120r) falls back to the stage-level answer. The
-    /// position is retained so FLOWIP-120n's position-based resume strategy
-    /// needs no re-threading at these sites.
+    /// Scope for a dispatch that may carry a delivered position or only an
+    /// in-band reader generation. Positioned work is judged at its full
+    /// coordinate; a position-less signal with a generation is judged at that
+    /// generation; only a wholly position-less occurrence falls back to the
+    /// stage-level answer.
     pub fn dispatch_scope(
         &self,
         stage_id: StageId,
         position: Option<StageInputPosition>,
         generation: Option<ReaderGeneration>,
     ) -> MiddlewareExecutionScope {
-        match position {
-            Some(p) => self.scope_at(ExecutionPosition {
+        match (position, generation) {
+            (Some(p), generation) => self.scope_at(ExecutionPosition {
                 stage_id,
                 position: p,
                 generation,
             }),
-            None => self.stage_scope(stage_id),
+            (None, Some(generation)) => self.strategy.scope_for_generation(stage_id, generation),
+            (None, None) => self.stage_scope(stage_id),
         }
     }
 
@@ -783,6 +807,14 @@ mod tests {
             Scope::LiveHandler
         );
         assert_eq!(s.scope_at(at(None)), Scope::ResumeHandler);
+        assert_eq!(
+            s.scope_for_generation(stage, ReaderGeneration(0)),
+            Scope::ResumeHandler
+        );
+        assert_eq!(
+            s.scope_for_generation(stage, ReaderGeneration(1)),
+            Scope::LiveHandler
+        );
 
         // After the boundary the frontier fallback flips, while a late prefix
         // event still in flight stays reconstruction-scoped: the generation
@@ -791,6 +823,10 @@ mod tests {
         assert_eq!(s.scope_at(at(None)), Scope::LiveHandler);
         assert_eq!(
             s.scope_at(at(Some(ReaderGeneration(0)))),
+            Scope::ResumeHandler
+        );
+        assert_eq!(
+            s.scope_for_generation(stage, ReaderGeneration(0)),
             Scope::ResumeHandler
         );
     }

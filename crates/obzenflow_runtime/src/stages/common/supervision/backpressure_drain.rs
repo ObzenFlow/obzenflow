@@ -100,7 +100,6 @@ pub(crate) async fn drain_one_pending(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&crate::stages::observer::StageObserverBundle>,
     pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
 ) -> Result<DrainOutcome, Box<dyn std::error::Error + Send + Sync>> {
     match drain_one_pending_resolve(
@@ -116,7 +115,6 @@ pub(crate) async fn drain_one_pending(
         backpressure_pulse,
         backpressure_stall,
         output_contract,
-        observers,
         pending_outputs,
     )
     .await?
@@ -257,7 +255,6 @@ pub(crate) async fn drain_one_pending_resolve(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&crate::stages::observer::StageObserverBundle>,
     pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
 ) -> Result<DrainAttempt, Box<dyn std::error::Error + Send + Sync>> {
     let is_data = pending.event.is_data();
@@ -283,7 +280,6 @@ pub(crate) async fn drain_one_pending_resolve(
         heartbeat_state: heartbeat_state.as_ref(),
         output_contract,
         backpressure_writer: None,
-        observers,
         observer_scope: pending.scope,
     };
 

@@ -4,7 +4,7 @@
 
 //! Configuration for finite source stages
 
-use crate::stages::observer::StageObserverBundle;
+use crate::stages::observer::StageObserverBindings;
 use crate::stages::source::boundary::SourceBoundary;
 use crate::stages::source::strategies::CompletionGate;
 use obzenflow_core::StageId;
@@ -29,8 +29,30 @@ pub struct FiniteSourceConfig {
     /// Runtime-neutral source boundary seam (FLOWIP-115a).
     pub source_boundary: Option<Arc<dyn SourceBoundary>>,
 
-    /// Runtime observer bundle attached to this source boundary.
-    pub observers: StageObserverBundle,
+    /// Closed observer inputs validated by the concrete source builder.
+    pub(crate) observer_bindings: StageObserverBindings,
+}
+
+impl FiniteSourceConfig {
+    pub fn new(
+        stage_id: StageId,
+        stage_name: impl Into<String>,
+        flow_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            stage_id,
+            stage_name: stage_name.into(),
+            flow_name: flow_name.into(),
+            control_strategy: None,
+            source_boundary: None,
+            observer_bindings: StageObserverBindings::default(),
+        }
+    }
+
+    pub fn with_observer_bindings(mut self, bindings: StageObserverBindings) -> Self {
+        self.observer_bindings = bindings;
+        self
+    }
 }
 
 impl std::fmt::Debug for FiniteSourceConfig {
@@ -41,7 +63,7 @@ impl std::fmt::Debug for FiniteSourceConfig {
             .field("flow_name", &self.flow_name)
             .field("control_strategy", &self.control_strategy)
             .field("has_source_boundary", &self.source_boundary.is_some())
-            .field("has_observers", &!self.observers.is_empty())
+            .field("has_observers", &!self.observer_bindings.is_empty())
             .finish()
     }
 }

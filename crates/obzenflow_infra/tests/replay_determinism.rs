@@ -490,15 +490,12 @@ async fn run_stateful_supervisor_once() -> Vec<serde_json::Value> {
     let handler = SupervisorCountingHandler {
         writer_id: WriterId::from(stateful_stage),
     };
-    let config = StatefulConfig {
-        stage_id: stateful_stage,
-        stage_name: "stateful_supervisor_replay".to_string(),
-        flow_name: "replay_flow".to_string(),
-        upstream_stages: vec![src],
-        observers: obzenflow_runtime::stages::observer::StageObserverBundle::default(),
-        emit_interval: None,
-        control_strategy: None,
-    };
+    let config = StatefulConfig::new(
+        stateful_stage,
+        "stateful_supervisor_replay",
+        "replay_flow",
+        vec![src],
+    );
 
     let handle = StatefulBuilder::new(handler.clone(), config, stateful_resources)
         .build()

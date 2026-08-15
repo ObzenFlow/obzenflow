@@ -13,7 +13,6 @@ mod middleware_context_key;
 mod stage_fact_set;
 mod stage_output;
 mod typed_fact_set;
-mod typed_middleware_event;
 mod typed_payload;
 
 pub use effect_outcome::EffectOutcomeFacts;
@@ -32,5 +31,4 @@ pub use typed_fact_set::{
     decode_member_fact, missing_fact_group_error, sum_group_arity_error, TypedFact, TypedFactSet,
     TypedFactSetError, TypedFactType,
 };
-pub use typed_middleware_event::TypedMiddlewareEvent;
 pub use typed_payload::TypedPayload;

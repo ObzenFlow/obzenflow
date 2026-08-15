@@ -23,6 +23,9 @@ use obzenflow_adapters::middleware::{
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::__private::{SinkWriterAdapter, UnifiedJoinHandler};
+use obzenflow_runtime::stages::observer::{
+    observer_shell_surfaces_for_stage as runtime_observer_shell_surfaces_for_stage, ObserverSurface,
+};
 use obzenflow_runtime::{
     effects::{
         EffectBoundary, EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
@@ -86,39 +89,67 @@ fn factory_declares_circuit_breaker(factory: &dyn MiddlewareFactory) -> bool {
 pub const BINDING_DERIVED_NAME_SENTINEL: &str = "__obzenflow_binding_derived_name__";
 
 fn create_system_observers(_config: &StageConfig) -> StageObserverSet {
-    // No built-in observers (FLOWIP-115f): `processing_time` is stamped by the
-    // runtime output committer from the instrumentation timer, not by an
-    // observer, and the user-facing observation middleware are `indicator()` and
-    // `log()`. User-attached observers are merged onto this empty default.
+    // No built-in observers (FLOWIP-115m Part 2). Runtime instrumentation and
+    // output finalisation remain framework-owned; user observers attach only
+    // through the explicit passive lane.
     StageObserverSet::default()
 }
 
-fn observer_surfaces_for_stage(stage_type: StageType) -> &'static [MiddlewareSurfaceKind] {
-    match stage_type {
-        StageType::FiniteSource | StageType::InfiniteSource => &[
-            MiddlewareSurfaceKind::SourcePoll,
-            MiddlewareSurfaceKind::OutputCommit,
-            MiddlewareSurfaceKind::StageLifecycle,
-        ],
-        StageType::Transform => &[
-            MiddlewareSurfaceKind::Handler,
-            MiddlewareSurfaceKind::OutputCommit,
-            MiddlewareSurfaceKind::StageLifecycle,
-        ],
-        StageType::Stateful => &[
-            MiddlewareSurfaceKind::Stateful,
-            MiddlewareSurfaceKind::OutputCommit,
-            MiddlewareSurfaceKind::StageLifecycle,
-        ],
-        StageType::Join => &[
-            MiddlewareSurfaceKind::Join,
-            MiddlewareSurfaceKind::OutputCommit,
-            MiddlewareSurfaceKind::StageLifecycle,
-        ],
-        StageType::Sink => &[
-            MiddlewareSurfaceKind::SinkDelivery,
-            MiddlewareSurfaceKind::StageLifecycle,
-        ],
+fn middleware_surface_kind(surface: ObserverSurface) -> MiddlewareSurfaceKind {
+    match surface {
+        ObserverSurface::Handler => MiddlewareSurfaceKind::Handler,
+        ObserverSurface::Stateful => MiddlewareSurfaceKind::Stateful,
+        ObserverSurface::Join => MiddlewareSurfaceKind::Join,
+        ObserverSurface::SourcePoll => MiddlewareSurfaceKind::SourcePoll,
+        ObserverSurface::Effect => MiddlewareSurfaceKind::Effect,
+        ObserverSurface::SinkDelivery => MiddlewareSurfaceKind::SinkDelivery,
+        ObserverSurface::StageLifecycle => MiddlewareSurfaceKind::StageLifecycle,
+    }
+}
+
+fn observer_shell_surfaces_for_stage(stage_type: StageType) -> &'static [ObserverSurface] {
+    runtime_observer_shell_surfaces_for_stage(stage_type)
+}
+
+fn observer_surface_name(surface: MiddlewareSurfaceKind) -> &'static str {
+    match surface {
+        MiddlewareSurfaceKind::SourcePoll => "source_poll",
+        MiddlewareSurfaceKind::Effect => "effect",
+        MiddlewareSurfaceKind::SinkDelivery => "sink_delivery",
+        MiddlewareSurfaceKind::Ingress => "ingress",
+        MiddlewareSurfaceKind::Handler => "handler",
+        MiddlewareSurfaceKind::Stateful => "stateful",
+        MiddlewareSurfaceKind::Join => "join",
+        MiddlewareSurfaceKind::StageLifecycle => "stage_lifecycle",
+    }
+}
+
+fn quoted_observer_surfaces(surfaces: impl IntoIterator<Item = MiddlewareSurfaceKind>) -> String {
+    surfaces
+        .into_iter()
+        .map(|surface| format!("'{}'", observer_surface_name(surface)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn incompatible_observer_surface_message(
+    declaration: &MiddlewareDeclaration,
+    stage_name: &str,
+    stage_type: StageType,
+    exposed_surfaces: impl IntoIterator<Item = MiddlewareSurfaceKind>,
+) -> String {
+    let required = quoted_observer_surfaces(declaration.surfaces.iter().copied());
+    let exposed = quoted_observer_surfaces(exposed_surfaces);
+    if declaration.surfaces.len() == 1 {
+        format!(
+            "observer '{}' requires surface {required}, but stage '{stage_name}' ({stage_type:?}) does not expose it; exposed observer surfaces: [{exposed}]",
+            declaration.label
+        )
+    } else {
+        format!(
+            "observer '{}' requires one of surfaces [{required}], but stage '{stage_name}' ({stage_type:?}) exposes none of them; exposed observer surfaces: [{exposed}]",
+            declaration.label
+        )
     }
 }
 
@@ -133,9 +164,9 @@ fn declaration_has_stage_observer_surface(
     declaration: &MiddlewareDeclaration,
     stage_type: StageType,
 ) -> bool {
-    observer_surfaces_for_stage(stage_type)
+    observer_shell_surfaces_for_stage(stage_type)
         .iter()
-        .any(|surface| declaration.supports(*surface))
+        .any(|surface| declaration.supports(middleware_surface_kind(*surface)))
 }
 
 struct EffectObserverMaterialization<'a> {
@@ -151,6 +182,7 @@ fn materialize_effect_observers_for_declarations(
     factory: &dyn MiddlewareFactory,
     materialization: EffectObserverMaterialization<'_>,
 ) -> StageCreationResult<()> {
+    let mut attachments = Vec::with_capacity(materialization.effect_declarations.len());
     for effect in materialization.effect_declarations {
         let attachment = crate::dsl::binder::materialize_effect_observer(
             factory,
@@ -160,7 +192,10 @@ fn materialize_effect_observers_for_declarations(
             effect,
             materialization.declaration_index,
         )?;
-        push_observer_attachment(observers, attachment)?;
+        attachments.push((effect.effect_type, attachment));
+    }
+    if let Err(error) = observers.push_effect_attachments(attachments) {
+        return Err(error.into());
     }
     Ok(())
 }
@@ -211,14 +246,15 @@ fn plan_positioned_stage_observers(
     control_middleware: &Arc<ControlMiddlewareAggregator>,
 ) -> StageCreationResult<MiddlewarePlacement> {
     let mut observers = create_system_observers(config);
-    let observer_surfaces = observer_surfaces_for_stage(stage_type);
+    let observer_surfaces = observer_shell_surfaces_for_stage(stage_type);
 
     for (observer_index, factory) in observer_factories {
         let declaration = factory.declaration();
         reject_control_in_observers(factory.as_ref())?;
         let mut placed = false;
-        for surface in observer_surfaces {
-            if !declaration.supports(*surface) {
+        for observer_surface in observer_surfaces {
+            let surface = middleware_surface_kind(*observer_surface);
+            if !declaration.supports(surface) {
                 continue;
             }
             let attachment = crate::dsl::binder::materialize_observer(
@@ -226,19 +262,20 @@ fn plan_positioned_stage_observers(
                 config,
                 stage_type,
                 control_middleware,
-                *surface,
+                surface,
                 MiddlewareDeclarationIndex::observers(observer_index),
             )?;
             push_observer_attachment(&mut observers, attachment)?;
             placed = true;
         }
         if !placed {
-            return Err(format!(
-                "observer middleware '{}' declares capability {:?} and surfaces {:?}, but stage '{}' ({stage_type:?}) has no compatible observer surface",
-                declaration.label,
-                declaration.capability,
-                declaration.surfaces,
-                config.name
+            return Err(incompatible_observer_surface_message(
+                &declaration,
+                &config.name,
+                stage_type,
+                observer_surfaces
+                    .iter()
+                    .map(|surface| middleware_surface_kind(*surface)),
             )
             .into());
         }
@@ -727,14 +764,11 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         handler.install_writer_id(writer_id);
 
         // Create the stage configuration
-        let source_config = FiniteSourceConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name.clone(),
-            control_strategy: source_binding.completion_gate,
-            source_boundary: source_binding.source_boundary,
-            observers: source_binding.observers.build(),
-        };
+        let mut source_config =
+            FiniteSourceConfig::new(config.stage_id, &config.name, &config.flow_name)
+                .with_observer_bindings(source_binding.observers.into_bindings());
+        source_config.control_strategy = source_binding.completion_gate;
+        source_config.source_boundary = source_binding.source_boundary;
 
         // Use the builder to create the handle
         let handle = FiniteSourceBuilder::new(handler, source_config, resources)
@@ -888,14 +922,11 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
         handler.install_writer_id(writer_id);
 
         // Create the stage configuration
-        let source_config = FiniteSourceConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name.clone(),
-            control_strategy: source_binding.completion_gate,
-            source_boundary: source_binding.source_boundary,
-            observers: source_binding.observers.build(),
-        };
+        let mut source_config =
+            FiniteSourceConfig::new(config.stage_id, &config.name, &config.flow_name)
+                .with_observer_bindings(source_binding.observers.into_bindings());
+        source_config.control_strategy = source_binding.completion_gate;
+        source_config.source_boundary = source_binding.source_boundary;
 
         // Use the builder to create the handle
         let handle = AsyncFiniteSourceBuilder::new(handler, source_config, resources)
@@ -1029,14 +1060,11 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
         handler.install_writer_id(writer_id);
 
         // Create the stage configuration
-        let source_config = InfiniteSourceConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name.clone(),
-            control_strategy: source_binding.completion_gate,
-            source_boundary: source_binding.source_boundary,
-            observers: source_binding.observers.build(),
-        };
+        let mut source_config =
+            InfiniteSourceConfig::new(config.stage_id, &config.name, &config.flow_name)
+                .with_observer_bindings(source_binding.observers.into_bindings());
+        source_config.control_strategy = source_binding.completion_gate;
+        source_config.source_boundary = source_binding.source_boundary;
 
         // Use the builder to create the handle
         let handle = InfiniteSourceBuilder::new(handler, source_config, resources)
@@ -1197,14 +1225,11 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
         let mut handler = self.handler;
         handler.install_writer_id(writer_id);
 
-        let source_config = InfiniteSourceConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name.clone(),
-            control_strategy: source_binding.completion_gate,
-            source_boundary: source_binding.source_boundary,
-            observers: source_binding.observers.build(),
-        };
+        let mut source_config =
+            InfiniteSourceConfig::new(config.stage_id, &config.name, &config.flow_name)
+                .with_observer_bindings(source_binding.observers.into_bindings());
+        source_config.control_strategy = source_binding.completion_gate;
+        source_config.source_boundary = source_binding.source_boundary;
 
         let handle = AsyncInfiniteSourceBuilder::new(handler, source_config, resources)
             .with_poll_timeout(poll_timeout)
@@ -1317,15 +1342,15 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         let instrumentation = Arc::new(instrumentation);
 
         // Create the stage configuration
-        let transform_config = TransformConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name.clone(),
-            observers: placement.observers.build(),
-            control_strategy: Some(control_strategy),
-            upstream_stages: resources.upstream_stages.clone(),
-            cycle_guard: config.cycle_guard,
-        };
+        let mut transform_config = TransformConfig::new(
+            config.stage_id,
+            &config.name,
+            &config.flow_name,
+            resources.upstream_stages.clone(),
+        )
+        .with_observer_bindings(placement.observers.into_bindings());
+        transform_config.control_strategy = Some(control_strategy);
+        transform_config.cycle_guard = config.cycle_guard;
 
         // Use the builder to create the handle
         let handle = TransformBuilder::new(self.handler, transform_config, resources)
@@ -1607,9 +1632,10 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        // `observers:` is already an observation-only lane. Effect observers
-        // fan out over the declared effects while the same declaration index is
-        // reused for every surface/subject produced by that one list entry.
+        // `observers:` is already an observe-only interception lane. An
+        // effect factory materialises once per declared subject; the adapter
+        // regroups those products into one logical runtime binding (and one
+        // quarantine latch) for this declaration index.
         let mut shell_specs = Vec::new();
         let mut effect_observers = StageObserverSet::default();
         for (observer_index, factory) in observer_factories.into_iter().enumerate() {
@@ -1634,9 +1660,15 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             if observes_shell {
                 shell_specs.push((observer_index, factory));
             } else if !observes_effect {
-                return Err(format!(
-                    "observer middleware '{}' has no compatible surface on effectful stage '{}'",
-                    declaration.label, self.name
+                let exposed_surfaces = observer_shell_surfaces_for_stage(StageType::Transform)
+                    .iter()
+                    .map(|surface| middleware_surface_kind(*surface))
+                    .chain(std::iter::once(MiddlewareSurfaceKind::Effect));
+                return Err(incompatible_observer_surface_message(
+                    &declaration,
+                    &self.name,
+                    StageType::Transform,
+                    exposed_surfaces,
                 )
                 .into());
             }
@@ -1729,15 +1761,15 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        let transform_config = TransformConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name.clone(),
-            observers: observers.build(),
-            control_strategy: Some(control_strategy),
-            upstream_stages: resources.upstream_stages.clone(),
-            cycle_guard: config.cycle_guard,
-        };
+        let mut transform_config = TransformConfig::new(
+            config.stage_id,
+            &config.name,
+            &config.flow_name,
+            resources.upstream_stages.clone(),
+        )
+        .with_observer_bindings(observers.into_bindings());
+        transform_config.control_strategy = Some(control_strategy);
+        transform_config.cycle_guard = config.cycle_guard;
 
         let effect_boundary: Arc<dyn EffectBoundary> =
             Arc::new(PerEffectPolicyBoundary::new(effect_policy_chains));
@@ -1907,19 +1939,17 @@ impl<C: SinkConnector + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
         let default_delivery_method = self.description.default_method().cloned();
 
         // Create the stage configuration
-        let sink_config = JournalSinkConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name.clone(),
-            upstream_stages: resources.upstream_stages.clone(),
-            buffer_size: None,
-            flush_interval_ms: None,
-            control_strategy: Some(control_strategy),
-            sink_delivery_boundary,
-            observers: observers.build(),
-            receipt_destination,
-            default_delivery_method: default_delivery_method.clone(),
-        };
+        let mut sink_config = JournalSinkConfig::new(
+            config.stage_id,
+            &config.name,
+            &config.flow_name,
+            resources.upstream_stages.clone(),
+        )
+        .with_observer_bindings(observers.into_bindings());
+        sink_config.control_strategy = Some(control_strategy);
+        sink_config.sink_delivery_boundary = sink_delivery_boundary;
+        sink_config.receipt_destination = receipt_destination;
+        sink_config.default_delivery_method = default_delivery_method.clone();
 
         // Open the configured connector only at stage materialisation, then
         // erase its unique mutable writer behind the journal sink boundary.
@@ -2161,15 +2191,15 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         let instrumentation = Arc::new(instrumentation);
 
         // Create the stage configuration
-        let stateful_config = StatefulConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name.clone(),
-            observers: placement.observers.build(),
-            emit_interval: self.emit_interval,
-            control_strategy: Some(control_strategy),
-            upstream_stages: resources.upstream_stages.clone(),
-        };
+        let mut stateful_config = StatefulConfig::new(
+            config.stage_id,
+            &config.name,
+            &config.flow_name,
+            resources.upstream_stages.clone(),
+        )
+        .with_observer_bindings(placement.observers.into_bindings());
+        stateful_config.emit_interval = self.emit_interval;
+        stateful_config.control_strategy = Some(control_strategy);
 
         // Use the builder to create the handle
         let handle = StatefulBuilder::new(self.handler, stateful_config, resources)
@@ -2363,17 +2393,17 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        let stateful_config = StatefulConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name.clone(),
-            observers: observers.build(),
-            // Input-driven only (FLOWIP-120z): the effectful surface never
-            // arms the supervisor's emission timer.
-            emit_interval: None,
-            control_strategy: Some(control_strategy),
-            upstream_stages: resources.upstream_stages.clone(),
-        };
+        let mut stateful_config = StatefulConfig::new(
+            config.stage_id,
+            &config.name,
+            &config.flow_name,
+            resources.upstream_stages.clone(),
+        )
+        .with_observer_bindings(observers.into_bindings());
+        // Input-driven only (FLOWIP-120z): the effectful surface never arms
+        // the supervisor's emission timer.
+        stateful_config.emit_interval = None;
+        stateful_config.control_strategy = Some(control_strategy);
 
         let handle = StatefulBuilder::new(
             EffectfulStatefulHandlerAdapter(self.handler),
@@ -2550,18 +2580,18 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
             .copied()
             .ok_or_else(|| "Join stage requires at least one stream source".to_string())?;
 
-        let join_config = JoinConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            observers: placement.observers.build(),
-            flow_name: config.flow_name.clone(),
+        let mut join_config = JoinConfig::new(
+            config.stage_id,
+            &config.name,
+            &config.flow_name,
             reference_source_id,
             stream_source_id,
-            reference_mode,
-            reference_batch_cap,
-            control_strategy: Some(control_strategy.clone()),
-            upstream_stages: resources.upstream_stages.clone(),
-        };
+        )
+        .with_observer_bindings(placement.observers.into_bindings());
+        join_config.reference_mode = reference_mode;
+        join_config.reference_batch_cap = reference_batch_cap;
+        join_config.control_strategy = Some(control_strategy.clone());
+        join_config.upstream_stages = resources.upstream_stages.clone();
 
         // Separate reference and stream journals
         // First upstream is reference, rest are streams
@@ -2780,7 +2810,7 @@ mod tests {
     fn effect_policy_attachment_validation_rejects_undeclared_effect() {
         let attachment = EffectPolicyAttachment {
             effect_type: "test.undeclared",
-            factory: Box::new(obzenflow_adapters::middleware::LoggingMiddlewareFactory::new()),
+            factory: Box::new(obzenflow_adapters::middleware::RateLimiterFactory::new(1.0)),
         };
 
         let error = validate_effect_policy_attachments("effectful", &[], &[attachment])
@@ -3571,14 +3601,14 @@ mod tests {
 mod observer_placement_negative_tests {
     use super::*;
     use obzenflow_adapters::middleware::{
-        validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
-        MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-        MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurfaceAttachment,
-        MiddlewareSurfaceKind, SourceAdmission, SourcePolicy, SourcePolicyCtx,
-        SourcePollAttachment, SourcePollOutcome,
+        sink_delivery_observer, validate_attachment_request, MiddlewareAttachmentRequest,
+        MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
+        MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurface,
+        MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, SourceAdmission, SourcePolicy,
+        SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome,
     };
     use obzenflow_runtime::stages::observer::{
-        HandlerObserver, JoinObserver, SinkDeliveryObserver, SourcePollObserver,
+        EffectObserver, HandlerObserver, JoinObserver, SinkDeliveryObserver, SourcePollObserver,
         StageLifecycleObserver, StatefulObserver,
     };
     use std::sync::Mutex;
@@ -3586,36 +3616,13 @@ mod observer_placement_negative_tests {
     /// A no-op observer that supports every observer surface this factory may be
     /// placed on. All hooks use the trait defaults (record nothing).
     struct NoopObserver;
-    impl HandlerObserver for NoopObserver {
-        fn label(&self) -> &'static str {
-            "loud-observer"
-        }
-    }
-    impl StatefulObserver for NoopObserver {
-        fn label(&self) -> &'static str {
-            "loud-observer"
-        }
-    }
-    impl JoinObserver for NoopObserver {
-        fn label(&self) -> &'static str {
-            "loud-observer"
-        }
-    }
-    impl SourcePollObserver for NoopObserver {
-        fn label(&self) -> &'static str {
-            "loud-observer"
-        }
-    }
-    impl SinkDeliveryObserver for NoopObserver {
-        fn label(&self) -> &'static str {
-            "loud-observer"
-        }
-    }
-    impl StageLifecycleObserver for NoopObserver {
-        fn label(&self) -> &'static str {
-            "loud-observer"
-        }
-    }
+    impl HandlerObserver for NoopObserver {}
+    impl StatefulObserver for NoopObserver {}
+    impl JoinObserver for NoopObserver {}
+    impl SourcePollObserver for NoopObserver {}
+    impl SinkDeliveryObserver for NoopObserver {}
+    impl StageLifecycleObserver for NoopObserver {}
+    impl EffectObserver for NoopObserver {}
 
     /// An observer factory used to prove the planner reaches typed materialization.
     struct LoudObserverFactory;
@@ -3633,6 +3640,53 @@ mod observer_placement_negative_tests {
         calls: Arc<Mutex<Vec<MaterializationCall>>>,
     }
     struct RecordingObserverFamily;
+
+    struct RecordingEffectObserverFactory {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+    struct RecordingEffectObserverFamily;
+
+    impl MiddlewareFactory for RecordingEffectObserverFactory {
+        fn label(&self) -> &'static str {
+            "recording-effect-observer"
+        }
+
+        fn override_key(&self) -> MiddlewareOverrideKey {
+            MiddlewareOverrideKey::of::<RecordingEffectObserverFamily>(self.label())
+        }
+
+        fn declaration(&self) -> MiddlewareDeclaration {
+            MiddlewareDeclaration::observer(self.label(), vec![MiddlewareSurfaceKind::Effect])
+        }
+
+        fn materialize(
+            &self,
+            request: MiddlewareAttachmentRequest<'_>,
+            context: &MiddlewareMaterializationContext<'_>,
+        ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+            validate_attachment_request(&self.declaration(), &request).map_err(|error| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    error,
+                )
+            })?;
+            let MiddlewareSurface::Effect(surface) = request.surface else {
+                return Err(MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    std::io::Error::other("expected effect surface"),
+                ));
+            };
+            self.calls
+                .lock()
+                .expect("effect materialisation call lock")
+                .push(surface.effect_type.as_str().to_string());
+            Ok(MiddlewareSurfaceAttachment::effect_observer(Arc::new(
+                NoopObserver,
+            )))
+        }
+    }
 
     struct RecordingSourceControlFactory<Family> {
         label: &'static str,
@@ -3757,7 +3811,7 @@ mod observer_placement_negative_tests {
                 other => Err(MiddlewareFactoryError::materialization_failed(
                     self.label(),
                     &context.config.name,
-                    obzenflow_runtime::stages::observer::ObserverCommitError::new(format!(
+                    std::io::Error::other(format!(
                         "unsupported recording observer surface {other:?}"
                     )),
                 )),
@@ -3821,9 +3875,7 @@ mod observer_placement_negative_tests {
                 other => Err(MiddlewareFactoryError::materialization_failed(
                     self.label(),
                     &context.config.name,
-                    obzenflow_runtime::stages::observer::ObserverCommitError::new(format!(
-                        "unsupported loud observer surface {other:?}"
-                    )),
+                    std::io::Error::other(format!("unsupported loud observer surface {other:?}")),
                 )),
             }
         }
@@ -4011,6 +4063,65 @@ mod observer_placement_negative_tests {
     }
 
     #[test]
+    fn effect_factory_materialises_once_per_subject_and_regroups_one_declaration() {
+        fn declaration(effect_type: &'static str) -> EffectDeclaration {
+            EffectDeclaration {
+                effect_type,
+                safety: EffectSafety::Idempotent,
+                idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
+                required_ports: Vec::new(),
+                transactional_executor: None,
+                outcome_kind: obzenflow_runtime::effects::EffectOutcomeKind::RecordedReply,
+                public_outcome_fact_types: Vec::new(),
+            }
+        }
+
+        let config = StageConfig {
+            stage_id: StageId::new(),
+            name: "effect_observer_cardinality".to_string(),
+            flow_name: "observer_placement_negative".to_string(),
+            cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            effective_config: Arc::new(
+                obzenflow_runtime::runtime_config::FlowEffectiveConfig::default(),
+            ),
+        };
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let factory = RecordingEffectObserverFactory {
+            calls: calls.clone(),
+        };
+        let effects = [declaration("effect.a"), declaration("effect.b")];
+        let mut observers = StageObserverSet::default();
+
+        materialize_effect_observers_for_declarations(
+            &mut observers,
+            &factory,
+            EffectObserverMaterialization {
+                config: &config,
+                stage_type: StageType::Transform,
+                control_middleware: &control,
+                declaration_index: MiddlewareDeclarationIndex::observers(4),
+                effect_declarations: &effects,
+            },
+        )
+        .expect("effect observers materialise");
+
+        assert_eq!(
+            *calls.lock().expect("effect materialisation call lock"),
+            ["effect.a", "effect.b"]
+        );
+        let bindings = observers.into_bindings();
+        assert_eq!(bindings.len(), 1);
+        let binding = bindings.iter().next().expect("one logical binding");
+        assert_eq!(binding.label(), "recording-effect-observer");
+        assert_eq!(
+            binding.effect_types().collect::<Vec<_>>(),
+            ["effect.a", "effect.b"]
+        );
+    }
+
+    #[test]
     fn source_control_and_observer_lanes_number_independently() {
         let stage_id = StageId::new();
         let config = StageConfig {
@@ -4129,5 +4240,37 @@ mod observer_placement_negative_tests {
             Err(error) => error,
         };
         assert!(wrong_capability.contains("returned Control/Effect"));
+    }
+
+    #[test]
+    fn incompatible_observer_diagnostic_names_required_and_exposed_surfaces() {
+        let config = StageConfig {
+            stage_id: StageId::new(),
+            name: "authorize_payment".to_string(),
+            flow_name: "observer_placement_negative".to_string(),
+            cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            effective_config: Arc::new(
+                obzenflow_runtime::runtime_config::FlowEffectiveConfig::default(),
+            ),
+        };
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let error = match plan_stage_observers(
+            &config,
+            StageType::Transform,
+            vec![Box::new(sink_delivery_observer(
+                "delivery-trace",
+                NoopObserver,
+            ))],
+            &control,
+        ) {
+            Ok(_) => panic!("sink-delivery observer cannot attach to a transform"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "observer 'delivery-trace' requires surface 'sink_delivery', but stage 'authorize_payment' (Transform) does not expose it; exposed observer surfaces: ['handler', 'stage_lifecycle']"
+        );
     }
 }

@@ -5,7 +5,7 @@
 //! Join stage configuration
 
 use crate::stages::common::control_strategies::SignalGate;
-use crate::stages::observer::StageObserverBundle;
+use crate::stages::observer::StageObserverBindings;
 use obzenflow_core::StageId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -36,9 +36,9 @@ pub struct JoinConfig {
     /// Unique name for this join stage
     pub stage_name: String,
 
-    /// Runtime observer bundle attached to this stage.
+    /// Closed observer inputs validated by the concrete join builder.
     #[serde(skip, default)]
-    pub observers: StageObserverBundle,
+    pub(crate) observer_bindings: StageObserverBindings,
 
     /// Flow name
     pub flow_name: String,
@@ -77,7 +77,7 @@ impl JoinConfig {
         Self {
             stage_id,
             stage_name: stage_name.into(),
-            observers: StageObserverBundle::default(),
+            observer_bindings: StageObserverBindings::default(),
             flow_name: flow_name.into(),
             reference_source_id,
             stream_source_id,
@@ -86,5 +86,10 @@ impl JoinConfig {
             control_strategy: None,
             upstream_stages: vec![reference_source_id, stream_source_id],
         }
+    }
+
+    pub fn with_observer_bindings(mut self, bindings: StageObserverBindings) -> Self {
+        self.observer_bindings = bindings;
+        self
     }
 }

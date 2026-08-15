@@ -33,7 +33,7 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use serde_json::json;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -42,7 +42,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-fn source_error_kind(error: &SourceError) -> ErrorKind {
+pub(crate) fn source_error_kind(error: &SourceError) -> ErrorKind {
     match error {
         SourceError::Timeout(_) => ErrorKind::Timeout,
         SourceError::Transport(_) => ErrorKind::Remote,
@@ -187,85 +187,73 @@ pub(crate) fn emit_batch_to_pending_outputs(
 }
 
 pub(crate) struct SourcePollObservation<'a> {
+    flow_id: FlowId,
     stage_flow_context: &'a FlowContext,
-    instrumentation: &'a Arc<StageInstrumentation>,
     observers: &'a StageObserverBundle,
     scope: MiddlewareExecutionScope,
-    data_journal: &'a Arc<dyn Journal<ChainEvent>>,
 }
 
 impl<'a> SourcePollObservation<'a> {
     pub(crate) fn new(
+        flow_id: FlowId,
         stage_flow_context: &'a FlowContext,
-        instrumentation: &'a Arc<StageInstrumentation>,
         observers: &'a StageObserverBundle,
         scope: MiddlewareExecutionScope,
-        data_journal: &'a Arc<dyn Journal<ChainEvent>>,
     ) -> Self {
         Self {
+            flow_id,
             stage_flow_context,
-            instrumentation,
             observers,
             scope,
-            data_journal,
         }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.observers.has_source_poll() && !self.scope.is_deterministic_replay()
     }
 
     pub(crate) async fn observe(
         &self,
-        outputs: &mut [ChainEvent],
-        poll_duration: Duration,
+        outputs: &[ChainEvent],
+        _poll_duration: Duration,
         outcome: SourcePollObserverOutcome,
-    ) -> Result<(), BoxError> {
-        let observer_ctx = SourcePollObserverContext {
-            stage_id: self.stage_flow_context.stage_id,
-            stage_name: &self.stage_flow_context.stage_name,
-            flow_context: self.stage_flow_context,
-            scope: self.scope,
-            poll_duration,
-            outcome,
-        };
-        run_source_poll_observers(
-            self.observers,
-            &observer_ctx,
-            outputs,
-            self.data_journal,
-            self.instrumentation,
-        )
-        .await
+    ) {
+        if !self.is_enabled() {
+            return;
+        }
+        let observer_ctx =
+            SourcePollObserverContext::new(self.flow_id, self.stage_flow_context, outcome);
+        run_source_poll_observers(self.observers, self.scope, &observer_ctx, outputs);
     }
 
     pub(crate) async fn observe_empty(
         &self,
         poll_duration: Duration,
         outcome: SourcePollObserverOutcome,
-    ) -> Result<(), BoxError> {
-        let mut outputs = Vec::new();
-        self.observe(outputs.as_mut_slice(), poll_duration, outcome)
-            .await
+    ) {
+        self.observe(&[], poll_duration, outcome).await;
     }
 }
 
 pub(crate) async fn observe_source_boundary_rejection(
     observation: &SourcePollObservation<'_>,
-    control_events: &mut Vec<ChainEvent>,
-    reason: &str,
-) -> Result<(), BoxError> {
+    control_events: &[ChainEvent],
+    policy: Option<&str>,
+) {
+    if !observation.is_enabled() {
+        return;
+    }
     let outcome = SourcePollObserverOutcome::Rejected {
-        reason: reason.to_string(),
+        policy: policy.map(str::to_string),
     };
     if control_events.is_empty() {
         observation
             .observe_empty(Duration::from_nanos(0), outcome)
-            .await
+            .await;
     } else {
         observation
-            .observe(
-                control_events.as_mut_slice(),
-                Duration::from_nanos(0),
-                outcome,
-            )
-            .await
+            .observe(control_events, Duration::from_nanos(0), outcome)
+            .await;
     }
 }
 
@@ -332,7 +320,6 @@ pub(crate) async fn drain_pending_outputs_sync(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&crate::stages::observer::StageObserverBundle>,
 ) -> Result<bool, BoxError> {
     while let Some(pending) = pending_outputs.pop_front() {
         if matches!(
@@ -362,7 +349,6 @@ pub(crate) async fn drain_pending_outputs_sync(
             backpressure_pulse,
             backpressure_stall,
             output_contract,
-            observers,
             pending_outputs,
         )
         .await?
@@ -391,7 +377,6 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&crate::stages::observer::StageObserverBundle>,
     external_events: &mut EventReceiver<E>,
     on_channel_closed: impl FnOnce() -> E,
 ) -> Result<Option<EventLoopDirective<E>>, BoxError>
@@ -428,7 +413,6 @@ where
             backpressure_pulse,
             backpressure_stall,
             output_contract,
-            observers,
             pending_outputs,
         )
         .await?
@@ -818,7 +802,6 @@ mod tests {
                 &mut backpressure_pulse,
                 &mut backpressure_stall,
                 None,
-                None,
                 &mut receiver,
                 || TestEvent::ChannelClosed,
             )
@@ -921,7 +904,6 @@ mod tests {
                 &writer,
                 &mut backpressure_pulse,
                 &mut backpressure_stall,
-                None,
                 None,
                 &mut receiver,
                 || TestEvent::ChannelClosed,

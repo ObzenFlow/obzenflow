@@ -78,17 +78,12 @@ pub(super) async fn start_if_eligible<
 
     run_before_handler_observers(
         &ctx.observers,
-        ctx.stage_id,
-        &ctx.stage_name,
+        ctx.flow_id,
         flow_context,
         scope,
         &envelope.event,
-        Some(input_position.0),
-        &ctx.data_journal,
-        &ctx.instrumentation,
-        envelope,
-    )
-    .await?;
+        input_position,
+    );
 
     let admission = DirectFactAdmission::new(envelope.event.event_type().into(), bound);
     let effect_writer = ctx
@@ -254,35 +249,20 @@ async fn finish_success<
     ctx: &mut TransformContext<H>,
     continuation: DirectFactContinuation,
     flow_context: &FlowContext,
-    mut transformed_events: Vec<ChainEvent>,
+    transformed_events: Vec<ChainEvent>,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
-    if let Err(error) = run_after_handler_observers(
+    let input_position = continuation
+        .input_position
+        .ok_or("generated direct-fact continuation has no deterministic stage input position")?;
+    run_after_handler_observers(
         &ctx.observers,
-        ctx.stage_id,
-        &ctx.stage_name,
+        ctx.flow_id,
         flow_context,
         continuation.scope,
         &continuation.envelope.event,
-        continuation.input_position.map(|position| position.0),
-        transformed_events.as_mut_slice(),
-        &ctx.data_journal,
-        &ctx.instrumentation,
-        &continuation.envelope,
-    )
-    .await
-    {
-        return fail(
-            sup,
-            ctx,
-            continuation,
-            direct_fatal(
-                StageFatalCode::Coordination,
-                StageFatalReason::CoordinationFailure,
-                format!("generated after-handler observer failed: {error}"),
-            ),
-        )
-        .await;
-    }
+        input_position,
+        transformed_events.as_slice(),
+    );
 
     let mut pending = VecDeque::<PendingOutput>::new();
     for event in transformed_events {
@@ -378,7 +358,6 @@ async fn finish_success<
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
-            Some(&ctx.observers),
             &mut pending,
         )
         .await

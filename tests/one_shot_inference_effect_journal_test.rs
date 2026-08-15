@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ai_resilience;
-use obzenflow_adapters::middleware::{LoggingMiddlewareFactory, MiddlewareFactory};
+use obzenflow_adapters::middleware::{MiddlewareFactory, RateLimiterFactory};
 use obzenflow_core::ai::{
     AiClientError, AiInferenceRole, AiRoleLogicFailure, ChatBindingContract, ChatClient,
     ChatCompletionReply, ChatMessage, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse,
@@ -945,7 +945,7 @@ async fn inference_rejects_a_non_resilience_policy_before_role_or_port_resolutio
                 interpret_calls: interpret_calls.clone(),
                 prompt_suffix: "",
             },
-            Box::new(LoggingMiddlewareFactory::new()),
+            Box::new(RateLimiterFactory::new(1.0)),
         ))
         .await;
 

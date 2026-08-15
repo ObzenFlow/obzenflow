@@ -45,7 +45,7 @@
 //! review. See `README.md`.
 
 use super::console;
-use super::deliveries::ShippingHandoff;
+use super::deliveries::{ShippingDeliveryLog, ShippingHandoff};
 use super::domain::{
     CustomerOrderPlaced, InvalidOrder, OrderCancelled, PaymentAuthorizationUnavailable,
     PaymentAuthorized, PaymentDeclined, ValidatedOrder,
@@ -54,9 +54,9 @@ use super::fixtures;
 use super::gateway::{AuthorizePayment, GatewayTransform};
 use super::validation;
 use obzenflow::typed::sources as typed_sources;
-use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
 use obzenflow_adapters::middleware::{
-    CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder, Retry,
+    sink_delivery_observer, CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder,
+    Retry,
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -174,6 +174,12 @@ pub fn assemble_flow(
             });
         let record_unavailable = SinkTyped::with_delivery(
             |unavailable: PaymentAuthorizationUnavailable, delivery| async move {
+                tracing::info!(
+                    operation = "payment.authorization",
+                    handoff_kind = "manual_review",
+                    order_id = %unavailable.order_id,
+                    "authorization queued for manual review"
+                );
                 console::record_authorization_unavailable(unavailable, delivery.provenance());
             },
         );
@@ -252,29 +258,21 @@ pub fn assemble_flow(
                         PaymentAuthorizationUnavailable
                     } => gateway_transform,
                     effects: [AuthorizePayment with gateway_resilience],
-                    // Record a per-execution service-level-indicator sample for the
-                    // authorization handler. This is end-to-end handler wall time, so it
-                    // includes effect-boundary admission, dependency execution, recovery,
-                    // rejection routing, and the demo's first-Recovery quiet period.
-                    // Breaker attempt rows separately report raw dependency and
-                    // admission-wait time. This sample is observe-only; it never changes
-                    // whether the payment succeeds, retries, or routes. The objective
-                    // (e.g. "under five seconds"), and aggregation into percentiles and
-                    // SLOs, are FLOWIP-115l's job, applied at read time over these
-                    // journalled samples rather than baked into the wide event.
-                    observers: [
-                        indicator()
-                            .operation("payment.authorization")
-                            .kind(IndicatorKind::Latency)
-                            .indicator("authorization.latency")
-                            .tag("dependency", "payment_gateway")
-                    ]
                 );
 
                 // Paid-order sink: a tiny in-process console integration. Its
                 // implementation only writes and reports what it actually did;
                 // the site-level clause classifies repeat delivery for resume.
-                paid_orders = sink!(PaymentAuthorized => shipping_handoff, delivery: idempotent);
+                // One passive observer logs the runtime's immutable delivery
+                // classification. It cannot alter settlement or emit flow facts.
+                paid_orders = sink!(
+                    PaymentAuthorized => shipping_handoff,
+                    delivery: idempotent,
+                    observers: [sink_delivery_observer(
+                        "shipping-delivery-log",
+                        ShippingDeliveryLog
+                    )]
+                );
 
                 // Cancelled-order sink, tier 2: a declared closure. The order's
                 // fate converges from both producers (local validation failures
@@ -286,21 +284,14 @@ pub fn assemble_flow(
                 // reason to skip the write.
                 cancelled_orders = sink!(OrderCancelled => record_cancelled, delivery: idempotent);
 
-                // Unavailable-authorization sink, tier 2 with observers: failed
-                // gateway call or breaker refusal. No payment decision was
-                // reached, so the order is not cancelled; it goes to manual
-                // review.
+                // Unavailable-authorization sink, tier 2: failed gateway call or
+                // breaker refusal. No payment decision was reached, so the order
+                // is not cancelled; it goes to manual review. Its implementation
+                // uses ordinary structured Rust tracing for local operator output;
+                // the Delivery receipt remains the durable settlement fact.
                 manual_review = sink!(
                     PaymentAuthorizationUnavailable => record_unavailable,
-                    delivery: idempotent,
-                    observers: [
-                        // Publish journalled operator-handoff evidence for each
-                        // unavailable-authorization delivery. Observe-only: it does
-                        // not change routing or delivery. The stage data journal is
-                        // the source of truth, with a tracing mirror for local
-                        // visibility.
-                        log().prefix("manual_review")
-                    ]
+                    delivery: idempotent
                 );
             },
 

@@ -64,7 +64,7 @@ These examples don't have tutorials, but they demonstrate concrete framework con
   - Code: [`examples/csv_demo_support_sla/flow.rs`](csv_demo_support_sla/flow.rs)
 
 - **`payment_gateway_resilience`** — Per-effect circuit breaking, retry, rate limiting, fail-fast rejection, and operator-facing resilience against unreliable dependencies. Use this when you care about runtime protections and replay-stable failure semantics.
-  - Shows: [declared effects](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [operational batteries](https://obzenflow.dev/product/how-obzenflow-works/#run-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it)
+  - Shows: [declared effects](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [operational batteries](https://obzenflow.dev/product/how-obzenflow-works/#run-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it), and one passive `observers:` attachment
   - Run: `cargo run -p obzenflow --example payment_gateway_resilience`
   - Run with metrics: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
   - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)

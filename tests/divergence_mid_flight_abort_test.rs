@@ -26,22 +26,29 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent};
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
 use obzenflow_core::event::SystemEventType;
+use obzenflow_core::journal::journal_error::JournalError;
+use obzenflow_core::journal::journal_name::JournalName;
+use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{CycleDepth, DivergenceContract, StageOutputs, TransportContract};
+use obzenflow_core::{
+    CycleDepth, DivergenceContract, EventEnvelope, EventId, FlowId, JournalId, StageOutputs,
+    TransportContract,
+};
 use obzenflow_dsl::{effectful_transform, sink, source, test_flow, transform};
-use obzenflow_infra::journal::memory_journals;
+use obzenflow_infra::journal::{memory_journals, MemoryJournalFactory};
 use obzenflow_runtime::effects::{Effects, StageCompletion};
+use obzenflow_runtime::journal::{FlowJournalFactory, RunSubstrateState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
     SinkWriteReport, TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::stages::observer::{
-    HandlerObserver, HandlerObserverContext, ObserverReport,
-};
 use obzenflow_runtime::testing::{EventShape, JournalOrder, JournalSnapshot, TestClock};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// File-local payload for the mid-flight-divergence abort test. The JSON
@@ -269,77 +276,134 @@ impl TypedTransformHandler for LoopBackTransform {
     }
 }
 
-/// Test-only observer that corrupts the runtime-owned cycle metadata after a
-/// typed handler has produced its facts. This preserves the original
-/// integration proof: the divergence contract must reject an over-depth event
-/// arriving on an SCC-internal edge, independently of the entry guard that
-/// normally prevents an honest flow from constructing one.
-#[derive(Clone, Debug)]
-struct CycleDepthInjectionMiddleware {
+/// Lower-level fault fixture that corrupts an SCC-internal row after runtime
+/// output validation, immediately before the journal commits it. This keeps
+/// mutation authority out of ordinary observers while preserving the
+/// integration proof that the continuous divergence contract aborts an
+/// already-running pipeline when corrupt cycle metadata reaches transport.
+struct CycleDepthFaultJournal {
+    inner: Arc<dyn Journal<ChainEvent>>,
     bump_to: u16,
 }
 
-impl CycleDepthInjectionMiddleware {
-    fn new(bump_to: u16) -> Self {
-        Self { bump_to }
-    }
-}
-
-struct CycleDepthInjectionFamily;
-
-const CYCLE_DEPTH_INJECTION_LABEL: &str = "test_cycle_depth_injection";
-
-impl MiddlewareFactory for CycleDepthInjectionMiddleware {
-    fn label(&self) -> &'static str {
-        CYCLE_DEPTH_INJECTION_LABEL
-    }
-
-    fn override_key(&self) -> MiddlewareOverrideKey {
-        MiddlewareOverrideKey::of::<CycleDepthInjectionFamily>(CYCLE_DEPTH_INJECTION_LABEL)
-    }
-
-    fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::observer_with_family(
-            CYCLE_DEPTH_INJECTION_LABEL,
-            self.override_key().family_label(),
-            vec![MiddlewareSurfaceKind::Handler],
-        )
-    }
-
-    fn materialize(
-        &self,
-        request: MiddlewareAttachmentRequest<'_>,
-        context: &MiddlewareMaterializationContext<'_>,
-    ) -> Result<MiddlewareSurfaceAttachment, MiddlewareFactoryError> {
-        validate_attachment_request(&self.declaration(), &request).map_err(|error| {
-            MiddlewareFactoryError::materialization_failed(
-                CYCLE_DEPTH_INJECTION_LABEL,
-                &context.config.name,
-                error,
-            )
-        })?;
-        Ok(MiddlewareSurfaceAttachment::handler_observer(Arc::new(
-            self.clone(),
-        )))
-    }
-}
-
-impl HandlerObserver for CycleDepthInjectionMiddleware {
-    fn label(&self) -> &'static str {
-        CYCLE_DEPTH_INJECTION_LABEL
-    }
-
-    fn after_handle(
-        &self,
-        _ctx: &HandlerObserverContext<'_>,
-        outputs: &mut [ChainEvent],
-    ) -> ObserverReport {
-        for event in outputs {
-            if event.is_data() && event.cycle_scc_id.is_some() {
-                event.cycle_depth = Some(CycleDepth::new(self.bump_to));
-            }
+impl CycleDepthFaultJournal {
+    fn corrupt(&self, mut event: ChainEvent) -> ChainEvent {
+        if event.is_data() && event.cycle_scc_id.is_some() {
+            event.cycle_depth = Some(CycleDepth::new(self.bump_to));
         }
-        ObserverReport::empty()
+        event
+    }
+}
+
+#[async_trait]
+impl Journal<ChainEvent> for CycleDepthFaultJournal {
+    fn id(&self) -> &JournalId {
+        self.inner.id()
+    }
+
+    fn owner(&self) -> Option<&JournalOwner> {
+        self.inner.owner()
+    }
+
+    async fn append(
+        &self,
+        event: ChainEvent,
+        parent: Option<&EventEnvelope<ChainEvent>>,
+    ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
+        self.inner.append(self.corrupt(event), parent).await
+    }
+
+    async fn append_group(
+        &self,
+        group_id: &str,
+        events: Vec<ChainEvent>,
+        parent: Option<&EventEnvelope<ChainEvent>>,
+    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        self.inner
+            .append_group(
+                group_id,
+                events
+                    .into_iter()
+                    .map(|event| self.corrupt(event))
+                    .collect(),
+                parent,
+            )
+            .await
+    }
+
+    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        self.inner.read_all_unordered().await
+    }
+
+    async fn read_event(
+        &self,
+        event_id: &EventId,
+    ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+        self.inner.read_event(event_id).await
+    }
+
+    async fn reader_from(
+        &self,
+        position: u64,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
+        self.inner.reader_from(position).await
+    }
+
+    async fn read_last_n(
+        &self,
+        count: usize,
+    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        self.inner.read_last_n(count).await
+    }
+}
+
+struct CycleDepthFaultFactory {
+    inner: MemoryJournalFactory,
+    chain_journals: HashMap<JournalName, Arc<dyn Journal<ChainEvent>>>,
+}
+
+impl CycleDepthFaultFactory {
+    fn new(flow_id: FlowId) -> Self {
+        Self {
+            inner: MemoryJournalFactory::new(flow_id),
+            chain_journals: HashMap::new(),
+        }
+    }
+}
+
+impl FlowJournalFactory for CycleDepthFaultFactory {
+    fn run_state(&self) -> RunSubstrateState {
+        RunSubstrateState::Ephemeral
+    }
+
+    fn create_chain_journal(
+        &mut self,
+        name: JournalName,
+        owner: JournalOwner,
+    ) -> Result<Arc<dyn Journal<ChainEvent>>, JournalError> {
+        if let Some(journal) = self.chain_journals.get(&name) {
+            return Ok(journal.clone());
+        }
+        let inner = self.inner.create_chain_journal(name.clone(), owner)?;
+        let journal: Arc<dyn Journal<ChainEvent>> = match &name {
+            JournalName::Stage { name, .. } if name == "entry" => {
+                Arc::new(CycleDepthFaultJournal {
+                    inner,
+                    bump_to: 100,
+                })
+            }
+            _ => inner,
+        };
+        self.chain_journals.insert(name, journal.clone());
+        Ok(journal)
+    }
+
+    fn create_system_journal(
+        &mut self,
+        name: JournalName,
+        owner: JournalOwner,
+    ) -> Result<Arc<dyn Journal<SystemEvent>>, JournalError> {
+        self.inner.create_system_journal(name, owner)
     }
 }
 
@@ -701,12 +765,12 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
     let delay = DelayedSeedTransform::new(Duration::from_millis(5));
     let entry = PassThroughTransform;
     let iter = PassThroughTransform;
-    let inject_cycle_depth = CycleDepthInjectionMiddleware::new(100);
     let sink = CountingSink;
+    let journals = |flow_id| Ok(CycleDepthFaultFactory::new(flow_id));
 
     let harness = test_flow! {
         name: "divergence_cycle_depth_abort",
-        journals: memory_journals(),
+        journals: journals,
 
         stages: {
             src = source!(SeedEvent => source);
@@ -715,7 +779,7 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
                 effects: [],
                 observers: [],
             );
-            entry = transform!(SeedEvent -> SeedEvent => entry, observers: [inject_cycle_depth]);
+            entry = transform!(SeedEvent -> SeedEvent => entry);
             iter = transform!(SeedEvent -> SeedEvent => iter);
             snk = sink!(SeedEvent => sink);
         },
@@ -741,7 +805,6 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
             break;
         }
         clock.advance(Duration::from_millis(50)).await?;
-        // Give supervisors a chance to run timers and propagate contract evidence.
         let _ = TestClock::settle_scheduler(|| async { Ok::<bool, Infallible>(run.is_finished()) })
             .await?;
     }
@@ -764,7 +827,6 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
     .await?;
 
     let snapshot = JournalSnapshot::capture_system_journal(system_journal.clone()).await?;
-
     let mut seen_divergence_contract_result = false;
     let mut seen_cycle_depth_contract_status = false;
 

@@ -9,11 +9,10 @@ error[E0432]: unresolved imports `obzenflow_runtime::stages::common::handlers::D
   = help: consider importing one of these variants instead:
           obzenflow_adapters::middleware::SinkDeliveryPolicyOutcome::Delivered
           obzenflow_adapters::middleware::SourcePollOutcome::Delivered
-          obzenflow_adapters::middleware::observer::SinkDeliveryObserverOutcome::Delivered
-          obzenflow_runtime::stages::observer::SinkDeliveryObserverOutcome::Delivered
           obzenflow_runtime::stages::sink::journal_sink::SinkDeliveryAttemptOutcome::Delivered
-  = help: consider importing this variant instead:
+  = help: consider importing one of these variants instead:
           obzenflow_core::event::ChainEventContent::Delivery
+          obzenflow_runtime::stages::observer::JoinObserverOccurrence::Delivery
 
 error[E0432]: unresolved imports `obzenflow_runtime::stages::sink::FallibleSinkTyped`, `obzenflow_runtime::stages::sink::SinkTypedWithDelivery`
  --> tests/compile_fail/sink_witness/retired_surface.rs:7:39

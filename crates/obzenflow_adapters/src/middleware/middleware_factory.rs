@@ -112,6 +112,7 @@ pub fn materialize_factory_checked_with_declaration(
         .commit_batch(context.take_pending())
         .map_err(MiddlewareBindingError::AuthorityCommit)?;
     Ok(CheckedMiddlewareSurfaceAttachment::from_validated(
+        declaration.label,
         attachment,
     ))
 }

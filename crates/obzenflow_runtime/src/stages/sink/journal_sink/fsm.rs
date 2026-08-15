@@ -467,30 +467,24 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     &ctx.system_journal,
                 )
                 .await;
-                let flow_context = FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: ctx.flow_id.to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_id: ctx.stage_id,
-                    stage_type: StageType::Sink,
-                };
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.stage_id,
-                    &ctx.stage_name,
-                    &flow_context,
                     scope,
                     StageLifecyclePhase::Running,
-                    &ctx.data_journal,
-                    &ctx.instrumentation,
-                )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Sink lifecycle observer failed: {e}"
-                    ))
-                })?;
+                    || {
+                        (
+                            ctx.flow_id,
+                            FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: ctx.stage_id,
+                                stage_type: StageType::Sink,
+                            },
+                        )
+                    },
+                );
                 Ok(())
             }
 
@@ -509,30 +503,24 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     ctx.instrumentation.as_ref(),
                 )
                 .await;
-                let flow_context = FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: ctx.flow_id.to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_id: ctx.stage_id,
-                    stage_type: StageType::Sink,
-                };
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.stage_id,
-                    &ctx.stage_name,
-                    &flow_context,
                     scope,
                     StageLifecyclePhase::Completed,
-                    &ctx.data_journal,
-                    &ctx.instrumentation,
-                )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Sink lifecycle observer failed: {e}"
-                    ))
-                })?;
+                    || {
+                        (
+                            ctx.flow_id,
+                            FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: ctx.stage_id,
+                                stage_type: StageType::Sink,
+                            },
+                        )
+                    },
+                );
                 Ok(())
             }
 
@@ -548,30 +536,24 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     ctx.instrumentation.as_ref(),
                 )
                 .await;
-                let flow_context = FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: ctx.flow_id.to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_id: ctx.stage_id,
-                    stage_type: StageType::Sink,
-                };
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
-                    ctx.stage_id,
-                    &ctx.stage_name,
-                    &flow_context,
                     scope,
                     StageLifecyclePhase::Failed,
-                    &ctx.data_journal,
-                    &ctx.instrumentation,
-                )
-                .await
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Sink lifecycle observer failed: {e}"
-                    ))
-                })?;
+                    || {
+                        (
+                            ctx.flow_id,
+                            FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: ctx.stage_id,
+                                stage_type: StageType::Sink,
+                            },
+                        )
+                    },
+                );
                 Ok(())
             }
 

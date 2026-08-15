@@ -196,11 +196,37 @@ pub(super) async fn dispatch_hydrating<
                     let reference_stage_id = ctx.reference_stage_id;
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     let upstream_stage = subscription.last_delivered_upstream_stage();
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        subscription.last_delivered_stage_input_position(),
+                        subscription.last_delivered_generation(),
+                    );
+                    let delivery_snapshot = (ctx.observers.has_join()
+                        && !scope.is_deterministic_replay())
+                    .then(|| {
+                        common::delivery_snapshot(
+                            crate::stages::observer::JoinSide::Reference,
+                            reference_stage_id,
+                            subscription.last_delivered_stage_input_position(),
+                            &envelope,
+                            &ctx.reference_high_water_clock,
+                        )
+                    })
+                    .transpose()?;
 
                     if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
                         heartbeat.state.record_data_read(upstream, event_id);
                     }
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
+                    common::observe_join_input(
+                        ctx,
+                        scope,
+                        &event,
+                        delivery_snapshot.as_ref(),
+                        None,
+                        Some(&envelope),
+                    )
+                    .await?;
 
                     if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
                         if let Some(state) = &heartbeat_state {
@@ -224,17 +250,23 @@ pub(super) async fn dispatch_hydrating<
                             );
                         }
 
-                        let scope = ctx.runtime_execution.dispatch_scope(
-                            ctx.stage_id,
-                            subscription.last_delivered_stage_input_position(),
-                            subscription.last_delivered_generation(),
-                        );
-                        ctx.pending_outputs.push_back(
+                        let mut outputs = vec![event];
+                        common::observe_join_outputs(
+                            ctx,
+                            scope,
+                            Some(&envelope.event),
+                            delivery_snapshot.as_ref(),
+                            None,
+                            outputs.as_mut_slice(),
+                            Some(&envelope),
+                        )
+                        .await?;
+                        ctx.pending_outputs.extend(outputs.into_iter().map(|event| {
                             crate::stages::common::supervision::backpressure_drain::PendingOutput {
                                 event,
                                 scope,
-                            },
-                        );
+                            }
+                        }));
                         ctx.pending_subscription_ack = subscription
                             .last_delivered_upstream_stage()
                             .map(|upstream| PendingSubscriptionAck {
@@ -252,16 +284,9 @@ pub(super) async fn dispatch_hydrating<
                     let _processing = heartbeat_state.as_ref().map(|state| {
                         HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
                     });
-                    // FLOWIP-120n: per-delivery execution scope, computed at
-                    // dispatch from the delivered position and generation.
-                    let scope = ctx.runtime_execution.dispatch_scope(
-                        ctx.stage_id,
-                        subscription.last_delivered_stage_input_position(),
-                        subscription.last_delivered_generation(),
-                    );
                     let result = ctx.handler.process_reference(
                         &mut ctx.handler_state,
-                        event,
+                        event.clone(),
                         reference_stage_id,
                         writer_id,
                         scope,
@@ -285,10 +310,21 @@ pub(super) async fn dispatch_hydrating<
                         .fetch_add(1, Ordering::Relaxed);
 
                     match result {
-                        Ok(events_produced) => {
+                        Ok(mut events_produced) => {
                             ctx.instrumentation
                                 .events_accumulated_total
                                 .fetch_add(1, Ordering::Relaxed);
+
+                            common::observe_join_outputs(
+                                ctx,
+                                scope,
+                                Some(&event),
+                                delivery_snapshot.as_ref(),
+                                None,
+                                events_produced.as_mut_slice(),
+                                Some(&envelope),
+                            )
+                            .await?;
 
                             tracing::debug!(
                                 stage_name = %ctx.stage_name,
@@ -315,6 +351,17 @@ pub(super) async fn dispatch_hydrating<
                                     fatal,
                                     Some(&envelope),
                                     subscription.last_delivered_stage_input_position(),
+                                )
+                                .await?;
+                            } else {
+                                common::observe_join_outputs(
+                                    ctx,
+                                    scope,
+                                    Some(&event),
+                                    delivery_snapshot.as_ref(),
+                                    None,
+                                    &[],
+                                    Some(&envelope),
                                 )
                                 .await?;
                             }

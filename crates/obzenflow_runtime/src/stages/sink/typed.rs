@@ -431,6 +431,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn with_delivery_uses_runtime_replay_scope_when_fan_in_clears_event_context() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_closure = Arc::clone(&seen);
+        let handler =
+            SinkTyped::with_delivery(move |_input: TestPayload, delivery: DeliveryContext| {
+                let seen = Arc::clone(&seen_for_closure);
+                async move {
+                    seen.lock()
+                        .expect("seen lock poisoned")
+                        .push(delivery.provenance())
+                }
+            });
+        let mut adapter = adapted(handler).await;
+        let fan_in_output_without_replay_context = event(2);
+
+        crate::stages::common::handlers::UnifiedSinkHandler::consume_report(
+            &mut adapter,
+            fan_in_output_without_replay_context,
+            None,
+            obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
+        )
+        .await
+        .expect("reconstructed fan-in delivery consumes");
+
+        assert_eq!(
+            *seen.lock().expect("seen lock poisoned"),
+            vec![DeliveryProvenance::Replayed]
+        );
+    }
+
     #[test]
     fn closure_redelivery_safety_is_explicit_and_replaceable() {
         let undeclared = SinkTyped::new(|_input: TestPayload| async move {});

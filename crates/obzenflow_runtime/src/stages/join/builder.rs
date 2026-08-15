@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
+use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
@@ -91,6 +92,12 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
     type Error = BuilderError;
 
     async fn build(self) -> Result<Self::Handle, Self::Error> {
+        let observers = StageObserverBundle::compose_checked(
+            &self.config.stage_name,
+            ObserverTarget::Join,
+            self.config.observer_bindings,
+        )?;
+
         // Create channels for supervisor communication
         let (event_sender, event_receiver, state_watcher) =
             ChannelBuilder::new().build(JoinState::<H>::Created);
@@ -165,7 +172,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             handler_state,
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
-            observers: self.config.observers.clone(),
+            observers,
             flow_name: self.config.flow_name.clone(),
             runtime_execution: self.resources.runtime_execution.clone(),
             flow_id: self.resources.flow_id,

@@ -215,61 +215,34 @@ impl EffectsCore {
         Ok(())
     }
 
-    async fn observe_effect_outcome(
+    fn observe_effect_outcome(
         &self,
         effect_type: &str,
         outcome: crate::stages::observer::EffectObserverOutcome,
-    ) -> Result<(), EffectError> {
+    ) {
         let Some(observers) = self.ctx.observers.as_ref() else {
-            return Ok(());
+            return;
         };
-        if observers.effect.is_none() {
-            return Ok(());
+        if observers.effect().is_none() {
+            return;
         }
-        let scope = if matches!(
-            outcome,
-            crate::stages::observer::EffectObserverOutcome::SuppressedByReplay
-        ) {
-            self.ctx
-                .runtime_execution
-                .scope_at(crate::execution::ExecutionPosition {
-                    stage_id: self.ctx.stage_id,
-                    position: self.ctx.input_seq,
-                    // The effect context carries no generation; the effect-miss
-                    // decision is positional (FLOWIP-120n F7).
-                    generation: None,
-                })
-        } else {
-            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary
-        };
         crate::stages::observer::dispatch::run_effect_observers(
             observers,
+            self.ctx.flow_id,
             self.ctx.stage_id,
             &self.ctx.stage_key,
-            self.ctx.flow_context.as_ref(),
-            scope,
+            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
             effect_type,
             outcome,
-            &self.ctx.data_journal,
-            self.ctx.instrumentation.as_ref(),
-            Some(&self.ctx.parent),
-        )
-        .await
-        .map_err(|e| EffectError::Journal(e.to_string()))
+        );
     }
 
-    async fn observe_effect_result<T>(
-        &self,
-        effect_type: &str,
-        result: &Result<T, EffectError>,
-    ) -> Result<(), EffectError> {
+    fn observe_effect_result<T>(&self, effect_type: &str, result: &Result<T, EffectError>) {
         let outcome = match result {
             Ok(_) => crate::stages::observer::EffectObserverOutcome::Succeeded,
-            Err(err) => crate::stages::observer::EffectObserverOutcome::Failed {
-                message: err.error_message(),
-            },
+            Err(_) => crate::stages::observer::EffectObserverOutcome::Failed,
         };
-        self.observe_effect_outcome(effect_type, outcome).await
+        self.observe_effect_outcome(effect_type, outcome);
     }
 
     fn reserve_effect_ordinal(&mut self) -> Result<EffectOrdinal, EffectError> {
@@ -408,7 +381,6 @@ impl EffectsCore {
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: Some(&self.ctx.output_contract),
             backpressure_writer: Some(&self.ctx.backpressure_writer),
-            observers: None,
             observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
         };
         committer
@@ -547,11 +519,6 @@ impl EffectsCore {
                     )
                     .await?;
                 }
-                self.observe_effect_outcome(
-                    E::EFFECT_TYPE,
-                    crate::stages::observer::EffectObserverOutcome::SuppressedByReplay,
-                )
-                .await?;
                 if let Some(abandoned) = selected.abandonment.as_ref() {
                     return Err(EffectError::RecoveryAbandoned {
                         last_started_attempt: abandoned.highest_started_attempt,
@@ -700,8 +667,7 @@ impl EffectsCore {
                     self.observe_effect_outcome(
                         E::EFFECT_TYPE,
                         crate::stages::observer::EffectObserverOutcome::Succeeded,
-                    )
-                    .await?;
+                    );
                     Ok(output)
                 }
                 Err(err) => {
@@ -709,11 +675,8 @@ impl EffectsCore {
                         .await?;
                     self.observe_effect_outcome(
                         E::EFFECT_TYPE,
-                        crate::stages::observer::EffectObserverOutcome::Failed {
-                            message: err.error_message(),
-                        },
-                    )
-                    .await?;
+                        crate::stages::observer::EffectObserverOutcome::Failed,
+                    );
                     Err(err)
                 }
             };
@@ -786,8 +749,7 @@ impl EffectsCore {
                 self.observe_effect_outcome(
                     E::EFFECT_TYPE,
                     crate::stages::observer::EffectObserverOutcome::Succeeded,
-                )
-                .await?;
+                );
                 Ok(output)
             }
             EffectBoundaryOutcome::Executed(Err(err)) => {
@@ -801,11 +763,8 @@ impl EffectsCore {
                 .await?;
                 self.observe_effect_outcome(
                     E::EFFECT_TYPE,
-                    crate::stages::observer::EffectObserverOutcome::Failed {
-                        message: err.error_message(),
-                    },
-                )
-                .await?;
+                    crate::stages::observer::EffectObserverOutcome::Failed,
+                );
                 Err(err)
             }
             EffectBoundaryOutcome::Aborted(reason) => {
@@ -818,14 +777,11 @@ impl EffectsCore {
                         control_events,
                     )
                     .await;
-                if let Err(err) = &result {
+                if result.is_err() {
                     self.observe_effect_outcome(
                         E::EFFECT_TYPE,
-                        crate::stages::observer::EffectObserverOutcome::Failed {
-                            message: err.error_message(),
-                        },
-                    )
-                    .await?;
+                        crate::stages::observer::EffectObserverOutcome::Failed,
+                    );
                 }
                 result
             }
@@ -917,7 +873,6 @@ impl EffectsCore {
                         heartbeat_state: heartbeat_state.as_ref(),
                         output_contract: None,
                         backpressure_writer: Some(&backpressure_writer),
-                        observers: None,
                         observer_scope:
                             obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
                     };
@@ -1010,8 +965,7 @@ impl EffectsCore {
                         self.observe_effect_outcome(
                             E::EFFECT_TYPE,
                             crate::stages::observer::EffectObserverOutcome::Succeeded,
-                        )
-                        .await?;
+                        );
                         Ok(output)
                     }
                     Err(error) => {
@@ -1026,42 +980,41 @@ impl EffectsCore {
                         .await?;
                         self.observe_effect_outcome(
                             E::EFFECT_TYPE,
-                            crate::stages::observer::EffectObserverOutcome::Failed {
-                                message: error.error_message(),
-                            },
-                        )
-                        .await?;
+                            crate::stages::observer::EffectObserverOutcome::Failed,
+                        );
                         Err(error.clone())
                     }
                 }
             }
             SingleUseEffectBoundaryOutcome::Aborted(reason) => {
-                if highest_prior_attempt == 0 {
-                    return self
-                        .record_boundary_abort_with_control_events(
-                            cursor,
-                            descriptor_hash,
-                            descriptor,
-                            reason,
-                            control_events,
-                        )
-                        .await;
-                }
-                let causal_input_id = recovery_causal_input_id.ok_or_else(|| {
-                    EffectError::EffectProvenanceMismatch(format!(
-                        "effect cursor {cursor:?} selected recovery abandonment without an archived Start identity"
-                    ))
-                })?;
-                self.record_recovery_abandonment(RecoveryAbandonment {
-                    cursor,
-                    descriptor_hash,
-                    descriptor,
-                    highest_started_attempt: EffectAttemptOrdinal::new(highest_prior_attempt),
-                    causal_input_id,
-                    reason,
-                    control_events,
-                })
-                .await
+                let result = if highest_prior_attempt == 0 {
+                    self.record_boundary_abort_with_control_events(
+                        cursor,
+                        descriptor_hash,
+                        descriptor,
+                        reason,
+                        control_events,
+                    )
+                    .await
+                } else {
+                    let causal_input_id = recovery_causal_input_id.ok_or_else(|| {
+                        EffectError::EffectProvenanceMismatch(format!(
+                            "effect cursor {cursor:?} selected recovery abandonment without an archived Start identity"
+                        ))
+                    })?;
+                    self.record_recovery_abandonment(RecoveryAbandonment {
+                        cursor,
+                        descriptor_hash,
+                        descriptor,
+                        highest_started_attempt: EffectAttemptOrdinal::new(highest_prior_attempt),
+                        causal_input_id,
+                        reason,
+                        control_events,
+                    })
+                    .await
+                };
+                self.observe_effect_result(E::EFFECT_TYPE, &result);
+                result
             }
         }
     }
@@ -1079,7 +1032,6 @@ impl EffectsCore {
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: None,
             backpressure_writer: Some(&self.ctx.backpressure_writer),
-            observers: None,
             observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
         };
         if let Err(error) = committer
@@ -1488,11 +1440,6 @@ impl EffectsCore {
                             materialization,
                         )
                         .await?;
-                        self.observe_effect_outcome(
-                            "obzenflow.capture",
-                            crate::stages::observer::EffectObserverOutcome::SuppressedByReplay,
-                        )
-                        .await?;
                         return Err(err);
                     }
                     Err(err) => return Err(err),
@@ -1500,11 +1447,6 @@ impl EffectsCore {
                 let materialization = effect_record_group_materialization(&records)?;
                 self.append_replayed_records(cursor, descriptor_hash, descriptor, materialization)
                     .await?;
-                self.observe_effect_outcome(
-                    "obzenflow.capture",
-                    crate::stages::observer::EffectObserverOutcome::SuppressedByReplay,
-                )
-                .await?;
                 return Ok(output);
             }
 
@@ -1534,8 +1476,7 @@ impl EffectsCore {
         self.observe_effect_outcome(
             "obzenflow.capture",
             crate::stages::observer::EffectObserverOutcome::Succeeded,
-        )
-        .await?;
+        );
         Ok(value)
     }
 
@@ -1605,7 +1546,7 @@ impl EffectsCore {
             let outcome = commit_observer.settled_outcome();
             let result =
                 self.settle_transactional::<E>(executor, output_ordinal, port_result, outcome);
-            self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
+            self.observe_effect_result(E::EFFECT_TYPE, &result);
             return result;
         };
 
@@ -1697,7 +1638,7 @@ impl EffectsCore {
                         port_result,
                         outcome,
                     );
-                    self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
+                    self.observe_effect_result(E::EFFECT_TYPE, &result);
                     return result;
                 }
 
@@ -1709,7 +1650,7 @@ impl EffectsCore {
                 self.append_failed_record(cursor, descriptor_hash, descriptor, &err)
                     .await?;
                 let result: Result<E::Outcome, EffectError> = Err(err);
-                self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
+                self.observe_effect_result(E::EFFECT_TYPE, &result);
                 return result;
             }
         };
@@ -1745,14 +1686,14 @@ impl EffectsCore {
                     )
                     .await?;
                     let result: Result<E::Outcome, EffectError> = Err(err);
-                    self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
+                    self.observe_effect_result(E::EFFECT_TYPE, &result);
                     return result;
                 };
                 self.commit_deferred_transactional_outcome(&cursor, prepared, control_events)
                     .await?;
                 let result =
                     self.settle_transactional::<E>(executor, output_ordinal, port_result, outcome);
-                self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
+                self.observe_effect_result(E::EFFECT_TYPE, &result);
                 result
             }
             SingleUseEffectBoundaryOutcome::Aborted(reason) => {
@@ -1768,7 +1709,7 @@ impl EffectsCore {
                         control_events,
                     )
                     .await;
-                self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
+                self.observe_effect_result(E::EFFECT_TYPE, &result);
                 result
             }
         }
@@ -2181,7 +2122,6 @@ impl EffectsCore {
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: Some(&self.ctx.output_contract),
             backpressure_writer: Some(&self.ctx.backpressure_writer),
-            observers: None,
             observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
         };
         if let Err(error) = committer
@@ -2229,7 +2169,6 @@ impl EffectsCore {
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: None,
             backpressure_writer: Some(&self.ctx.backpressure_writer),
-            observers: None,
             observer_scope,
         };
         if let Err(error) = committer

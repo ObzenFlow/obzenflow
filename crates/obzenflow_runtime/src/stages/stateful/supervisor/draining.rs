@@ -135,7 +135,6 @@ pub(super) async fn dispatch_draining<
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
-            Some(&ctx.observers),
             &mut ctx.pending_outputs,
         )
         .await?
@@ -230,33 +229,13 @@ pub(super) async fn dispatch_draining<
                         stage_input_position,
                         None,
                     );
-                    let observer_ctx = StatefulObserverContext {
-                        stage_id: ctx.stage_id,
-                        stage_name: &ctx.stage_name,
-                        flow_context: &flow_context,
-                        scope,
-                        input: Some(&event),
-                        stage_input_position: stage_input_position.map(|position| position.0),
-                    };
-                    run_stateful_before_accumulate_observers(
-                        &ctx.observers,
-                        &observer_ctx,
-                        &ctx.data_journal,
-                        &ctx.instrumentation,
-                        Some(&envelope),
-                    )
-                    .await?;
-
+                    let observer_ctx = StatefulObserverContext::new(
+                        ctx.flow_id,
+                        &flow_context,
+                        Some(&event),
+                        stage_input_position,
+                    );
                     if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
-                        run_stateful_after_accumulate_observers(
-                            &ctx.observers,
-                            &observer_ctx,
-                            &ctx.data_journal,
-                            &ctx.instrumentation,
-                            Some(&envelope),
-                        )
-                        .await?;
-
                         if let Some(state) = &heartbeat_state {
                             state.record_last_consumed(event_id);
                         }
@@ -289,6 +268,8 @@ pub(super) async fn dispatch_draining<
                         return Ok(EventLoopDirective::Continue);
                     }
 
+                    run_stateful_before_accumulate_observers(&ctx.observers, scope, &observer_ctx);
+
                     let mut handler = (*ctx.handler).clone();
                     let effect_context = stage_input_position.and_then(|input_seq| {
                         ctx.writer_id.map(|writer_id| EffectInvocationContext {
@@ -319,14 +300,6 @@ pub(super) async fn dispatch_draining<
                     let accumulate_result = handler
                         .accumulate(&mut ctx.current_state, event.clone(), effect_context, scope)
                         .await;
-                    run_stateful_after_accumulate_observers(
-                        &ctx.observers,
-                        &observer_ctx,
-                        &ctx.data_journal,
-                        &ctx.instrumentation,
-                        Some(&envelope),
-                    )
-                    .await?;
                     if let Err(err) = &accumulate_result {
                         if let Some(fatal) = err.as_fatal() {
                             let duration = start.elapsed();
@@ -382,6 +355,7 @@ pub(super) async fn dispatch_draining<
                             return Ok(directive);
                         }
                     }
+                    run_stateful_after_accumulate_observers(&ctx.observers, scope, &observer_ctx);
 
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
@@ -468,28 +442,22 @@ pub(super) async fn dispatch_draining<
                             });
 
                         match handler.emit_with_context(&mut ctx.current_state, output_context) {
-                            Ok(mut events_to_emit) => {
+                            Ok(events_to_emit) => {
                                 if !events_to_emit.is_empty() {
                                     let stage_writer_id =
                                         ctx.writer_id.ok_or("No writer ID available")?;
-                                    let observer_ctx = StatefulObserverContext {
-                                        stage_id: ctx.stage_id,
-                                        stage_name: &ctx.stage_name,
-                                        flow_context: &flow_context,
-                                        scope,
-                                        input: Some(&event),
-                                        stage_input_position: stage_input_position
-                                            .map(|position| position.0),
-                                    };
+                                    let observer_ctx = StatefulObserverContext::new(
+                                        ctx.flow_id,
+                                        &flow_context,
+                                        Some(&event),
+                                        stage_input_position,
+                                    );
                                     run_stateful_after_emit_observers(
                                         &ctx.observers,
+                                        scope,
                                         &observer_ctx,
-                                        events_to_emit.as_mut_slice(),
-                                        &ctx.data_journal,
-                                        &ctx.instrumentation,
-                                        Some(&envelope),
-                                    )
-                                    .await?;
+                                        events_to_emit.as_slice(),
+                                    );
 
                                     for mut out in events_to_emit {
                                         out.writer_id = stage_writer_id;
@@ -856,28 +824,24 @@ pub(super) async fn dispatch_draining<
     .await;
 
     match drain_result {
-        Ok(mut drain_events) => {
+        Ok(drain_events) => {
             let stage_writer_id = ctx.writer_id.ok_or("No writer ID available")?;
-            let observer_ctx = StatefulObserverContext {
-                stage_id: ctx.stage_id,
-                stage_name: &ctx.stage_name,
-                flow_context: &flow_context,
-                scope: observer_scope,
-                input: ctx
-                    .last_consumed_envelope
-                    .as_ref()
-                    .map(|envelope| &envelope.event),
-                stage_input_position: ctx.last_input_position.map(|position| position.0),
-            };
-            run_stateful_after_emit_observers(
-                &ctx.observers,
-                &observer_ctx,
-                drain_events.as_mut_slice(),
-                &ctx.data_journal,
-                &ctx.instrumentation,
-                ctx.last_consumed_envelope.as_ref(),
-            )
-            .await?;
+            if !drain_events.is_empty() {
+                let observer_ctx = StatefulObserverContext::new(
+                    ctx.flow_id,
+                    &flow_context,
+                    ctx.last_consumed_envelope
+                        .as_ref()
+                        .map(|envelope| &envelope.event),
+                    ctx.last_input_position,
+                );
+                run_stateful_after_emit_observers(
+                    &ctx.observers,
+                    observer_scope,
+                    &observer_ctx,
+                    drain_events.as_slice(),
+                );
+            }
 
             for mut event in drain_events {
                 event.writer_id = stage_writer_id;

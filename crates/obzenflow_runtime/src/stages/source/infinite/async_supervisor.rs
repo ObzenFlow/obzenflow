@@ -399,7 +399,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                     &mut ctx.backpressure_pulse,
                     &mut ctx.backpressure_stall,
                     Some(&ctx.output_contract),
-                    Some(&ctx.observers),
                     &mut self.external_events,
                     || InfiniteSourceEvent::Error("External control channel closed".to_string()),
                 )
@@ -752,28 +751,27 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                     };
 
                     let source_poll_observation = SourcePollObservation::new(
+                        ctx.flow_id,
                         &stage_flow_context,
-                        &ctx.instrumentation,
                         &ctx.observers,
                         obzenflow_core::MiddlewareExecutionScope::LiveHandler,
-                        &ctx.data_journal,
                     );
 
                     match report.outcome {
-                        SourceBoundaryOutcome::Rejected { reason } => {
+                        SourceBoundaryOutcome::Rejected { policy, reason } => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
                                 reason = %reason,
                                 "Async infinite source boundary rejected; beginning completion"
                             );
                             ctx.completion_reason = InfiniteSourceCompletionReason::LiveEof;
-                            let mut control_events = report.control_events;
+                            let control_events = report.control_events;
                             observe_source_boundary_rejection(
                                 &source_poll_observation,
-                                &mut control_events,
-                                &reason,
+                                &control_events,
+                                policy.as_deref(),
                             )
-                            .await?;
+                            .await;
                             if stage_boundary_control_events(
                                 control_events,
                                 &stage_flow_context,
@@ -810,7 +808,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                                             events: source_event_count,
                                         },
                                     )
-                                    .await?;
+                                    .await;
                                 stage_source_poll_outputs(
                                     events,
                                     &stage_flow_context,
@@ -828,16 +826,16 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                                 let source_event_count = events.len();
                                 events.extend(poll.operational_events);
                                 events.extend(report.control_events);
+                                source_poll_observation
+                                    .observe(
+                                        events.as_slice(),
+                                        poll.poll_duration,
+                                        crate::stages::observer::SourcePollObserverOutcome::Batch {
+                                            events: source_event_count,
+                                        },
+                                    )
+                                    .await;
                                 if !events.is_empty() {
-                                    source_poll_observation
-                                        .observe(
-                                            events.as_mut_slice(),
-                                            poll.poll_duration,
-                                            crate::stages::observer::SourcePollObserverOutcome::Batch {
-                                                events: source_event_count,
-                                            },
-                                        )
-                                        .await?;
                                     stage_source_poll_outputs(
                                         events,
                                         &stage_flow_context,
@@ -860,7 +858,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                                             poll.poll_duration,
                                             crate::stages::observer::SourcePollObserverOutcome::Eof,
                                         )
-                                        .await?;
+                                        .await;
                                     Ok(EventLoopDirective::Transition(
                                         InfiniteSourceEvent::BeginDrain,
                                     ))
@@ -870,10 +868,10 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                                     source_poll_observation
                                         .observe(
                                             control_events.as_mut_slice(),
-                                            Duration::from_nanos(0),
+                                            poll.poll_duration,
                                             crate::stages::observer::SourcePollObserverOutcome::Eof,
                                         )
-                                        .await?;
+                                        .await;
                                     stage_source_poll_outputs(
                                         control_events,
                                         &stage_flow_context,
@@ -892,7 +890,8 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                                     error = %error,
                                     "Async infinite source handler.next() returned error"
                                 );
-                                let message = error.to_string();
+                                let kind =
+                                    crate::stages::source::supervision::source_error_kind(&error);
                                 let mut events = vec![normalise_source_poll_error(
                                     WriterId::from(self.stage_id),
                                     "async_infinite",
@@ -905,10 +904,10 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                                         events.as_mut_slice(),
                                         poll.poll_duration,
                                         crate::stages::observer::SourcePollObserverOutcome::Error {
-                                            message,
+                                            kind,
                                         },
                                     )
-                                    .await?;
+                                    .await;
                                 stage_source_poll_outputs(
                                     events,
                                     &stage_flow_context,

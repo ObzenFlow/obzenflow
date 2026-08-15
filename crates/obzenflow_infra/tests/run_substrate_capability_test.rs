@@ -118,11 +118,7 @@ async fn pre_substrate_failure_carries_no_run_state() {
 // post-substrate failure (same shape as middleware_topology_slot_collision_test).
 #[derive(Debug)]
 struct NoopObserver;
-impl StageLifecycleObserver for NoopObserver {
-    fn label(&self) -> &'static str {
-        "noop"
-    }
-}
+impl StageLifecycleObserver for NoopObserver {}
 
 struct FamilyA;
 struct FamilyB;

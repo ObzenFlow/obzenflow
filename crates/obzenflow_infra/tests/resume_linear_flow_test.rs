@@ -18,6 +18,7 @@ mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use obzenflow_adapters::middleware::handler_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -39,6 +40,7 @@ use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedInfiniteSourceHandler, TypedTransformHandler,
 };
+use obzenflow_runtime::stages::observer::{HandlerObserver, HandlerObserverContext};
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
@@ -111,6 +113,17 @@ impl DoubleTransform {
     }
 }
 
+#[derive(Clone)]
+struct CountsLiveTransformOccurrences {
+    calls: Arc<AtomicU64>,
+}
+
+impl HandlerObserver for CountsLiveTransformOccurrences {
+    fn after_handle(&self, _ctx: &HandlerObserverContext<'_>, _outputs: &[ChainEvent]) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 impl TypedTransformHandler for DoubleTransform {
     type Input = Tick;
     type Output = Doubled;
@@ -153,16 +166,26 @@ impl InlineSink for CountingSink {
     }
 }
 
-fn build_flow(
+fn build_flow_with_observer(
     journal_base: PathBuf,
     first_n: u64,
     count: u64,
     delivered: Arc<AtomicU64>,
+    observer_calls: Option<Arc<AtomicU64>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let source_handler = BoundedTicker::new(first_n, count);
         let transform_handler = DoubleTransform::new();
         let sink_handler = CountingSink { delivered };
+        let transformed = match observer_calls {
+            Some(calls) => transform!(Tick -> Doubled => transform_handler, observers: [
+                handler_observer(
+                    "live-transform-occurrences",
+                    CountsLiveTransformOccurrences { calls }
+                )
+            ]),
+            None => transform!(Tick -> Doubled => transform_handler),
+        };
 
         Ok(flow! {
             name: "resume_linear",
@@ -170,7 +193,7 @@ fn build_flow(
 
             stages: {
                 src = infinite_source!(Tick => source_handler);
-                xform = transform!(Tick -> Doubled => transform_handler);
+                xform = transformed;
                 snk = sink!(Doubled => sink_handler);
             },
 
@@ -221,12 +244,23 @@ async fn run_until_delivered(
     count: u64,
     expected: u64,
 ) -> Result<()> {
+    run_until_delivered_with_observer(journal_base, first_n, count, expected, None).await
+}
+
+async fn run_until_delivered_with_observer(
+    journal_base: &Path,
+    first_n: u64,
+    count: u64,
+    expected: u64,
+    observer_calls: Option<Arc<AtomicU64>>,
+) -> Result<()> {
     let delivered = Arc::new(AtomicU64::new(0));
-    let handle = build_flow(
+    let handle = build_flow_with_observer(
         journal_base.to_path_buf(),
         first_n,
         count,
         delivered.clone(),
+        observer_calls,
     )
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
@@ -474,7 +508,20 @@ async fn resume_linear_flow_replays_prefix_then_continues_live() -> Result<()> {
 
     // Record: run the flow live, cancel once the sink consumed everything.
     // The archive seals as Cancelled, the common resume input.
-    run_until_delivered(&journal_base, 1, RECORDED, RECORDED).await?;
+    let recorded_observer_calls = Arc::new(AtomicU64::new(0));
+    run_until_delivered_with_observer(
+        &journal_base,
+        1,
+        RECORDED,
+        RECORDED,
+        Some(recorded_observer_calls.clone()),
+    )
+    .await?;
+    assert_eq!(
+        recorded_observer_calls.load(Ordering::SeqCst),
+        RECORDED,
+        "the recorded live run observes every transform occurrence"
+    );
     let recorded_run = replay_testkit::latest_run_dir(&journal_base);
 
     let recorded_src_prefix =
@@ -499,7 +546,20 @@ async fn resume_linear_flow_replays_prefix_then_continues_live() -> Result<()> {
         // The sink re-consumes the recorded prefix during catch-up (F14), so
         // the wait target is prefix + live; a live-only target is satisfied
         // mid-catch-up and races the stop into the reconstruction phase.
-        run_until_delivered(&journal_base, RECORDED + 1, LIVE, RECORDED + LIVE).await?;
+        let resumed_observer_calls = Arc::new(AtomicU64::new(0));
+        run_until_delivered_with_observer(
+            &journal_base,
+            RECORDED + 1,
+            LIVE,
+            RECORDED + LIVE,
+            Some(resumed_observer_calls.clone()),
+        )
+        .await?;
+        assert_eq!(
+            resumed_observer_calls.load(Ordering::SeqCst),
+            LIVE,
+            "resume catch-up dispatches no observers; only the resumed-live tail is observed"
+        );
     }
 
     let resumed_run = replay_testkit::latest_run_dir(&journal_base);
