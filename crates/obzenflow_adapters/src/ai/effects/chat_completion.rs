@@ -11,8 +11,9 @@ use obzenflow_core::ai::{
 };
 use obzenflow_core::BoundedBindingEvidence;
 use obzenflow_runtime::effects::{
-    Effect, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError, EffectPortSlot,
-    EffectPortSlotSet, EffectSafety, Named, NamedEffect, RecordedReply,
+    Effect, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError,
+    EffectPortMetadataContext, EffectPortSlot, EffectPortSlotSet, EffectSafety, Named, NamedEffect,
+    RecordedReply,
 };
 
 const MAX_CANONICALIZATION_DETAIL_BYTES: usize = 512;
@@ -99,7 +100,8 @@ impl EffectBindingEvidence for ChatBindingEvidence {
     }
 }
 
-pub const CHAT_CLIENT: EffectPortSlot<dyn ChatClient> = EffectPortSlot::new(CHAT_CLIENT_PORT);
+pub const CHAT_CLIENT: EffectPortSlot<dyn ChatClient, ChatTarget> =
+    EffectPortSlot::new(CHAT_CLIENT_PORT);
 
 /// Public replay-safe chat-completion effect.
 #[derive(Clone)]
@@ -184,11 +186,10 @@ impl Effect for ChatCompletion {
         })
     }
 
-    fn validate_port_bindings(&self, ctx: &EffectContext) -> Result<(), EffectError> {
-        let client = ctx.port(CHAT_CLIENT)?;
+    fn validate_port_metadata(&self, ctx: &EffectPortMetadataContext) -> Result<(), EffectError> {
         let expected = self.binding.evidence().target();
-        let observed = client.target();
-        if expected != observed {
+        let observed = ctx.metadata(CHAT_CLIENT)?;
+        if expected != observed.as_ref() {
             return Err(EffectError::target_invariant_violation(CHAT_CLIENT));
         }
         Ok(())

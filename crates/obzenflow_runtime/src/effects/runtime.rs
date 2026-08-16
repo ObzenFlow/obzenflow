@@ -667,8 +667,8 @@ impl EffectsCore {
                 .map_err(EffectError::Execution)?;
         }
 
-        let binding_context = self.live_effect_context(&declaration)?;
-        effect.validate_port_bindings(&binding_context)?;
+        let (metadata_context, binding_context) = self.live_effect_contexts(&declaration)?;
+        effect.validate_port_metadata(&metadata_context)?;
 
         let identity = EffectIdentity {
             effect_type: E::EFFECT_TYPE,
@@ -1993,12 +1993,12 @@ impl EffectsCore {
         }
     }
 
-    fn live_effect_context(
+    fn live_effect_contexts(
         &self,
         declaration: &EffectDeclaration,
-    ) -> Result<EffectContext, EffectError> {
-        let ports = match declaration.binding().named_parts() {
-            None => super::ports::EffectPortView::default(),
+    ) -> Result<(EffectPortMetadataContext, EffectContext), EffectError> {
+        let views = match declaration.binding().named_parts() {
+            None => super::ports::EffectPortViews::default(),
             Some((binding, registration, slots)) => self
                 .ctx
                 .effect_ports
@@ -2022,13 +2022,17 @@ impl EffectsCore {
                     EffectError::BindingAuthority { fault }
                 })?,
         };
-        Ok(EffectContext {
+        let metadata_context = EffectPortMetadataContext {
+            metadata: views.metadata,
+        };
+        let binding_context = EffectContext {
             is_replaying: false,
             flow_id: self.ctx.flow_id,
             stage_key: self.ctx.stage_key.clone(),
             input_seq: self.ctx.input_seq,
-            ports,
-        })
+            ports: views.ports,
+        };
+        Ok((metadata_context, binding_context))
     }
 
     async fn append_record(&self, record: EffectRecord) -> Result<(), EffectError> {

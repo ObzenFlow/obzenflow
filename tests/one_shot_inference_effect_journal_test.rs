@@ -30,8 +30,8 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::{
-    EffectBinding, EffectPortRegistry, EffectPortResolver, EffectRegistrationBuilder,
-    LogicalEffectBindingName, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
+    EffectBinding, EffectPortRegistry, EffectPortResolverWithMetadata, EffectRegistrationBuilder,
+    LogicalEffectBindingName, ResolvedEffectPort, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -296,18 +296,21 @@ fn evidence() -> ChatBindingEvidence {
 type ChatAuthority = (EffectBinding<ChatCompletion>, EffectPortRegistry);
 
 fn live_chat_registry(resolutions: Arc<AtomicUsize>, calls: Arc<AtomicUsize>) -> ChatAuthority {
-    let resolver: EffectPortResolver<dyn ChatClient> = Arc::new(move || {
-        resolutions.fetch_add(1, Ordering::SeqCst);
-        Ok(Arc::new(CountingChatClient {
-            target: target(),
-            calls: calls.clone(),
-        }) as Arc<dyn ChatClient>)
-    });
+    let resolver: EffectPortResolverWithMetadata<dyn ChatClient, ChatTarget> =
+        Arc::new(move || {
+            resolutions.fetch_add(1, Ordering::SeqCst);
+            let client = Arc::new(CountingChatClient {
+                target: target(),
+                calls: calls.clone(),
+            }) as Arc<dyn ChatClient>;
+            let metadata = Arc::new(client.target().clone());
+            Ok(ResolvedEffectPort::new(client, metadata))
+        });
     let (binding, registration) = EffectRegistrationBuilder::<ChatCompletion>::new(
         LogicalEffectBindingName::new("chat").unwrap(),
         evidence(),
     )
-    .bind_deferred(CHAT_CLIENT, resolver)
+    .bind_deferred_with_metadata(CHAT_CLIENT, resolver)
     .unwrap()
     .finish()
     .unwrap();
@@ -321,7 +324,10 @@ fn eager_chat_registry(client: Arc<dyn ChatClient>) -> ChatAuthority {
         LogicalEffectBindingName::new("chat").unwrap(),
         evidence(),
     )
-    .bind_eager(CHAT_CLIENT, client)
+    .bind_eager_with_metadata(
+        CHAT_CLIENT,
+        ResolvedEffectPort::new(client.clone(), Arc::new(client.target().clone())),
+    )
     .unwrap()
     .finish()
     .unwrap();
@@ -335,7 +341,7 @@ fn replay_only_chat_registry() -> ChatAuthority {
         LogicalEffectBindingName::new("chat").unwrap(),
         evidence(),
     )
-    .bind_deferred(
+    .bind_deferred_with_metadata(
         CHAT_CLIENT,
         Arc::new(|| {
             Err(obzenflow_runtime::effects::EffectPortResolutionError::ClientConstructionFailed)

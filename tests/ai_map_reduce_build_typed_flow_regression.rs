@@ -34,6 +34,7 @@ use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{
     EffectBinding, EffectPortRegistry, EffectRegistrationBuilder, LogicalEffectBindingName,
+    ResolvedEffectPort,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -178,7 +179,10 @@ fn test_binding_and_ports(
         LogicalEffectBindingName::new("chat").unwrap(),
         evidence,
     )
-    .bind_eager(CHAT_CLIENT, client)
+    .bind_eager_with_metadata(
+        CHAT_CLIENT,
+        ResolvedEffectPort::new(client.clone(), Arc::new(client.target().clone())),
+    )
     .unwrap()
     .finish()
     .unwrap();

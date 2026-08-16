@@ -499,10 +499,9 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
 
     async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError>;
 
-    /// Validate metadata on already-resolved required ports before boundary
-    /// admission. Implementations must not perform I/O or resolve another
-    /// port from this hook.
-    fn validate_port_bindings(&self, _ctx: &EffectContext) -> Result<(), EffectError> {
+    /// Validate immutable metadata co-resolved with required ports before
+    /// boundary admission. This context has no callable-port authority.
+    fn validate_port_metadata(&self, _ctx: &EffectPortMetadataContext) -> Result<(), EffectError> {
         Ok(())
     }
 

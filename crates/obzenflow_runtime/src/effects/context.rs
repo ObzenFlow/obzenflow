@@ -4,6 +4,38 @@
 
 use super::*;
 
+/// Structurally metadata-only view used before effect-boundary admission.
+///
+/// It deliberately exposes neither callable ports nor registry or resolver
+/// authority. Metadata is co-resolved with its callable port under the same
+/// run-scoped verdict.
+#[derive(Clone, Default)]
+pub struct EffectPortMetadataContext {
+    pub(super) metadata: super::ports::EffectPortMetadataView,
+}
+
+impl EffectPortMetadataContext {
+    /// Return the immutable snapshot for one declared metadata-bearing slot.
+    pub fn metadata<P, M>(&self, slot: EffectPortSlot<P, M>) -> Result<Arc<M>, EffectError>
+    where
+        P: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
+    {
+        self.metadata
+            .get(slot)
+            .ok_or_else(|| EffectError::target_invariant_violation(slot))
+    }
+}
+
+impl std::fmt::Debug for EffectPortMetadataContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EffectPortMetadataContext")
+            .field("metadata", &"<not disclosed>")
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct EffectContext {
     pub(super) is_replaying: bool,
@@ -58,9 +90,10 @@ impl EffectContext {
         fastrand::Rng::with_seed(u64::from_be_bytes(seed))
     }
 
-    pub fn port<T>(&self, slot: EffectPortSlot<T>) -> Result<Arc<T>, EffectError>
+    pub fn port<T, M>(&self, slot: EffectPortSlot<T, M>) -> Result<Arc<T>, EffectError>
     where
         T: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
     {
         self.ports
             .get(slot)

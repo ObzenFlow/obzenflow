@@ -185,7 +185,7 @@ mod tests {
             LogicalEffectBindingName::new("chat").unwrap(),
             evidence,
         )
-        .bind_deferred(
+        .bind_deferred_with_metadata(
             CHAT_CLIENT,
             Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
         )

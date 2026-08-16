@@ -29,8 +29,8 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::effects::{
-    EffectBinding, EffectPortRegistry, EffectPortResolver, EffectRegistrationBuilder,
-    LogicalEffectBindingName, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
+    EffectBinding, EffectPortRegistry, EffectPortResolverWithMetadata, EffectRegistrationBuilder,
+    LogicalEffectBindingName, ResolvedEffectPort, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -202,35 +202,40 @@ fn live_authority(
     };
     let chat_target = chat_seed.evidence().target().clone();
     let embedding_target = embedding_seed.evidence().target().clone();
-    let chat_resolver: EffectPortResolver<dyn ChatClient> = Arc::new({
+    let chat_resolver: EffectPortResolverWithMetadata<dyn ChatClient, ChatTarget> = Arc::new({
         let resolutions = counters.chat_resolutions.clone();
         let calls = counters.chat_calls.clone();
         move || {
             let target = chat_target.clone();
             resolutions.fetch_add(1, Ordering::SeqCst);
-            Ok(Arc::new(FixtureChatClient {
+            let client = Arc::new(FixtureChatClient {
                 target,
                 calls: calls.clone(),
-            }) as Arc<dyn ChatClient>)
+            }) as Arc<dyn ChatClient>;
+            let metadata = Arc::new(client.target().clone());
+            Ok(ResolvedEffectPort::new(client, metadata))
         }
     });
-    let embedding_resolver: EffectPortResolver<dyn EmbeddingClient> = Arc::new({
-        let resolutions = counters.embedding_resolutions.clone();
-        let calls = counters.embedding_calls.clone();
-        move || {
-            let target = embedding_target.clone();
-            resolutions.fetch_add(1, Ordering::SeqCst);
-            Ok(Arc::new(FixtureEmbeddingClient {
-                target,
-                calls: calls.clone(),
-            }) as Arc<dyn EmbeddingClient>)
-        }
-    });
+    let embedding_resolver: EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> =
+        Arc::new({
+            let resolutions = counters.embedding_resolutions.clone();
+            let calls = counters.embedding_calls.clone();
+            move || {
+                let target = embedding_target.clone();
+                resolutions.fetch_add(1, Ordering::SeqCst);
+                let client = Arc::new(FixtureEmbeddingClient {
+                    target,
+                    calls: calls.clone(),
+                }) as Arc<dyn EmbeddingClient>;
+                let metadata = Arc::new(client.target().clone());
+                Ok(ResolvedEffectPort::new(client, metadata))
+            }
+        });
     let (chat, chat_registration) = EffectRegistrationBuilder::<ChatCompletion>::new(
         LogicalEffectBindingName::new("chat").expect("valid fixture binding name"),
         chat_seed.evidence().clone(),
     )
-    .bind_deferred(CHAT_CLIENT, chat_resolver)
+    .bind_deferred_with_metadata(CHAT_CLIENT, chat_resolver)
     .and_then(|builder| builder.finish())
     .map_err(|error| binding_error("chat", error))?;
     let (embedding, embedding_registration) =
@@ -238,7 +243,7 @@ fn live_authority(
             LogicalEffectBindingName::new("embedding").expect("valid fixture binding name"),
             embedding_seed.evidence().clone(),
         )
-        .bind_deferred(EMBEDDING_CLIENT, embedding_resolver)
+        .bind_deferred_with_metadata(EMBEDDING_CLIENT, embedding_resolver)
         .and_then(|builder| builder.finish())
         .map_err(|error| binding_error("embedding", error))?;
     let mut effect_ports = EffectPortRegistry::new();
@@ -261,7 +266,10 @@ fn eager_authority(chat: Arc<dyn ChatClient>, embedding: Arc<dyn EmbeddingClient
         LogicalEffectBindingName::new("chat").unwrap(),
         chat_seed.evidence().clone(),
     )
-    .bind_eager(CHAT_CLIENT, chat)
+    .bind_eager_with_metadata(
+        CHAT_CLIENT,
+        ResolvedEffectPort::new(chat.clone(), Arc::new(chat.target().clone())),
+    )
     .and_then(|builder| builder.finish())
     .unwrap();
     let (embedding_binding, embedding_registration) =
@@ -269,7 +277,10 @@ fn eager_authority(chat: Arc<dyn ChatClient>, embedding: Arc<dyn EmbeddingClient
             LogicalEffectBindingName::new("embedding").unwrap(),
             embedding_seed.evidence().clone(),
         )
-        .bind_eager(EMBEDDING_CLIENT, embedding)
+        .bind_eager_with_metadata(
+            EMBEDDING_CLIENT,
+            ResolvedEffectPort::new(embedding.clone(), Arc::new(embedding.target().clone())),
+        )
         .and_then(|builder| builder.finish())
         .unwrap();
     let mut effect_ports = EffectPortRegistry::new();

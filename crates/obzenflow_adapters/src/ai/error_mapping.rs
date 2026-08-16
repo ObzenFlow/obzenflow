@@ -10,13 +10,14 @@ use obzenflow_runtime::effects::{EffectError, EffectPortSlot};
 use obzenflow_runtime::stages::common::handler_error::{HandlerError, StageFatal};
 
 /// Map an AI port failure into durable effect failure evidence.
-pub(crate) fn ai_client_error_to_effect_error<P>(
+pub(crate) fn ai_client_error_to_effect_error<P, M>(
     error: AiClientError,
-    port: EffectPortSlot<P>,
+    port: EffectPortSlot<P, M>,
     failure_source: &'static str,
 ) -> EffectError
 where
     P: ?Sized + Send + Sync + 'static,
+    M: Send + Sync + 'static,
 {
     match error {
         AiClientError::TargetMismatch { .. } => EffectError::target_invariant_violation(port),

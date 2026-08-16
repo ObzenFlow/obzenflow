@@ -58,7 +58,7 @@ use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::{
     EffectBinding, EffectPortRegistry, EffectPortResolutionError, EffectPortResolver,
-    EffectRegistrationBuilder, LogicalEffectBindingName, SinkRedeliverySafety,
+    EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort, SinkRedeliverySafety,
     EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -359,6 +359,11 @@ enum ChatPortRecipe {
     Missing,
 }
 
+fn resolved_chat_port(port: Arc<dyn ChatClient>) -> ResolvedEffectPort<dyn ChatClient, ChatTarget> {
+    let metadata = Arc::new(port.target().clone());
+    ResolvedEffectPort::new(port, metadata)
+}
+
 fn materialise_chat_authority(
     binding_target: ChatTarget,
     binding_estimator: ResolvedTokenEstimator,
@@ -377,9 +382,14 @@ fn materialise_chat_authority(
         evidence,
     );
     let builder = match recipe {
-        ChatPortRecipe::Eager(port) => builder.bind_eager(CHAT_CLIENT, port),
-        ChatPortRecipe::Deferred(resolver) => builder.bind_deferred(CHAT_CLIENT, resolver),
-        ChatPortRecipe::Missing => builder.bind_deferred(
+        ChatPortRecipe::Eager(port) => {
+            builder.bind_eager_with_metadata(CHAT_CLIENT, resolved_chat_port(port))
+        }
+        ChatPortRecipe::Deferred(resolver) => builder.bind_deferred_with_metadata(
+            CHAT_CLIENT,
+            Arc::new(move || resolver().map(resolved_chat_port)),
+        ),
+        ChatPortRecipe::Missing => builder.bind_deferred_with_metadata(
             CHAT_CLIENT,
             Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
         ),
@@ -2737,17 +2747,19 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
 async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
+    let resolutions = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let result = FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
             Arc::new(Mutex::new(Vec::new())),
-            eager_chat_port_for_target(
+            ChatPortRecipe::Deferred(counting_chat_resolver(
+                ChatTarget::new("fixture", "wrong-client-model"),
+                resolutions.clone(),
                 calls.clone(),
                 false,
-                ChatTarget::new("fixture", "wrong-client-model"),
-            ),
+            )),
             3,
             target(),
             false,
@@ -2757,6 +2769,11 @@ async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
     assert!(
         result.is_err(),
         "a resolved client for another target must terminate the stage"
+    );
+    assert_eq!(
+        resolutions.load(Ordering::SeqCst),
+        1,
+        "port authority and its metadata snapshot must come from one resolver verdict"
     );
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -2773,6 +2790,13 @@ async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
                 || envelope.event.event_type() == EFFECT_RECORD_EVENT_TYPE
         }),
         "client target validation must precede the attempt boundary"
+    );
+    assert!(
+        !map.iter().any(|envelope| matches!(
+            &envelope.event.content,
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(_))
+        )),
+        "client target validation must precede policy observation"
     );
     assert!(
         chunk_failures(&map).is_empty(),

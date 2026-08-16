@@ -174,13 +174,29 @@ impl std::fmt::Display for EffectPortSlotLabel {
     }
 }
 
+/// Marker for an effect port with no pre-boundary metadata projection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NoPortMetadata;
+
 /// One typed, effect-local slot declaration.
-pub struct EffectPortSlot<P: ?Sized + Send + Sync + 'static> {
+///
+/// `P` is callable authority available only to the protected effect
+/// operation. `M` is the immutable metadata snapshot available to
+/// pre-boundary validation and defaults to no metadata.
+pub struct EffectPortSlot<
+    P: ?Sized + Send + Sync + 'static,
+    M: Send + Sync + 'static = NoPortMetadata,
+> {
     label: &'static str,
     _port: PhantomData<fn() -> P>,
+    _metadata: PhantomData<fn() -> M>,
 }
 
-impl<P: ?Sized + Send + Sync + 'static> EffectPortSlot<P> {
+impl<P, M> EffectPortSlot<P, M>
+where
+    P: ?Sized + Send + Sync + 'static,
+    M: Send + Sync + 'static,
+{
     pub const fn new(label: &'static str) -> Self {
         assert!(
             is_public_identifier_const(label),
@@ -189,6 +205,7 @@ impl<P: ?Sized + Send + Sync + 'static> EffectPortSlot<P> {
         Self {
             label,
             _port: PhantomData,
+            _metadata: PhantomData,
         }
     }
 
@@ -202,21 +219,35 @@ impl<P: ?Sized + Send + Sync + 'static> EffectPortSlot<P> {
 
     pub(super) fn requirement(self) -> EffectPortSlotRequirement {
         EffectPortSlotRequirement {
-            type_id: TypeId::of::<P>(),
+            port_type_id: TypeId::of::<P>(),
+            metadata_type_id: TypeId::of::<M>(),
             label: self.label,
         }
     }
 }
 
-impl<P: ?Sized + Send + Sync + 'static> Clone for EffectPortSlot<P> {
+impl<P, M> Clone for EffectPortSlot<P, M>
+where
+    P: ?Sized + Send + Sync + 'static,
+    M: Send + Sync + 'static,
+{
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<P: ?Sized + Send + Sync + 'static> Copy for EffectPortSlot<P> {}
+impl<P, M> Copy for EffectPortSlot<P, M>
+where
+    P: ?Sized + Send + Sync + 'static,
+    M: Send + Sync + 'static,
+{
+}
 
-impl<P: ?Sized + Send + Sync + 'static> std::fmt::Debug for EffectPortSlot<P> {
+impl<P, M> std::fmt::Debug for EffectPortSlot<P, M>
+where
+    P: ?Sized + Send + Sync + 'static,
+    M: Send + Sync + 'static,
+{
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("EffectPortSlot")
@@ -235,16 +266,18 @@ impl EffectPortSlotSet {
         Self::default()
     }
 
-    pub fn single<P>(slot: EffectPortSlot<P>) -> Self
+    pub fn single<P, M>(slot: EffectPortSlot<P, M>) -> Self
     where
         P: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
     {
         Self::new().with(slot)
     }
 
-    pub fn with<P>(mut self, slot: EffectPortSlot<P>) -> Self
+    pub fn with<P, M>(mut self, slot: EffectPortSlot<P, M>) -> Self
     where
         P: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
     {
         self.slots.push(slot.requirement());
         self
@@ -270,7 +303,8 @@ impl std::fmt::Debug for EffectPortSlotSet {
 
 #[derive(Clone)]
 pub(super) struct EffectPortSlotRequirement {
-    pub(super) type_id: TypeId,
+    pub(super) port_type_id: TypeId,
+    pub(super) metadata_type_id: TypeId,
     pub(super) label: &'static str,
 }
 

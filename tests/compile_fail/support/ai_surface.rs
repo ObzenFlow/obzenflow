@@ -12,7 +12,7 @@ use obzenflow_core::ai::{
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{
-    EffectBinding, EffectRegistrationBuilder, LogicalEffectBindingName,
+    EffectBinding, EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -142,7 +142,15 @@ pub fn binding() -> EffectBinding<ChatCompletion> {
         LogicalEffectBindingName::new("trybuild_chat").unwrap(),
         evidence,
     )
-    .bind_eager(CHAT_CLIENT, Arc::new(FixtureChatClient { target }) as Arc<dyn ChatClient>)
+    .bind_eager_with_metadata(
+        CHAT_CLIENT,
+        ResolvedEffectPort::new(
+            Arc::new(FixtureChatClient {
+                target: target.clone(),
+            }) as Arc<dyn ChatClient>,
+            Arc::new(target),
+        ),
+    )
     .unwrap()
     .finish()
     .unwrap();

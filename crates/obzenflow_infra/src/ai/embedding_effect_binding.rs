@@ -17,8 +17,9 @@ use obzenflow_core::ai::{AiProvider, EmbeddingClient, EmbeddingTarget};
 use obzenflow_core::config::SecretRef;
 use obzenflow_core::http_client::Url;
 use obzenflow_runtime::effects::{
-    EffectBinding, EffectBindingBuildError, EffectPortResolutionError, EffectPortResolver,
-    EffectRegistration, EffectRegistrationBuilder, LogicalEffectBindingName,
+    EffectBinding, EffectBindingBuildError, EffectPortResolutionError,
+    EffectPortResolverWithMetadata, EffectRegistration, EffectRegistrationBuilder,
+    LogicalEffectBindingName, ResolvedEffectPort,
 };
 use obzenflow_runtime::runtime_config::AiModelsConfig;
 use std::sync::Arc;
@@ -159,14 +160,20 @@ impl EmbeddingEffectBinding {
     > {
         let target = self.evidence.target().clone();
         let provider = Arc::new(self.provider);
-        let resolver: EffectPortResolver<dyn EmbeddingClient> =
-            Arc::new(move || resolve_client(&target, &provider));
+        let resolver: EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> =
+            Arc::new(move || {
+                let client = resolve_client(&target, &provider)?;
+                // Snapshot the resolved client's observed target. Reusing the
+                // requested target here would make pre-boundary validation tautological.
+                let metadata = Arc::new(client.target().clone());
+                Ok(ResolvedEffectPort::new(client, metadata))
+            });
         EffectRegistrationBuilder::<EmbeddingGeneration>::new(
             LogicalEffectBindingName::new("embedding")
                 .expect("framework embedding binding name is a valid public identifier"),
             self.evidence,
         )
-        .bind_deferred(EMBEDDING_CLIENT, resolver)?
+        .bind_deferred_with_metadata(EMBEDDING_CLIENT, resolver)?
         .finish()
         .map_err(Into::into)
     }

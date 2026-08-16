@@ -1,0 +1,5 @@
+error[E0599]: no method named `port` found for reference `&EffectPortMetadataContext` in the current scope
+ --> tests/compile_fail/flowip_132a_metadata_context_has_no_port.rs:7:21
+  |
+7 |     let _ = context.port(CHAT_CLIENT);
+  |                     ^^^^ method not found in `&EffectPortMetadataContext`

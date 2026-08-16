@@ -12,8 +12,9 @@ use obzenflow_core::ai::{
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 use obzenflow_core::BoundedBindingEvidence;
 use obzenflow_runtime::effects::{
-    Effect, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError, EffectPortSlot,
-    EffectPortSlotSet, EffectSafety, Named, NamedEffect, RecordedReply,
+    Effect, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError,
+    EffectPortMetadataContext, EffectPortSlot, EffectPortSlotSet, EffectSafety, Named, NamedEffect,
+    RecordedReply,
 };
 
 const MAX_CANONICALIZATION_DETAIL_BYTES: usize = 512;
@@ -84,7 +85,7 @@ impl EffectBindingEvidence for EmbeddingBindingEvidence {
     }
 }
 
-pub const EMBEDDING_CLIENT: EffectPortSlot<dyn EmbeddingClient> =
+pub const EMBEDDING_CLIENT: EffectPortSlot<dyn EmbeddingClient, EmbeddingTarget> =
     EffectPortSlot::new(EMBEDDING_CLIENT_PORT);
 
 /// Replay-safe embedding generation through the sealed embedding port.
@@ -165,10 +166,9 @@ impl Effect for EmbeddingGeneration {
         })
     }
 
-    fn validate_port_bindings(&self, ctx: &EffectContext) -> Result<(), EffectError> {
-        let client = ctx.port(EMBEDDING_CLIENT)?;
-        let observed = client.target();
-        if self.binding.evidence().target() != observed {
+    fn validate_port_metadata(&self, ctx: &EffectPortMetadataContext) -> Result<(), EffectError> {
+        let observed = ctx.metadata(EMBEDDING_CLIENT)?;
+        if self.binding.evidence().target() != observed.as_ref() {
             return Err(EffectError::target_invariant_violation(EMBEDDING_CLIENT));
         }
         Ok(())
@@ -315,7 +315,7 @@ mod tests {
             LogicalEffectBindingName::new("embedding").unwrap(),
             EmbeddingBindingEvidence::new(target()).unwrap(),
         )
-        .bind_deferred(
+        .bind_deferred_with_metadata(
             EMBEDDING_CLIENT,
             Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
         )

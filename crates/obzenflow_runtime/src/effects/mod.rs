@@ -69,7 +69,7 @@ pub use binding::EffectInvocationBinding;
 pub use binding::{
     BindingIdentifierError, EffectBinding, EffectBindingEvidence, EffectBindingMode,
     EffectBindingUse, EffectPortSlot, EffectPortSlotLabel, EffectPortSlotSet,
-    LogicalEffectBindingName, Named, NamedEffect, Portless,
+    LogicalEffectBindingName, Named, NamedEffect, NoPortMetadata, Portless,
 };
 pub(crate) use boundary::SingleUseEffectBoundaryOutcome;
 pub use boundary::{
@@ -81,7 +81,7 @@ pub use boundary::{
 };
 pub use commit::EffectCommitHandle;
 pub use completion::StageCompletion;
-pub use context::{EffectContext, EffectInvocationContext};
+pub use context::{EffectContext, EffectInvocationContext, EffectPortMetadataContext};
 // FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.
 #[cfg(test)]
 pub(crate) use context::EffectRuntimeMode;
@@ -112,7 +112,8 @@ pub use identity::{
 };
 pub use ports::{
     EffectBindingBuildError, EffectPortRegistrationError, EffectPortRegistry,
-    EffectPortResolutionError, EffectPortResolver, EffectRegistration, EffectRegistrationBuilder,
+    EffectPortResolutionError, EffectPortResolver, EffectPortResolverWithMetadata,
+    EffectRegistration, EffectRegistrationBuilder, ResolvedEffectPort,
 };
 pub(crate) use runtime::EffectsCore;
 // FLOWIP-120z/B9: the proof facades are doc-hidden public bounds so rustc can

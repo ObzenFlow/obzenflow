@@ -160,9 +160,10 @@ pub enum EffectError {
 
 impl EffectError {
     /// Construct a target-invariant failure from a validated typed slot.
-    pub fn target_invariant_violation<P>(slot: EffectPortSlot<P>) -> Self
+    pub fn target_invariant_violation<P, M>(slot: EffectPortSlot<P, M>) -> Self
     where
         P: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
     {
         Self::EffectTargetInvariantViolation {
             slot: slot.diagnostic_label(),

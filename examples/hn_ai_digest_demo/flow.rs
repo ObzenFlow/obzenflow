@@ -27,6 +27,7 @@ use obzenflow_infra::application::{Banner, FlowApplication, Presentation, RunPre
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
     EffectPortRegistry, EffectPortResolver, EffectRegistrationBuilder, LogicalEffectBindingName,
+    ResolvedEffectPort,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
@@ -375,11 +376,16 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 detail: error.to_string(),
             })?;
         let (chat, chat_registration) = if let Some(resolver) = chat_resolver_override {
+            let resolver = std::sync::Arc::new(move || {
+                let port = resolver()?;
+                let metadata = std::sync::Arc::new(port.target().clone());
+                Ok(ResolvedEffectPort::new(port, metadata))
+            });
             EffectRegistrationBuilder::<ChatCompletion>::new(
                 LogicalEffectBindingName::new("chat").expect("valid fixture binding name"),
                 chat.evidence().clone(),
             )
-            .bind_deferred(CHAT_CLIENT, resolver)
+            .bind_deferred_with_metadata(CHAT_CLIENT, resolver)
             .and_then(EffectRegistrationBuilder::finish)
             .map_err(|error| FlowBuildError::BindingConfiguration {
                 binding: "chat".to_string(),

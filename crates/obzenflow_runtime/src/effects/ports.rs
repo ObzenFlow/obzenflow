@@ -6,7 +6,7 @@
 
 use super::binding::{
     validate_effect_type, validate_slot_name, BindingCoordinate, BoundEffectPortSlot,
-    EffectPortSlotRequirement,
+    EffectPortSlotRequirement, NoPortMetadata,
 };
 use super::{
     transactional_effect_port_slot, BindingAuthorityFault, EffectBinding, EffectDeclaration,
@@ -18,8 +18,16 @@ use std::marker::PhantomData;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, OnceLock};
 
-type ErasedPort = Arc<dyn Any + Send + Sync>;
-type ErasedResolver = Arc<dyn Fn() -> Result<ErasedPort, EffectPortResolutionError> + Send + Sync>;
+type ErasedValue = Arc<dyn Any + Send + Sync>;
+
+#[derive(Clone)]
+struct ErasedResolvedEffectPort {
+    port: ErasedValue,
+    metadata: ErasedValue,
+}
+
+type ErasedResolver =
+    Arc<dyn Fn() -> Result<ErasedResolvedEffectPort, EffectPortResolutionError> + Send + Sync>;
 const MAX_REPORTED_MISSING_SLOTS: usize = 16;
 
 /// Closed provider-side result for bounded local client construction.
@@ -35,6 +43,48 @@ pub enum EffectPortResolutionError {
 /// Non-suspending, bounded resolver recipe.
 pub type EffectPortResolver<P> =
     Arc<dyn Fn() -> Result<Arc<P>, EffectPortResolutionError> + Send + Sync>;
+
+/// A callable port and its immutable pre-boundary metadata snapshot.
+///
+/// The two values form one resolver verdict and cannot be registered under
+/// independent lifecycles or coordinates.
+pub struct ResolvedEffectPort<P, M>
+where
+    P: ?Sized + Send + Sync + 'static,
+    M: Send + Sync + 'static,
+{
+    port: Arc<P>,
+    metadata: Arc<M>,
+}
+
+impl<P, M> ResolvedEffectPort<P, M>
+where
+    P: ?Sized + Send + Sync + 'static,
+    M: Send + Sync + 'static,
+{
+    /// Bind callable authority to the metadata snapshot observed at construction.
+    pub fn new(port: Arc<P>, metadata: Arc<M>) -> Self {
+        Self { port, metadata }
+    }
+}
+
+impl<P, M> std::fmt::Debug for ResolvedEffectPort<P, M>
+where
+    P: ?Sized + Send + Sync + 'static,
+    M: Send + Sync + 'static,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedEffectPort")
+            .field("port", &"<not disclosed>")
+            .field("metadata", &"<not disclosed>")
+            .finish()
+    }
+}
+
+/// Non-suspending resolver that co-produces callable authority and metadata.
+pub type EffectPortResolverWithMetadata<P, M> =
+    Arc<dyn Fn() -> Result<ResolvedEffectPort<P, M>, EffectPortResolutionError> + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EffectBindingBuildError {
@@ -76,16 +126,16 @@ pub enum EffectPortRegistrationError {
 
 #[derive(Clone)]
 enum PortRecipe {
-    Eager(ErasedPort),
+    Eager(ErasedResolvedEffectPort),
     Deferred(ErasedResolver),
 }
 
 #[derive(Clone)]
 enum RunPortEntry {
-    Eager(ErasedPort),
+    Eager(ErasedResolvedEffectPort),
     Deferred {
         resolver: ErasedResolver,
-        verdict: Arc<OnceLock<Result<ErasedPort, ResolverVerdictError>>>,
+        verdict: Arc<OnceLock<Result<ErasedResolvedEffectPort, ResolverVerdictError>>>,
     },
 }
 
@@ -116,10 +166,11 @@ impl<E: NamedEffect> EffectRegistrationBuilder<E> {
         let mut expected = E::required_slots().slots;
         if matches!(E::SAFETY, EffectSafety::Transactional) {
             let executor = transactional_effect_port_slot::<E>().requirement();
-            if !expected
-                .iter()
-                .any(|slot| slot.type_id == executor.type_id && slot.label == executor.label)
-            {
+            if !expected.iter().any(|slot| {
+                slot.port_type_id == executor.port_type_id
+                    && slot.metadata_type_id == executor.metadata_type_id
+                    && slot.label == executor.label
+            }) {
                 expected.push(executor);
             }
         }
@@ -133,41 +184,83 @@ impl<E: NamedEffect> EffectRegistrationBuilder<E> {
     }
 
     pub fn bind_eager<P>(
-        mut self,
+        self,
         slot: EffectPortSlot<P>,
         port: Arc<P>,
     ) -> Result<Self, EffectBindingBuildError>
     where
         P: ?Sized + Send + Sync + 'static,
     {
-        let erased = Arc::new(port) as ErasedPort;
-        self.push(slot, PortRecipe::Eager(erased))?;
-        Ok(self)
+        self.bind_eager_with_metadata(
+            slot,
+            ResolvedEffectPort::new(port, Arc::new(NoPortMetadata)),
+        )
     }
 
     pub fn bind_deferred<P>(
-        mut self,
+        self,
         slot: EffectPortSlot<P>,
         resolver: EffectPortResolver<P>,
     ) -> Result<Self, EffectBindingBuildError>
     where
         P: ?Sized + Send + Sync + 'static,
     {
-        let erased: ErasedResolver = Arc::new(move || {
-            let port = resolver()?;
-            Ok(Arc::new(port) as ErasedPort)
-        });
+        let resolver_with_metadata: EffectPortResolverWithMetadata<P, NoPortMetadata> =
+            Arc::new(move || {
+                let port = resolver()?;
+                Ok(ResolvedEffectPort::new(port, Arc::new(NoPortMetadata)))
+            });
+        self.bind_deferred_with_metadata(slot, resolver_with_metadata)
+    }
+
+    /// Bind an already-constructed port and metadata snapshot as one verdict.
+    pub fn bind_eager_with_metadata<P, M>(
+        mut self,
+        slot: EffectPortSlot<P, M>,
+        resolved: ResolvedEffectPort<P, M>,
+    ) -> Result<Self, EffectBindingBuildError>
+    where
+        P: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
+    {
+        self.push(slot, PortRecipe::Eager(Self::erase(resolved)))?;
+        Ok(self)
+    }
+
+    /// Bind one resolver that co-produces a port and metadata snapshot.
+    pub fn bind_deferred_with_metadata<P, M>(
+        mut self,
+        slot: EffectPortSlot<P, M>,
+        resolver: EffectPortResolverWithMetadata<P, M>,
+    ) -> Result<Self, EffectBindingBuildError>
+    where
+        P: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
+    {
+        let erased: ErasedResolver = Arc::new(move || resolver().map(Self::erase));
         self.push(slot, PortRecipe::Deferred(erased))?;
         Ok(self)
     }
 
-    fn push<P>(
+    fn erase<P, M>(resolved: ResolvedEffectPort<P, M>) -> ErasedResolvedEffectPort
+    where
+        P: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
+    {
+        ErasedResolvedEffectPort {
+            port: Arc::new(resolved.port),
+            metadata: Arc::new(resolved.metadata),
+        }
+    }
+
+    fn push<P, M>(
         &mut self,
-        slot: EffectPortSlot<P>,
+        slot: EffectPortSlot<P, M>,
         recipe: PortRecipe,
     ) -> Result<(), EffectBindingBuildError>
     where
         P: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
     {
         // Validate the effect identifier before constructing any error that
         // would otherwise project the author's raw `EFFECT_TYPE` string.
@@ -181,7 +274,9 @@ impl<E: NamedEffect> EffectRegistrationBuilder<E> {
             });
         }
         if !self.expected.iter().any(|expected| {
-            expected.type_id == requirement.type_id && expected.label == requirement.label
+            expected.port_type_id == requirement.port_type_id
+                && expected.metadata_type_id == requirement.metadata_type_id
+                && expected.label == requirement.label
         }) {
             return Err(EffectBindingBuildError::UnexpectedSlot {
                 binding: self.logical_name.clone(),
@@ -236,7 +331,8 @@ impl<E: NamedEffect> EffectRegistrationBuilder<E> {
             .iter()
             .filter(|expected| {
                 !self.pending.iter().any(|pending| {
-                    pending.requirement.type_id == expected.type_id
+                    pending.requirement.port_type_id == expected.port_type_id
+                        && pending.requirement.metadata_type_id == expected.metadata_type_id
                         && pending.requirement.label == expected.label
                 })
             })
@@ -366,7 +462,7 @@ impl EffectPortRegistry {
             .iter()
             .map(|(coordinate, recipe)| {
                 let entry = match recipe {
-                    PortRecipe::Eager(port) => RunPortEntry::Eager(Arc::clone(port)),
+                    PortRecipe::Eager(port) => RunPortEntry::Eager(port.clone()),
                     PortRecipe::Deferred(resolver) => RunPortEntry::Deferred {
                         resolver: Arc::clone(resolver),
                         verdict: Arc::new(OnceLock::new()),
@@ -415,22 +511,35 @@ impl EffectPortRegistry {
         &self,
         registration: BindingCoordinate,
         slots: &[BoundEffectPortSlot],
-    ) -> Result<EffectPortView, EffectPortViewBuildError> {
+    ) -> Result<EffectPortViews, EffectPortViewBuildError> {
         if !self.installed_coordinates.contains(&registration) {
             return Err(EffectPortViewBuildError::MissingRegistration);
         }
-        let mut resolved = HashMap::with_capacity(slots.len());
+        let mut ports = HashMap::with_capacity(slots.len());
+        let mut metadata = HashMap::with_capacity(slots.len());
         for slot in slots {
-            let port = self.resolve(slot)?;
-            resolved.insert((slot.requirement.type_id, slot.requirement.label), port);
+            let resolved = self.resolve(slot)?;
+            let key = (
+                slot.requirement.port_type_id,
+                slot.requirement.metadata_type_id,
+                slot.requirement.label,
+            );
+            ports.insert(key, resolved.port);
+            metadata.insert(key, resolved.metadata);
         }
-        Ok(EffectPortView { resolved })
+        Ok(EffectPortViews {
+            ports: EffectPortView { resolved: ports },
+            metadata: EffectPortMetadataView { resolved: metadata },
+        })
     }
 
-    fn resolve(&self, slot: &BoundEffectPortSlot) -> Result<ErasedPort, EffectPortViewBuildError> {
+    fn resolve(
+        &self,
+        slot: &BoundEffectPortSlot,
+    ) -> Result<ErasedResolvedEffectPort, EffectPortViewBuildError> {
         let Some(entries) = self.run_entries.as_ref() else {
             return match self.recipes.get(&slot.coordinate) {
-                Some(PortRecipe::Eager(port)) => Ok(Arc::clone(port)),
+                Some(PortRecipe::Eager(port)) => Ok(port.clone()),
                 Some(PortRecipe::Deferred(_)) => Err(EffectPortViewBuildError::Resolver {
                     slot: slot.requirement.label,
                     verdict: ResolverVerdictError::NotMaterialised,
@@ -442,7 +551,7 @@ impl EffectPortRegistry {
             return Err(EffectPortViewBuildError::MissingRegistration);
         };
         match entry {
-            RunPortEntry::Eager(port) => Ok(Arc::clone(port)),
+            RunPortEntry::Eager(port) => Ok(port.clone()),
             RunPortEntry::Deferred { resolver, verdict } => verdict
                 .get_or_init(|| {
                     catch_unwind(AssertUnwindSafe(|| resolver()))
@@ -450,7 +559,7 @@ impl EffectPortRegistry {
                         .and_then(|result| result.map_err(ResolverVerdictError::Provider))
                 })
                 .as_ref()
-                .map(Arc::clone)
+                .cloned()
                 .map_err(|error| EffectPortViewBuildError::Resolver {
                     slot: slot.requirement.label,
                     verdict: *error,
@@ -472,18 +581,74 @@ impl std::fmt::Debug for EffectPortRegistry {
 
 #[derive(Clone, Default)]
 pub(super) struct EffectPortView {
-    resolved: HashMap<(TypeId, &'static str), ErasedPort>,
+    resolved: HashMap<(TypeId, TypeId, &'static str), ErasedValue>,
 }
 
 impl EffectPortView {
-    pub(super) fn get<P>(&self, slot: EffectPortSlot<P>) -> Option<Arc<P>>
+    pub(super) fn get<P, M>(&self, slot: EffectPortSlot<P, M>) -> Option<Arc<P>>
     where
         P: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
     {
         self.resolved
-            .get(&(TypeId::of::<P>(), slot.label()))?
+            .get(&(TypeId::of::<P>(), TypeId::of::<M>(), slot.label()))?
             .downcast_ref::<Arc<P>>()
             .cloned()
+    }
+}
+
+#[derive(Clone, Default)]
+pub(super) struct EffectPortMetadataView {
+    resolved: HashMap<(TypeId, TypeId, &'static str), ErasedValue>,
+}
+
+impl EffectPortMetadataView {
+    pub(super) fn get<P, M>(&self, slot: EffectPortSlot<P, M>) -> Option<Arc<M>>
+    where
+        P: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
+    {
+        self.resolved
+            .get(&(TypeId::of::<P>(), TypeId::of::<M>(), slot.label()))?
+            .downcast_ref::<Arc<M>>()
+            .cloned()
+    }
+}
+
+impl std::fmt::Debug for EffectPortMetadataView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EffectPortMetadataView")
+            .field("slot_count", &self.resolved.len())
+            .field("metadata", &"<not disclosed>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Default)]
+pub(super) struct EffectPortViews {
+    pub(super) ports: EffectPortView,
+    pub(super) metadata: EffectPortMetadataView,
+}
+
+impl EffectPortViews {
+    #[cfg(test)]
+    fn get<P, M>(&self, slot: EffectPortSlot<P, M>) -> Option<Arc<P>>
+    where
+        P: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
+    {
+        self.ports.get(slot)
+    }
+}
+
+impl std::fmt::Debug for EffectPortViews {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EffectPortViews")
+            .field("slot_count", &self.ports.resolved.len())
+            .field("authority", &"<not disclosed>")
+            .finish()
     }
 }
 
@@ -511,7 +676,7 @@ mod tests {
     use super::*;
     use crate::effects::{
         Effect, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError,
-        EffectPortSlotSet, EffectSafety, Named, RecordedReply,
+        EffectPortMetadataContext, EffectPortSlotSet, EffectSafety, Named, RecordedReply,
     };
     use async_trait::async_trait;
     use obzenflow_core::{BoundedBindingEvidence, EffectBindingIdentity, TypedPayload};
@@ -558,6 +723,10 @@ mod tests {
         secret: &'static str,
     }
 
+    struct CanaryMetadata {
+        secret: &'static str,
+    }
+
     impl Port for CanaryLivePort {
         fn value(&self) -> usize {
             self.secret.len()
@@ -565,6 +734,7 @@ mod tests {
     }
 
     const PORT: EffectPortSlot<dyn Port> = EffectPortSlot::new("client");
+    const CANARY_PORT: EffectPortSlot<dyn Port, CanaryMetadata> = EffectPortSlot::new("client");
     const FALLBACK: EffectPortSlot<dyn Port> = EffectPortSlot::new("fallback");
     const CONFLICTING_CLIENT: EffectPortSlot<usize> = EffectPortSlot::new("client");
 
@@ -648,7 +818,7 @@ mod tests {
         }
 
         fn required_slots() -> EffectPortSlotSet {
-            EffectPortSlotSet::single(PORT)
+            EffectPortSlotSet::single(CANARY_PORT)
         }
     }
 
@@ -1158,16 +1328,20 @@ mod tests {
 
     #[test]
     fn authority_canaries_are_absent_from_framework_projections() {
+        let resolved = ResolvedEffectPort::new(
+            Arc::new(CanaryLivePort {
+                secret: AUTHORITY_CANARY,
+            }) as Arc<dyn Port>,
+            Arc::new(CanaryMetadata {
+                secret: AUTHORITY_CANARY,
+            }),
+        );
+        let resolved_debug = format!("{resolved:?}");
         let builder = EffectRegistrationBuilder::<CanaryBoundEffect>::new(
             LogicalEffectBindingName::new("canary").unwrap(),
             CanaryEvidence,
         )
-        .bind_eager(
-            PORT,
-            Arc::new(CanaryLivePort {
-                secret: AUTHORITY_CANARY,
-            }) as Arc<dyn Port>,
-        )
+        .bind_eager_with_metadata(CANARY_PORT, resolved)
         .unwrap();
         let builder_debug = format!("{builder:?}");
         let (binding, registration) = builder.finish().unwrap();
@@ -1193,10 +1367,23 @@ mod tests {
             panic!("expected named declaration")
         };
         let view = run.scoped_view(named.registration, &named.slots).unwrap();
-        assert_eq!(view.get(PORT).unwrap().value(), AUTHORITY_CANARY.len());
+        assert_eq!(
+            view.get(CANARY_PORT).unwrap().value(),
+            AUTHORITY_CANARY.len()
+        );
+        assert_eq!(
+            view.metadata.get(CANARY_PORT).unwrap().secret.len(),
+            AUTHORITY_CANARY.len()
+        );
         let view_debug = format!("{view:?}");
+        let metadata_context_debug = format!(
+            "{:?}",
+            EffectPortMetadataContext {
+                metadata: view.metadata.clone(),
+            }
+        );
 
-        let resolver: EffectPortResolver<dyn Port> = Arc::new(|| {
+        let resolver: EffectPortResolverWithMetadata<dyn Port, CanaryMetadata> = Arc::new(|| {
             panic!("{AUTHORITY_CANARY}");
         });
         let (panic_binding, panic_registration) =
@@ -1204,7 +1391,7 @@ mod tests {
                 LogicalEffectBindingName::new("panic_canary").unwrap(),
                 CanaryEvidence,
             )
-            .bind_deferred(PORT, resolver)
+            .bind_deferred_with_metadata(CANARY_PORT, resolver)
             .unwrap()
             .finish()
             .unwrap();
@@ -1231,6 +1418,7 @@ mod tests {
         };
         let framework_surfaces = [
             builder_debug,
+            resolved_debug,
             registration_debug,
             declaration_debug,
             durable_identity,
@@ -1238,6 +1426,7 @@ mod tests {
             binding_debug,
             run_debug,
             view_debug,
+            metadata_context_debug,
             panic_error_debug,
             fault.to_string(),
             format!("{fault:?}"),
@@ -1252,5 +1441,45 @@ mod tests {
                 "framework projection disclosed authority canary: {projection}"
             );
         }
+    }
+
+    #[test]
+    fn callable_port_and_metadata_share_one_cached_resolver_verdict() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver: EffectPortResolverWithMetadata<dyn Port, CanaryMetadata> = Arc::new({
+            let calls = Arc::clone(&calls);
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ResolvedEffectPort::new(
+                    Arc::new(LivePort) as Arc<dyn Port>,
+                    Arc::new(CanaryMetadata { secret: "snapshot" }),
+                ))
+            }
+        });
+        let (binding, registration) = EffectRegistrationBuilder::<CanaryBoundEffect>::new(
+            LogicalEffectBindingName::new("co_resolved").unwrap(),
+            CanaryEvidence,
+        )
+        .bind_deferred_with_metadata(CANARY_PORT, resolver)
+        .unwrap()
+        .finish()
+        .unwrap();
+        let mut registry = EffectPortRegistry::new();
+        registry.install(registration).unwrap();
+        let registry = registry.into_run_registry();
+        let super::super::binding::EffectDeclarationBinding::Named(named) =
+            binding.declaration_binding()
+        else {
+            panic!("expected named declaration")
+        };
+
+        for _ in 0..2 {
+            let views = registry
+                .scoped_view(named.registration, &named.slots)
+                .unwrap();
+            assert_eq!(views.get(CANARY_PORT).unwrap().value(), 7);
+            assert_eq!(views.metadata.get(CANARY_PORT).unwrap().secret, "snapshot");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
