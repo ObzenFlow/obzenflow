@@ -119,6 +119,8 @@ schema instead of expecting pre-132a descriptor compatibility.
 
 ## Concrete 132a migrations
 
+### Payment gateway
+
 Payment moves the declaration and its singleton policy from the detached lane
 onto the arrow:
 
@@ -143,51 +145,159 @@ ValidatedOrder -> {
 } => gateway
 ```
 
-One-shot inference and HN retain their existing `via chat` row syntax, but the
-construction result and installation gateway are now generic:
+### One-shot inference
+
+The one-shot example keeps its `via chat` effect row and migrates the binding
+facade's result into the generic, consuming installation gateway:
 
 ```rust,ignore
 // Before
-let (chat, registration) = ChatEffectBinding::from_config(&config)?.into_parts();
-let effect_ports = registration.install_into(EffectPortRegistry::new())?;
+let (chat, chat_registration) =
+    ChatEffectBinding::from_config(&ai_models)?.into_parts();
+let effect_ports =
+    chat_registration.install_into(EffectPortRegistry::new())?;
 
 // After
-let (chat, registration) = ChatEffectBinding::from_config(&config)?.into_parts()?;
+let (chat, chat_registration) =
+    ChatEffectBinding::from_config(&ai_models)?.into_parts()?;
 let mut effect_ports = EffectPortRegistry::new();
-effect_ports.install(registration)?;
-// `chat` is EffectBinding<ChatCompletion>.
-```
+effect_ports.install(chat_registration)?;
 
-Standalone chat and embedding replace raw name-plus-type registry entries with
-the same public typed builder used by provider facades and applications:
-
-```rust,ignore
-// Before
-EffectPortRegistry::new().with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)?;
-effectful_transform!(Input -> Output => handler,
-    effects: [at_least_once(ChatCompletion) with ai_resilience()]);
-
-// After
-let (chat, registration) = EffectRegistrationBuilder::<ChatCompletion>::new(
-    LogicalEffectBindingName::new("chat")?, evidence,
-)
-.bind_deferred(CHAT_CLIENT, resolver)?
-.finish()?;
-effect_ports.install(registration)?;
-effectful_transform!(Input -> {
+ReducedEvidence -> {
     at_least_once(ChatCompletion) via chat with ai_resilience()
-} Output => handler);
+} DecisionBrief => brief_role
 ```
 
-The embedding form substitutes `EmbeddingGeneration`, `EMBEDDING_CLIENT`, and
-its typed evidence. Transactional fixtures likewise move the executor out of a
-string operand:
+### Hacker News digest
+
+HN previously selected its test resolver through the raw port registry. It now
+rebuilds the same typed authority through the public builder and installs the
+result once at the composition root:
 
 ```rust,ignore
 // Before
-Input -> Output => handler,
-effects: [transactional(LedgerWrite, "ledger")]
+let (chat, chat_registration) =
+    ChatEffectBinding::from_config(&ai_models)?.into_parts();
+let chat_target = chat.target().clone();
+let effect_ports = if let Some(resolver) = chat_resolver_override {
+    EffectPortRegistry::new()
+        .with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)
+} else {
+    chat_registration.install_into(EffectPortRegistry::new())
+}?;
 
 // After
-Input -> { transactional(LedgerWrite) via ledger } Output => handler
+let (chat, chat_registration) =
+    ChatEffectBinding::from_config(&ai_models)?.into_parts()?;
+let (chat, chat_registration) = if let Some(resolver) = chat_resolver_override {
+    EffectRegistrationBuilder::<ChatCompletion>::new(
+        LogicalEffectBindingName::new("chat")?,
+        chat.evidence().clone(),
+    )
+    .bind_deferred(CHAT_CLIENT, resolver)?
+    .finish()?
+} else {
+    (chat, chat_registration)
+};
+let chat_target = chat.evidence().target().clone();
+let mut effect_ports = EffectPortRegistry::new();
+effect_ports.install(chat_registration)?;
+```
+
+### Standalone chat
+
+Standalone chat replaces the raw name-plus-type resolver and detached effect
+list with a typed registration and canonical row declaration:
+
+```rust,ignore
+// Before
+let effect_ports = EffectPortRegistry::new()
+    .with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, chat_resolver)?;
+effectful_transform!(
+    TicketRaised -> TicketSummarised => chat_handler,
+    effects: [at_least_once(ChatCompletion) with ai_resilience()],
+);
+
+// After
+let (chat, chat_registration) =
+    EffectRegistrationBuilder::<ChatCompletion>::new(
+        LogicalEffectBindingName::new("chat")?,
+        chat_evidence,
+    )
+    .bind_deferred(CHAT_CLIENT, chat_resolver)?
+    .finish()?;
+effect_ports.install(chat_registration)?;
+effectful_transform!(
+    TicketRaised -> {
+        at_least_once(ChatCompletion) via chat with ai_resilience()
+    } TicketSummarised => chat_handler,
+);
+```
+
+### Standalone embedding
+
+Embedding makes the corresponding migration explicitly rather than relying on
+a textual substitution from the chat example:
+
+```rust,ignore
+// Before
+let effect_ports = EffectPortRegistry::new()
+    .with_deferred::<dyn EmbeddingClient>(
+        EMBEDDING_CLIENT_PORT,
+        embedding_resolver,
+    )?;
+effectful_transform!(
+    TicketSummarised -> TicketEmbedded => embedding_handler,
+    effects: [at_least_once(EmbeddingGeneration) with ai_resilience()],
+);
+
+// After
+let (embedding, embedding_registration) =
+    EffectRegistrationBuilder::<EmbeddingGeneration>::new(
+        LogicalEffectBindingName::new("embedding")?,
+        embedding_evidence,
+    )
+    .bind_deferred(EMBEDDING_CLIENT, embedding_resolver)?
+    .finish()?;
+effect_ports.install(embedding_registration)?;
+effectful_transform!(
+    TicketSummarised -> {
+        at_least_once(EmbeddingGeneration) via embedding with ai_resilience()
+    } TicketEmbedded => embedding_handler,
+);
+```
+
+### Transactional ledger
+
+Transactional registration moves from a raw string-keyed executor to its
+effect's typed transactional slot, while the row carries the binding value:
+
+```rust,ignore
+// Before
+ports.insert::<dyn TransactionalEffectPort<LedgerEffect>>(
+    "ledger_tx",
+    ledger_port,
+)?;
+effectful_transform!(
+    ReplayInput -> { ReplayOutput, ReplayEffectValue } => ledger_handler,
+    effects: [transactional(LedgerEffect, "ledger_tx") with resilience],
+);
+
+// After
+let (ledger_binding, registration) =
+    EffectRegistrationBuilder::<LedgerEffect>::new(
+        LogicalEffectBindingName::new("ledger_tx")?,
+        LedgerBindingEvidence,
+    )
+    .bind_eager(
+        transactional_effect_port_slot::<LedgerEffect>(),
+        ledger_port,
+    )?
+    .finish()?;
+ports.install(registration)?;
+effectful_transform!(
+    ReplayInput -> {
+        transactional(LedgerEffect) via ledger_binding with resilience
+    } { ReplayOutput, ReplayEffectValue } => ledger_handler,
+);
 ```

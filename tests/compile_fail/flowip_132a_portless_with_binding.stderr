@@ -1,42 +1,4 @@
-error[E0277]: the trait bound `FirstEffect: NamedEffect` is not satisfied
-  --> tests/compile_fail/flowip_132a_portless_with_binding.rs:10:19
-   |
-10 |         Input ->{ FirstEffect via binding } First => support::AllowsFirstEffect,
-   |                   ^^^^^^^^^^^ unsatisfied trait bound
-   |
-help: the trait `NamedEffect` is not implemented for `FirstEffect`
-  --> tests/compile_fail/support/typed_effectful.rs
-   |
-   | pub struct FirstEffect;
-   | ^^^^^^^^^^^^^^^^^^^^^^
-help: the following other types implement trait `NamedEffect`
-  --> tests/compile_fail/support/typed_effectful.rs
-   |
-   | impl NamedEffect for ZeroSlotNamedEffect {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ZeroSlotNamedEffect`
-...
-   | impl NamedEffect for OtherZeroSlotNamedEffect {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `OtherZeroSlotNamedEffect`
-   |
-  ::: crates/obzenflow_adapters/src/ai/effects/embedding_generation.rs
-   |
-   | impl NamedEffect for EmbeddingGeneration {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EmbeddingGeneration`
-   |
-  ::: crates/obzenflow_adapters/src/ai/effects/chat_completion.rs
-   |
-   | impl NamedEffect for ChatCompletion {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ChatCompletion`
-note: required by a bound in `EffectDeclaration::named`
-  --> crates/obzenflow_runtime/src/effects/declaration.rs
-   |
-   |     pub fn named<E>(binding: &EffectBinding<E>) -> Self
-   |            ----- required by a bound in this associated function
-   |     where
-   |         E: NamedEffect,
-   |            ^^^^^^^^^^^ required by this bound in `EffectDeclaration::named`
-
-error[E0308]: mismatched types
+error[E0277]: binding `EffectBinding<ZeroSlotNamedEffect>` does not match declared effect `FirstEffect`
   --> tests/compile_fail/flowip_132a_portless_with_binding.rs:9:13
    |
  9 |       let _ = obzenflow_dsl::effectful_transform!(
@@ -44,16 +6,24 @@ error[E0308]: mismatched types
 10 | |         Input ->{ FirstEffect via binding } First => support::AllowsFirstEffect,
 11 | |         observers: []
 12 | |     );
-   | |     ^
-   | |     |
-   | |_____expected `&EffectBinding<FirstEffect>`, found `&EffectBinding<ZeroSlotNamedEffect>`
-   |       arguments to this function are incorrect
+   | |_____^ the binding selected by `via` belongs to a different effect
    |
-   = note: expected reference `&EffectBinding<FirstEffect>`
-              found reference `&EffectBinding<ZeroSlotNamedEffect>`
-note: associated function defined here
+   = note: use the `EffectBinding<FirstEffect>` produced for the effect named before `via`
+help: the trait `EffectBindingFor<FirstEffect>` is not implemented for `EffectBinding<ZeroSlotNamedEffect>`
+      but trait `EffectBindingFor<ZeroSlotNamedEffect>` is implemented for it
   --> crates/obzenflow_runtime/src/effects/declaration.rs
    |
-   |     pub fn named<E>(binding: &EffectBinding<E>) -> Self
-   |            ^^^^^
+   | / impl<E> EffectBindingFor<E> for EffectBinding<E>
+   | | where
+   | |     E: NamedEffect,
+   | |___________________^
+   = help: for that trait implementation, expected `ZeroSlotNamedEffect`, found `FirstEffect`
+note: required by a bound in `declare_named_effect`
+  --> crates/obzenflow_runtime/src/effects/declaration.rs
+   |
+   | pub fn declare_named_effect<E, B>(binding: &B) -> EffectDeclaration
+   |        -------------------- required by a bound in this function
+...
+   |     B: EffectBindingFor<E> + ?Sized,
+   |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `declare_named_effect`
    = note: this error originates in the macro `$crate::__obzenflow_effect_entries` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)

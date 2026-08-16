@@ -14,10 +14,7 @@ use obzenflow_core::{
     event::payloads::observability_payload::{
         CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
     },
-    event::{
-        ChainEventContent, StageFatalCode, StageFatalReason, StageFatalRecorded,
-        StageLifecycleEvent, SystemEvent, SystemEventType,
-    },
+    event::{ChainEventContent, StageLifecycleEvent, SystemEvent, SystemEventType},
     id::{StageId, SystemId},
     journal::{journal_owner::JournalOwner, Journal},
     BoundedBindingEvidence, StageOutputs, TypedPayload,
@@ -25,15 +22,15 @@ use obzenflow_core::{
 use obzenflow_dsl::{
     effectful_stateful, effectful_transform, flow, sink, source, transform, FlowDefinition,
 };
-use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::application::{ApplicationError, FlowApplication};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
     is_framework_effect_event_type, transactional_effect_port_slot, Effect, EffectBinding,
     EffectBindingEvidence, EffectBindingUse, EffectCommitHandle, EffectContext, EffectCursor,
-    EffectError, EffectPortRegistry, EffectPortSlot, EffectPortSlotSet, EffectRecord,
-    EffectRegistration, EffectRegistrationBuilder, EffectSafety, Effects, IdempotencyKey,
-    LogicalEffectBindingName, Named, NamedEffect, SinkRedeliverySafety, TransactionalEffectPort,
-    EFFECT_RECORD_EVENT_TYPE,
+    EffectError, EffectPortRegistry, EffectPortResolver, EffectPortSlot, EffectPortSlotSet,
+    EffectRecord, EffectRegistration, EffectRegistrationBuilder, EffectSafety, Effects,
+    IdempotencyKey, LogicalEffectBindingName, Named, NamedEffect, SinkRedeliverySafety,
+    TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -89,11 +86,22 @@ impl TypedPayload for ReplayEffectValue {
 #[derive(Clone, Debug)]
 struct ReplaySource {
     next_value: u64,
+    calls: Option<Arc<AtomicUsize>>,
 }
 
 impl ReplaySource {
     fn new() -> Self {
-        Self { next_value: 1 }
+        Self {
+            next_value: 1,
+            calls: None,
+        }
+    }
+
+    fn counted(calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            next_value: 1,
+            calls: Some(calls),
+        }
     }
 }
 
@@ -101,6 +109,9 @@ impl TypedFiniteSourceHandler for ReplaySource {
     type Output = ReplayInput;
 
     fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        if let Some(calls) = &self.calls {
+            calls.fetch_add(1, Ordering::SeqCst);
+        }
         if self.next_value > 3 {
             return Ok(None);
         }
@@ -3472,13 +3483,14 @@ impl EffectfulTransformHandler for PortedTransform {
 
 fn build_ported_flow(
     journal_base: PathBuf,
+    source_calls: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
     authority: (EffectBinding<PortedEffect>, EffectPortRegistry),
 ) -> FlowDefinition {
     let (ported_binding, ports) = authority;
     FlowDefinition::materialize(move |_runtime_config| {
-        let inputs_handler = ReplaySource::new();
+        let inputs_handler = ReplaySource::counted(source_calls);
         let ported_handler = PortedTransform {
             calls,
             binding: ported_binding.invocation(),
@@ -3523,6 +3535,26 @@ fn ported_binding(
     .unwrap()
 }
 
+fn deferred_ported_binding(
+    resolver_calls: Arc<AtomicUsize>,
+) -> (
+    EffectBinding<PortedEffect>,
+    EffectRegistration<PortedEffect>,
+) {
+    let resolver: EffectPortResolver<dyn GreetingPort> = Arc::new(move || {
+        resolver_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(DoublingGreetingPort) as Arc<dyn GreetingPort>)
+    });
+    EffectRegistrationBuilder::<PortedEffect>::new(
+        LogicalEffectBindingName::new("greeting").unwrap(),
+        PortedBindingEvidence,
+    )
+    .bind_deferred(GREETING_PORT, resolver)
+    .unwrap()
+    .finish()
+    .unwrap()
+}
+
 #[tokio::test]
 async fn application_local_builder_runs_live_and_strict_replays_with_an_empty_registry() {
     let _guard = effect_replay_test_guard().await;
@@ -3530,6 +3562,7 @@ async fn application_local_builder_runs_live_and_strict_replays_with_an_empty_re
     let journal_base = temp.path().join("journals");
 
     let calls = Arc::new(AtomicUsize::new(0));
+    let source_calls = Arc::new(AtomicUsize::new(0));
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
     let (binding, registration) = ported_binding(Arc::new(DoublingGreetingPort));
@@ -3540,6 +3573,7 @@ async fn application_local_builder_runs_live_and_strict_replays_with_an_empty_re
         .with_cli_args(["obzenflow"])
         .run_async(build_ported_flow(
             journal_base.clone(),
+            source_calls.clone(),
             calls.clone(),
             outputs.clone(),
             (binding, ports),
@@ -3548,6 +3582,8 @@ async fn application_local_builder_runs_live_and_strict_replays_with_an_empty_re
         .expect("a flow that supplies the required effect port should materialise and run");
 
     assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let live_source_calls = source_calls.load(Ordering::SeqCst);
+    assert!(live_source_calls > 0, "the live source must be polled");
     let domain = outputs.lock().expect("outputs lock poisoned").clone();
     assert_eq!(
         domain,
@@ -3580,6 +3616,7 @@ async fn application_local_builder_runs_live_and_strict_replays_with_an_empty_re
         ])
         .run_async(build_ported_flow(
             journal_base,
+            source_calls.clone(),
             calls.clone(),
             replay_outputs.clone(),
             (replay_binding, EffectPortRegistry::new()),
@@ -3591,6 +3628,11 @@ async fn application_local_builder_runs_live_and_strict_replays_with_an_empty_re
         calls.load(Ordering::SeqCst),
         3,
         "strict replay must not execute the application-local effect"
+    );
+    assert_eq!(
+        source_calls.load(Ordering::SeqCst),
+        live_source_calls,
+        "strict replay must not poll the live source"
     );
     assert_eq!(
         replay_outputs
@@ -3609,16 +3651,20 @@ async fn flow_without_required_effect_port_fails_closed_at_materialisation() {
     let journal_base = temp.path().join("journals");
 
     let calls = Arc::new(AtomicUsize::new(0));
+    let source_calls = Arc::new(AtomicUsize::new(0));
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
     // The binding is valid but its opaque registration is deliberately not
-    // installed. First live use must fail closed before effect execution.
-    let (binding, registration) = ported_binding(Arc::new(DoublingGreetingPort));
+    // installed. Descriptor materialisation must fail without resolving its
+    // deferred port or allowing the pipeline to reach `Materialized`.
+    let (binding, registration) = deferred_ported_binding(resolver_calls.clone());
     drop(registration);
     let err = FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(build_ported_flow(
             journal_base.clone(),
+            source_calls.clone(),
             calls.clone(),
             outputs.clone(),
             (binding, EffectPortRegistry::new()),
@@ -3626,27 +3672,35 @@ async fn flow_without_required_effect_port_fails_closed_at_materialisation() {
         .await
         .expect_err("a flow missing the selected binding registration must fail closed");
 
-    let _application_error = err;
-    let run = latest_run_dir(&journal_base);
-    let fatals = read_stage_error_events(&run, "ported")
-        .await
-        .iter()
-        .filter_map(StageFatalRecorded::from_event)
-        .collect::<Vec<_>>();
-    assert_eq!(fatals.len(), 1);
-    assert_eq!(fatals[0].code, StageFatalCode::Configuration);
-    assert_eq!(
-        fatals[0].reason,
-        StageFatalReason::EffectPortRegistrationMissing
+    let detail = match err {
+        ApplicationError::FlowBuildFailed(detail) => detail,
+        other => panic!("missing registration failed after materialisation: {other:?}"),
+    };
+    assert!(
+        detail.contains(
+            "Effectful stage 'ported' cannot materialise: binding 'greeting' for effect \
+             'effect_port_supply.ported' has no installed registration"
+        ),
+        "unexpected build failure: {detail}"
     );
     assert_eq!(
-        fatals[0].detail,
-        "binding 'greeting' for effect 'effect_port_supply.ported' has no installed registration"
+        source_calls.load(Ordering::SeqCst),
+        0,
+        "the source must not be polled before registration preflight passes"
     );
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
         "the effect must not execute when its required port is unregistered"
+    );
+    assert_eq!(
+        resolver_calls.load(Ordering::SeqCst),
+        0,
+        "registration preflight must not invoke deferred resolvers"
+    );
+    assert!(
+        outputs.lock().expect("outputs lock poisoned").is_empty(),
+        "no stage work may be emitted before registration preflight passes"
     );
 }
 

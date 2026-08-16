@@ -57,6 +57,32 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
+    struct AffineEffect;
+
+    #[async_trait]
+    impl Effect for AffineEffect {
+        const EFFECT_TYPE: &'static str = "test.lowering_contract.affine_effect";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+        type BindingMode = obzenflow_runtime::effects::Portless;
+
+        type Outcome = Out;
+        type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
+
+        fn label(&self) -> &str {
+            "affine_effect"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+            Ok(Out)
+        }
+    }
+
+    #[derive(Clone, Debug)]
     struct TxEffect {
         binding: EffectBindingUse<Self>,
     }
@@ -180,7 +206,7 @@ mod tests {
         );
         assert!(transactional_attachments.is_empty());
 
-        type AtLeastOnce = crate::__obzenflow_effect_manifest_types!(at_least_once(PlainEffect));
+        type AtLeastOnce = crate::__obzenflow_effect_manifest_types!(at_least_once(AffineEffect));
         let mut at_least_once = Vec::new();
         let _at_least_once_attachments: Vec<crate::dsl::stage_descriptor::EffectPolicyAttachment> =
             Vec::new();
@@ -188,7 +214,7 @@ mod tests {
             @entry at_least_once,
             _at_least_once_attachments,
             [],
-            at_least_once(PlainEffect)
+            at_least_once(AffineEffect)
         );
         assert_eq!(
             <AtLeastOnce as EffectSet>::effect_types(),

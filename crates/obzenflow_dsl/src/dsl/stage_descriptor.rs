@@ -590,8 +590,8 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
 fn validate_effect_declarations(
     stage_name: &str,
     declarations: &[EffectDeclaration],
-    _effect_ports: &EffectPortRegistry,
-    _port_registration_policy: obzenflow_runtime::execution::EffectPortRegistrationPolicy,
+    effect_ports: &EffectPortRegistry,
+    port_registration_policy: obzenflow_runtime::execution::EffectPortRegistrationPolicy,
 ) -> Result<(), String> {
     let mut effect_types = std::collections::HashSet::new();
 
@@ -605,6 +605,10 @@ fn validate_effect_declarations(
                 declaration.effect_type()
             ));
         }
+
+        declaration
+            .validate_safety_syntax()
+            .map_err(|error| format!("Effectful stage '{stage_name}' {error}"))?;
 
         if matches!(declaration.safety(), EffectSafety::NonIdempotentRequiresKey)
             && !matches!(
@@ -628,6 +632,19 @@ fn validate_effect_declarations(
                 "Effectful stage '{stage_name}' declares paid non-idempotent effect '{}' without explicit at_least_once(...) acknowledgement",
                 declaration.effect_type()
             ));
+        }
+    }
+
+    if matches!(
+        port_registration_policy,
+        obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required
+    ) {
+        for declaration in declarations {
+            effect_ports
+                .validate_required_registration(declaration)
+                .map_err(|fault| {
+                    format!("Effectful stage '{stage_name}' cannot materialise: {fault}")
+                })?;
         }
     }
 
@@ -2669,9 +2686,14 @@ mod tests {
     use super::*;
     use obzenflow_adapters::middleware::CircuitBreaker;
     use obzenflow_core::event::{JournalEvent, SystemEvent};
-    use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, StageKey, TypedPayload};
+    use obzenflow_core::{
+        BoundedBindingEvidence, ChainEvent, EventEnvelope, FlowId, StageKey, TypedPayload,
+    };
     use obzenflow_runtime::control_plane::ControlPlaneProvider;
-    use obzenflow_runtime::effects::{Effect, EffectContext, EffectError};
+    use obzenflow_runtime::effects::{
+        Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError,
+        EffectPortSlotSet, EffectRegistrationBuilder, LogicalEffectBindingName, Named, NamedEffect,
+    };
     use obzenflow_runtime::message_bus::FsmMessageBus;
     use obzenflow_runtime::stages::common::handlers::source::traits::FiniteSourceHandler;
     use obzenflow_runtime::stages::common::handlers::source::traits::{
@@ -2777,6 +2799,79 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct SafetyBindingEvidence;
+
+    impl EffectBindingEvidence for SafetyBindingEvidence {
+        const SCHEMA_VERSION: u32 = 1;
+
+        fn canonical_bytes(&self) -> BoundedBindingEvidence {
+            BoundedBindingEvidence::try_new(b"safety-wrapper-fixture".to_vec()).unwrap()
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct NamedSafetyEffect<const CLASS: u8> {
+        binding: EffectBindingUse<Self>,
+    }
+
+    #[async_trait]
+    impl<const CLASS: u8> Effect for NamedSafetyEffect<CLASS> {
+        const EFFECT_TYPE: &'static str = match CLASS {
+            0 => "test.safety.idempotent",
+            1 => "test.safety.requires_key",
+            2 => "test.safety.at_least_once",
+            3 => "test.safety.transactional",
+            _ => panic!("unknown test safety class"),
+        };
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = match CLASS {
+            0 => EffectSafety::Idempotent,
+            1 => EffectSafety::NonIdempotentRequiresKey,
+            2 => EffectSafety::NonIdempotentAtLeastOnce,
+            3 => EffectSafety::Transactional,
+            _ => panic!("unknown test safety class"),
+        };
+        type BindingMode = Named<SafetyBindingEvidence>;
+        type Outcome = ();
+        type OutcomeSemantics = obzenflow_runtime::effects::RecordedReply;
+
+        fn label(&self) -> &str {
+            "named_safety"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            json!({})
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+            Ok(())
+        }
+    }
+
+    impl<const CLASS: u8> NamedEffect for NamedSafetyEffect<CLASS> {
+        type BindingEvidence = SafetyBindingEvidence;
+
+        fn binding_use(&self) -> &EffectBindingUse<Self> {
+            &self.binding
+        }
+
+        fn required_slots() -> EffectPortSlotSet {
+            EffectPortSlotSet::new()
+        }
+    }
+
+    fn safety_binding<const CLASS: u8>() -> EffectBinding<NamedSafetyEffect<CLASS>> {
+        let (binding, registration) = EffectRegistrationBuilder::<NamedSafetyEffect<CLASS>>::new(
+            LogicalEffectBindingName::new(format!("safety_{CLASS}")).unwrap(),
+            SafetyBindingEvidence,
+        )
+        .finish()
+        .unwrap();
+        drop(registration);
+        binding
+    }
+
     #[test]
     fn effect_declaration_constructor_closes_missing_key_strategy() {
         let declaration = EffectDeclaration::of::<MissingKeyEffect>();
@@ -2826,6 +2921,116 @@ mod tests {
             "Effectful stage 'standalone_chat' declares paid non-idempotent effect \
              'obzenflow.ai.chat_completion' without explicit at_least_once(...) acknowledgement"
         );
+    }
+
+    #[test]
+    fn safety_wrappers_never_reclassify_effects_and_every_mismatch_is_rejected() {
+        let idempotent = safety_binding::<0>();
+        let requires_key = safety_binding::<1>();
+        let at_least_once = safety_binding::<2>();
+        let transactional = safety_binding::<3>();
+
+        let mismatches = [
+            (
+                EffectDeclaration::named_at_least_once(&idempotent),
+                EffectSafety::Idempotent,
+                "at_least_once(...), but its authoritative Effect::SAFETY is Idempotent",
+            ),
+            (
+                EffectDeclaration::named_at_least_once(&requires_key),
+                EffectSafety::NonIdempotentRequiresKey,
+                "at_least_once(...), but its authoritative Effect::SAFETY is NonIdempotentRequiresKey",
+            ),
+            (
+                EffectDeclaration::named_at_least_once(&transactional),
+                EffectSafety::Transactional,
+                "at_least_once(...), but its authoritative Effect::SAFETY is Transactional",
+            ),
+            (
+                EffectDeclaration::transactional(&idempotent),
+                EffectSafety::Idempotent,
+                "transactional(...), but its authoritative Effect::SAFETY is Idempotent",
+            ),
+            (
+                EffectDeclaration::transactional(&requires_key),
+                EffectSafety::NonIdempotentRequiresKey,
+                "transactional(...), but its authoritative Effect::SAFETY is NonIdempotentRequiresKey",
+            ),
+            (
+                EffectDeclaration::transactional(&at_least_once),
+                EffectSafety::NonIdempotentAtLeastOnce,
+                "transactional(...), but its authoritative Effect::SAFETY is NonIdempotentAtLeastOnce",
+            ),
+        ];
+
+        for (declaration, authoritative_safety, expected) in mismatches {
+            assert_eq!(
+                declaration.safety(),
+                authoritative_safety,
+                "a lexical wrapper must never rewrite Effect::SAFETY"
+            );
+            let error = validate_effect_declarations(
+                "safety_mismatch",
+                &[declaration],
+                &EffectPortRegistry::new(),
+                obzenflow_runtime::execution::EffectPortRegistrationPolicy::OptionalStrictReplay,
+            )
+            .expect_err("a wrapper/safety mismatch must fail descriptor construction");
+            assert!(error.contains(expected), "unexpected diagnostic: {error}");
+        }
+    }
+
+    #[test]
+    fn required_safety_wrappers_are_enforced_and_matching_forms_are_coherent() {
+        let at_least_once = safety_binding::<2>();
+        let transactional = safety_binding::<3>();
+
+        for (declaration, expected) in [
+            (
+                EffectDeclaration::named(&at_least_once),
+                "without explicit at_least_once(...) acknowledgement",
+            ),
+            (
+                EffectDeclaration::named(&transactional),
+                "without the transactional(...) wrapper",
+            ),
+        ] {
+            let error = validate_effect_declarations(
+                "missing_safety_wrapper",
+                &[declaration],
+                &EffectPortRegistry::new(),
+                obzenflow_runtime::execution::EffectPortRegistrationPolicy::OptionalStrictReplay,
+            )
+            .expect_err("a required safety wrapper must not be optional");
+            assert!(error.contains(expected), "unexpected diagnostic: {error}");
+        }
+
+        let acknowledged = EffectDeclaration::named_at_least_once(&at_least_once);
+        assert_eq!(
+            acknowledged.safety(),
+            EffectSafety::NonIdempotentAtLeastOnce
+        );
+        assert_eq!(
+            acknowledged.idempotency_key_policy(),
+            IdempotencyKeyPolicy::AtLeastOnceAcknowledged
+        );
+        validate_effect_declarations(
+            "matching_at_least_once",
+            &[acknowledged],
+            &EffectPortRegistry::new(),
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::OptionalStrictReplay,
+        )
+        .expect("the matching at_least_once wrapper is valid");
+
+        let transactional = EffectDeclaration::transactional(&transactional);
+        assert_eq!(transactional.safety(), EffectSafety::Transactional);
+        validate_effect_declarations(
+            "matching_transactional",
+            &[transactional],
+            &EffectPortRegistry::new(),
+            obzenflow_runtime::execution::EffectPortRegistrationPolicy::OptionalStrictReplay,
+        )
+        .expect("the matching transactional wrapper is valid");
     }
 
     #[derive(Clone, Debug)]

@@ -482,12 +482,13 @@ impl EffectsCore {
     where
         E: Effect,
     {
+        let safety = declaration.safety();
         // FLOWIP-120c G10: the missing-key check is a deterministic
         // validation error, so it sits above the effect-history lookup and
         // the boundary consult. Live and replay recompute the same error,
         // nothing is recorded under the cursor, and admission is never
         // charged for a call that can never execute.
-        if matches!(E::SAFETY, EffectSafety::NonIdempotentRequiresKey)
+        if matches!(safety, EffectSafety::NonIdempotentRequiresKey)
             && effect.idempotency_key().is_none()
         {
             return Err(EffectError::MissingIdempotencyKey {
@@ -531,7 +532,7 @@ impl EffectsCore {
             .unwrap_or_default();
         let current = current_cursor_history(&self.ctx.data_journal, &cursor).await?;
         let selected = merge_cursor_histories(&cursor, archived, current)?;
-        if matches!(E::SAFETY, EffectSafety::NonIdempotentAtLeastOnce) {
+        if matches!(safety, EffectSafety::NonIdempotentAtLeastOnce) {
             validate_affine_terminal_group(&cursor, &selected)?;
         }
 
@@ -607,7 +608,7 @@ impl EffectsCore {
                 return output_result;
             }
             EffectHistorySelection::InDoubt(attempts) => {
-                if !matches!(E::SAFETY, EffectSafety::NonIdempotentAtLeastOnce) {
+                if !matches!(safety, EffectSafety::NonIdempotentAtLeastOnce) {
                     return Err(EffectError::EffectProvenanceMismatch(format!(
                         "effect cursor {cursor:?} has attempt history but effect '{}' is not NonIdempotentAtLeastOnce",
                         E::EFFECT_TYPE
@@ -671,12 +672,12 @@ impl EffectsCore {
 
         let identity = EffectIdentity {
             effect_type: E::EFFECT_TYPE,
-            safety: E::SAFETY,
+            safety,
             cursor: cursor.clone(),
             idempotency_key: effect.idempotency_key(),
         };
 
-        if matches!(E::SAFETY, EffectSafety::NonIdempotentAtLeastOnce) {
+        if matches!(safety, EffectSafety::NonIdempotentAtLeastOnce) {
             // Keep the generated affine state machine off the caller's async
             // frame. `perform` is monomorphised for every effect safety class;
             // storing this large future inline also bloats ordinary
@@ -694,7 +695,7 @@ impl EffectsCore {
             .await;
         }
 
-        if matches!(E::SAFETY, EffectSafety::Transactional) {
+        if matches!(safety, EffectSafety::Transactional) {
             // The transactional boundary owns another sizeable single-use
             // future. Heap-pin it for the same frame-containment reason.
             return Box::pin(self.perform_transactional(

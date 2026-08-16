@@ -1857,25 +1857,25 @@ macro_rules! __obzenflow_effect_entries {
     // ── end of input ───────────────────────────────────────────────────
     (@entry $effects:ident, $atts:ident, [],) => {};
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+],) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
+        $effects.push(::obzenflow_runtime::effects::declare_effect_without_binding::<$($acc)+>());
     };
 
     // ── paid non-idempotent acknowledgement entries ──────────────────
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) via $binding:ident with $policy:expr, $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named_at_least_once::<$effect>(&$binding));
+        $effects.push(::obzenflow_runtime::effects::declare_named_at_least_once_effect::<$effect, _>(&$binding));
         $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) via $binding:ident with $policy:expr) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named_at_least_once::<$effect>(&$binding));
+        $effects.push(::obzenflow_runtime::effects::declare_named_at_least_once_effect::<$effect, _>(&$binding));
         $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
     };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) via $binding:ident, $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named_at_least_once::<$effect>(&$binding));
+        $effects.push(::obzenflow_runtime::effects::declare_named_at_least_once_effect::<$effect, _>(&$binding));
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) via $binding:ident) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named_at_least_once::<$effect>(&$binding));
+        $effects.push(::obzenflow_runtime::effects::declare_named_at_least_once_effect::<$effect, _>(&$binding));
     };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
         compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
@@ -1884,20 +1884,20 @@ macro_rules! __obzenflow_effect_entries {
         compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
     };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with $policy:expr, $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
+        $effects.push(::obzenflow_runtime::effects::declare_at_least_once_without_binding::<$effect>());
         $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with $policy:expr) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
+        $effects.push(::obzenflow_runtime::effects::declare_at_least_once_without_binding::<$effect>());
         $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
     };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty), $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
+        $effects.push(::obzenflow_runtime::effects::declare_at_least_once_without_binding::<$effect>());
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty)) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
+        $effects.push(::obzenflow_runtime::effects::declare_at_least_once_without_binding::<$effect>());
     };
 
     // ── transactional entries (recognized at entry start) ─────────────
@@ -1908,20 +1908,20 @@ macro_rules! __obzenflow_effect_entries {
         compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
     };
     (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident with $policy:expr, $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional::<$effect>(&$binding));
+        $effects.push(::obzenflow_runtime::effects::declare_transactional_effect::<$effect, _>(&$binding));
         $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
     (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident with $policy:expr) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional::<$effect>(&$binding));
+        $effects.push(::obzenflow_runtime::effects::declare_transactional_effect::<$effect, _>(&$binding));
         $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
     };
     (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident, $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional::<$effect>(&$binding));
+        $effects.push(::obzenflow_runtime::effects::declare_transactional_effect::<$effect, _>(&$binding));
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
     (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional::<$effect>(&$binding));
+        $effects.push(::obzenflow_runtime::effects::declare_transactional_effect::<$effect, _>(&$binding));
     };
     (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) $($rest:tt)*) => {
         compile_error!("transactional executors are typed bindings; write `transactional(Effect) via binding`");
@@ -1929,20 +1929,20 @@ macro_rules! __obzenflow_effect_entries {
 
     // ── named ordinary entries ─────────────────────────────────────────
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+], via $binding:ident with $policy:expr, $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named::<$($acc)+>(&$binding));
+        $effects.push(::obzenflow_runtime::effects::declare_named_effect::<$($acc)+, _>(&$binding));
         $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, $policy);
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+], via $binding:ident with $policy:expr) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named::<$($acc)+>(&$binding));
+        $effects.push(::obzenflow_runtime::effects::declare_named_effect::<$($acc)+, _>(&$binding));
         $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, $policy);
     };
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+], via $binding:ident, $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named::<$($acc)+>(&$binding));
+        $effects.push(::obzenflow_runtime::effects::declare_named_effect::<$($acc)+, _>(&$binding));
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+], via $binding:ident) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named::<$($acc)+>(&$binding));
+        $effects.push(::obzenflow_runtime::effects::declare_named_effect::<$($acc)+, _>(&$binding));
     };
 
     // ── bare `with` attachment terminator ──────────────────────────────
@@ -1953,18 +1953,18 @@ macro_rules! __obzenflow_effect_entries {
         compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
     };
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+], with $policy:expr, $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
+        $effects.push(::obzenflow_runtime::effects::declare_effect_without_binding::<$($acc)+>());
         $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, $policy);
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+], with $policy:expr) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
+        $effects.push(::obzenflow_runtime::effects::declare_effect_without_binding::<$($acc)+>());
         $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, $policy);
     };
 
     // ── comma terminator ────────────────────────────────────────────────
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+], , $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
+        $effects.push(::obzenflow_runtime::effects::declare_effect_without_binding::<$($acc)+>());
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
 
@@ -1985,6 +1985,66 @@ macro_rules! __obzenflow_effect_entries {
     }};
 }
 
+/// Early teaching diagnostic for the common identifier-only effect row. The
+/// general const guard still compares stable `EFFECT_TYPE`s for qualified and
+/// generic types; this gate prevents an exact duplicate from leaking the
+/// membership-proof implementation before that guard can speak.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effect_duplicate_gate {
+    (effects = [$($effect:ident),+ $(,)?], then = [$($then:tt)*]) => {
+        $crate::__obzenflow_effect_duplicate_gate!(
+            @next seen = [], remaining = [$($effect),+], then = [$($then)*]
+        )
+    };
+    (effects = [$($effects:tt)*], then = [$($then:tt)*]) => {
+        $($then)*
+    };
+    (@next seen = [$($seen:ident),*], remaining = [], then = [$($then:tt)*]) => {
+        $($then)*
+    };
+    (@next seen = [$($seen:ident),*], remaining = [$candidate:ident $(, $rest:ident)*], then = [$($then:tt)*]) => {
+        $crate::__obzenflow_effect_duplicate_gate!(
+            @search
+            all = [$($seen),*],
+            search = [$($seen),*],
+            candidate = $candidate,
+            remaining = [$($rest),*],
+            then = [$($then)*]
+        )
+    };
+    (@search all = [$($all:ident),*], search = [], candidate = $candidate:ident, remaining = [$($rest:ident),*], then = [$($then:tt)*]) => {
+        $crate::__obzenflow_effect_duplicate_gate!(
+            @next
+            seen = [$($all,)* $candidate],
+            remaining = [$($rest),*],
+            then = [$($then)*]
+        )
+    };
+    (@search all = [$($all:ident),*], search = [$head:ident $(, $tail:ident)*], candidate = $candidate:ident, remaining = [$($rest:ident),*], then = [$($then:tt)*]) => {{
+        macro_rules! __obzenflow_compare_effect_identifier {
+            ($head) => {
+                compile_error!(concat!(
+                    "effect declaration `",
+                    stringify!($candidate),
+                    "` appears more than once; each effect type may occur only once"
+                ))
+            };
+            ($_other:ident) => {
+                $crate::__obzenflow_effect_duplicate_gate!(
+                    @search
+                    all = [$($all),*],
+                    search = [$($tail),*],
+                    candidate = $candidate,
+                    remaining = [$($rest),*],
+                    then = [$($then)*]
+                )
+            };
+        }
+        __obzenflow_compare_effect_identifier!($candidate)
+    }};
+}
+
 /// Fail before handler/type-contract expansion when an ordinary effect row
 /// uses a delimiter reserved by FLOWIP-115s. Keeping this as a token scanner
 /// lets qualified and generic effect types pass through without reconstructing
@@ -1994,7 +2054,13 @@ macro_rules! __obzenflow_effect_entries {
 macro_rules! __obzenflow_effect_policy_syntax_gate {
     (effects = [$($effects:tt)*], then = [$($then:tt)*]) => {
         $crate::__obzenflow_effect_policy_syntax_gate!(
-            @scan then = [$($then)*], $($effects)*
+            @scan then = [
+                $crate::__obzenflow_effect_duplicate_gate!(
+                    effects = [$($effects)*],
+                    then = [$($then)*]
+                )
+            ],
+            $($effects)*
         )
     };
     (@scan then = [$($then:tt)*],) => {
@@ -3166,7 +3232,16 @@ macro_rules! __obzenflow_effectful_stateful_untyped {
 #[macro_export]
 macro_rules! __obzenflow_stateful_effect_policy_gate {
     (effects = [$($effects:tt)*], then = [$($then:tt)*]) => {
-        $crate::__obzenflow_stateful_effect_policy_gate!(@scan then = [$($then)*], $($effects)*)
+        $crate::__obzenflow_stateful_effect_policy_gate!(
+            @scan
+            then = [
+                $crate::__obzenflow_effect_duplicate_gate!(
+                    effects = [$($effects)*],
+                    then = [$($then)*]
+                )
+            ],
+            $($effects)*
+        )
     };
     (@scan then = [$($then:tt)*],) => { $($then)* };
     (@scan then = [$($then:tt)*], with $($rest:tt)*) => {

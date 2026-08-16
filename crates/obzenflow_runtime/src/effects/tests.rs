@@ -4839,6 +4839,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
         };
         use obzenflow_core::event::payloads::observability_payload::CircuitBreakerHealthClassification;
 
+        assert_eq!(identity.safety, EffectSafety::NonIdempotentAtLeastOnce);
         self.consults.fetch_add(1, Ordering::SeqCst);
         let execution = operation.execute().await;
         assert!(matches!(

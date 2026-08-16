@@ -86,9 +86,12 @@ pub use context::{EffectContext, EffectInvocationContext};
 #[cfg(test)]
 pub(crate) use context::EffectRuntimeMode;
 pub use declaration::{
-    transactional_effect_port_slot, DomainFacts, Effect, EffectDeclaration, EffectOutcomeKind,
-    EffectOutcomeSemantics, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,
-    PreparedEffectSuccess, RecordedReply, SinkRedeliverySafety, TransactionalEffectPort,
+    declare_at_least_once_without_binding, declare_effect_without_binding,
+    declare_named_at_least_once_effect, declare_named_effect, declare_transactional_effect,
+    transactional_effect_port_slot, DomainFacts, Effect, EffectBindingFor, EffectDeclaration,
+    EffectDeclarationWithoutBinding, EffectOutcomeKind, EffectOutcomeSemantics, EffectSafety,
+    IdempotencyKey, IdempotencyKeyPolicy, PreparedEffectSuccess, RecordedReply,
+    SinkRedeliverySafety, TransactionalEffectPort,
 };
 // FLOWIP-120z effect capability sets; the list traits are doc(hidden)
 // plumbing that must stay reachable for the public `DeclaredEffectSet` impl.

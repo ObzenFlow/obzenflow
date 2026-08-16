@@ -8,7 +8,10 @@ use super::binding::{
     validate_effect_type, validate_slot_name, BindingCoordinate, BoundEffectPortSlot,
     EffectPortSlotRequirement,
 };
-use super::{EffectBinding, EffectPortSlot, LogicalEffectBindingName, NamedEffect};
+use super::{
+    BindingAuthorityFault, EffectBinding, EffectDeclaration, EffectPortSlot,
+    LogicalEffectBindingName, NamedEffect,
+};
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
@@ -20,7 +23,6 @@ type ErasedResolver = Arc<dyn Fn() -> Result<ErasedPort, EffectPortResolutionErr
 const MAX_REPORTED_MISSING_SLOTS: usize = 16;
 
 /// Closed provider-side result for bounded local client construction.
-#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EffectPortResolutionError {
     #[error("credential unavailable")]
@@ -364,6 +366,38 @@ impl EffectPortRegistry {
             .collect();
         self.run_entries = Some(Arc::new(entries));
         self
+    }
+
+    /// Verify that a named declaration carries authority minted by a
+    /// registration installed in this registry. This is a metadata-only
+    /// materialisation preflight: it never invokes a deferred resolver.
+    #[doc(hidden)]
+    pub fn validate_required_registration(
+        &self,
+        declaration: &EffectDeclaration,
+    ) -> Result<(), BindingAuthorityFault> {
+        let Some((logical_name, registration, slots)) = declaration.binding().named_parts() else {
+            return Ok(());
+        };
+
+        if !self.installed_coordinates.contains(&registration) {
+            return Err(BindingAuthorityFault::registration_missing(
+                declaration.effect_type(),
+                logical_name.clone(),
+            ));
+        }
+
+        if slots
+            .iter()
+            .any(|slot| !self.recipes.contains_key(&slot.coordinate))
+        {
+            return Err(BindingAuthorityFault::registration_missing(
+                declaration.effect_type(),
+                logical_name.clone(),
+            ));
+        }
+
+        Ok(())
     }
 
     pub(super) fn scoped_view(

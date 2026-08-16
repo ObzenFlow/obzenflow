@@ -2,7 +2,7 @@
 
 #[path = "support/typed_effectful.rs"]
 mod support;
-use support::{First, FirstEffect, Input};
+#[allow(unused_imports)] use support::{First, FirstEffect, Input};
 
 fn main() {
     let _ = obzenflow_dsl::effectful_transform!(
