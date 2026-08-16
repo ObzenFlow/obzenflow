@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
 
 use obzenflow_adapters::ai::{ChatCompletion, CHAT_CLIENT};
 use obzenflow_core::ai::ChatTarget;

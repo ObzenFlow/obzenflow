@@ -1,11 +1,11 @@
 error[E0277]: binding `EffectBinding<OtherZeroSlotNamedEffect>` does not match declared effect `ZeroSlotNamedEffect`
-  --> tests/compile_fail/flowip_132a_wrong_binding_type.rs:9:13
+  --> tests/compile_fail/flowip_132a_wrong_binding_type.rs:11:13
    |
- 9 |       let _ = obzenflow_dsl::effectful_transform!(
+11 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
-10 | |         Input ->{ ZeroSlotNamedEffect via other } First => support::AllowsZeroSlotNamedEffect,
-11 | |         observers: []
-12 | |     );
+12 | |         Input ->{ ZeroSlotNamedEffect via other } First => support::AllowsZeroSlotNamedEffect,
+13 | |         observers: []
+14 | |     );
    | |_____^ the binding selected by `via` belongs to a different effect
    |
    = note: use the `EffectBinding<ZeroSlotNamedEffect>` produced for the effect named before `via`

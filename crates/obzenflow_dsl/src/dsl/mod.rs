@@ -105,14 +105,48 @@
 //! uses `In ->{ Effect } Out`; `effects: [...]` and empty rows are rejected.
 //!
 //! ```
+//! use async_trait::async_trait;
+//! use obzenflow_core::TypedPayload;
 //! use obzenflow_dsl::effectful_transform;
+//! use obzenflow_runtime::effects::{Effects, StageCompletion};
+//! use obzenflow_runtime::stages::common::{
+//!     handlers::EffectfulTransformHandler,
+//!     HandlerError,
+//! };
+//! use serde::{Deserialize, Serialize};
 //!
+//! #[derive(Clone, Debug, Serialize, Deserialize)]
 //! struct In;
+//! impl TypedPayload for In {
+//!     const EVENT_TYPE: &'static str = "docs.effectful-transform.input";
+//! }
+//!
+//! #[derive(Clone, Debug, Serialize, Deserialize)]
 //! struct Out;
-//! let handler = ();
+//! impl TypedPayload for Out {
+//!     const EVENT_TYPE: &'static str = "docs.effectful-transform.output";
+//! }
+//!
+//! #[derive(Clone, Debug)]
+//! struct Handler;
+//!
+//! #[async_trait]
+//! impl EffectfulTransformHandler for Handler {
+//!     type Input = In;
+//!     type Output = Out;
+//!     type AllowedEffects = obzenflow_runtime::effect_set![];
+//!
+//!     async fn process(
+//!         &self,
+//!         _input: Self::Input,
+//!         _fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+//!     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+//!         unimplemented!()
+//!     }
+//! }
 //!
 //! // Pure signature: no effect row.
-//! let _ = effectful_transform!(In -> Out => handler, observers: []);
+//! let _ = effectful_transform!(In -> Out => Handler, observers: []);
 //! ```
 //!
 //! ## FLOWIP-120c H7: per-effect policies attach inline in the effect row

@@ -1,45 +1,45 @@
 error[E0107]: method takes 2 generic arguments but 1 generic argument was supplied
- --> tests/compile_fail/flowip_132a_ambient_registry.rs:9:21
-  |
-9 |     let _ = context.port::<usize>("client");
-  |                     ^^^^   ----- supplied 1 generic argument
-  |                     |
-  |                     expected 2 generic arguments
-  |
+  --> tests/compile_fail/flowip_132a_ambient_registry.rs:11:21
+   |
+11 |     let _ = context.port::<usize>("client");
+   |                     ^^^^   ----- supplied 1 generic argument
+   |                     |
+   |                     expected 2 generic arguments
+   |
 note: method defined here, with 2 generic parameters: `T`, `M`
- --> crates/obzenflow_runtime/src/effects/context.rs
-  |
-  |     pub fn port<T, M>(&self, slot: EffectPortSlot<T, M>) -> Result<Arc<T>, EffectError>
-  |            ^^^^ -  -
+  --> crates/obzenflow_runtime/src/effects/context.rs
+   |
+   |     pub fn port<T, M>(&self, slot: EffectPortSlot<T, M>) -> Result<Arc<T>, EffectError>
+   |            ^^^^ -  -
 help: add missing generic argument
-  |
-9 |     let _ = context.port::<usize, M>("client");
-  |                                 +++
+   |
+11 |     let _ = context.port::<usize, M>("client");
+   |                                 +++
 
 error[E0308]: mismatched types
- --> tests/compile_fail/flowip_132a_ambient_registry.rs:9:35
-  |
-9 |     let _ = context.port::<usize>("client");
-  |                     ------------- ^^^^^^^^ expected `EffectPortSlot<usize, _>`, found `&str`
-  |                     |
-  |                     arguments to this method are incorrect
-  |
-  = note: expected struct `EffectPortSlot<usize, _>`
-          found reference `&'static str`
+  --> tests/compile_fail/flowip_132a_ambient_registry.rs:11:35
+   |
+11 |     let _ = context.port::<usize>("client");
+   |                     ------------- ^^^^^^^^ expected `EffectPortSlot<usize, _>`, found `&str`
+   |                     |
+   |                     arguments to this method are incorrect
+   |
+   = note: expected struct `EffectPortSlot<usize, _>`
+           found reference `&'static str`
 note: method defined here
- --> crates/obzenflow_runtime/src/effects/context.rs
-  |
-  |     pub fn port<T, M>(&self, slot: EffectPortSlot<T, M>) -> Result<Arc<T>, EffectError>
-  |            ^^^^
+  --> crates/obzenflow_runtime/src/effects/context.rs
+   |
+   |     pub fn port<T, M>(&self, slot: EffectPortSlot<T, M>) -> Result<Arc<T>, EffectError>
+   |            ^^^^
 
 error[E0599]: no method named `get` found for struct `EffectPortRegistry` in the current scope
-  --> tests/compile_fail/flowip_132a_ambient_registry.rs:14:22
+  --> tests/compile_fail/flowip_132a_ambient_registry.rs:16:22
    |
-14 |     let _ = registry.get::<usize>("client");
+16 |     let _ = registry.get::<usize>("client");
    |                      ^^^ method not found in `EffectPortRegistry`
 
 error[E0599]: no method named `with_deferred` found for struct `EffectPortRegistry` in the current scope
-  --> tests/compile_fail/flowip_132a_ambient_registry.rs:15:22
+  --> tests/compile_fail/flowip_132a_ambient_registry.rs:17:22
    |
-15 |     let _ = registry.with_deferred::<usize>(
+17 |     let _ = registry.with_deferred::<usize>(
    |             ---------^^^^^^^^^^^^^ method not found in `EffectPortRegistry`

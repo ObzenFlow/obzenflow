@@ -8,6 +8,7 @@ structural_adapter|crates/obzenflow_runtime/src/stages/transform/strategies/ai_c
 structural_adapter|crates/obzenflow_dsl/src/dsl/typing.rs|PlaceholderTransform
 test_harness|crates/obzenflow_runtime/src/stages/transform/supervisor/tests.rs|ExpandHandler
 test_harness|crates/obzenflow_runtime/src/stages/transform/supervisor/tests.rs|FilterHandler
+test_harness|crates/obzenflow_runtime/src/stages/transform/supervisor/tests.rs|BindingFatalHandler
 test_harness|crates/obzenflow_runtime/src/stages/transform/supervisor/tests.rs|CountingFilterHandler
 test_harness|crates/obzenflow_dsl/src/dsl/composition.rs|Noop
 test_harness|crates/obzenflow_dsl/src/dsl/tests/typed_decoration_matrix_test.rs|Tr

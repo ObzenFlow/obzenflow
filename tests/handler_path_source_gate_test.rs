@@ -24,6 +24,9 @@ const RETIRED_HELPER_COMPILE_FAIL_FIXTURE: &str =
     "tests/compile_fail/synchronous_transform_witness/raw_helper_removed.rs";
 const RETIRED_STATEFUL_HELPER_COMPILE_FAIL_FIXTURE: &str =
     "tests/compile_fail/plain_stateful_witness/raw_helper_removed.rs";
+// Negative fixture licensed to cross the generated lowering seam solely to
+// prove that a raw TransformHandler cannot occupy the typed chunker slot.
+const RAW_CHUNKER_COMPILE_FAIL_FIXTURE: &str = "tests/compile_fail/ai_map_reduce_raw_chunker.rs";
 
 fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory)
@@ -116,6 +119,7 @@ fn first_party_declarations_do_not_call_exported_lowering_helpers_directly() {
             LOWERING_CONTRACT_TESTS,
             RETIRED_HELPER_COMPILE_FAIL_FIXTURE,
             RETIRED_STATEFUL_HELPER_COMPILE_FAIL_FIXTURE,
+            RAW_CHUNKER_COMPILE_FAIL_FIXTURE,
         ])
         .collect();
     let mut violations = Vec::new();

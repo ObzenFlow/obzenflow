@@ -1,11 +1,11 @@
 error: transactional executors are typed bindings; write `transactional(Effect) via binding`
-  --> tests/compile_fail/flowip_132a_transactional_executor_string.rs:8:13
+  --> tests/compile_fail/flowip_132a_transactional_executor_string.rs:10:13
    |
- 8 |       let _ = obzenflow_dsl::effectful_transform!(
+10 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
- 9 | |         Input ->{ transactional(FirstEffect, "ledger") } First => support::AllowsFirstEffect,
-10 | |         observers: []
-11 | |     );
+11 | |         Input ->{ transactional(FirstEffect, "ledger") } First => support::AllowsFirstEffect,
+12 | |         observers: []
+13 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_effect_entries` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)

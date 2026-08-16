@@ -1,13 +1,13 @@
 error[E0277]: the trait bound `AmbientRegistryMode: effects::binding::private::Sealed` is not satisfied
- --> tests/compile_fail/flowip_132a_sealed_binding_mode.rs:7:42
+ --> tests/compile_fail/flowip_132a_sealed_binding_mode.rs:9:42
   |
-7 | impl<E: Effect> EffectBindingMode<E> for AmbientRegistryMode {
+9 | impl<E: Effect> EffectBindingMode<E> for AmbientRegistryMode {
   |                                          ^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
   |
 help: the trait `effects::binding::private::Sealed` is not implemented for `AmbientRegistryMode`
- --> tests/compile_fail/flowip_132a_sealed_binding_mode.rs:5:1
+ --> tests/compile_fail/flowip_132a_sealed_binding_mode.rs:7:1
   |
-5 | struct AmbientRegistryMode;
+7 | struct AmbientRegistryMode;
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
 help: the following other types implement trait `effects::binding::private::Sealed`
  --> crates/obzenflow_runtime/src/effects/binding.rs

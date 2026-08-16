@@ -1,11 +1,11 @@
 error: effect declaration `FirstEffect` appears more than once; each effect type may occur only once
-  --> tests/compile_fail/flowip_132a_duplicate_effect.rs:8:13
+  --> tests/compile_fail/flowip_132a_duplicate_effect.rs:10:13
    |
- 8 |       let _ = obzenflow_dsl::effectful_transform!(
+10 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
- 9 | |         Input ->{ FirstEffect, FirstEffect } First => support::AllowsFirstEffect,
-10 | |         observers: []
-11 | |     );
+11 | |         Input ->{ FirstEffect, FirstEffect } First => support::AllowsFirstEffect,
+12 | |         observers: []
+13 | |     );
    | |_____^
    |
    = note: this error originates in the macro `__obzenflow_compare_effect_identifier` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)

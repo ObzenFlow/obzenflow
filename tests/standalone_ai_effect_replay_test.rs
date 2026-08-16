@@ -168,6 +168,8 @@ struct AiAuthority {
     effect_ports: EffectPortRegistry,
 }
 
+// Keep fixture materialisation on FlowDefinition's concrete build-error API.
+#[allow(clippy::result_large_err)]
 fn base_bindings(
     chat_endpoint: Option<Url>,
 ) -> Result<
@@ -188,6 +190,8 @@ fn base_bindings(
     Ok((chat, embedding))
 }
 
+// Keep fixture materialisation on FlowDefinition's concrete build-error API.
+#[allow(clippy::result_large_err)]
 fn live_authority(
     chat_endpoint: Option<Url>,
     counters: Option<AuthorityCounters>,

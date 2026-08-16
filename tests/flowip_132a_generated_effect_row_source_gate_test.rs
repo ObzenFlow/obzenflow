@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
 
 const STAGE_MACROS: &str = include_str!("../crates/obzenflow_dsl/src/dsl/stage_macros.rs");
 const INFERENCE: &str = include_str!("../crates/obzenflow_dsl/src/dsl/inference.rs");

@@ -110,7 +110,7 @@ error: inference!: paid non-idempotent ChatCompletion requires `at_least_once(Ch
 69 | |     );
    | |_____^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_ai_effect_row_syntax_then` which comes from the expansion of the macro `obzenflow_dsl::inference` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_effect_entries` which comes from the expansion of the macro `obzenflow_dsl::inference` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: ai_map_reduce!: paid non-idempotent ChatCompletion requires `at_least_once(ChatCompletion)` acknowledgement
   --> tests/compile_fail/handler_path_diagnostic_precedence.rs:71:13
@@ -125,4 +125,4 @@ error: ai_map_reduce!: paid non-idempotent ChatCompletion requires `at_least_onc
 81 | |     );
    | |_____^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_ai_effect_row_syntax_then` which comes from the expansion of the macro `obzenflow_dsl::ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_effect_entries` which comes from the expansion of the macro `obzenflow_dsl::ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)

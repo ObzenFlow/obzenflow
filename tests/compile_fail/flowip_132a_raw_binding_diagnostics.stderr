@@ -1,17 +1,17 @@
 error[E0616]: field `kind` of struct `BindingAuthorityFault` is private
- --> tests/compile_fail/flowip_132a_raw_binding_diagnostics.rs:9:19
-  |
-9 |     let _ = fault.kind;
-  |                   ^^^^ private field
+  --> tests/compile_fail/flowip_132a_raw_binding_diagnostics.rs:11:19
+   |
+11 |     let _ = fault.kind;
+   |                   ^^^^ private field
 
 error[E0308]: mismatched types
-  --> tests/compile_fail/flowip_132a_raw_binding_diagnostics.rs:13:65
+  --> tests/compile_fail/flowip_132a_raw_binding_diagnostics.rs:15:65
    |
-13 |     let _ = EffectError::EffectTargetInvariantViolation { slot: "client" };
+15 |     let _ = EffectError::EffectTargetInvariantViolation { slot: "client" };
    |                                                                 ^^^^^^^^ expected `EffectPortSlotLabel`, found `&str`
 
 error[E0616]: field `effect_type` of struct `EffectDeclaration` is private
-  --> tests/compile_fail/flowip_132a_raw_binding_diagnostics.rs:15:17
+  --> tests/compile_fail/flowip_132a_raw_binding_diagnostics.rs:17:17
    |
-15 |     declaration.effect_type = "https://credential-canary.example";
+17 |     declaration.effect_type = "https://credential-canary.example";
    |                 ^^^^^^^^^^^ private field

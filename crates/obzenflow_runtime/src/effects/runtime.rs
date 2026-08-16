@@ -48,6 +48,16 @@ struct RecoveryAbandonment {
     control_events: Vec<ChainEvent>,
 }
 
+/// Authority and durable identity prepared after history selection and live
+/// admission, then consumed by exactly one safety-specific execution path.
+struct PreparedLiveEffect {
+    identity: EffectIdentity,
+    cursor: EffectCursor,
+    descriptor_hash: EffectDescriptorHash,
+    descriptor: EffectDescriptor,
+    binding_context: EffectContext,
+}
+
 fn split_invariant_control_events(
     cursor: &EffectCursor,
     attempt: EffectAttemptOrdinal,
@@ -670,11 +680,17 @@ impl EffectsCore {
         let (metadata_context, binding_context) = self.live_effect_contexts(&declaration)?;
         effect.validate_port_metadata(&metadata_context)?;
 
-        let identity = EffectIdentity {
-            effect_type: E::EFFECT_TYPE,
-            safety,
-            cursor: cursor.clone(),
-            idempotency_key: effect.idempotency_key(),
+        let prepared = PreparedLiveEffect {
+            identity: EffectIdentity {
+                effect_type: E::EFFECT_TYPE,
+                safety,
+                cursor: cursor.clone(),
+                idempotency_key: effect.idempotency_key(),
+            },
+            cursor,
+            descriptor_hash,
+            descriptor,
+            binding_context,
         };
 
         if matches!(safety, EffectSafety::NonIdempotentAtLeastOnce) {
@@ -683,31 +699,22 @@ impl EffectsCore {
             // storing this large future inline also bloats ordinary
             // transactional/repeatable handler futures enough to exhaust the
             // stage task stack before their own branch runs.
-            return Box::pin(self.perform_affine(
-                effect,
-                identity,
-                cursor,
-                descriptor_hash,
-                descriptor,
-                prior_attempts,
-                binding_context,
-            ))
-            .await;
+            return Box::pin(self.perform_affine(effect, prepared, prior_attempts)).await;
         }
 
         if matches!(safety, EffectSafety::Transactional) {
             // The transactional boundary owns another sizeable single-use
             // future. Heap-pin it for the same frame-containment reason.
-            return Box::pin(self.perform_transactional(
-                effect,
-                identity,
-                cursor,
-                descriptor_hash,
-                descriptor,
-                binding_context,
-            ))
-            .await;
+            return Box::pin(self.perform_transactional(effect, prepared)).await;
         }
+
+        let PreparedLiveEffect {
+            identity,
+            cursor,
+            descriptor_hash,
+            descriptor,
+            binding_context,
+        } = prepared;
 
         let Some(boundary) = self.ctx.effect_boundary.clone() else {
             // Unguarded path: execute directly and record the outcome.
@@ -866,16 +873,19 @@ impl EffectsCore {
     async fn perform_affine<E>(
         &mut self,
         effect: E,
-        identity: EffectIdentity,
-        cursor: EffectCursor,
-        descriptor_hash: EffectDescriptorHash,
-        descriptor: EffectDescriptor,
+        prepared: PreparedLiveEffect,
         prior_attempts: Vec<EffectAttemptStarted>,
-        binding_context: EffectContext,
     ) -> Result<E::Outcome, EffectError>
     where
         E: Effect,
     {
+        let PreparedLiveEffect {
+            identity,
+            cursor,
+            descriptor_hash,
+            descriptor,
+            binding_context,
+        } = prepared;
         let highest_prior_attempt = u32::try_from(prior_attempts.len()).map_err(|_| {
             EffectError::EffectProvenanceMismatch(
                 "effect attempt history exceeds u32 range".to_string(),
@@ -1540,15 +1550,18 @@ impl EffectsCore {
     async fn perform_transactional<E>(
         &mut self,
         effect: E,
-        identity: EffectIdentity,
-        cursor: EffectCursor,
-        descriptor_hash: EffectDescriptorHash,
-        descriptor: EffectDescriptor,
-        mut effect_ctx: EffectContext,
+        prepared: PreparedLiveEffect,
     ) -> Result<E::Outcome, EffectError>
     where
         E: Effect,
     {
+        let PreparedLiveEffect {
+            identity,
+            cursor,
+            descriptor_hash,
+            descriptor,
+            binding_context: mut effect_ctx,
+        } = prepared;
         let executor_slot = transactional_effect_port_slot::<E>();
         let executor = executor_slot.label();
         let port = effect_ctx.port(executor_slot)?;

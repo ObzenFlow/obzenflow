@@ -1,11 +1,11 @@
 error[E0277]: binding `EffectBinding<ZeroSlotNamedEffect>` does not match declared effect `FirstEffect`
-  --> tests/compile_fail/flowip_132a_portless_with_binding.rs:9:13
+  --> tests/compile_fail/flowip_132a_portless_with_binding.rs:11:13
    |
- 9 |       let _ = obzenflow_dsl::effectful_transform!(
+11 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
-10 | |         Input ->{ FirstEffect via binding } First => support::AllowsFirstEffect,
-11 | |         observers: []
-12 | |     );
+12 | |         Input ->{ FirstEffect via binding } First => support::AllowsFirstEffect,
+13 | |         observers: []
+14 | |     );
    | |_____^ the binding selected by `via` belongs to a different effect
    |
    = note: use the `EffectBinding<FirstEffect>` produced for the effect named before `via`

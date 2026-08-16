@@ -364,6 +364,8 @@ fn resolved_chat_port(port: Arc<dyn ChatClient>) -> ResolvedEffectPort<dyn ChatC
     ResolvedEffectPort::new(port, metadata)
 }
 
+// Keep fixture materialisation on FlowDefinition's concrete build-error API.
+#[allow(clippy::result_large_err)]
 fn materialise_chat_authority(
     binding_target: ChatTarget,
     binding_estimator: ResolvedTokenEstimator,
