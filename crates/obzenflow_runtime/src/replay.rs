@@ -33,6 +33,13 @@ pub enum ReplayError {
         supported: &'static str,
     },
 
+    #[error("Replay archive capability '{capability}' has unsupported version {found:?} (supported: {supported}); re-record the run with this build of ObzenFlow")]
+    UnsupportedArchiveCapability {
+        capability: &'static str,
+        found: Option<u64>,
+        supported: u32,
+    },
+
     #[error("Replay archive version {archive_version} is incompatible with running framework version {current_version} (major.minor must match)")]
     VersionMismatch {
         archive_version: String,

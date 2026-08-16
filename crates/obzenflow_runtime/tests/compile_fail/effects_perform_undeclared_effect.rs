@@ -21,6 +21,7 @@ impl Effect for UndeclaredEffect {
     const EFFECT_TYPE: &'static str = "compile_fail.effects.perform.undeclared";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = crate::effects::Portless;
     type Outcome = Outcome;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 

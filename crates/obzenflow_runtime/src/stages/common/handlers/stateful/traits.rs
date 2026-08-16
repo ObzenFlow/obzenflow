@@ -334,7 +334,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// stage cannot acknowledge the input, process later input, or complete drain
 /// because its state no longer represents a fold of its durable history.
 ///
-/// The stage arrow and `effects:` clause are the canonical operator-facing
+/// The stage arrow and inline effect row are the canonical operator-facing
 /// contract. `Output` and `AllowedEffects` mirror those declarations so Rust
 /// can check `decide` before the handler is erased. They carry no runtime
 /// metadata and are never journalled.
@@ -396,7 +396,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// }
 /// ```
 ///
-/// Middleware and policy values stay solely in the stage's `effects:` clause;
+/// Middleware and policy values stay solely in the stage's effect row;
 /// `AllowedEffects` mirrors effect types only.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not satisfy `EffectfulStatefulHandler` for this stage",
@@ -404,7 +404,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
     note = "implement `EffectfulStatefulHandler` with `State`, `Input`, `Output`, \
             `AllowedEffects`, `initial_state`, `decide`, and `apply`; `Input` must match the \
             arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and \
-            `effects:` clause (FLOWIP-120z B9)"
+            effect row (FLOWIP-120z B9)"
 )]
 #[async_trait]
 pub trait EffectfulStatefulHandler: Send + Sync {
@@ -483,6 +483,21 @@ where
             })?;
         }
         *state = draft;
+        if let Some(fatal) = fx.binding_fault_fatal() {
+            return Err(HandlerError::Fatal(fatal));
+        }
+        if decide_result.as_ref().is_err_and(HandlerError::is_fatal) {
+            return decide_result.map(|_| ());
+        }
+        if let Err(divergence) = fx.preflight_settlement_has_no_unused_history().await {
+            return Err(HandlerError::Fatal(
+                crate::stages::common::handler_error::StageFatal::new(
+                    obzenflow_core::event::StageFatalCode::Replay,
+                    obzenflow_core::event::StageFatalReason::ReplayDivergence,
+                    divergence.to_string(),
+                ),
+            ));
+        }
         decide_result.map(|_| ())
     }
 

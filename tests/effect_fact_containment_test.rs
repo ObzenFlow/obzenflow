@@ -64,6 +64,7 @@ impl Effect for ValueEffect {
     const EFFECT_TYPE: &'static str = "containment.value";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = ContainmentEffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -277,7 +278,6 @@ fn empty_effects_flow(journal_base: PathBuf) -> FlowDefinition {
                 inputs = source!(ContainmentInput => inputs_handler);
                 effectful = effectful_transform!(
                     ContainmentInput -> { ContainmentOutput } => effectful_handler,
-                    effects: [],
                     observers: []);
                 drops = sink!(ContainmentOutput => drops_handler);
             },
@@ -386,6 +386,7 @@ impl Effect for CollidingEffect {
     const EFFECT_TYPE: &'static str = "containment.colliding";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = CollidingOutcome;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;

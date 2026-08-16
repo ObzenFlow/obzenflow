@@ -111,6 +111,7 @@ impl Effect for CountingEffect {
     const EFFECT_TYPE: &'static str = "envelope.counting";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = EnvelopeEffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -217,8 +218,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
                 source_a = source!(EnvelopeInput => source_a);
                 source_b = source!(EnvelopeInput => source_b);
                 effectful_merge = effectful_transform!(
-                    EnvelopeInput -> { EnvelopeOutput, EnvelopeEffectValue } => effectful_merge,
-                    effects: [CountingEffect],
+                    EnvelopeInput ->{ CountingEffect } { EnvelopeOutput, EnvelopeEffectValue } => effectful_merge,
                     observers: []
                 );
                 collector = sink!(EnvelopeOutput => collector);

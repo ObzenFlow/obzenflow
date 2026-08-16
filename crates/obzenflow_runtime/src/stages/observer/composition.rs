@@ -833,7 +833,7 @@ impl StageObserverBundle {
                         if !target
                             .effects()
                             .iter()
-                            .any(|effect| effect.effect_type == subject.effect_type)
+                            .any(|effect| effect.effect_type() == subject.effect_type)
                         {
                             return Err(ObserverBindingError::UndeclaredEffect {
                                 stage: stage.to_string(),
@@ -843,7 +843,7 @@ impl StageObserverBundle {
                                 declared_effects: target
                                     .effects()
                                     .iter()
-                                    .map(|effect| effect.effect_type)
+                                    .map(EffectDeclaration::effect_type)
                                     .collect(),
                             });
                         }
@@ -926,7 +926,9 @@ impl fmt::Debug for StageObserverBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effects::{EffectOutcomeKind, EffectSafety, IdempotencyKeyPolicy};
+    use crate::effects::{
+        Effect, EffectContext, EffectError, EffectSafety, Portless, RecordedReply,
+    };
     use crate::messaging::upstream_subscription::StageInputPosition;
     use crate::stages::observer::EffectObserverOutcome;
     use obzenflow_core::event::context::{FlowContext, StageType};
@@ -1088,15 +1090,61 @@ mod tests {
     impl SinkDeliveryObserver for NoopObserver {}
     impl StageLifecycleObserver for NoopObserver {}
 
+    #[derive(Clone, Debug)]
+    struct DeclaredEffectA;
+
+    #[async_trait::async_trait]
+    impl Effect for DeclaredEffectA {
+        const EFFECT_TYPE: &'static str = "effect.a";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Idempotent;
+        type BindingMode = Portless;
+        type Outcome = ();
+        type OutcomeSemantics = RecordedReply;
+
+        fn label(&self) -> &str {
+            "a"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct DeclaredEffectB;
+
+    #[async_trait::async_trait]
+    impl Effect for DeclaredEffectB {
+        const EFFECT_TYPE: &'static str = "effect.b";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Idempotent;
+        type BindingMode = Portless;
+        type Outcome = ();
+        type OutcomeSemantics = RecordedReply;
+
+        fn label(&self) -> &str {
+            "b"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+            Ok(())
+        }
+    }
+
     fn declared_effect(effect_type: &'static str) -> EffectDeclaration {
-        EffectDeclaration {
-            effect_type,
-            safety: EffectSafety::Idempotent,
-            idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
-            required_ports: Vec::new(),
-            transactional_executor: None,
-            outcome_kind: EffectOutcomeKind::RecordedReply,
-            public_outcome_fact_types: Vec::new(),
+        match effect_type {
+            DeclaredEffectA::EFFECT_TYPE => EffectDeclaration::of::<DeclaredEffectA>(),
+            DeclaredEffectB::EFFECT_TYPE => EffectDeclaration::of::<DeclaredEffectB>(),
+            _ => panic!("unknown observer fixture effect"),
         }
     }
 

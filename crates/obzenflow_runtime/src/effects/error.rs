@@ -2,10 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::binding::EffectPortSlotLabel;
 use super::*;
 
 #[derive(Debug, Clone, Error)]
 pub enum EffectError {
+    #[error("{fault}")]
+    BindingAuthority { fault: BindingAuthorityFault },
+
     #[error("effect serialization failed: {0}")]
     Serialization(String),
 
@@ -88,32 +92,8 @@ pub enum EffectError {
     )]
     CompletedEmptyWithOutput { stage_key: String, committed: usize },
 
-    #[error("effect port '{name}' for type '{type_name}' is not registered")]
-    MissingEffectPort {
-        type_name: &'static str,
-        name: String,
-    },
-
-    #[error("effect port '{name}' for type '{type_name}' failed to resolve: {message}")]
-    EffectPortResolutionFailed {
-        type_name: &'static str,
-        name: String,
-        message: String,
-    },
-
-    #[error("effect port '{port}' binding mismatch: expected {expected}, observed {observed}")]
-    EffectPortBindingMismatch {
-        port: String,
-        expected: String,
-        observed: String,
-    },
-
-    #[error("effect port '{port}' target mismatch: expected {expected}, observed {observed}")]
-    EffectPortBindingInvariantViolation {
-        port: String,
-        expected: String,
-        observed: String,
-    },
+    #[error("effect target invariant failed for slot '{slot}'")]
+    EffectTargetInvariantViolation { slot: EffectPortSlotLabel },
 
     #[error("effect dependency '{failure_source}' failed ({code}): {message}")]
     DependencyFailed {
@@ -179,13 +159,24 @@ pub enum EffectError {
 }
 
 impl EffectError {
+    /// Construct a target-invariant failure from a validated typed slot.
+    pub fn target_invariant_violation<P>(slot: EffectPortSlot<P>) -> Self
+    where
+        P: ?Sized + Send + Sync + 'static,
+    {
+        Self::EffectTargetInvariantViolation {
+            slot: slot.diagnostic_label(),
+        }
+    }
+
     fn recovery_eligible_by_default(&self) -> bool {
         match self {
+            EffectError::BindingAuthority { .. } => false,
             EffectError::RecordedFailure { retry, .. }
             | EffectError::BoundaryRejected { retry, .. }
             | EffectError::DependencyFailed { retry, .. } => retry.is_retryable(),
             EffectError::RecoveryAbandoned { .. }
-            | EffectError::EffectPortBindingInvariantViolation { .. } => false,
+            | EffectError::EffectTargetInvariantViolation { .. } => false,
             EffectError::EffectProvenanceMismatch(_) => false,
             EffectError::IncompleteOutcomeGroup { .. } => false,
             EffectError::MissingRecordedEffect { .. }
@@ -198,9 +189,6 @@ impl EffectError {
             | EffectError::EmitUnsupported { .. }
             | EffectError::CompletedWithoutOutput { .. }
             | EffectError::CompletedEmptyWithOutput { .. }
-            | EffectError::MissingEffectPort { .. }
-            | EffectError::EffectPortResolutionFailed { .. }
-            | EffectError::EffectPortBindingMismatch { .. }
             | EffectError::TransactionalCommitMissing { .. } => false,
             EffectError::Timeout(_)
             | EffectError::Transport(_)
@@ -221,6 +209,7 @@ impl EffectError {
 
     pub(super) fn error_type(&self) -> EffectFailureKind {
         match self {
+            EffectError::BindingAuthority { .. } => "binding_authority_fault",
             EffectError::Serialization(_) => "serialization",
             EffectError::Journal(_) => "journal",
             EffectError::MissingRecordedEffect { .. } => "missing_recorded_effect",
@@ -237,12 +226,7 @@ impl EffectError {
             EffectError::EmitUnsupported { .. } => "emit_unsupported",
             EffectError::CompletedWithoutOutput { .. } => "completed_without_output",
             EffectError::CompletedEmptyWithOutput { .. } => "completed_empty_with_output",
-            EffectError::MissingEffectPort { .. } => "missing_effect_port",
-            EffectError::EffectPortResolutionFailed { .. } => "effect_port_resolution_failed",
-            EffectError::EffectPortBindingMismatch { .. } => "effect_port_binding_mismatch",
-            EffectError::EffectPortBindingInvariantViolation { .. } => {
-                "effect_port_binding_invariant_violation"
-            }
+            EffectError::EffectTargetInvariantViolation { .. } => "target_invariant_violation",
             EffectError::DependencyFailed { code, .. } => return code.as_str().into(),
             EffectError::RecoveryAbandoned { .. } => "recovery_abandoned",
             EffectError::TransactionalCommitMissing { .. } => "transactional_commit_missing",
@@ -286,7 +270,8 @@ impl EffectError {
             EffectError::BoundaryRejected { message, .. } => std::borrow::Cow::Borrowed(message),
             EffectError::DependencyFailed { message, .. }
             | EffectError::RecoveryAbandoned { message, .. } => std::borrow::Cow::Borrowed(message),
-            EffectError::MissingRecordedEffect { .. }
+            EffectError::BindingAuthority { .. }
+            | EffectError::MissingRecordedEffect { .. }
             | EffectError::EffectInDoubt { .. }
             | EffectError::DuplicateRecordedEffect { .. }
             | EffectError::DescriptorMismatch { .. }
@@ -297,10 +282,7 @@ impl EffectError {
             | EffectError::EmitUnsupported { .. }
             | EffectError::CompletedWithoutOutput { .. }
             | EffectError::CompletedEmptyWithOutput { .. }
-            | EffectError::MissingEffectPort { .. }
-            | EffectError::EffectPortResolutionFailed { .. }
-            | EffectError::EffectPortBindingMismatch { .. }
-            | EffectError::EffectPortBindingInvariantViolation { .. }
+            | EffectError::EffectTargetInvariantViolation { .. }
             | EffectError::TransactionalCommitMissing { .. } => {
                 std::borrow::Cow::Owned(self.to_string())
             }
@@ -348,15 +330,13 @@ impl EffectError {
 
     pub fn failure_detail(&self) -> Option<EffectFailureDetail> {
         match self {
-            Self::EffectPortBindingInvariantViolation {
-                port,
-                expected,
-                observed,
-            } => Some(EffectFailureDetail::PortBindingInvariantViolation {
-                port: port.clone(),
-                expected: expected.clone(),
-                observed: observed.clone(),
-            }),
+            Self::EffectTargetInvariantViolation { slot } => {
+                Some(EffectFailureDetail::PortBindingInvariantViolation {
+                    port: slot.as_str().to_string(),
+                    expected: "<not disclosed>".to_string(),
+                    observed: "<not disclosed>".to_string(),
+                })
+            }
             Self::RecordedFailure { detail, .. } => detail.as_deref().cloned(),
             _ => None,
         }

@@ -78,7 +78,7 @@
 //! - `infinite_source!(Out => handler)` for an infinite source.
 //! - `async_infinite_source!(Out => handler)` for an async infinite source.
 //! - `transform!(In -> Out => handler)` for a synchronous transform.
-//! - `effectful_transform!(In -> Out => handler, effects: [...], observers: [])`
+//! - `effectful_transform!(In ->{ ... } Out => handler, observers: [])`
 //!   for a transform that performs declared external work.
 //! - `sink!(In => handler)` for a sink.
 //! - `stateful!(In -> Out => handler)` for stateful aggregation.

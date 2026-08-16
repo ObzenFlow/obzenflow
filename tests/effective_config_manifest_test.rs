@@ -118,6 +118,7 @@ impl Effect for AuthorizePayment {
     const EFFECT_TYPE: &'static str = "payments.authorize";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = PaymentEffectFact;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -145,6 +146,7 @@ impl Effect for RefundPayment {
     const EFFECT_TYPE: &'static str = "payments.refund";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = PaymentEffectFact;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -280,11 +282,10 @@ fn build_two_effect_flow_future(
             stages: {
                 orders = source!(Item => one_shot_source);
                 authorize_payment = effectful_transform!(
-                    Item -> PaymentEffectFact => payment_effects,
-                    effects: [
+                    Item ->{
                         AuthorizePayment with authorize_resilience,
                         RefundPayment with refund_resilience
-                    ],
+                    } PaymentEffectFact => payment_effects,
                     observers: []
                 );
                 output = sink!(PaymentEffectFact => null_sink);

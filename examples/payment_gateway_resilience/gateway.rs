@@ -68,6 +68,7 @@ impl Effect for AuthorizePayment {
     // A charge is never idempotent on its own, so the effect must carry a key
     // the gateway can dedupe on. The runtime enforces this before any I/O.
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = AuthorizePaymentOutcome;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;

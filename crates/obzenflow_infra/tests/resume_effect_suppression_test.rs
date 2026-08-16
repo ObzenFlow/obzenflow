@@ -113,6 +113,7 @@ impl Effect for CountingEffect {
     const EFFECT_TYPE: &'static str = "resume_effects.counting";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = EffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -219,8 +220,7 @@ fn build_flow(
             stages: {
                 src = infinite_source!(Reading => reader);
                 enrich = effectful_transform!(
-                    Reading -> { Enriched, EffectValue } => enrich_transform,
-                    effects: [CountingEffect],
+                    Reading ->{ CountingEffect } { Enriched, EffectValue } => enrich_transform,
                     observers: []
                 );
                 snk = sink!(Enriched => counting_sink);

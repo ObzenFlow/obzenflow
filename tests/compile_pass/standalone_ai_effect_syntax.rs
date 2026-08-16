@@ -61,8 +61,9 @@ fn main() {
 
     let (chat, _chat_registration) = ChatEffectBinding::ollama("model", None)
         .unwrap()
-        .into_parts();
-    let chat_handler = ChatTransformBuilder::from_binding(chat)
+        .into_parts()
+        .unwrap();
+    let chat_handler = ChatTransformBuilder::from_binding(chat.clone())
         .logic_version("chat-v1")
         .system("Be concise")
         .temperature(0.2)
@@ -82,16 +83,16 @@ fn main() {
         )
         .unwrap();
     let _chat = effectful_transform!(
-        Input -> ChatOutput => chat_handler,
-        effects: [at_least_once(ChatCompletion) with ai_resilience()],
+        Input ->{ at_least_once(ChatCompletion) via chat with ai_resilience() } ChatOutput => chat_handler,
         observers: [],
     );
 
     let (embedding, _embedding_registration) =
         EmbeddingEffectBinding::ollama("embedding-model", None)
             .unwrap()
-            .into_parts();
-    let embedding_handler = EmbeddingTransformBuilder::from_binding(embedding)
+            .into_parts()
+            .unwrap();
+    let embedding_handler = EmbeddingTransformBuilder::from_binding(embedding.clone())
         .logic_version("embedding-v1")
         .dimensions(EmbeddingDimensions::try_from(3).unwrap())
         .build_typed::<ChatOutput, EmbeddingOutput>(
@@ -100,8 +101,7 @@ fn main() {
         )
         .unwrap();
     let _embedding = effectful_transform!(
-        ChatOutput -> EmbeddingOutput => embedding_handler,
-        effects: [at_least_once(EmbeddingGeneration) with ai_resilience()],
+        ChatOutput ->{ at_least_once(EmbeddingGeneration) via embedding with ai_resilience() } EmbeddingOutput => embedding_handler,
         observers: [],
     );
 }

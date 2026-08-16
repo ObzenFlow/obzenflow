@@ -43,12 +43,10 @@ pub use tiktoken::TiktokenEstimator;
 pub use model_config::ModelConfig;
 
 #[cfg(feature = "ai-rig")]
-pub use chat_effect_binding::{ChatEffectBinding, ChatEffectBindingError, ChatEffectRegistration};
+pub use chat_effect_binding::{ChatEffectBinding, ChatEffectBindingError};
 
 #[cfg(feature = "ai-rig")]
-pub use embedding_effect_binding::{
-    EmbeddingEffectBinding, EmbeddingEffectBindingError, EmbeddingEffectRegistration,
-};
+pub use embedding_effect_binding::{EmbeddingEffectBinding, EmbeddingEffectBindingError};
 
 #[cfg(feature = "ai-rig")]
 pub use native_embedding_client::NativeEmbeddingClient;

@@ -603,8 +603,7 @@ mod tests {
 
         let effectful_transform = crate::effectful_transform!(
             name: "effectful_transform",
-            OutputEvent -> OutputEvent, outputs: [OutputEvent, AlternateEvent] => EffectfulMultiOutputTransform,
-            effects: [],
+            OutputEvent -> { OutputEvent, AlternateEvent } => EffectfulMultiOutputTransform,
             observers: []
         );
         let effectful_transform_meta = effectful_transform.typing_metadata().unwrap();
@@ -620,7 +619,6 @@ mod tests {
         let effectful_transform = crate::effectful_transform!(
             name: "effectful_multi_output_transform",
             OutputEvent -> { OutputEvent, AlternateEvent } => EffectfulMultiOutputTransform,
-            effects: [],
             observers: []
         );
         let metadata = effectful_transform.typing_metadata().unwrap();
@@ -710,7 +708,6 @@ mod tests {
         let effectful_stateful = crate::effectful_stateful!(
             name: "multi_output_effectful_stateful",
             InputEvent -> { OutputEvent, AlternateEvent } => EffectfulProductStateful,
-            effects: [],
             observers: []
         );
         let effectful_stateful_meta = effectful_stateful.typing_metadata().unwrap();
@@ -738,7 +735,6 @@ mod tests {
         let effectful_stateful = crate::effectful_stateful!(
             name: "effectful_stateful",
             InputEvent -> OutputEvent => EffectfulExactStateful,
-            effects: [],
             observers: []
         );
         let metadata = effectful_stateful.typing_metadata().unwrap();
@@ -1117,7 +1113,6 @@ mod tests {
             crate::effectful_transform!(
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
-                effects: [],
                 observers: []
             ),
         );
@@ -1205,7 +1200,6 @@ mod tests {
             crate::effectful_transform!(
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
-                effects: [],
                 observers: []
             ),
         );
@@ -1700,7 +1694,6 @@ mod tests {
             crate::effectful_transform!(
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
-                effects: [],
                 observers: []
             ),
         );
@@ -1822,7 +1815,6 @@ mod tests {
             crate::effectful_transform!(
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
-                effects: [],
                 observers: []
             ),
         );
@@ -1941,7 +1933,6 @@ mod tests {
             crate::effectful_transform!(
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
-                effects: [],
                 observers: []
             ),
         );
@@ -2041,7 +2032,6 @@ mod tests {
             crate::effectful_transform!(
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
-                effects: [],
                 observers: []
             ),
         );
@@ -2124,7 +2114,6 @@ mod tests {
             crate::effectful_transform!(
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
-                effects: [],
                 observers: []
             ),
         );
@@ -2242,7 +2231,6 @@ mod tests {
             crate::effectful_transform!(
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
-                effects: [],
                 observers: []
             ),
         );
@@ -2378,7 +2366,6 @@ mod tests {
             crate::effectful_transform!(
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
-                effects: [],
                 observers: []
             ),
         );
@@ -2457,7 +2444,6 @@ mod tests {
             crate::effectful_transform!(
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform,
-                effects: [],
                 observers: []
             ),
         );

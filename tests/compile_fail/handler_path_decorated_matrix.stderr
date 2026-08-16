@@ -68,83 +68,81 @@ error: transform!: the handler slot takes a name, not an expression. Bind the ha
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `obzenflow_dsl::transform` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: effectful_transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);
+error: effectful_transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input ->{ Effect } Output => handler, observers: [...]);
   --> tests/compile_fail/handler_path_decorated_matrix.rs:46:13
    |
 46 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
 47 | |         name: "effectful_transform",
-48 | |         Input -> { Output, Alternate } => Handler::new(),
-49 | |         effects: [Effect],
-50 | |         observers: [middleware],
-51 | |         backpressure: backpressure
-52 | |     );
+48 | |         Input ->{ Effect } { Output, Alternate } => Handler::new(),
+49 | |         observers: [middleware],
+50 | |         backpressure: backpressure
+51 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyStateful::new(...); output = stateful!(Input -> Output => handler);
-  --> tests/compile_fail/handler_path_decorated_matrix.rs:53:13
+  --> tests/compile_fail/handler_path_decorated_matrix.rs:52:13
    |
-53 |       let _ = obzenflow_dsl::stateful!(
+52 |       let _ = obzenflow_dsl::stateful!(
    |  _____________^
-54 | |         name: "stateful",
-55 | |         Input -> { Output, Alternate } => Handler::new(),
-56 | |         emit_interval = interval,
-57 | |         observers: [middleware],
-58 | |         backpressure: backpressure
-59 | |     );
+53 | |         name: "stateful",
+54 | |         Input -> { Output, Alternate } => Handler::new(),
+55 | |         emit_interval = interval,
+56 | |         observers: [middleware],
+57 | |         backpressure: backpressure
+58 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `obzenflow_dsl::stateful` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: effectful_stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], observers: [...]);
-  --> tests/compile_fail/handler_path_decorated_matrix.rs:60:13
+error: effectful_stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input ->{ Effect } Output => handler, observers: [...]);
+  --> tests/compile_fail/handler_path_decorated_matrix.rs:59:13
    |
-60 |       let _ = obzenflow_dsl::effectful_stateful!(
+59 |       let _ = obzenflow_dsl::effectful_stateful!(
    |  _____________^
-61 | |         name: "effectful_stateful",
-62 | |         Input -> { Output, Alternate } => Handler::new(),
-63 | |         effects: [Effect],
-64 | |         observers: [middleware],
-65 | |         backpressure: backpressure
-66 | |     );
+60 | |         name: "effectful_stateful",
+61 | |         Input ->{ Effect } { Output, Alternate } => Handler::new(),
+62 | |         observers: [middleware],
+63 | |         backpressure: backpressure
+64 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `obzenflow_dsl::effectful_stateful` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: join!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = joins::inner::<Reference, Stream, Output, _, _, _, _>(...); output = join!(catalog reference: Reference, Stream -> Output => handler);
-  --> tests/compile_fail/handler_path_decorated_matrix.rs:67:13
+  --> tests/compile_fail/handler_path_decorated_matrix.rs:65:13
    |
-67 |       let _ = obzenflow_dsl::join!(
+65 |       let _ = obzenflow_dsl::join!(
    |  _____________^
-68 | |         name: "join",
-69 | |         catalog reference: Reference,
-70 | |         Input -> { Output, Alternate } => Handler::new(),
-71 | |         observers: [middleware]
-72 | |     );
+66 | |         name: "join",
+67 | |         catalog reference: Reference,
+68 | |         Input -> { Output, Alternate } => Handler::new(),
+69 | |         observers: [middleware]
+70 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `obzenflow_dsl::join` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: sink!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let output = SinkTyped::new(...); events = sink!(name: "events", Event => output);
-  --> tests/compile_fail/handler_path_decorated_matrix.rs:73:13
+  --> tests/compile_fail/handler_path_decorated_matrix.rs:71:13
    |
-73 |       let _ = obzenflow_dsl::sink!(
+71 |       let _ = obzenflow_dsl::sink!(
    |  _____________^
-74 | |         name: "sink",
-75 | |         Input => Handler::new(),
-76 | |         delivery: idempotent,
-77 | |         observers: [middleware]
-78 | |     );
+72 | |         name: "sink",
+73 | |         Input => Handler::new(),
+74 | |         delivery: idempotent,
+75 | |         observers: [middleware]
+76 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `obzenflow_dsl::sink` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: sink!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let output = sinks::json::<Event>(); events = sink!(Event => output);
-  --> tests/compile_fail/handler_path_decorated_matrix.rs:79:13
+  --> tests/compile_fail/handler_path_decorated_matrix.rs:77:13
    |
-79 |     let _ = obzenflow_dsl::sink!(Input => sinks::json());
+77 |     let _ = obzenflow_dsl::sink!(Input => sinks::json());
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `obzenflow_dsl::sink` (in Nightly builds, run with -Z macro-backtrace for more info)

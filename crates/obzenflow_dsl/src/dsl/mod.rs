@@ -35,7 +35,7 @@
 //!         }
 //!     })
 //! })
-//! ```
+//! ```ignore
 //!
 //! Both `placeholder!()` and `placeholder!("reason")` remain valid sketch
 //! markers. Async-source poll timeout is handler configuration exposed through
@@ -99,24 +99,23 @@
 //! let _ = join!(reference: Carrier, stream: Order, out: Enriched; "enricher" => with_ref!(carriers, handler));
 //! ```
 //!
-//! ## FLOWIP-120g: the `effects:` clause is mandatory on effectful macros
+//! ## FLOWIP-132a: effect rows live on the arrow
 //!
-//! An effectful stage must declare its effects, even when the list is empty
-//! (`effects: []`). Omitting the clause must not compile, so "no effects" stays
-//! distinct from "forgot the declaration".
+//! A pure effectful handler omits the row: `In -> Out`. A non-empty declaration
+//! uses `In ->{ Effect } Out`; `effects: [...]` and empty rows are rejected.
 //!
-//! ```compile_fail
+//! ```
 //! use obzenflow_dsl::effectful_transform;
 //!
 //! struct In;
 //! struct Out;
 //! let handler = ();
 //!
-//! // Missing the mandatory `effects:` clause (jumping straight to `observers:`).
+//! // Pure signature: no effect row.
 //! let _ = effectful_transform!(In -> Out => handler, observers: []);
 //! ```
 //!
-//! ## FLOWIP-120c H7: per-effect policies attach inline in `effects:`
+//! ## FLOWIP-120c H7: per-effect policies attach inline in the effect row
 //!
 //! A policy attaches to the exact effect it guards (`Effect with policy`).
 //!
@@ -132,7 +131,7 @@
 //! let handler = ();
 //!
 //! // `with` must be followed by one bare policy expression.
-//! let _ = effectful_transform!(In -> Out => handler, effects: [MyEffect with], observers: []);
+//! let _ = effectful_transform!(In ->{ MyEffect with } Out => handler, observers: []);
 //! ```
 //!
 //! ## FLOWIP-115s: the canonical `sink!` grammar

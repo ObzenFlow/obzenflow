@@ -19,17 +19,22 @@
 //! validation without driving the runtime.
 
 use async_trait::async_trait;
+use obzenflow_adapters::ai::{
+    ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, CHAT_CLIENT,
+};
 use obzenflow_core::ai::{
-    AiClientError, AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatBindingContract, ChatClient,
-    ChatCompletionReply, ChatMessage, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse,
-    ChatTarget, HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenCount,
+    AiClientError, AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply,
+    ChatMessage, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse, ChatTarget,
+    HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenCount,
     TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::effects::EffectPortRegistry;
+use obzenflow_runtime::effects::{
+    EffectBinding, EffectPortRegistry, EffectRegistrationBuilder, LogicalEffectBindingName,
+};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -161,13 +166,25 @@ impl ChatClient for DeterministicChatClient {
     }
 }
 
-fn test_effect_ports() -> EffectPortRegistry {
+fn test_binding_and_ports(
+    estimator_model: &str,
+) -> (EffectBinding<ChatCompletion>, EffectPortRegistry) {
     let client: Arc<dyn ChatClient> = Arc::new(DeterministicChatClient {
         target: test_target(),
     });
-    EffectPortRegistry::new()
-        .with_port::<dyn ChatClient>("chat", client)
-        .expect("one deterministic chat port")
+    let evidence = ChatBindingEvidence::new(test_target(), test_estimator(estimator_model))
+        .expect("test chat target and estimator models agree");
+    let (binding, registration) = EffectRegistrationBuilder::<ChatCompletion>::new(
+        LogicalEffectBindingName::new("chat").unwrap(),
+        evidence,
+    )
+    .bind_eager(CHAT_CLIENT, client)
+    .unwrap()
+    .finish()
+    .unwrap();
+    let mut registry = EffectPortRegistry::new();
+    registry.install(registration).unwrap();
+    (binding, registry)
 }
 
 fn test_estimator(model: &str) -> ResolvedTokenEstimator {
@@ -182,13 +199,8 @@ fn test_estimator(model: &str) -> ResolvedTokenEstimator {
 }
 
 macro_rules! generated_digest {
-    () => {{
-        generated_digest!("deterministic")
-    }};
-    ($estimator_model:expr) => {{
-        let chat =
-            ChatBindingContract::from_resolved(test_target(), test_estimator($estimator_model))
-                .expect("test chat target and estimator models agree");
+    ($chat:expr) => {{
+        let chat = $chat;
         let map_role = BuildMapRole;
         let finalise_role = BuildFinaliseRole;
         ai_map_reduce!(
@@ -345,15 +357,16 @@ async fn ordinary_flow_builder_accepts_ai_map_reduce_with_subgraph_attached() {
     let result = FlowDefinition::materialize(|_runtime_config| {
         let seed_handler = NoEventSource;
         let sink_handler = NoopSink::<BuildOnlyOut>::new();
+        let (chat, effect_ports) = test_binding_and_ports("deterministic");
 
         Ok(flow! {
             name: "amr_build_only",
             journals: memory_journals(),
-            effect_ports: test_effect_ports(),
+            effect_ports,
 
             stages: {
                 seed = source!(BuildOnlySeed => seed_handler);
-                digest = generated_digest!();
+                digest = generated_digest!(chat);
                 sink_stage = sink!(BuildOnlyOut => sink_handler);
             },
 
@@ -381,12 +394,9 @@ async fn ordinary_flow_builder_accepts_ai_map_reduce_with_subgraph_attached() {
 #[tokio::test]
 async fn materializer_scope_remains_visible_to_ai_effects_and_effect_ports() {
     let result = FlowDefinition::materialize(|_runtime_config| {
-        let chat =
-            ChatBindingContract::from_resolved(test_target(), test_estimator("deterministic"))
-                .expect("test chat target and estimator models agree");
+        let (chat, effect_ports) = test_binding_and_ports("deterministic");
         let bound_map_role = BuildMapRole;
         let bound_finalise_role = BuildFinaliseRole;
-        let effect_ports = test_effect_ports();
         let seed_handler = NoEventSource;
         let sink_handler = NoopSink::<BuildOnlyOut>::new();
 
@@ -441,12 +451,9 @@ async fn materializer_scope_remains_visible_to_ai_effects_and_effect_ports() {
 #[tokio::test]
 async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
     let result = async {
-        let chat =
-            ChatBindingContract::from_resolved(test_target(), test_estimator("deterministic"))
-                .expect("test chat target and estimator models agree");
+        let (chat, effect_ports) = test_binding_and_ports("deterministic");
         let bound_map_role = BuildMapRole;
         let bound_finalise_role = BuildFinaliseRole;
-        let effect_ports = test_effect_ports();
         let seed_handler = NoEventSource;
         let sink_handler = NoopSink::<BuildOnlyOut>::new();
 
@@ -505,20 +512,16 @@ fn estimator_mismatch_fails_before_journal_or_effect_port_evaluation() {
     let port_probe = Arc::clone(&ports_evaluated);
 
     let result = (|| {
-        let contract =
-            ChatBindingContract::from_resolved(test_target(), test_estimator("different-model"))?;
+        let evidence = ChatBindingEvidence::new(test_target(), test_estimator("different-model"))?;
         journal_probe.store(true, Ordering::SeqCst);
         port_probe.store(true, Ordering::SeqCst);
-        Ok::<_, obzenflow_core::ai::ChatBindingContractError>(contract)
+        Ok::<_, ChatBindingEvidenceBuildError>(evidence)
     })();
     let error = result.expect_err("an estimator for a different model must fail construction");
 
     assert!(matches!(
         error,
-        obzenflow_core::ai::ChatBindingContractError::EstimatorModelMismatch {
-            ref target_model,
-            ref estimator_model,
-        } if target_model == "deterministic" && estimator_model == "different-model"
+        ChatBindingEvidenceBuildError::EstimatorModelMismatch
     ));
     assert!(
         !journals_evaluated.load(Ordering::SeqCst),
@@ -535,15 +538,16 @@ async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
     let handle = FlowDefinition::materialize(|_runtime_config| {
         let seed_handler = NoEventSource;
         let sink_handler = NoopSink::<BuildOnlyOut>::new();
+        let (chat, effect_ports) = test_binding_and_ports("deterministic");
 
         Ok(flow! {
             name: "amr_boundary_payload_contract",
             journals: memory_journals(),
-            effect_ports: test_effect_ports(),
+            effect_ports,
 
             stages: {
                 seed = source!(BuildOnlySeed => seed_handler);
-                digest = generated_digest!();
+                digest = generated_digest!(chat);
                 sink_stage = sink!(BuildOnlyOut => sink_handler);
             },
 
@@ -602,17 +606,18 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     let handle = FlowDefinition::materialize(move |_runtime_config| {
         let seed_handler = OneSeedSource::new();
         let sink_handler = CountingOutSink::new(delivered_for_flow, total_for_flow);
+        let (chat, effect_ports) = test_binding_and_ports("deterministic");
 
         Ok(flow! {
             name: "amr_runtime_internal_contracts",
             journals: memory_journals(),
             backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(3)
                 .stall_timeout_ms(3_000),
-            effect_ports: test_effect_ports(),
+            effect_ports,
 
             stages: {
                 seed = source!(BuildOnlySeed => seed_handler);
-                digest = generated_digest!();
+                digest = generated_digest!(chat);
                 sink_stage = sink!(BuildOnlyOut => sink_handler);
             },
 
@@ -705,15 +710,16 @@ async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
     let result = FlowDefinition::materialize(|_runtime_config| {
         let seed_handler = NoEventSource;
         let sink_handler = NoopSink::<BuildOnlySeed>::new();
+        let (chat, effect_ports) = test_binding_and_ports("deterministic");
 
         Ok(flow! {
             name: "amr_boundary_mismatch",
             journals: memory_journals(),
-            effect_ports: test_effect_ports(),
+            effect_ports,
 
             stages: {
                 seed = source!(BuildOnlySeed => seed_handler);
-                digest = generated_digest!();
+                digest = generated_digest!(chat);
                 // Wrong type: no output port carries BuildOnlySeed, so the edge
                 // binds the default `out` port and must fail edge typing there.
                 sink_stage = sink!(BuildOnlySeed => sink_handler);
@@ -809,15 +815,16 @@ async fn join_reference_resolves_through_composite_boundary_port() {
         let stream_handler = NoStreamSource;
         let join_handler = LocalNoopJoin;
         let sink_handler = NoopSink::<JoinedP>::new();
+        let (chat, effect_ports) = test_binding_and_ports("deterministic");
 
         Ok(flow! {
             name: "amr_join_reference",
             journals: memory_journals(),
-            effect_ports: test_effect_ports(),
+            effect_ports,
 
             stages: {
                 seed = source!(BuildOnlySeed => seed_handler);
-                digest = generated_digest!();
+                digest = generated_digest!(chat);
                 stream_src = source!(JoinStreamP => stream_handler);
                 enrich = join!(catalog digest: BuildOnlyOut, JoinStreamP -> JoinedP => join_handler);
                 joined_sink = sink!(JoinedP => sink_handler);

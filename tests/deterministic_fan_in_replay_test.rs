@@ -200,6 +200,7 @@ impl Effect for CountingEffect {
     const EFFECT_TYPE: &'static str = "fan_in.counting";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = FanInEffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -378,8 +379,7 @@ fn build_two_channel_flow_with_jitter(
                 source_b = source!(FanInInput => source_b);
                 merge = transform!(FanInInput -> MergedRecord => merge);
                 effectful = effectful_transform!(
-                    MergedRecord -> { FanInOutput, FanInEffectValue } => effectful,
-                    effects: [CountingEffect],
+                    MergedRecord ->{ CountingEffect } { FanInOutput, FanInEffectValue } => effectful,
                     observers: []
                 );
                 collector = sink!(FanInOutput => collector);
@@ -423,8 +423,7 @@ fn build_skip_level_flow_with_delay(
                 tap = transform!(FanInInput -> FanInInput => tap);
                 merge = transform!(FanInInput -> MergedRecord => merge);
                 effectful = effectful_transform!(
-                    MergedRecord -> { FanInOutput, FanInEffectValue } => effectful,
-                    effects: [CountingEffect],
+                    MergedRecord ->{ CountingEffect } { FanInOutput, FanInEffectValue } => effectful,
                     observers: []
                 );
                 collector = sink!(FanInOutput => collector);

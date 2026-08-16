@@ -5,5 +5,11 @@
 mod chat_completion;
 mod embedding_generation;
 
-pub use chat_completion::{ChatCompletion, ChatCompletionBuildError};
-pub use embedding_generation::{EmbeddingGeneration, EmbeddingGenerationBuildError};
+pub use chat_completion::{
+    ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, ChatCompletionBuildError,
+    CHAT_CLIENT,
+};
+pub use embedding_generation::{
+    EmbeddingBindingEvidence, EmbeddingBindingEvidenceBuildError, EmbeddingGeneration,
+    EmbeddingGenerationBuildError, EMBEDDING_CLIENT,
+};

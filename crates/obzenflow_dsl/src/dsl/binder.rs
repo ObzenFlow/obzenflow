@@ -106,11 +106,11 @@ pub(crate) fn bind_effect_policy(
 ) -> Result<EffectPolicyAttachment, String> {
     let factory = declared_factory.factory;
     let declaration = declared_factory.declaration;
-    let effect_type = effect.effect_type;
+    let effect_type = effect.effect_type();
     let surface = MiddlewareSurface::Effect(EffectSurface {
         stage_id: config.stage_id,
         effect_type: EffectTypeKey::from(effect_type),
-        safety: effect.safety,
+        safety: effect.safety(),
     });
     let protected_unit = ProtectedUnitId {
         stage_id: config.stage_id,
@@ -150,11 +150,11 @@ pub(crate) fn materialize_effect_observer(
     effect: &EffectDeclaration,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<CheckedMiddlewareSurfaceAttachment, String> {
-    let effect_type = effect.effect_type;
+    let effect_type = effect.effect_type();
     let surface = MiddlewareSurface::Effect(EffectSurface {
         stage_id: config.stage_id,
         effect_type: EffectTypeKey::from(effect_type),
-        safety: effect.safety,
+        safety: effect.safety(),
     });
     let protected_unit = ProtectedUnitId {
         stage_id: config.stage_id,

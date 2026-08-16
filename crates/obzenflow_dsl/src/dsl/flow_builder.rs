@@ -657,7 +657,7 @@ where
                                 .effect_declarations()
                                 .into_iter()
                                 .map(|effect| {
-                                    obzenflow_core::event::EffectType::from(effect.effect_type)
+                                    obzenflow_core::event::EffectType::from(effect.effect_type())
                                 })
                                 .collect(),
                         )
@@ -1092,6 +1092,11 @@ where
         let mut manifest_capabilities = std::collections::BTreeMap::new();
         manifest_capabilities.insert(
             obzenflow_core::journal::run_manifest::EFFECT_ATTEMPT_HISTORY_CAPABILITY.to_string(),
+            1,
+        );
+        manifest_capabilities.insert(
+            obzenflow_core::journal::run_manifest::EFFECT_BINDING_DESCRIPTOR_CAPABILITY
+                .to_string(),
             1,
         );
         if !bounded_direct_fact_admission.is_empty() {

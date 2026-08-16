@@ -12,7 +12,7 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use support::{Input, Output};
 
 fn builder() -> ChatTransformBuilder {
-    ChatTransformBuilder::from_binding(support::contract())
+    ChatTransformBuilder::from_binding(support::binding())
 }
 
 fn main() {

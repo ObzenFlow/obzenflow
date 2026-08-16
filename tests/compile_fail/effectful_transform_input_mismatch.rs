@@ -19,7 +19,6 @@ impl TypedPayload for OtherInput {
 fn main() {
     let _ = obzenflow_dsl::effectful_transform!(
         OtherInput -> First => FirstOnly,
-        effects: [],
         observers: []
     );
 }

@@ -15,9 +15,9 @@
 //! infinite_source!(Out => handler)
 //! async_infinite_source!(Out => handler)
 //! transform!(In -> Out => handler)
-//! effectful_transform!(In -> Out => handler, effects: [], observers: [])
+//! effectful_transform!(In -> { Effect } Out => handler, observers: [])
 //! stateful!(In -> Out => handler)
-//! effectful_stateful!(In -> Out => handler, effects: [], observers: [])
+//! effectful_stateful!(In -> { Effect } Out => handler, observers: [])
 //! sink!(In => handler)
 //! join!(catalog CatalogStage: Catalog, Stream -> Out => handler)
 //! inference!(In -> { /* effect row */ } Out => role)
@@ -1845,30 +1845,7 @@ macro_rules! transform {
 // effectful_transform!
 // ============================================================================
 
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_effect_declarations_vec {
-    (@push $effects:ident,) => {};
-    (@push $effects:ident, at_least_once($effect:ty) $(, $($rest:tt)*)?) => {{
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
-        $crate::__obzenflow_effect_declarations_vec!(@push $effects, $($($rest)*)?);
-    }};
-    (@push $effects:ident, transactional($effect:ty, $executor:expr) $(, $($rest:tt)*)?) => {{
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
-        $crate::__obzenflow_effect_declarations_vec!(@push $effects, $($($rest)*)?);
-    }};
-    (@push $effects:ident, $effect:ty $(, $($rest:tt)*)?) => {{
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$effect>());
-        $crate::__obzenflow_effect_declarations_vec!(@push $effects, $($($rest)*)?);
-    }};
-    ($($effect_spec:tt)*) => {{
-        let mut __obzenflow_effects = Vec::new();
-        $crate::__obzenflow_effect_declarations_vec!(@push __obzenflow_effects, $($effect_spec)*);
-        __obzenflow_effects
-    }};
-}
-
-/// Entry parser for the `effects:` clause with inline per-effect policy
+/// Entry parser for the effect row with inline per-effect policy
 /// attachments: `Effect with policy`. Each effect position accepts exactly
 /// one aggregate policy expression.
 ///
@@ -1884,6 +1861,22 @@ macro_rules! __obzenflow_effect_entries {
     };
 
     // ── paid non-idempotent acknowledgement entries ──────────────────
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) via $binding:ident with $policy:expr, $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named_at_least_once::<$effect>(&$binding));
+        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) via $binding:ident with $policy:expr) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named_at_least_once::<$effect>(&$binding));
+        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
+    };
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) via $binding:ident, $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named_at_least_once::<$effect>(&$binding));
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) via $binding:ident) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named_at_least_once::<$effect>(&$binding));
+    };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
         compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
     };
@@ -1908,27 +1901,48 @@ macro_rules! __obzenflow_effect_entries {
     };
 
     // ── transactional entries (recognized at entry start) ─────────────
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
         compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
     };
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with { $($policy:tt)* } $($rest:tt)*) => {
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident with { $($policy:tt)* } $($rest:tt)*) => {
         compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
     };
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with $policy:expr, $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident with $policy:expr, $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional::<$effect>(&$binding));
         $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with $policy:expr) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident with $policy:expr) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional::<$effect>(&$binding));
         $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
     };
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr), $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident, $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional::<$effect>(&$binding));
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr)) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional::<$effect>(&$binding));
+    };
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) $($rest:tt)*) => {
+        compile_error!("transactional executors are typed bindings; write `transactional(Effect) via binding`");
+    };
+
+    // ── named ordinary entries ─────────────────────────────────────────
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], via $binding:ident with $policy:expr, $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named::<$($acc)+>(&$binding));
+        $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, $policy);
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], via $binding:ident with $policy:expr) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named::<$($acc)+>(&$binding));
+        $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, $policy);
+    };
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], via $binding:ident, $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named::<$($acc)+>(&$binding));
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], via $binding:ident) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::named::<$($acc)+>(&$binding));
     };
 
     // ── bare `with` attachment terminator ──────────────────────────────
@@ -2012,6 +2026,19 @@ macro_rules! __obzenflow_effect_manifest_types {
         ::obzenflow_runtime::effect_set![$($types,)* $($acc)+]
     };
 
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) via $binding:ident with $policy:expr, $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) via $binding:ident with $policy:expr) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $effect]
+    };
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) via $binding:ident, $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) via $binding:ident) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $effect]
+    };
+
     (@entry [$($types:ty,)*], [], at_least_once($effect:ty) with $policy:expr, $($rest:tt)*) => {
         $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
     };
@@ -2025,17 +2052,40 @@ macro_rules! __obzenflow_effect_manifest_types {
         ::obzenflow_runtime::effect_set![$($types,)* $effect]
     };
 
-    (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr) with $policy:expr, $($rest:tt)*) => {
+    (@entry [$($types:ty,)*], [], transactional($effect:ty) via $binding:ident with $policy:expr, $($rest:tt)*) => {
         $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
     };
-    (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr) with $policy:expr) => {
+    (@entry [$($types:ty,)*], [], transactional($effect:ty) via $binding:ident with $policy:expr) => {
         ::obzenflow_runtime::effect_set![$($types,)* $effect]
     };
+    (@entry [$($types:ty,)*], [], transactional($effect:ty) via $binding:ident, $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [], transactional($effect:ty) via $binding:ident) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $effect]
+    };
+    // Keep the type-only proof coherent while the value parser emits the
+    // single migration diagnostic for the retired string/expression executor
+    // form. Without these arms, the invalid entry is reinterpreted as a type
+    // and obscures the teaching error with unrelated trait failures.
     (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr), $($rest:tt)*) => {
         $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
     };
     (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr)) => {
         ::obzenflow_runtime::effect_set![$($types,)* $effect]
+    };
+
+    (@entry [$($types:ty,)*], [$($acc:tt)+], via $binding:ident with $policy:expr, $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $($acc)+,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [$($acc:tt)+], via $binding:ident with $policy:expr) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $($acc)+]
+    };
+    (@entry [$($types:ty,)*], [$($acc:tt)+], via $binding:ident, $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $($acc)+,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [$($acc:tt)+], via $binding:ident) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $($acc)+]
     };
 
     (@entry [$($types:ty,)*], [$($acc:tt)+], with $policy:expr, $($rest:tt)*) => {
@@ -2228,118 +2278,139 @@ macro_rules! __obzenflow_effectful_transform_typed {
 
 #[doc(hidden)]
 #[macro_export]
+macro_rules! __obzenflow_effectful_transform_row_contract {
+    (name = $name:literal, input = [$($in:tt)+], effects = [], $($rest:tt)*) => {
+        compile_error!("empty effect rows are not a purity marker; write `Input -> Output`")
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)+], then = [
+            $crate::__obzenflow_effectful_transform_typed!(
+                input = exact($($in)+),
+                output = $first,
+                output_contract = [$first $(, $member)*],
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)+],
+                middleware = [$($observer),*]
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_transform_row_contract!(
+            name = $name,
+            input = [$($in)+],
+            effects = [$($effects)+],
+            output = { $first $(, $member)* } => $handler_head $(:: $handler_tail)*,
+            observers: []
+            $(, backpressure: $bp)?
+        )
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)+], then = [
+            $crate::__obzenflow_effectful_transform_typed!(
+                input = exact($($in)+),
+                output = $out,
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)+],
+                middleware = [$($observer),*]
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = $out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_transform_row_contract!(
+            name = $name,
+            input = [$($in)+],
+            effects = [$($effects)+],
+            output = $out => $handler_head $(:: $handler_tail)*,
+            observers: []
+            $(, backpressure: $bp)?
+        )
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = $($rest:tt)*) => {
+        $crate::__obzenflow_handler_path_diagnostic!(
+            "effectful_transform!",
+            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input ->{ Effect } Output => handler, observers: [...]);"
+        )
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
 macro_rules! __obzenflow_effectful_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_effectful_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($out:ty),+ $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
-        $crate::__obzenflow_stage_middleware_removed!()
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
-        $crate::__obzenflow_stage_middleware_removed!()
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
-        $crate::__obzenflow_stage_middleware_removed!()
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
-            $crate::__obzenflow_effectful_transform_typed!(
-                input = exact($($in)+),
-                output = $first,
-                output_contract = [$first $(, $member)*],
-                name = $name,
-                handler = $handler_head $(:: $handler_tail)*,
-                effects = [$($effects)*],
-                middleware = [$($mw),*]
-                $(, backpressure = [$bp])?
-            )
-        ])
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
-            $crate::__obzenflow_effectful_transform_typed!(
-                input = exact($($in)+),
-                output = $out,
-                output_contract = [$($member),+],
-                name = $name,
-                handler = $handler_head $(:: $handler_tail)*,
-                effects = [$($effects)*],
-                middleware = [$($mw),*]
-                $(, backpressure = [$bp])?
-            )
-        ])
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
-            $crate::__obzenflow_effectful_transform_typed!(
-                input = exact($($in)+),
-                output = $out,
-                name = $name,
-                handler = $handler_head $(:: $handler_tail)*,
-                effects = [$($effects)*],
-                middleware = [$($mw),*]
-                $(, backpressure = [$bp])?
-            )
-        ])
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
-            $crate::__obzenflow_effectful_transform_typed!(
-                input = exact($($in)+),
-                output = $first,
-                output_contract = [$first $(, $member)*],
-                name = $name,
-                handler = $handler_head $(:: $handler_tail)*,
-                effects = [$($effects)*],
-                middleware = []
-                $(, backpressure = [$bp])?
-            )
-        ])
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
-            $crate::__obzenflow_effectful_transform_typed!(
-                input = exact($($in)+),
-                output = $out,
-                output_contract = [$($member),+],
-                name = $name,
-                handler = $handler_head $(:: $handler_tail)*,
-                effects = [$($effects)*],
-                middleware = []
-                $(, backpressure = [$bp])?
-            )
-        ])
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
-            $crate::__obzenflow_effectful_transform_typed!(
-                input = exact($($in)+),
-                output = $out,
-                name = $name,
-                handler = $handler_head $(:: $handler_tail)*,
-                effects = [$($effects)*],
-                middleware = []
-                $(, backpressure = [$bp])?
-            )
-        ])
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "effectful_transform!",
-            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);"
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($effects:tt)* } { $first:ty $(, $member:ty)* $(,)? } => $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_transform_row_contract!(
+            name = $name,
+            input = [$($in)+],
+            effects = [$($effects)*],
+            output = { $first $(, $member)* } => $($rest)+
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "effectful_transform!",
-            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);"
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($effects:tt)* } $out:ty => $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_transform_row_contract!(
+            name = $name,
+            input = [$($in)+],
+            effects = [$($effects)*],
+            output = $out => $($rest)+
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "effectful_transform!",
-            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);"
+    // A braced output union and an effect row both begin with `{ ... }`.
+    // The following `=>` makes the pure output-union form unambiguous, so it
+    // must be recognised before the general effect-row arm.
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler_head $(:: $handler_tail)*,
+            effects = [],
+            middleware = [$($observer),*]
+            $(, backpressure = [$bp])?
         )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_transform_exact_contract!(
+            @collect name = $name,
+            in = ($($in)+),
+            -> { $first $(, $member)* } => $handler_head $(:: $handler_tail)*,
+            observers: []
+            $(, backpressure: $bp)?
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            name = $name,
+            handler = $handler_head $(:: $handler_tail)*,
+            effects = [],
+            middleware = [$($observer),*]
+            $(, backpressure = [$bp])?
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_transform_exact_contract!(
+            @collect name = $name,
+            in = ($($in)+),
+            -> $out => $handler_head $(:: $handler_tail)*,
+            observers: []
+            $(, backpressure: $bp)?
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($out:ty),+ $(,)? } => $handler:expr, effects: [$($effects:tt)*] $($rest:tt)*) => {
+        compile_error!("effectful_transform!: detached `effects: [...]` was removed; write `Input -> { Effect } Output => handler`")
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, effects: [$($effects:tt)*] $($rest:tt)*) => {
+        compile_error!("effectful_transform!: detached `effects: [...]` was removed; write `Input -> { Effect } Output => handler`")
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*] $($rest:tt)*) => {
+        compile_error!("effectful_transform!: detached `effects: [...]` was removed; write `Input -> { Effect } Output => handler`")
     };
     (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
         $crate::__obzenflow_effectful_transform_exact_contract!(
@@ -3069,8 +3140,17 @@ macro_rules! stateful {
 macro_rules! __obzenflow_effectful_stateful_untyped {
     (name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::EffectfulStatefulDescriptor;
+        let mut __obzenflow_effects: Vec<::obzenflow_runtime::effects::EffectDeclaration> =
+            Vec::new();
+        let mut __obzenflow_attachments: Vec<
+            $crate::dsl::stage_descriptor::EffectPolicyAttachment,
+        > = Vec::new();
+        $crate::__obzenflow_effect_entries!(
+            @entry __obzenflow_effects, __obzenflow_attachments, [], $($effects)*
+        );
+        debug_assert!(__obzenflow_attachments.is_empty());
         let mut __desc = EffectfulStatefulDescriptor::new($name, $handler)
-            .with_effect_declarations($crate::__obzenflow_effect_declarations_vec!($($effects)*))
+            .with_effect_declarations(__obzenflow_effects)
             $(.with_observer($mw))*;
         {
             #[allow(unused_mut)]
@@ -3080,6 +3160,82 @@ macro_rules! __obzenflow_effectful_stateful_untyped {
         }
         __desc.build()
     }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_stateful_effect_policy_gate {
+    (effects = [$($effects:tt)*], then = [$($then:tt)*]) => {
+        $crate::__obzenflow_stateful_effect_policy_gate!(@scan then = [$($then)*], $($effects)*)
+    };
+    (@scan then = [$($then:tt)*],) => { $($then)* };
+    (@scan then = [$($then:tt)*], with $($rest:tt)*) => {
+        compile_error!("effectful_stateful!: effect policies require FLOWIP-120l stateful boundary binding; remove the `with` policy or complete FLOWIP-120l")
+    };
+    (@scan then = [$($then:tt)*], $next:tt $($rest:tt)*) => {
+        $crate::__obzenflow_stateful_effect_policy_gate!(@scan then = [$($then)*], $($rest)*)
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effectful_stateful_row_contract {
+    (name = $name:literal, input = [$($in:tt)+], effects = [], $($rest:tt)*) => {
+        compile_error!("empty effect rows are not a purity marker; write `Input -> Output`")
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_stateful_effect_policy_gate!(effects = [$($effects)+], then = [
+            $crate::__obzenflow_effectful_stateful_typed!(
+                input = exact($($in)+),
+                output = $first,
+                output_contract = [$first $(, $member)*],
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)+],
+                middleware = [$($observer),*]
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_stateful_row_contract!(
+            name = $name,
+            input = [$($in)+],
+            effects = [$($effects)+],
+            output = { $first $(, $member)* } => $handler_head $(:: $handler_tail)*,
+            observers: []
+            $(, backpressure: $bp)?
+        )
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_stateful_effect_policy_gate!(effects = [$($effects)+], then = [
+            $crate::__obzenflow_effectful_stateful_typed!(
+                input = exact($($in)+),
+                output = $out,
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)+],
+                middleware = [$($observer),*]
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = $out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_stateful_row_contract!(
+            name = $name,
+            input = [$($in)+],
+            effects = [$($effects)+],
+            output = $out => $handler_head $(:: $handler_tail)*,
+            observers: []
+            $(, backpressure: $bp)?
+        )
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = $($rest:tt)*) => {
+        $crate::__obzenflow_handler_path_diagnostic!(
+            "effectful_stateful!",
+            "let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input ->{ Effect } Output => handler, observers: [...]);"
+        )
+    };
 }
 
 #[doc(hidden)]
@@ -3134,46 +3290,68 @@ macro_rules! __obzenflow_effectful_stateful_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_effectful_stateful_exact_contract!(@collect name = $name, in = (), $($rest)+)
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($out:ty),+ $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
-        $crate::__obzenflow_stage_middleware_removed!()
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($effects:tt)* } { $first:ty $(, $member:ty)* $(,)? } => $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_stateful_row_contract!(
+            name = $name,
+            input = [$($in)+],
+            effects = [$($effects)*],
+            output = { $first $(, $member)* } => $($rest)+
+        )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
-        $crate::__obzenflow_stage_middleware_removed!()
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($effects:tt)* } $out:ty => $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_stateful_row_contract!(
+            name = $name,
+            input = [$($in)+],
+            effects = [$($effects)*],
+            output = $out => $($rest)+
+        )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_effectful_stateful_typed!(
             input = exact($($in)+),
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = $handler_head $(:: $handler_tail)*,
-            effects = [$($effects)*],
-            middleware = [$($mw),*]
+            effects = [],
+            middleware = [$($observer),*]
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_stateful_exact_contract!(
+            @collect name = $name,
+            in = ($($in)+),
+            -> { $first $(, $member)* } => $handler_head $(:: $handler_tail)*,
+            observers: []
+            $(, backpressure: $bp)?
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_effectful_stateful_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = $handler_head $(:: $handler_tail)*,
-            effects = [$($effects)*],
-            middleware = [$($mw),*]
+            effects = [],
+            middleware = [$($observer),*]
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "effectful_stateful!",
-            "let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], observers: [...]);"
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_stateful_exact_contract!(
+            @collect name = $name,
+            in = ($($in)+),
+            -> $out => $handler_head $(:: $handler_tail)*,
+            observers: []
+            $(, backpressure: $bp)?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "effectful_stateful!",
-            "let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], observers: [...]);"
-        )
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($out:ty),+ $(,)? } => $handler:expr, effects: [$($effects:tt)*] $($rest:tt)*) => {
+        compile_error!("effectful_stateful!: detached `effects: [...]` was removed; write `Input -> { Effect } Output => handler`")
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*] $($rest:tt)*) => {
+        compile_error!("effectful_stateful!: detached `effects: [...]` was removed; write `Input -> { Effect } Output => handler`")
     };
     (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
         $crate::__obzenflow_effectful_stateful_exact_contract!(
@@ -3801,10 +3979,10 @@ macro_rules! __obzenflow_clone_ai_chat_contract {
         struct $binding {
             _private: (),
         }
-        $crate::dsl::ai_effect::clone_inference_chat_contract::<_, $binding>(&$binding)
+        $crate::dsl::ai_effect::clone_inference_chat_binding::<_, $binding>(&$binding)
     }};
     ($surface:literal, $binding:ident) => {
-        $crate::dsl::ai_effect::clone_chat_contract(&$binding)
+        $crate::dsl::ai_effect::clone_chat_binding(&$binding)
     };
 }
 
@@ -3858,7 +4036,9 @@ macro_rules! __obzenflow_ai_chat_effect_row {
             $(,)?
         }
     ) => {{
-        let __chat_binding: ::obzenflow_core::ai::ChatBindingContract =
+        let __chat_binding: ::obzenflow_runtime::effects::EffectBinding<
+            ::obzenflow_adapters::ai::ChatCompletion,
+        > =
             $crate::__obzenflow_clone_ai_chat_contract!($surface, $binding);
         let __chat_policy: Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory> = $policy;
         (__chat_binding, __chat_policy)
@@ -4173,7 +4353,7 @@ macro_rules! __obzenflow_ai_map_reduce_build {
         let __chunker = $crate::__obzenflow_ai_map_reduce_chunker_by_budget!(
             seed_type = ($($seed_ty)+),
             item_type = ($item_ty),
-            estimator: __map_chat.estimator().estimator(),
+            estimator: __map_chat.evidence().estimator().estimator(),
             $($chunking)+
         );
         let _: ::core::marker::PhantomData<$($seed_ty)+> =

@@ -94,13 +94,20 @@ fn materialised_failure_probe(
                     detail: error.to_string(),
                 }
             })?;
-        let (_chat, registration) = binding.into_parts();
-        let effect_ports = registration
-            .install_into(EffectPortRegistry::new())
-            .map_err(|error| FlowBuildError::BindingConfiguration {
+        let (_chat, registration) =
+            binding
+                .into_parts()
+                .map_err(|error| FlowBuildError::BindingConfiguration {
+                    binding: "chat".to_string(),
+                    detail: error.to_string(),
+                })?;
+        let mut effect_ports = EffectPortRegistry::new();
+        effect_ports.install(registration).map_err(|error| {
+            FlowBuildError::BindingConfiguration {
                 binding: "chat".to_string(),
                 detail: error.to_string(),
-            })?;
+            }
+        })?;
 
         if matches!(kind, FailureKind::GenericAfterRegistration) {
             // Registration is deliberately deferred: reaching this sentinel proves

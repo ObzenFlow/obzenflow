@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+use obzenflow_runtime::effects::{
+    EffectPortResolutionError, EffectPortSlot, EffectRegistrationBuilder, NamedEffect,
+};
+use std::sync::Arc;
+
+fn bind_async<E, P>(builder: EffectRegistrationBuilder<E>, slot: EffectPortSlot<P>)
+where
+    E: NamedEffect,
+    P: ?Sized + Send + Sync + 'static,
+{
+    let resolver = Arc::new(|| async {
+        Err::<Arc<P>, EffectPortResolutionError>(
+            EffectPortResolutionError::ClientConstructionFailed,
+        )
+    });
+    let _ = builder.bind_deferred(slot, resolver);
+}
+
+fn main() {}

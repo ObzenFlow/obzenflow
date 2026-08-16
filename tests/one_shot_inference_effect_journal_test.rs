@@ -5,13 +5,14 @@
 //! FLOWIP-120j checked journal witness for scalar `inference!`.
 
 use async_trait::async_trait;
+use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, CHAT_CLIENT};
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_adapters::middleware::{MiddlewareFactory, RateLimiterFactory};
 use obzenflow_core::ai::{
-    AiClientError, AiInferenceRole, AiRoleLogicFailure, ChatBindingContract, ChatClient,
-    ChatCompletionReply, ChatMessage, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse,
-    ChatTarget, HeuristicTokenEstimator, ResolvedTokenEstimator, TokenEstimatorFallbackReason,
-    TokenEstimatorResolutionInfo, CHAT_CLIENT_PORT,
+    AiClientError, AiInferenceRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply,
+    ChatMessage, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse, ChatTarget,
+    HeuristicTokenEstimator, ResolvedTokenEstimator, TokenEstimatorFallbackReason,
+    TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{
@@ -29,7 +30,8 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::{
-    EffectPortRegistry, EffectPortResolver, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
+    EffectBinding, EffectPortRegistry, EffectPortResolver, EffectRegistrationBuilder,
+    LogicalEffectBindingName, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -287,35 +289,69 @@ fn estimator() -> ResolvedTokenEstimator {
     )
 }
 
-fn contract() -> ChatBindingContract {
-    ChatBindingContract::from_resolved(target(), estimator())
-        .expect("test chat target and estimator models agree")
+fn evidence() -> ChatBindingEvidence {
+    ChatBindingEvidence::new(target(), estimator()).expect("chat binding evidence")
 }
 
-fn live_chat_registry(
-    resolutions: Arc<AtomicUsize>,
-    calls: Arc<AtomicUsize>,
-) -> EffectPortRegistry {
+type ChatAuthority = (EffectBinding<ChatCompletion>, EffectPortRegistry);
+
+fn live_chat_registry(resolutions: Arc<AtomicUsize>, calls: Arc<AtomicUsize>) -> ChatAuthority {
     let resolver: EffectPortResolver<dyn ChatClient> = Arc::new(move || {
-        let resolutions = resolutions.clone();
-        let calls = calls.clone();
-        Box::pin(async move {
-            resolutions.fetch_add(1, Ordering::SeqCst);
-            Ok(Arc::new(CountingChatClient {
-                target: target(),
-                calls,
-            }) as Arc<dyn ChatClient>)
-        })
+        resolutions.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(CountingChatClient {
+            target: target(),
+            calls: calls.clone(),
+        }) as Arc<dyn ChatClient>)
     });
-    EffectPortRegistry::new()
-        .with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)
-        .expect("one chat resolver")
+    let (binding, registration) = EffectRegistrationBuilder::<ChatCompletion>::new(
+        LogicalEffectBindingName::new("chat").unwrap(),
+        evidence(),
+    )
+    .bind_deferred(CHAT_CLIENT, resolver)
+    .unwrap()
+    .finish()
+    .unwrap();
+    let mut registry = EffectPortRegistry::new();
+    registry.install(registration).unwrap();
+    (binding, registry)
+}
+
+fn eager_chat_registry(client: Arc<dyn ChatClient>) -> ChatAuthority {
+    let (binding, registration) = EffectRegistrationBuilder::<ChatCompletion>::new(
+        LogicalEffectBindingName::new("chat").unwrap(),
+        evidence(),
+    )
+    .bind_eager(CHAT_CLIENT, client)
+    .unwrap()
+    .finish()
+    .unwrap();
+    let mut registry = EffectPortRegistry::new();
+    registry.install(registration).unwrap();
+    (binding, registry)
+}
+
+fn replay_only_chat_registry() -> ChatAuthority {
+    let (binding, registration) = EffectRegistrationBuilder::<ChatCompletion>::new(
+        LogicalEffectBindingName::new("chat").unwrap(),
+        evidence(),
+    )
+    .bind_deferred(
+        CHAT_CLIENT,
+        Arc::new(|| {
+            Err(obzenflow_runtime::effects::EffectPortResolutionError::ClientConstructionFailed)
+        }),
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+    drop(registration);
+    (binding, EffectPortRegistry::new())
 }
 
 fn build_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DecisionBrief>>>,
-    effect_ports: EffectPortRegistry,
+    chat_authority: ChatAuthority,
     backpressure_window: u64,
     prepare_calls: Arc<AtomicUsize>,
     interpret_calls: Arc<AtomicUsize>,
@@ -329,7 +365,7 @@ fn build_flow(
     build_flow_for_role(
         journal_base,
         outputs,
-        effect_ports,
+        chat_authority,
         enforced_backpressure(backpressure_window).stall_timeout_ms(5_000),
         vec![ReducedEvidence { value: 7 }],
         brief_role,
@@ -340,7 +376,7 @@ fn build_flow(
 fn build_flow_for_role<Role>(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DecisionBrief>>>,
-    effect_ports: EffectPortRegistry,
+    chat_authority: ChatAuthority,
     backpressure: BackpressureClause,
     evidence_inputs: Vec<ReducedEvidence>,
     brief_role: Role,
@@ -349,8 +385,8 @@ fn build_flow_for_role<Role>(
 where
     Role: AiInferenceRole<ReducedEvidence, DecisionBrief>,
 {
+    let (chat, effect_ports) = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
-        let chat = contract();
         let evidence_handler = obzenflow::typed::sources::finite(evidence_inputs);
         let collected_handler = CollectBrief { outputs };
 
@@ -384,12 +420,12 @@ where
 fn build_credit_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DecisionBrief>>>,
-    effect_ports: EffectPortRegistry,
+    chat_authority: ChatAuthority,
     prepare_calls: Arc<AtomicUsize>,
     interpret_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
+    let (chat, effect_ports) = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
-        let chat = contract();
         let brief_role = BriefRole {
             prepare_calls,
             interpret_calls,
@@ -432,11 +468,11 @@ fn build_fan_out_flow(
     journal_base: PathBuf,
     fast_outputs: Arc<Mutex<Vec<DecisionBrief>>>,
     slow_outputs: Arc<Mutex<Vec<DecisionBrief>>>,
-    effect_ports: EffectPortRegistry,
+    chat_authority: ChatAuthority,
     prepare_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
+    let (chat, effect_ports) = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
-        let chat = contract();
         let brief_role = BriefRole {
             prepare_calls,
             interpret_calls: Arc::new(AtomicUsize::new(0)),
@@ -699,7 +735,7 @@ async fn one_shot_inference_live_and_strict_replay_use_three_rows_and_no_live_re
         .run_async(build_flow(
             journal_base.clone(),
             replay_outputs.clone(),
-            EffectPortRegistry::new(),
+            replay_only_chat_registry(),
             3,
             replay_prepare_calls.clone(),
             replay_interpret_calls.clone(),
@@ -1010,16 +1046,11 @@ async fn cancelling_an_active_inference_leaves_only_committed_physical_debt() {
     let journal_base = temp.path().join("journals");
     let calls = Arc::new(AtomicUsize::new(0));
     let entered = Arc::new(Notify::new());
-    let effect_ports = EffectPortRegistry::new()
-        .with_port::<dyn ChatClient>(
-            CHAT_CLIENT_PORT,
-            Arc::new(HangingChatClient {
-                target: target(),
-                calls: calls.clone(),
-                entered: entered.clone(),
-            }),
-        )
-        .expect("one hanging chat client");
+    let chat_authority = eager_chat_registry(Arc::new(HangingChatClient {
+        target: target(),
+        calls: calls.clone(),
+        entered: entered.clone(),
+    }));
 
     let run_task = tokio::spawn({
         let journal_base = journal_base.clone();
@@ -1029,7 +1060,7 @@ async fn cancelling_an_active_inference_leaves_only_committed_physical_debt() {
                 .run_async(build_flow(
                     journal_base,
                     Arc::new(Mutex::new(Vec::new())),
-                    effect_ports,
+                    chat_authority,
                     3,
                     Arc::new(AtomicUsize::new(0)),
                     Arc::new(AtomicUsize::new(0)),

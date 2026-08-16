@@ -55,6 +55,7 @@ impl Effect for EffectA {
     const EFFECT_TYPE: &'static str = "effect_control_composition.a";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = CompositionFact;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -80,6 +81,7 @@ impl Effect for EffectB {
     const EFFECT_TYPE: &'static str = "effect_control_composition.b";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = CompositionFact;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -414,8 +416,7 @@ macro_rules! single_effect_flow {
                 stages: {
                     input = source!(CompositionInput => placeholder!());
                     guarded = effectful_transform!(
-                        CompositionInput -> CompositionFact => guarded_handler,
-                        effects: [EffectA with $policy],
+                        CompositionInput ->{ EffectA with $policy } CompositionFact => guarded_handler,
                         observers: [$($observer),*]
                     );
                     output = sink!(CompositionFact => placeholder!());
@@ -442,11 +443,10 @@ macro_rules! two_effect_flow {
                 stages: {
                     input = source!(CompositionInput => placeholder!());
                     guarded = effectful_transform!(
-                        CompositionInput -> CompositionFact => guarded_handler,
-                        effects: [
+                        CompositionInput ->{
                             EffectA with $effect_a,
                             EffectB with $effect_b
-                        ],
+                        } CompositionFact => guarded_handler,
                         observers: []
                     );
                     output = sink!(CompositionFact => placeholder!());

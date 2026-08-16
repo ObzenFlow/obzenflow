@@ -9,7 +9,7 @@ mod support;
 use support::*;
 
 fn main() {
-    let chat = contract();
+    let chat = binding();
     let map_role = MapRole;
     let finalise_role = FinaliseRole;
     let first = obzenflow_adapters::middleware::control::ai_resilience();

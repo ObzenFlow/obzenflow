@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::journal::run_manifest::{
-    RunManifest, JOURNAL_FORMAT_VERSION, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+    RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_FORMAT_VERSION,
+    RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
 use obzenflow_core::journal::ArchiveStatus;
 
@@ -107,6 +108,19 @@ impl DiskRunSource {
                 path: manifest_path.clone(),
                 message: format!(
                     "unsupported journal_format_version {journal_format_version:?} (supported: {JOURNAL_FORMAT_VERSION})"
+                ),
+            }));
+        }
+        let binding_descriptor_version = value
+            .get("capabilities")
+            .and_then(|value| value.as_object())
+            .and_then(|capabilities| capabilities.get(EFFECT_BINDING_DESCRIPTOR_CAPABILITY))
+            .and_then(|value| value.as_u64());
+        if binding_descriptor_version != Some(1) {
+            return Err(SourceOpenError::Failed(VerifyError::Parse {
+                path: manifest_path.clone(),
+                message: format!(
+                    "unsupported archive capability {EFFECT_BINDING_DESCRIPTOR_CAPABILITY}={binding_descriptor_version:?} (supported: 1)"
                 ),
             }));
         }
@@ -243,6 +257,55 @@ impl Iterator for JournalRows {
                         message: format!("at offset {record_offset}: {problem}"),
                     }));
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verification_gates_binding_descriptor_capability_before_journal_decode() {
+        for version in [None, Some(2_u64)] {
+            let temp = tempfile::tempdir().expect("temporary archive");
+            let mut capabilities = serde_json::Map::new();
+            if let Some(version) = version {
+                capabilities.insert(
+                    EFFECT_BINDING_DESCRIPTOR_CAPABILITY.to_string(),
+                    serde_json::json!(version),
+                );
+            }
+            let manifest = serde_json::json!({
+                "manifest_version": RUN_MANIFEST_VERSION,
+                "journal_format_version": JOURNAL_FORMAT_VERSION,
+                "capabilities": capabilities,
+                "system_journal_file": "malformed-system.journal"
+            });
+            std::fs::write(
+                temp.path().join(RUN_MANIFEST_FILENAME),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                temp.path().join("malformed-system.journal"),
+                b"deliberately not a framed journal",
+            )
+            .unwrap();
+
+            match DiskRunSource::open(temp.path()) {
+                Err(SourceOpenError::Failed(VerifyError::Parse { message, .. })) => {
+                    assert!(message.contains(EFFECT_BINDING_DESCRIPTOR_CAPABILITY));
+                    assert!(message.contains("supported: 1"));
+                }
+                Err(SourceOpenError::Failed(_)) => {
+                    panic!("capability gate must win over malformed journal decoding")
+                }
+                Err(SourceOpenError::Refused(_)) => {
+                    panic!("capability mismatch must be a curated schema failure")
+                }
+                Ok(_) => panic!("missing or wrong capability must refuse verification"),
             }
         }
     }

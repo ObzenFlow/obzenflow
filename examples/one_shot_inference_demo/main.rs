@@ -95,13 +95,18 @@ fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowD
                 binding: "chat".to_string(),
                 detail: error.to_string(),
             })?
-            .into_parts();
-        let effect_ports = chat_registration
-            .install_into(EffectPortRegistry::new())
+            .into_parts()
             .map_err(|error| FlowBuildError::BindingConfiguration {
                 binding: "chat".to_string(),
                 detail: error.to_string(),
             })?;
+        let mut effect_ports = EffectPortRegistry::new();
+        effect_ports.install(chat_registration).map_err(|error| {
+            FlowBuildError::BindingConfiguration {
+                binding: "chat".to_string(),
+                detail: error.to_string(),
+            }
+        })?;
         let evidence_source = sources::finite([input]);
         let brief_role = BriefRole;
         let display_brief = sinks::console(|brief: &DecisionBrief| {

@@ -28,7 +28,6 @@ use obzenflow_core::{ChainEvent, EventEnvelope, EventId, FlowId, StageId, Writer
 use ring::digest::{digest, SHA256};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{Map, Value};
-use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +45,7 @@ use crate::stages::common::supervision::output_committer::{
     AtomicCommitEntry, CommitOptions, OutputCommitter, StageAppendIntent,
 };
 
+mod binding;
 mod boundary;
 mod commit;
 mod completion;
@@ -53,6 +53,7 @@ mod context;
 mod declaration;
 mod effect_set;
 mod error;
+mod fault;
 mod history;
 mod identity;
 mod ports;
@@ -63,6 +64,13 @@ mod typed;
 #[cfg(test)]
 mod tests;
 
+#[doc(hidden)]
+pub use binding::EffectInvocationBinding;
+pub use binding::{
+    BindingIdentifierError, EffectBinding, EffectBindingEvidence, EffectBindingMode,
+    EffectBindingUse, EffectPortSlot, EffectPortSlotLabel, EffectPortSlotSet,
+    LogicalEffectBindingName, Named, NamedEffect, Portless,
+};
 pub(crate) use boundary::SingleUseEffectBoundaryOutcome;
 pub use boundary::{
     AffineEffectBoundaryReport, AffineEffectExecution, AffineEffectOperation, EffectAbortReason,
@@ -78,9 +86,9 @@ pub use context::{EffectContext, EffectInvocationContext};
 #[cfg(test)]
 pub(crate) use context::EffectRuntimeMode;
 pub use declaration::{
-    DomainFacts, Effect, EffectDeclaration, EffectOutcomeKind, EffectOutcomeSemantics,
-    EffectSafety, IdempotencyKey, IdempotencyKeyPolicy, PreparedEffectSuccess, RecordedReply,
-    SinkRedeliverySafety, TransactionalEffectPort,
+    transactional_effect_port_slot, DomainFacts, Effect, EffectDeclaration, EffectOutcomeKind,
+    EffectOutcomeSemantics, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,
+    PreparedEffectSuccess, RecordedReply, SinkRedeliverySafety, TransactionalEffectPort,
 };
 // FLOWIP-120z effect capability sets; the list traits are doc(hidden)
 // plumbing that must stay reachable for the public `DeclaredEffectSet` impl.
@@ -88,6 +96,7 @@ pub use effect_set::{
     assert_distinct_effect_set, DeclaredEffectSet, EffectList, EffectSet, EffectTypeDisjoint,
 };
 pub use error::EffectError;
+pub use fault::{BindingAuthorityFault, BindingMismatchKind};
 pub(crate) use history::{
     current_cursor_history, merge_cursor_histories, EffectCursorCoordinator, EffectCursorHistory,
     EffectHistorySelection,
@@ -99,8 +108,8 @@ pub use identity::{
     EffectOutputOrdinal,
 };
 pub use ports::{
-    EffectPortKey, EffectPortRegistrationError, EffectPortRegistry, EffectPortRequirement,
-    EffectPortResolutionError, EffectPortResolveFuture, EffectPortResolver,
+    EffectBindingBuildError, EffectPortRegistrationError, EffectPortRegistry,
+    EffectPortResolutionError, EffectPortResolver, EffectRegistration, EffectRegistrationBuilder,
 };
 pub(crate) use runtime::EffectsCore;
 // FLOWIP-120z/B9: the proof facades are doc-hidden public bounds so rustc can

@@ -176,6 +176,7 @@ mod tests {
         const EFFECT_TYPE: &'static str = "effect_set.ping";
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::Idempotent;
+        type BindingMode = crate::effects::Portless;
 
         type Outcome = PingValue;
         type OutcomeSemantics = crate::effects::DomainFacts;
@@ -201,6 +202,7 @@ mod tests {
         const EFFECT_TYPE: &'static str = "effect_set.pong";
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::Idempotent;
+        type BindingMode = crate::effects::Portless;
 
         type Outcome = PingValue;
         type OutcomeSemantics = crate::effects::DomainFacts;

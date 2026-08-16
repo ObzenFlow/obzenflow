@@ -1,3 +1,12 @@
+error[E0432]: unresolved import `obzenflow::ai::EmbeddingBindingContract`
+  --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:10:5
+   |
+10 |     EmbeddingBindingContract, EmbeddingResponse, EmbeddingTarget, EmbeddingTransform,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+   |     |
+   |     no `EmbeddingBindingContract` in `ai`
+   |     help: a similar name exists in the module: `EmbeddingBindingFingerprint`
+
 error[E0599]: no function or associated item named `new` found for struct `EmbeddingTransformBuilder` in the current scope
   --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:29:40
    |
@@ -7,8 +16,8 @@ error[E0599]: no function or associated item named `new` found for struct `Embed
 note: if you're trying to build a new `EmbeddingTransformBuilder`, consider using `EmbeddingTransformBuilder::from_binding` which returns `EmbeddingTransformBuilder`
   --> crates/obzenflow_adapters/src/ai/builders.rs
    |
-   |     pub fn from_binding(binding: EmbeddingBindingContract) -> Self {
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     pub fn from_binding(binding: EffectBinding<EmbeddingGeneration>) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0277]: the trait bound `EmbeddingTransformBuilder: std::default::Default` is not satisfied
   --> tests/compile_fail/standalone_ai_removed_embedding_methods.rs:30:40

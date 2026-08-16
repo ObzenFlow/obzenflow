@@ -192,7 +192,7 @@ fn materialize_effect_observers_for_declarations(
             effect,
             materialization.declaration_index,
         )?;
-        attachments.push((effect.effect_type, attachment));
+        attachments.push((effect.effect_type(), attachment));
     }
     if let Err(error) = observers.push_effect_attachments(attachments) {
         return Err(error.into());
@@ -590,63 +590,44 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
 fn validate_effect_declarations(
     stage_name: &str,
     declarations: &[EffectDeclaration],
-    effect_ports: &EffectPortRegistry,
-    port_registration_policy: obzenflow_runtime::execution::EffectPortRegistrationPolicy,
+    _effect_ports: &EffectPortRegistry,
+    _port_registration_policy: obzenflow_runtime::execution::EffectPortRegistrationPolicy,
 ) -> Result<(), String> {
     let mut effect_types = std::collections::HashSet::new();
 
     for declaration in declarations {
-        if !effect_types.insert(declaration.effect_type) {
+        declaration.validate_public_identifiers().map_err(|error| {
+            format!("Effectful stage '{stage_name}' declares an invalid effect identifier: {error}")
+        })?;
+        if !effect_types.insert(declaration.effect_type()) {
             return Err(format!(
                 "Effectful stage '{stage_name}' declares effect '{}' more than once",
-                declaration.effect_type
+                declaration.effect_type()
             ));
         }
 
-        if matches!(declaration.safety, EffectSafety::NonIdempotentRequiresKey)
+        if matches!(declaration.safety(), EffectSafety::NonIdempotentRequiresKey)
             && !matches!(
-                declaration.idempotency_key_policy,
+                declaration.idempotency_key_policy(),
                 IdempotencyKeyPolicy::Required
             )
         {
             return Err(format!(
                 "Effectful stage '{stage_name}' declares non-idempotent effect '{}' without an idempotency-key strategy",
-                declaration.effect_type
+                declaration.effect_type()
             ));
         }
 
-        if matches!(declaration.safety, EffectSafety::NonIdempotentAtLeastOnce)
+        if matches!(declaration.safety(), EffectSafety::NonIdempotentAtLeastOnce)
             && !matches!(
-                declaration.idempotency_key_policy,
+                declaration.idempotency_key_policy(),
                 IdempotencyKeyPolicy::AtLeastOnceAcknowledged
             )
         {
             return Err(format!(
                 "Effectful stage '{stage_name}' declares paid non-idempotent effect '{}' without explicit at_least_once(...) acknowledgement",
-                declaration.effect_type
+                declaration.effect_type()
             ));
-        }
-
-        if matches!(declaration.safety, EffectSafety::Transactional)
-            && declaration.transactional_executor.is_none()
-        {
-            return Err(format!(
-                "Effectful stage '{stage_name}' declares transactional effect '{}' without a transactional executor",
-                declaration.effect_type
-            ));
-        }
-
-        for requirement in &declaration.required_ports {
-            if matches!(
-                port_registration_policy,
-                obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required
-            ) && !effect_ports.contains_requirement(requirement)
-            {
-                return Err(format!(
-                    "Effectful stage '{stage_name}' requires effect port '{}' for type '{}' but it is not registered",
-                    requirement.name, requirement.type_name
-                ));
-            }
         }
     }
 
@@ -1373,10 +1354,19 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
     }
 }
 
-/// The single control policy declared inline on one `effects:` entry.
+/// The single control policy declared inline on one effect-row entry.
 pub struct EffectPolicyAttachment {
     pub effect_type: &'static str,
     pub factory: Box<dyn MiddlewareFactory>,
+}
+
+fn canonicalize_effect_row(
+    mut effects: Vec<EffectDeclaration>,
+    mut effect_policies: Vec<EffectPolicyAttachment>,
+) -> (Vec<EffectDeclaration>, Vec<EffectPolicyAttachment>) {
+    effects.sort_by_key(EffectDeclaration::effect_type);
+    effect_policies.sort_by(|left, right| left.effect_type.cmp(right.effect_type));
+    (effects, effect_policies)
 }
 
 fn validate_effect_policy_attachments(
@@ -1386,7 +1376,7 @@ fn validate_effect_policy_attachments(
 ) -> Result<(), String> {
     let declared_effect_types = effect_declarations
         .iter()
-        .map(|declaration| declaration.effect_type)
+        .map(EffectDeclaration::effect_type)
         .collect::<std::collections::HashSet<_>>();
 
     let mut attached_effect_types = std::collections::HashSet::new();
@@ -1414,7 +1404,7 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     handler: H,
     effects: Vec<EffectDeclaration>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    /// Per-effect policy attachments from the `effects:` clause
+    /// Per-effect policy attachments from the effect row.
     /// (FLOWIP-120c H7).
     effect_policies: Vec<EffectPolicyAttachment>,
     direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan,
@@ -1435,6 +1425,7 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
         effect_policies: Vec<EffectPolicyAttachment>,
         backpressure: Option<BackpressureClause>,
     ) -> Self {
+        let (effects, effect_policies) = canonicalize_effect_row(effects, effect_policies);
         Self {
             name: name.into(),
             handler,
@@ -1686,12 +1677,12 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 .effect_policies
                 .iter()
                 .zip(&inline_policy_declarations)
-                .filter(|(attachment, _)| attachment.effect_type == effect.effect_type)
+                .filter(|(attachment, _)| attachment.effect_type == effect.effect_type())
                 .map(|(_, declaration)| declaration.clone())
                 .collect::<Vec<_>>();
             obzenflow_adapters::middleware::validate_effect_control_composition(
                 &self.name,
-                effect.effect_type,
+                effect.effect_type(),
                 &declarations,
             )
             .map_err(|error| error.to_string())?;
@@ -1707,7 +1698,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         {
             let effect_declaration = effect_declarations
                 .iter()
-                .find(|effect| effect.effect_type == attachment.effect_type)
+                .find(|effect| effect.effect_type() == attachment.effect_type)
                 .ok_or_else(|| {
                     format!(
                         "Effectful stage '{}' attaches policy middleware to undeclared effect '{}'",
@@ -2229,7 +2220,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
 pub struct EffectfulStatefulDescriptor<H: EffectfulStatefulHandler + 'static> {
     pub name: String,
     pub handler: H,
-    pub effects: Vec<EffectDeclaration>,
+    effects: Vec<EffectDeclaration>,
     pub observers: Vec<Box<dyn MiddlewareFactory>>,
     pub backpressure: Option<BackpressureClause>,
 }
@@ -2253,7 +2244,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
     }
 
     pub fn with_effect_declarations(mut self, effects: Vec<EffectDeclaration>) -> Self {
-        self.effects = effects;
+        self.effects = canonicalize_effect_row(effects, Vec::new()).0;
         self
     }
 
@@ -2680,9 +2671,7 @@ mod tests {
     use obzenflow_core::event::{JournalEvent, SystemEvent};
     use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, StageKey, TypedPayload};
     use obzenflow_runtime::control_plane::ControlPlaneProvider;
-    use obzenflow_runtime::effects::{
-        Effect, EffectCommitHandle, EffectContext, EffectError, TransactionalEffectPort,
-    };
+    use obzenflow_runtime::effects::{Effect, EffectContext, EffectError};
     use obzenflow_runtime::message_bus::FsmMessageBus;
     use obzenflow_runtime::stages::common::handlers::source::traits::FiniteSourceHandler;
     use obzenflow_runtime::stages::common::handlers::source::traits::{
@@ -2729,15 +2718,6 @@ mod tests {
         )
     }
 
-    trait DemoEffectPort: Send + Sync {}
-
-    struct DemoEffectPortImpl;
-
-    impl DemoEffectPort for DemoEffectPortImpl {}
-
-    #[derive(Clone, Debug)]
-    struct DemoTransactionalEffect;
-
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     struct DemoTransactionalOutput;
 
@@ -2745,17 +2725,21 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.transactional_declared_output";
     }
 
+    #[derive(Clone, Debug)]
+    struct MissingKeyEffect;
+
     #[async_trait]
-    impl Effect for DemoTransactionalEffect {
-        const EFFECT_TYPE: &'static str = "test.transactional_declared";
+    impl Effect for MissingKeyEffect {
+        const EFFECT_TYPE: &'static str = "test.non_idempotent";
         const SCHEMA_VERSION: u32 = 1;
-        const SAFETY: EffectSafety = EffectSafety::Transactional;
+        const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+        type BindingMode = obzenflow_runtime::effects::Portless;
 
         type Outcome = DemoTransactionalOutput;
         type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
         fn label(&self) -> &str {
-            "declared"
+            "missing_key"
         }
 
         fn canonical_input(&self) -> serde_json::Value {
@@ -2767,43 +2751,47 @@ mod tests {
         }
     }
 
-    struct DemoTransactionalPort;
+    #[derive(Clone, Debug)]
+    struct BarePaidEffect;
 
     #[async_trait]
-    impl TransactionalEffectPort<DemoTransactionalEffect> for DemoTransactionalPort {
-        async fn execute_and_commit(
-            &self,
-            _effect: DemoTransactionalEffect,
-            _ctx: &mut EffectContext,
-            commit: EffectCommitHandle<DemoTransactionalOutput>,
-        ) -> Result<DemoTransactionalOutput, EffectError> {
-            let output = DemoTransactionalOutput;
-            commit.commit_success(&output).await?;
-            Ok(output)
+    impl Effect for BarePaidEffect {
+        const EFFECT_TYPE: &'static str = "obzenflow.ai.chat_completion";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+        type BindingMode = obzenflow_runtime::effects::Portless;
+
+        type Outcome = ();
+        type OutcomeSemantics = obzenflow_runtime::effects::RecordedReply;
+
+        fn label(&self) -> &str {
+            "bare_paid"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            json!({})
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+            Ok(())
         }
     }
 
     #[test]
-    fn effect_declaration_validation_rejects_missing_key_strategy() {
-        let declaration = EffectDeclaration {
-            effect_type: "test.non_idempotent",
-            safety: EffectSafety::NonIdempotentRequiresKey,
-            idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
-            required_ports: Vec::new(),
-            transactional_executor: None,
-            outcome_kind: obzenflow_runtime::effects::EffectOutcomeKind::DomainFacts,
-            public_outcome_fact_types: Vec::new(),
-        };
+    fn effect_declaration_constructor_closes_missing_key_strategy() {
+        let declaration = EffectDeclaration::of::<MissingKeyEffect>();
+        assert_eq!(
+            declaration.idempotency_key_policy(),
+            IdempotencyKeyPolicy::Required
+        );
 
-        let err = validate_effect_declarations(
+        validate_effect_declarations(
             "effectful",
             &[declaration],
             &EffectPortRegistry::new(),
             obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
         )
-        .expect_err("missing key strategy must fail materialisation");
-
-        assert!(err.contains("without an idempotency-key strategy"));
+        .expect("the public constructor cannot create a missing-key declaration");
     }
 
     #[test]
@@ -2824,15 +2812,7 @@ mod tests {
 
     #[test]
     fn effect_declaration_validation_requires_explicit_at_least_once_acknowledgement() {
-        let declaration = EffectDeclaration {
-            effect_type: "obzenflow.ai.chat_completion",
-            safety: EffectSafety::NonIdempotentAtLeastOnce,
-            idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
-            required_ports: Vec::new(),
-            transactional_executor: None,
-            outcome_kind: obzenflow_runtime::effects::EffectOutcomeKind::RecordedReply,
-            public_outcome_fact_types: Vec::new(),
-        };
+        let declaration = EffectDeclaration::of::<BarePaidEffect>();
 
         let error = validate_effect_declarations(
             "standalone_chat",
@@ -2856,6 +2836,7 @@ mod tests {
         const EFFECT_TYPE: &'static str = "test.duplicate";
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::Idempotent;
+        type BindingMode = obzenflow_runtime::effects::Portless;
 
         type Outcome = DemoTransactionalOutput;
         type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -2874,19 +2855,20 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
-    struct DemoPortedEffect;
+    pub(super) struct ObserverFixtureEffect<const SECOND: bool>;
 
     #[async_trait]
-    impl Effect for DemoPortedEffect {
-        const EFFECT_TYPE: &'static str = "test.ported";
+    impl<const SECOND: bool> Effect for ObserverFixtureEffect<SECOND> {
+        const EFFECT_TYPE: &'static str = if SECOND { "effect.b" } else { "effect.a" };
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::Idempotent;
+        type BindingMode = obzenflow_runtime::effects::Portless;
 
-        type Outcome = DemoTransactionalOutput;
-        type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
+        type Outcome = ();
+        type OutcomeSemantics = obzenflow_runtime::effects::RecordedReply;
 
         fn label(&self) -> &str {
-            "ported"
+            "observer_fixture"
         }
 
         fn canonical_input(&self) -> serde_json::Value {
@@ -2894,8 +2876,55 @@ mod tests {
         }
 
         async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-            Ok(DemoTransactionalOutput)
+            Ok(())
         }
+    }
+
+    #[test]
+    fn effect_row_permutations_canonicalize_by_effect_identity() {
+        fn declaration<const SECOND: bool>() -> EffectDeclaration {
+            EffectDeclaration::of::<ObserverFixtureEffect<SECOND>>()
+        }
+
+        fn policy<const SECOND: bool>() -> EffectPolicyAttachment {
+            EffectPolicyAttachment {
+                effect_type: <ObserverFixtureEffect<SECOND> as Effect>::EFFECT_TYPE,
+                factory: Box::new(obzenflow_adapters::middleware::RateLimiterFactory::new(1.0)),
+            }
+        }
+
+        let (left_declarations, left_policies) = canonicalize_effect_row(
+            vec![declaration::<true>(), declaration::<false>()],
+            vec![policy::<true>(), policy::<false>()],
+        );
+        let (right_declarations, right_policies) = canonicalize_effect_row(
+            vec![declaration::<false>(), declaration::<true>()],
+            vec![policy::<false>(), policy::<true>()],
+        );
+
+        let declaration_types = |declarations: &[EffectDeclaration]| {
+            declarations
+                .iter()
+                .map(EffectDeclaration::effect_type)
+                .collect::<Vec<_>>()
+        };
+        let policy_types = |policies: &[EffectPolicyAttachment]| {
+            policies
+                .iter()
+                .map(|policy| policy.effect_type)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            declaration_types(&left_declarations),
+            declaration_types(&right_declarations)
+        );
+        assert_eq!(policy_types(&left_policies), policy_types(&right_policies));
+        assert_eq!(
+            declaration_types(&left_declarations),
+            ["effect.a", "effect.b"]
+        );
+        assert_eq!(policy_types(&left_policies), ["effect.a", "effect.b"]);
     }
 
     #[test]
@@ -2914,64 +2943,6 @@ mod tests {
         .expect_err("duplicate effect type must fail materialisation");
 
         assert!(err.contains("more than once"));
-    }
-
-    #[test]
-    fn effect_declaration_validation_checks_required_ports() {
-        let declaration = EffectDeclaration::of::<DemoPortedEffect>()
-            .require_port::<dyn DemoEffectPort>("primary");
-
-        let missing = validate_effect_declarations(
-            "effectful",
-            std::slice::from_ref(&declaration),
-            &EffectPortRegistry::new(),
-            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
-        )
-        .expect_err("missing required port must fail materialisation");
-        assert!(missing.contains("requires effect port"));
-
-        let mut registry = EffectPortRegistry::new();
-        registry
-            .insert::<dyn DemoEffectPort>("primary", Arc::new(DemoEffectPortImpl))
-            .expect("unique effect port");
-
-        validate_effect_declarations(
-            "effectful",
-            &[declaration],
-            &registry,
-            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
-        )
-        .expect("registered required port should pass");
-    }
-
-    #[test]
-    fn effect_declaration_validation_transactional_effect_requires_typed_port() {
-        let declaration = EffectDeclaration::transactional_effect::<DemoTransactionalEffect>("tx");
-
-        let missing = validate_effect_declarations(
-            "effectful",
-            std::slice::from_ref(&declaration),
-            &EffectPortRegistry::new(),
-            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
-        )
-        .expect_err("missing transactional port must fail materialisation");
-        assert!(missing.contains("requires effect port"));
-
-        let mut registry = EffectPortRegistry::new();
-        registry
-            .insert::<dyn TransactionalEffectPort<DemoTransactionalEffect>>(
-                "tx",
-                Arc::new(DemoTransactionalPort),
-            )
-            .expect("unique transactional port");
-
-        validate_effect_declarations(
-            "effectful",
-            &[declaration],
-            &registry,
-            obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required,
-        )
-        .expect("registered transactional typed port should pass");
     }
 
     #[derive(Clone, Debug)]
@@ -4064,18 +4035,6 @@ mod observer_placement_negative_tests {
 
     #[test]
     fn effect_factory_materialises_once_per_subject_and_regroups_one_declaration() {
-        fn declaration(effect_type: &'static str) -> EffectDeclaration {
-            EffectDeclaration {
-                effect_type,
-                safety: EffectSafety::Idempotent,
-                idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
-                required_ports: Vec::new(),
-                transactional_executor: None,
-                outcome_kind: obzenflow_runtime::effects::EffectOutcomeKind::RecordedReply,
-                public_outcome_fact_types: Vec::new(),
-            }
-        }
-
         let config = StageConfig {
             stage_id: StageId::new(),
             name: "effect_observer_cardinality".to_string(),
@@ -4091,7 +4050,10 @@ mod observer_placement_negative_tests {
         let factory = RecordingEffectObserverFactory {
             calls: calls.clone(),
         };
-        let effects = [declaration("effect.a"), declaration("effect.b")];
+        let effects = [
+            EffectDeclaration::of::<super::tests::ObserverFixtureEffect<false>>(),
+            EffectDeclaration::of::<super::tests::ObserverFixtureEffect<true>>(),
+        ];
         let mut observers = StageObserverSet::default();
 
         materialize_effect_observers_for_declarations(

@@ -22,12 +22,11 @@ use obzenflow_adapters::middleware::MiddlewareFactory;
 use obzenflow_core::ai::{
     AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceJobFailed,
     AiMapReduceMapInput, AiMapReducePlanningFailed, AiMapReducePlanningManifest,
-    AiMapReduceReduceInput, AiMapReduceTaggedPartial, AiMapRole, ChatBindingContract,
-    ChunkEnvelope, Many,
+    AiMapReduceReduceInput, AiMapReduceTaggedPartial, AiMapRole, ChunkEnvelope, Many,
 };
 use obzenflow_core::id::CompositeId;
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{Effect, EffectDeclaration};
+use obzenflow_runtime::effects::{Effect, EffectBinding, EffectDeclaration};
 use obzenflow_runtime::stages::stateful::SeededCollectByInput;
 use obzenflow_runtime::stages::transform::strategies::ai_chunking::generated_ai_chunk_handler;
 use obzenflow_runtime::stages::transform::ChunkByBudgetTyped;
@@ -46,7 +45,7 @@ type GeneratedMapReduceTypes<Seed, Item, Partial, Out> = fn() -> (Seed, Item, Pa
 pub fn generated_map_reduce<Seed, Item, Partial, Out, MapRole, FinaliseRole>(
     name: impl Into<String>,
     roles: (ChunkByBudgetTyped<Seed, Item>, MapRole, FinaliseRole),
-    chat_bindings: (ChatBindingContract, ChatBindingContract),
+    chat_bindings: (EffectBinding<ChatCompletion>, EffectBinding<ChatCompletion>),
     policies: GeneratedEffectPolicies,
 ) -> Box<dyn CompositeDescriptor>
 where
@@ -91,8 +90,8 @@ struct GeneratedAiMapReduceCompositeDescriptor<Seed, Item, Partial, Out, MapRole
     chunker: ChunkByBudgetTyped<Seed, Item>,
     map_role: MapRole,
     finalise_role: FinaliseRole,
-    map_chat_binding: ChatBindingContract,
-    finalise_chat_binding: ChatBindingContract,
+    map_chat_binding: EffectBinding<ChatCompletion>,
+    finalise_chat_binding: EffectBinding<ChatCompletion>,
     map_policies: Box<dyn MiddlewareFactory>,
     finalise_policies: Box<dyn MiddlewareFactory>,
     _types: PhantomData<GeneratedMapReduceTypes<Seed, Item, Partial, Out>>,
@@ -140,12 +139,12 @@ where
     fn expand(self: Box<Self>, ctx: &mut CompositeBuildContext) -> Result<(), CompositeBuildError> {
         if !self
             .map_chat_binding
-            .shares_construction_origin(&self.finalise_chat_binding)
+            .shares_construction_family(&self.finalise_chat_binding)
         {
             return Err(CompositeBuildError::binding_configuration(
                 "chat",
                 "ai_map_reduce!: map binding `map_chat` and reduce binding `reduce_chat` \
-                 must be clones of one ChatBindingContract; equal target metadata does not \
+                 must be clones of one EffectBinding<ChatCompletion>; equal evidence does not \
                  prove one estimator/configuration decision",
             ));
         }
@@ -187,6 +186,7 @@ where
             ]),
         );
 
+        let map_declaration = EffectDeclaration::named_at_least_once(&self.map_chat_binding);
         let map_handler =
             GeneratedAiMapHandler::<Item, Partial, _>::new(self.map_role, self.map_chat_binding);
         let map_descriptor = wrap_typed_descriptor(
@@ -196,7 +196,7 @@ where
             >(
                 "map",
                 map_handler,
-                vec![EffectDeclaration::at_least_once::<ChatCompletion>()],
+                vec![map_declaration],
                 vec![EffectPolicyAttachment {
                     effect_type: ChatCompletion::EFFECT_TYPE,
                     factory: self.map_policies,
@@ -242,6 +242,8 @@ where
             >()]),
         );
 
+        let finalise_declaration =
+            EffectDeclaration::named_at_least_once(&self.finalise_chat_binding);
         let finalise_handler = GeneratedAiFinaliseHandler::<Seed, Many<Partial>, Out, _>::new(
             self.finalise_role,
             self.finalise_chat_binding,
@@ -252,7 +254,7 @@ where
             >(
                 "finalize",
                 finalise_handler,
-                vec![EffectDeclaration::at_least_once::<ChatCompletion>()],
+                vec![finalise_declaration],
                 vec![EffectPolicyAttachment {
                     effect_type: ChatCompletion::EFFECT_TYPE,
                     factory: self.finalise_policies,

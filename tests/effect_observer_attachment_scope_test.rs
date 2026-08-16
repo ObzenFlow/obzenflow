@@ -56,6 +56,7 @@ impl Effect for EffectA {
     const EFFECT_TYPE: &'static str = "effect_observer_scope.a";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = EffectReply;
     type OutcomeSemantics = obzenflow_runtime::effects::RecordedReply;
@@ -83,6 +84,7 @@ impl Effect for EffectB {
     const EFFECT_TYPE: &'static str = "effect_observer_scope.b";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = EffectReply;
     type OutcomeSemantics = obzenflow_runtime::effects::RecordedReply;
@@ -222,8 +224,7 @@ async fn public_effect_observer_path_keys_dispatch_and_shares_declaration_quaran
             stages: {
                 input = source!(Input => input_source);
                 observed = effectful_transform!(
-                    Input -> EffectFact => observed_handler,
-                    effects: [EffectA, EffectB],
+                    Input ->{ EffectA, EffectB } EffectFact => observed_handler,
                     observers: [
                         effect_observer(
                             "panics-on-a",

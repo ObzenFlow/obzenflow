@@ -702,7 +702,6 @@ async fn graph_fan_out_dispatches_once_per_concurrent_stage_occurrence() {
                     input = source!(ConcurrentInput => input);
                     left = effectful_transform!(
                         ConcurrentInput -> ConcurrentOutput => left,
-                        effects: [],
                         observers: [handler_observer(
                             "left-occurrences",
                             RecordsHandlerOccurrences {
@@ -712,7 +711,6 @@ async fn graph_fan_out_dispatches_once_per_concurrent_stage_occurrence() {
                     );
                     right = effectful_transform!(
                         ConcurrentInput -> ConcurrentOutput => right,
-                        effects: [],
                         observers: [handler_observer(
                             "right-occurrences",
                             RecordsHandlerOccurrences {

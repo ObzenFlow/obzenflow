@@ -10,7 +10,7 @@ pub struct EffectContext {
     pub(super) flow_id: FlowId,
     pub(super) stage_key: String,
     pub(super) input_seq: StageInputPosition,
-    pub(super) ports: EffectPortRegistry,
+    pub(super) ports: super::ports::EffectPortView,
 }
 
 impl EffectContext {
@@ -58,16 +58,13 @@ impl EffectContext {
         fastrand::Rng::with_seed(u64::from_be_bytes(seed))
     }
 
-    pub fn port<T>(&self, name: &str) -> Result<Arc<T>, EffectError>
+    pub fn port<T>(&self, slot: EffectPortSlot<T>) -> Result<Arc<T>, EffectError>
     where
         T: ?Sized + Send + Sync + 'static,
     {
         self.ports
-            .get(name)
-            .ok_or_else(|| EffectError::MissingEffectPort {
-                type_name: std::any::type_name::<T>(),
-                name: name.to_string(),
-            })
+            .get(slot)
+            .ok_or_else(|| EffectError::target_invariant_violation(slot))
     }
 
     pub fn sleep(&self, duration: Duration) -> impl std::future::Future<Output = ()> + Send {
@@ -109,13 +106,18 @@ impl EffectInvocationContext {
         &self,
         effect_type: &'static str,
     ) -> Result<EffectDeclaration, EffectError> {
+        let reported_effect_type = if super::binding::validate_effect_type(effect_type).is_ok() {
+            effect_type
+        } else {
+            "invalid_effect_type"
+        };
         self.effect_declarations
             .iter()
-            .find(|declaration| declaration.effect_type == effect_type)
+            .find(|declaration| declaration.effect_type() == effect_type)
             .cloned()
             .ok_or_else(|| EffectError::UndeclaredEffect {
                 stage_key: self.stage_key.clone(),
-                effect_type: effect_type.to_string(),
+                effect_type: reported_effect_type.to_string(),
             })
     }
 }

@@ -14,7 +14,9 @@ pub mod transforms;
 
 pub use builders::{ChatTransformBuilder, EmbeddingTransformBuilder};
 pub use effects::{
-    ChatCompletion, ChatCompletionBuildError, EmbeddingGeneration, EmbeddingGenerationBuildError,
+    ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, ChatCompletionBuildError,
+    EmbeddingBindingEvidence, EmbeddingBindingEvidenceBuildError, EmbeddingGeneration,
+    EmbeddingGenerationBuildError, CHAT_CLIENT, EMBEDDING_CLIENT,
 };
 pub use error_mapping::effect_error_to_handler_error;
 pub use transforms::{ChatTransform, EmbeddingTransform};

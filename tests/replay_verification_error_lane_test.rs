@@ -134,7 +134,6 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
                 numbers = source!(Input => numbers_handler);
                 gate = effectful_transform!(
                     Input -> { Accepted } => gate_handler,
-                    effects: [],
                     observers: []
                 );
                 out = sink!(Accepted => out_handler);

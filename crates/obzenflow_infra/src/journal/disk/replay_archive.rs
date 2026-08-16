@@ -16,7 +16,8 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::run_manifest::{
-    RunManifest, JOURNAL_FORMAT_VERSION, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+    RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_FORMAT_VERSION,
+    RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
@@ -107,6 +108,22 @@ impl DiskReplayArchive {
                     "unsupported journal_format_version {journal_format_version:?} in {} (supported: {JOURNAL_FORMAT_VERSION})",
                     manifest_path.display()
                 ),
+            });
+        }
+        // FLOWIP-132a: descriptor shape is an archive interpretation contract,
+        // not an optional serde field. Gate the raw manifest before typed
+        // deserialization or any system/stage journal scan so an older archive
+        // cannot be mistaken for a portless binding.
+        let binding_descriptor_version = manifest_value
+            .get("capabilities")
+            .and_then(|value| value.as_object())
+            .and_then(|capabilities| capabilities.get(EFFECT_BINDING_DESCRIPTOR_CAPABILITY))
+            .and_then(|value| value.as_u64());
+        if binding_descriptor_version != Some(1) {
+            return Err(ReplayError::UnsupportedArchiveCapability {
+                capability: EFFECT_BINDING_DESCRIPTOR_CAPABILITY,
+                found: binding_descriptor_version,
+                supported: 1,
             });
         }
         let manifest: RunManifest =

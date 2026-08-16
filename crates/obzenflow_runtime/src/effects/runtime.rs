@@ -111,6 +111,7 @@ pub(crate) struct EffectsCore {
     next_output_ordinal: EffectOutputOrdinal,
     routed_output_fact_count: usize,
     committed_facts: Vec<ChainEvent>,
+    binding_fault: Option<BindingAuthorityFault>,
 }
 
 impl EffectsCore {
@@ -121,7 +122,43 @@ impl EffectsCore {
             next_output_ordinal: EffectOutputOrdinal::new(0),
             routed_output_fact_count: 0,
             committed_facts: Vec::new(),
+            binding_fault: None,
         }
+    }
+
+    fn binding_fault_error(&self) -> Option<EffectError> {
+        self.binding_fault
+            .clone()
+            .map(|fault| EffectError::BindingAuthority { fault })
+    }
+
+    fn gate_authoring(&self) -> Result<(), EffectError> {
+        match self.binding_fault_error() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn ensure_authoring_open(&self) -> Result<(), EffectError> {
+        self.gate_authoring()
+    }
+
+    fn latch_binding_fault(&mut self, fault: BindingAuthorityFault) -> EffectError {
+        let first = self.binding_fault.get_or_insert(fault).clone();
+        EffectError::BindingAuthority { fault: first }
+    }
+
+    pub(crate) fn binding_fault_fatal(
+        &self,
+    ) -> Option<crate::stages::common::handler_error::StageFatal> {
+        self.binding_fault
+            .as_ref()
+            .map(BindingAuthorityFault::stage_fatal)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_effect_ordinal_for_test(&self) -> EffectOrdinal {
+        self.next_effect_ordinal
     }
 
     /// Evidence of every user fact committed by this invocation, in commit
@@ -161,6 +198,7 @@ impl EffectsCore {
     }
 
     pub(crate) async fn preflight_next_effect_cursor_is_empty(&self) -> Result<(), EffectError> {
+        self.gate_authoring()?;
         let recorded_flow_id = self
             .ctx
             .effect_history
@@ -203,6 +241,7 @@ impl EffectsCore {
     }
 
     pub(crate) async fn request_generated_live_admission(&self) -> Result<(), EffectError> {
+        self.gate_authoring()?;
         if self.is_replaying() {
             return Ok(());
         }
@@ -336,6 +375,7 @@ impl EffectsCore {
     where
         T: TypedPayload,
     {
+        self.gate_authoring()?;
         if !self.ctx.emit_enabled {
             return Err(EffectError::EmitUnsupported {
                 stage_key: self.ctx.stage_key.clone(),
@@ -406,7 +446,42 @@ impl EffectsCore {
     where
         E: Effect,
     {
+        self.gate_authoring()?;
         let declaration = self.ctx.effect_declaration(E::EFFECT_TYPE)?;
+        let invocation = <E::BindingMode as EffectBindingMode<E>>::invocation_binding(&effect);
+        if let Err(mismatch) = declaration.binding().compare_invocation(&invocation) {
+            let kind = match mismatch {
+                super::binding::BindingMatchError::Mode => BindingMismatchKind::Mode,
+                super::binding::BindingMatchError::Family => {
+                    BindingMismatchKind::ConstructionFamily
+                }
+                super::binding::BindingMatchError::Evidence => BindingMismatchKind::Evidence,
+            };
+            let fault = BindingAuthorityFault::binding_mismatch(
+                E::EFFECT_TYPE,
+                declaration.binding().logical_name().cloned(),
+                kind,
+            );
+            return Err(self.latch_binding_fault(fault));
+        }
+
+        let result = Box::pin(self.perform_authorised(effect, declaration.clone())).await;
+        if let Err(error) = &result {
+            if let Some(fault) = self.binding_fault_for_error::<E>(&declaration, error) {
+                return Err(self.latch_binding_fault(fault));
+            }
+        }
+        result
+    }
+
+    async fn perform_authorised<E>(
+        &mut self,
+        effect: E,
+        declaration: EffectDeclaration,
+    ) -> Result<E::Outcome, EffectError>
+    where
+        E: Effect,
+    {
         // FLOWIP-120c G10: the missing-key check is a deterministic
         // validation error, so it sits above the effect-history lookup and
         // the boundary consult. Live and replay recompute the same error,
@@ -426,6 +501,7 @@ impl EffectsCore {
             self.ctx.stage_logic_version.clone(),
             E::EFFECT_TYPE,
             E::SCHEMA_VERSION,
+            declaration.binding_identity(),
         )?;
         let descriptor_hash = descriptor_hash(&descriptor)?;
         let recorded_flow_id = self
@@ -579,39 +655,19 @@ impl EffectsCore {
             }
         }
 
+        // A replay hit above never touches a resolver. Only a selected live
+        // continuation resolves its declared ports, then performs the
+        // effect-specific metadata-only binding check before consulting the
+        // boundary or authoring an attempt.
+        let binding_context = self.live_effect_context(&declaration)?;
+        effect.validate_port_bindings(&binding_context)?;
+
         if let Some(admission) = self.ctx.backpressure_writer.direct_fact_admission() {
             admission
                 .request_live()
                 .await
                 .map_err(EffectError::Execution)?;
         }
-
-        // A replay hit above never touches a resolver. Only a selected live
-        // continuation resolves its declared ports, then performs the
-        // effect-specific metadata-only binding check before consulting the
-        // boundary or authoring an attempt.
-        for requirement in &declaration.required_ports {
-            self.ctx
-                .effect_ports
-                .resolve_requirement(requirement)
-                .await
-                .map_err(|error| match error {
-                    EffectPortResolutionError::Missing { type_name, name } => {
-                        EffectError::MissingEffectPort { type_name, name }
-                    }
-                    EffectPortResolutionError::ResolverFailed {
-                        type_name,
-                        name,
-                        message,
-                    } => EffectError::EffectPortResolutionFailed {
-                        type_name,
-                        name,
-                        message,
-                    },
-                })?;
-        }
-        let binding_context = self.live_effect_context();
-        effect.validate_port_bindings(&binding_context)?;
 
         let identity = EffectIdentity {
             effect_type: E::EFFECT_TYPE,
@@ -633,6 +689,7 @@ impl EffectsCore {
                 descriptor_hash,
                 descriptor,
                 prior_attempts,
+                binding_context,
             ))
             .await;
         }
@@ -642,18 +699,18 @@ impl EffectsCore {
             // future. Heap-pin it for the same frame-containment reason.
             return Box::pin(self.perform_transactional(
                 effect,
-                declaration,
                 identity,
                 cursor,
                 descriptor_hash,
                 descriptor,
+                binding_context,
             ))
             .await;
         }
 
         let Some(boundary) = self.ctx.effect_boundary.clone() else {
             // Unguarded path: execute directly and record the outcome.
-            let mut effect_ctx = self.live_effect_context();
+            let mut effect_ctx = binding_context;
             return match Self::execute_into_success(effect, &mut effect_ctx).await {
                 Ok((output, success)) => {
                     self.append_success(
@@ -692,7 +749,7 @@ impl EffectsCore {
             let writer_id = self.ctx.writer_id;
             let parent_event = self.ctx.parent.event.clone();
             let lineage = self.ctx.lineage;
-            let base_context = self.live_effect_context();
+            let base_context = binding_context;
             RepeatableEffectOperation::new_with_lifecycle(move |lifecycle| {
                 let effect = effect.clone();
                 let mut effect_ctx = base_context.clone();
@@ -813,6 +870,7 @@ impl EffectsCore {
         descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
         prior_attempts: Vec<EffectAttemptStarted>,
+        binding_context: EffectContext,
     ) -> Result<E::Outcome, EffectError>
     where
         E: Effect,
@@ -861,7 +919,7 @@ impl EffectsCore {
             let writer_id = self.ctx.writer_id;
             let parent_event = self.ctx.parent.event.clone();
             let lineage = self.ctx.lineage;
-            let base_context = self.live_effect_context();
+            let base_context = binding_context;
             AffineEffectOperation::new_with_lifecycle(
                 highest_prior_attempt,
                 move |lifecycle| async move {
@@ -1154,10 +1212,7 @@ impl EffectsCore {
         attempt: EffectAttemptOrdinal,
         mut control_events: Vec<ChainEvent>,
     ) -> Result<(), EffectError> {
-        if matches!(
-            error,
-            EffectError::EffectPortBindingInvariantViolation { .. }
-        ) {
+        if matches!(error, EffectError::EffectTargetInvariantViolation { .. }) {
             let (preterminal, terminal) =
                 split_invariant_control_events(&cursor, attempt, control_events)?;
             self.commit_escape_control_group(
@@ -1403,6 +1458,7 @@ impl EffectsCore {
     where
         T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
     {
+        self.gate_authoring()?;
         let effect_ordinal = self.reserve_effect_ordinal()?;
         let descriptor = EffectDescriptor::new(
             "obzenflow.capture",
@@ -1483,32 +1539,18 @@ impl EffectsCore {
     async fn perform_transactional<E>(
         &mut self,
         effect: E,
-        declaration: EffectDeclaration,
         identity: EffectIdentity,
         cursor: EffectCursor,
         descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
+        mut effect_ctx: EffectContext,
     ) -> Result<E::Outcome, EffectError>
     where
         E: Effect,
     {
-        let executor =
-            declaration
-                .transactional_executor
-                .ok_or_else(|| EffectError::MissingEffectPort {
-                    type_name: std::any::type_name::<dyn TransactionalEffectPort<E>>(),
-                    name: "<missing transactional executor>".to_string(),
-                })?;
-        let port = self
-            .ctx
-            .effect_ports
-            .get::<dyn TransactionalEffectPort<E>>(executor)
-            .ok_or_else(|| EffectError::MissingEffectPort {
-                type_name: std::any::type_name::<dyn TransactionalEffectPort<E>>(),
-                name: executor.to_string(),
-            })?;
-
-        let mut effect_ctx = self.live_effect_context();
+        let executor_slot = transactional_effect_port_slot::<E>();
+        let executor = executor_slot.label();
+        let port = effect_ctx.port(executor_slot)?;
         let output_ordinal = match E::OutcomeSemantics::KIND {
             EffectOutcomeKind::DomainFacts => Some(self.reserve_output_ordinal()?),
             EffectOutcomeKind::RecordedReply => None,
@@ -1912,14 +1954,83 @@ impl EffectsCore {
         decode_effect_outcome(&record.outcome)
     }
 
-    fn live_effect_context(&self) -> EffectContext {
-        EffectContext {
+    fn binding_fault_for_error<E: Effect>(
+        &self,
+        declaration: &EffectDeclaration,
+        error: &EffectError,
+    ) -> Option<BindingAuthorityFault> {
+        if let EffectError::BindingAuthority { fault } = error {
+            return Some(fault.clone());
+        }
+
+        let (binding, _, _) = declaration.binding().named_parts()?;
+        match error {
+            EffectError::EffectTargetInvariantViolation { slot } => {
+                let slot = declaration.binding().declared_slot_label(slot.as_str())?;
+                Some(BindingAuthorityFault::target_invariant_violation(
+                    E::EFFECT_TYPE,
+                    binding.clone(),
+                    slot,
+                    false,
+                ))
+            }
+            EffectError::RecordedFailure {
+                detail: Some(detail),
+                ..
+            } => match detail.as_ref() {
+                EffectFailureDetail::PortBindingInvariantViolation { port, .. } => {
+                    let slot = declaration.binding().declared_slot_label(port)?;
+                    Some(BindingAuthorityFault::target_invariant_violation(
+                        E::EFFECT_TYPE,
+                        binding.clone(),
+                        slot,
+                        true,
+                    ))
+                }
+            },
+            _ => None,
+        }
+    }
+
+    fn live_effect_context(
+        &self,
+        declaration: &EffectDeclaration,
+    ) -> Result<EffectContext, EffectError> {
+        let ports = match declaration.binding().named_parts() {
+            None => super::ports::EffectPortView::default(),
+            Some((binding, registration, slots)) => self
+                .ctx
+                .effect_ports
+                .scoped_view(registration, slots)
+                .map_err(|error| {
+                    let fault = match error.kind {
+                        super::ports::EffectPortViewBuildErrorKind::MissingRegistration => {
+                            BindingAuthorityFault::registration_missing(
+                                declaration.effect_type(),
+                                binding.clone(),
+                            )
+                        }
+                        super::ports::EffectPortViewBuildErrorKind::Resolver(_) => {
+                            let slot = error
+                                .slot
+                                .expect("resolver failures are tied to a declared typed slot");
+                            BindingAuthorityFault::resolution_failed(
+                                declaration.effect_type(),
+                                binding.clone(),
+                                slot,
+                            )
+                        }
+                    };
+                    EffectError::BindingAuthority { fault }
+                })?,
+        };
+        Ok(EffectContext {
             is_replaying: false,
             flow_id: self.ctx.flow_id,
             stage_key: self.ctx.stage_key.clone(),
             input_seq: self.ctx.input_seq,
-            ports: self.ctx.effect_ports.clone(),
-        }
+            ports,
+        })
     }
 
     async fn append_record(&self, record: EffectRecord) -> Result<(), EffectError> {

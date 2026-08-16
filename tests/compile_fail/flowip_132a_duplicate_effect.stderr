@@ -1,0 +1,57 @@
+error[E0283]: type annotations needed
+  --> tests/compile_fail/flowip_132a_duplicate_effect.rs:8:13
+   |
+ 8 |       let _ = obzenflow_dsl::effectful_transform!(
+   |  _____________^
+ 9 | |         Input ->{ FirstEffect, FirstEffect } First => support::AllowsFirstEffect,
+10 | |         observers: []
+11 | |     );
+   | |_____^ cannot infer type
+   |
+   = note: multiple `impl`s satisfying `WithMember<FirstEffect, WithMember<FirstEffect, EmptySet>>: Member<FirstEffect, _>` found in the `obzenflow_core` crate:
+           - impl<T, Head, Rest, Index> Member<T, MemberAfter<Index>> for WithMember<Head, Rest>
+             where Rest: Member<T, Index>;
+           - impl<T, Rest> Member<T, MemberFound> for WithMember<T, Rest>;
+   = note: required for `WithMember<FirstEffect, EmptySet>` to implement `SubsetOf<WithMember<FirstEffect, WithMember<FirstEffect, EmptySet>>, SubsetProofStep<_, SubsetProofEnd>>`
+   = note: required for `WithMember<FirstEffect, EmptySet>` to implement `HandlerEffectsAreDeclaredByManifest<WithMember<FirstEffect, WithMember<FirstEffect, EmptySet>>, SubsetProofStep<_, SubsetProofEnd>>`
+note: required by a bound in `__obzenflow_assert_effectful_transform_contract`
+  --> tests/compile_fail/flowip_132a_duplicate_effect.rs:8:13
+   |
+ 8 |       let _ = obzenflow_dsl::effectful_transform!(
+   |  _____________^
+ 9 | |         Input ->{ FirstEffect, FirstEffect } First => support::AllowsFirstEffect,
+10 | |         observers: []
+11 | |     );
+   | |     ^
+   | |     |
+   | |_____required by a bound in this function
+   |       required by this bound in `__obzenflow_assert_effectful_transform_contract`
+   = note: this error originates in the macro `$crate::__obzenflow_assert_effectful_transform_contract` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0080]: evaluation panicked: duplicate member in a declared effect capability set: two members share an effect type; each effect appears exactly once (FLOWIP-120z)
+ --> crates/obzenflow_runtime/src/effects/effect_set.rs
+  |
+  | /         assert!(
+  | |             !const_str_eq(X::EFFECT_TYPE, Head::EFFECT_TYPE),
+  | |             "duplicate member in a declared effect capability set: two members share an \
+  | |              effect type; each effect appears exactly once (FLOWIP-120z)"
+  | |         );
+  | |_________^ evaluation of `<obzenflow_core::event::schema::WithMember<support::FirstEffect, obzenflow_core::event::schema::EmptySet> as obzenflow_runtime::effects::EffectTypeDisjoint<support::FirstEffect>>::OK` failed here
+
+note: erroneous constant encountered
+ --> crates/obzenflow_runtime/src/effects/effect_set.rs
+  |
+  |         <Rest as EffectTypeDisjoint<Head>>::OK,
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+ --> crates/obzenflow_runtime/src/effects/effect_set.rs
+  |
+  |     const MEMBERS_DISTINCT: () = L::DISTINCT_EFFECT_TYPES;
+  |                                  ^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+ --> crates/obzenflow_runtime/src/effects/effect_set.rs
+  |
+  |     S::MEMBERS_DISTINCT
+  |     ^^^^^^^^^^^^^^^^^^^

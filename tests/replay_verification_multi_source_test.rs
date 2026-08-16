@@ -92,6 +92,7 @@ impl Effect for ChargeEffect {
     const EFFECT_TYPE: &'static str = "replay_verification_multi.charge";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = Charged;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -197,8 +198,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
                 store_orders = source!(OrderPlaced => store_orders_handler);
                 intake = transform!(OrderPlaced -> OrderPlaced => intake_handler);
                 charge = effectful_transform!(
-                    OrderPlaced -> { Charged } => charge_handler,
-                    effects: [ChargeEffect],
+                    OrderPlaced ->{ ChargeEffect } { Charged } => charge_handler,
                     observers: []
                 );
                 receipts = sink!(Charged => receipts_handler);

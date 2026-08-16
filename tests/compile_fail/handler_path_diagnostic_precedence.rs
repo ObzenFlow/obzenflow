@@ -49,9 +49,8 @@ fn main() {
         backpressure:
     );
     let _ = obzenflow_dsl::effectful_transform!(
-        Input -> Output => Handler::new(),
+        Input ->{ Effect } Output => Handler::new(),
         observers: [],
-        effects: [Effect]
     );
 
     // The unsupported inference chunking clause remains primary too.

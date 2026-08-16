@@ -62,7 +62,6 @@ fn main() {
     let _ = obzenflow_dsl::transform!(Input -> Output => PureTransform);
     let _ = obzenflow_dsl::effectful_transform!(
         Input -> Output => ExternalWorkTransform,
-        effects: [],
         observers: []
     );
 }

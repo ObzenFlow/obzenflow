@@ -7,8 +7,8 @@ error[E0599]: no function or associated item named `new` found for struct `ChatT
 note: if you're trying to build a new `ChatTransformBuilder`, consider using `ChatTransformBuilder::from_binding` which returns `ChatTransformBuilder`
   --> crates/obzenflow_adapters/src/ai/builders.rs
    |
-   |     pub fn from_binding(binding: ChatBindingContract) -> Self {
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     pub fn from_binding(binding: EffectBinding<ChatCompletion>) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0277]: the trait bound `ChatTransformBuilder: std::default::Default` is not satisfied
   --> tests/compile_fail/standalone_ai_removed_chat_methods.rs:20:35

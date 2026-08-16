@@ -158,7 +158,7 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 
 /// Async transform surface for replay-safe effects.
 ///
-/// The stage arrow and `effects:` clause are the canonical operator-facing
+/// The stage arrow and inline effect row are the canonical operator-facing
 /// contract. `Output` and `AllowedEffects` mirror those declarations so Rust
 /// can reject an undeclared [`Effects::emit`] or [`Effects::perform`] inside
 /// this handler before the handler is erased for execution. They carry no
@@ -167,7 +167,7 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 /// A single output fact may be named directly. For a multi-fact arrow, use
 /// [`obzenflow_core::stage_fact_set!`]. Always mirror effect types with
 /// [`crate::effect_set!`]; middleware and policy values remain only in the
-/// stage's `effects:` clause.
+/// stage's effect row.
 ///
 /// ```ignore
 /// # use async_trait::async_trait;
@@ -212,7 +212,7 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
     label = "this handler does not match the effectful transform contract",
     note = "implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, \
             and `process`; `Input` must match the arrow input, while `Output` and \
-            `AllowedEffects` mirror the canonical arrow and `effects:` clause (FLOWIP-120z B9)"
+            `AllowedEffects` mirror the canonical arrow and effect row (FLOWIP-120z B9)"
 )]
 #[async_trait]
 pub trait EffectfulTransformHandler: Send + Sync {
@@ -331,7 +331,11 @@ where
         let mut fx = Effects::<H::Output, H::AllowedEffects>::new(effect_context);
         let input = H::Input::try_from_event(&event)
             .map_err(|e| HandlerError::Deserialization(e.to_string()))?;
-        match self.handler.process(input, &mut fx).await {
+        let handler_result = self.handler.process(input, &mut fx).await;
+        if let Some(fatal) = fx.binding_fault_fatal() {
+            return Err(HandlerError::Fatal(fatal));
+        }
+        match handler_result {
             Ok(_completion) => {
                 if let Err(divergence) = fx.preflight_settlement_has_no_unused_history().await {
                     return Err(HandlerError::Fatal(

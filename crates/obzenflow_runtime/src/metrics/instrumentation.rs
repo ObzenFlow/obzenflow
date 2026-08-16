@@ -441,7 +441,7 @@ impl StageInstrumentation {
         }
 
         // Per-effect policy instances (FLOWIP-120c G9), keyed by declared
-        // effect type; cardinality is bounded by the stage's `effects:` set.
+        // effect type; cardinality is bounded by the stage's effect row.
         ctx.effect_circuit_breakers = self
             .effect_cb_snapshotters
             .iter()

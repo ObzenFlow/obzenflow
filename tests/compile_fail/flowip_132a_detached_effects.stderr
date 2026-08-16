@@ -1,0 +1,20 @@
+error: effectful_transform!: detached `effects: [...]` was removed; write `Input -> { Effect } Output => handler`
+  --> tests/compile_fail/flowip_132a_detached_effects.rs:8:13
+   |
+ 8 |       let _ = obzenflow_dsl::effectful_transform!(
+   |  _____________^
+ 9 | |         Input -> First => support::AllowsFirstEffect,
+10 | |         effects: [FirstEffect],
+11 | |         observers: []
+12 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_transform_exact_contract` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `FirstEffect`, `First`, and `Input`
+ --> tests/compile_fail/flowip_132a_detached_effects.rs:5:15
+  |
+5 | use support::{First, FirstEffect, Input};
+  |               ^^^^^  ^^^^^^^^^^^  ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

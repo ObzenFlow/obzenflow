@@ -11,12 +11,10 @@ fn main() {
     let first_handler = handler.clone();
     let _ = obzenflow_dsl::effectful_transform!(
         Input -> { First } => first_handler,
-        effects: [],
         observers: []
     );
     let _ = obzenflow_dsl::effectful_transform!(
         Input -> { First, Second } => handler,
-        effects: [],
         observers: []
     );
 }

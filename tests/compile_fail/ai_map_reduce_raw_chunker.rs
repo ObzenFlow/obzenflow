@@ -30,7 +30,7 @@ fn main() {
     let _ = generated_map_reduce::<Seed, Item, Partial, Output, _, _>(
         "raw-chunker",
         (RawChunker, MapRole, FinaliseRole),
-        (contract(), contract()),
+        (binding(), binding()),
         (
             obzenflow_adapters::middleware::control::ai_resilience(),
             obzenflow_adapters::middleware::control::ai_resilience(),

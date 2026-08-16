@@ -153,6 +153,7 @@ impl Effect for CountingEffect {
     const EFFECT_TYPE: &'static str = "resume_abort.counting";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = EffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -274,8 +275,7 @@ fn build_flow(
                 src_b = infinite_source!(ChannelTick => channel_b);
                 merge = transform!(ChannelTick -> Merged => merge_transform);
                 effectful = effectful_transform!(
-                    Merged -> { AbortOutput, EffectValue } => effectful_tail,
-                    effects: [CountingEffect],
+                    Merged ->{ CountingEffect } { AbortOutput, EffectValue } => effectful_tail,
                     observers: []
                 );
                 collect = sink!(AbortOutput => counting_sink);

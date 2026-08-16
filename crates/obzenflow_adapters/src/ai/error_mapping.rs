@@ -6,23 +6,20 @@ use obzenflow_core::ai::AiClientError;
 use obzenflow_core::event::{
     EffectFailureCode, EffectFailureSource, RetryDisposition, StageFatalCode, StageFatalReason,
 };
-use obzenflow_runtime::effects::EffectError;
+use obzenflow_runtime::effects::{EffectError, EffectPortSlot};
 use obzenflow_runtime::stages::common::handler_error::{HandlerError, StageFatal};
 
 /// Map an AI port failure into durable effect failure evidence.
-pub(crate) fn ai_client_error_to_effect_error(
+pub(crate) fn ai_client_error_to_effect_error<P>(
     error: AiClientError,
-    port: &'static str,
+    port: EffectPortSlot<P>,
     failure_source: &'static str,
-) -> EffectError {
+) -> EffectError
+where
+    P: ?Sized + Send + Sync + 'static,
+{
     match error {
-        AiClientError::TargetMismatch { requested, bound } => {
-            EffectError::EffectPortBindingInvariantViolation {
-                port: port.to_string(),
-                expected: bound.to_string(),
-                observed: requested.to_string(),
-            }
-        }
+        AiClientError::TargetMismatch { .. } => EffectError::target_invariant_violation(port),
         AiClientError::Timeout { message } => dependency(failure_source, "timeout", message),
         AiClientError::Remote { message } => dependency(failure_source, "remote", message),
         AiClientError::RateLimited { message, .. } => {
@@ -63,38 +60,7 @@ fn fatal(
 /// classifications.
 pub fn effect_error_to_handler_error(error: EffectError) -> HandlerError {
     match error {
-        EffectError::MissingEffectPort { name, .. } => fatal(
-            StageFatalCode::Configuration,
-            StageFatalReason::EffectPortRegistrationMissing,
-            format!("required effect port '{name}' is not registered"),
-        ),
-        EffectError::EffectPortResolutionFailed { name, message, .. } => fatal(
-            StageFatalCode::Configuration,
-            StageFatalReason::EffectPortResolutionFailed,
-            format!("effect port '{name}' failed to resolve: {message}"),
-        ),
-        EffectError::EffectPortBindingMismatch {
-            port,
-            expected,
-            observed,
-        } => fatal(
-            StageFatalCode::Configuration,
-            StageFatalReason::EffectPortBindingMismatch,
-            format!(
-                "effect port '{port}' binding mismatch: expected {expected}, observed {observed}"
-            ),
-        ),
-        EffectError::EffectPortBindingInvariantViolation {
-            port,
-            expected,
-            observed,
-        } => fatal(
-            StageFatalCode::Configuration,
-            StageFatalReason::EffectPortTargetInvariantViolation,
-            format!(
-                "effect port '{port}' target invariant failed: expected {expected}, observed {observed}"
-            ),
-        ),
+        error @ EffectError::BindingAuthority { .. } => HandlerError::from(error),
         error @ (EffectError::MissingRecordedEffect { .. }
         | EffectError::EffectInDoubt { .. }
         | EffectError::DuplicateRecordedEffect { .. }

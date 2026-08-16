@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::binding::EffectDeclarationBinding;
 use super::*;
 use obzenflow_core::StageFactSet;
 use serde::de::DeserializeOwned;
@@ -156,23 +157,41 @@ where
 
 #[derive(Debug, Clone)]
 pub struct EffectDeclaration {
-    pub effect_type: &'static str,
-    pub safety: EffectSafety,
-    pub idempotency_key_policy: IdempotencyKeyPolicy,
-    pub required_ports: Vec<EffectPortRequirement>,
-    pub transactional_executor: Option<&'static str>,
+    effect_type: &'static str,
+    safety: EffectSafety,
+    idempotency_key_policy: IdempotencyKeyPolicy,
+    pub(crate) binding: EffectDeclarationBinding,
     /// Event-sourcing meaning selected by the effect type.
-    pub outcome_kind: EffectOutcomeKind,
+    outcome_kind: EffectOutcomeKind,
     /// Public facts this effect may author. Recorded replies project an empty
     /// set and therefore never enter a stage output contract.
-    pub public_outcome_fact_types: Vec<TypedFactType>,
+    public_outcome_fact_types: Vec<TypedFactType>,
 }
 
 impl EffectDeclaration {
     pub fn of<E>() -> Self
     where
+        E: Effect<BindingMode = Portless>,
+    {
+        Self::for_binding::<E>(EffectDeclarationBinding::Portless)
+    }
+
+    /// Declare a named effect using the lexical binding selected by `via`.
+    pub fn named<E>(binding: &EffectBinding<E>) -> Self
+    where
+        E: NamedEffect,
+    {
+        Self::for_binding::<E>(binding.declaration_binding())
+    }
+
+    fn for_binding<E>(binding: EffectDeclarationBinding) -> Self
+    where
         E: Effect,
     {
+        assert!(
+            super::binding::validate_effect_type(E::EFFECT_TYPE).is_ok(),
+            "effect identifiers must contain dot-separated public identifier segments and be at most 255 ASCII bytes"
+        );
         let idempotency_key_policy = match E::SAFETY {
             EffectSafety::Idempotent | EffectSafety::Transactional => {
                 IdempotencyKeyPolicy::NotRequired
@@ -185,8 +204,7 @@ impl EffectDeclaration {
             effect_type: E::EFFECT_TYPE,
             safety: E::SAFETY,
             idempotency_key_policy,
-            required_ports: E::required_ports(),
-            transactional_executor: None,
+            binding,
             outcome_kind: <E::OutcomeSemantics as EffectOutcomeSemantics<E::Outcome>>::KIND,
             public_outcome_fact_types: <<E::OutcomeSemantics as EffectOutcomeSemantics<
                 E::Outcome,
@@ -195,11 +213,36 @@ impl EffectDeclaration {
         }
     }
 
+    pub fn effect_type(&self) -> &'static str {
+        self.effect_type
+    }
+
+    pub fn safety(&self) -> EffectSafety {
+        self.safety
+    }
+
+    pub fn idempotency_key_policy(&self) -> IdempotencyKeyPolicy {
+        self.idempotency_key_policy
+    }
+
+    pub fn outcome_kind(&self) -> EffectOutcomeKind {
+        self.outcome_kind
+    }
+
+    pub fn public_outcome_fact_types(&self) -> &[TypedFactType] {
+        &self.public_outcome_fact_types
+    }
+
+    /// Validate the framework-visible effect identifier before a stage can be materialised.
+    pub fn validate_public_identifiers(&self) -> Result<(), BindingIdentifierError> {
+        super::binding::validate_effect_type(self.effect_type)
+    }
+
     /// Explicit acknowledgement for an effect whose only safe recovery is a
     /// new at-least-once attempt after durable in-doubt evidence.
     pub fn at_least_once<E>() -> Self
     where
-        E: Effect,
+        E: Effect<BindingMode = Portless>,
     {
         let mut declaration = Self::of::<E>();
         declaration.safety = EffectSafety::NonIdempotentAtLeastOnce;
@@ -207,36 +250,34 @@ impl EffectDeclaration {
         declaration
     }
 
-    pub fn transactional_effect<E>(executor: &'static str) -> Self
+    /// Explicit at-least-once acknowledgement for a named effect.
+    pub fn named_at_least_once<E>(binding: &EffectBinding<E>) -> Self
     where
-        E: Effect,
+        E: NamedEffect,
     {
-        let mut required_ports = E::required_ports();
-        required_ports.push(EffectPortRequirement::of::<dyn TransactionalEffectPort<E>>(
-            executor,
-        ));
-
-        Self {
-            effect_type: E::EFFECT_TYPE,
-            safety: EffectSafety::Transactional,
-            idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
-            required_ports,
-            transactional_executor: Some(executor),
-            outcome_kind: <E::OutcomeSemantics as EffectOutcomeSemantics<E::Outcome>>::KIND,
-            public_outcome_fact_types: <<E::OutcomeSemantics as EffectOutcomeSemantics<
-                E::Outcome,
-            >>::PublicFacts as StageFactSet>::member_fact_types(
-            ),
-        }
+        let mut declaration = Self::named(binding);
+        declaration.safety = EffectSafety::NonIdempotentAtLeastOnce;
+        declaration.idempotency_key_policy = IdempotencyKeyPolicy::AtLeastOnceAcknowledged;
+        declaration
     }
 
-    pub fn require_port<T>(mut self, name: impl Into<String>) -> Self
+    /// Select transactional execution through the named effect's reserved typed slot.
+    pub fn transactional<E>(binding: &EffectBinding<E>) -> Self
     where
-        T: ?Sized + Send + Sync + 'static,
+        E: NamedEffect,
     {
-        self.required_ports
-            .push(EffectPortRequirement::of::<T>(name));
-        self
+        let mut declaration = Self::named(binding);
+        declaration.safety = EffectSafety::Transactional;
+        declaration.idempotency_key_policy = IdempotencyKeyPolicy::NotRequired;
+        declaration
+    }
+
+    pub(crate) fn binding_identity(&self) -> obzenflow_core::EffectBindingIdentity {
+        self.binding.identity()
+    }
+
+    pub(crate) fn binding(&self) -> &EffectDeclarationBinding {
+        &self.binding
     }
 }
 
@@ -245,6 +286,9 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
     const EFFECT_TYPE: &'static str;
     const SCHEMA_VERSION: u32;
     const SAFETY: EffectSafety;
+
+    /// Closed binding strategy for this effect contract.
+    type BindingMode: EffectBindingMode<Self>;
 
     /// The typed value returned to the handler after live execution or replay.
     type Outcome: Clone + Send + Sync + 'static;
@@ -269,10 +313,6 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
         None
     }
-
-    fn required_ports() -> Vec<EffectPortRequirement> {
-        Vec::new()
-    }
 }
 
 #[async_trait]
@@ -283,4 +323,53 @@ pub trait TransactionalEffectPort<E: Effect>: Send + Sync {
         ctx: &mut EffectContext,
         commit: EffectCommitHandle<E::Outcome, E::OutcomeSemantics>,
     ) -> Result<E::Outcome, EffectError>;
+}
+
+/// Reserved effect-local slot used by `transactional(E) via binding`.
+pub const fn transactional_effect_port_slot<E: Effect>(
+) -> EffectPortSlot<dyn TransactionalEffectPort<E>> {
+    EffectPortSlot::new("executor")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Debug)]
+    struct InvalidIdentifierEffect;
+
+    #[async_trait]
+    impl Effect for InvalidIdentifierEffect {
+        const EFFECT_TYPE: &'static str = "https://credential-canary.example";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Idempotent;
+        type BindingMode = Portless;
+        type Outcome = ();
+        type OutcomeSemantics = RecordedReply;
+
+        fn label(&self) -> &str {
+            "invalid_identifier"
+        }
+
+        fn canonical_input(&self) -> Value {
+            Value::Null
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn invalid_effect_identifier_cannot_become_a_declaration_or_diagnostic_value() {
+        let panic = std::panic::catch_unwind(EffectDeclaration::of::<InvalidIdentifierEffect>)
+            .expect_err("invalid identifiers must fail at construction");
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+            .expect("constructor panic has a static curated message");
+        assert!(!message.contains("credential-canary"));
+        assert!(message.contains("effect identifiers must contain dot-separated"));
+    }
 }

@@ -224,11 +224,11 @@ where
 /// Public only for exported macro expansion; it is not user-implemented API.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "the stage `effects:` clause declares an effect missing from the handler's \
+    message = "the stage effect row declares an effect missing from the handler's \
                `AllowedEffects`",
     label = "this effect manifest is not contained in the handler's `AllowedEffects` set",
-    note = "the stage `effects:` clause is canonical: mirror its effects in `type \
-            AllowedEffects = obzenflow_runtime::effect_set![...]`, or change `effects:` \
+    note = "the stage effect row is canonical: mirror its effects in `type \
+            AllowedEffects = obzenflow_runtime::effect_set![...]`, or change the row \
             first if the stage capability contract is wrong (FLOWIP-120z B9)"
 )]
 pub trait ManifestEffectsAreAllowedByHandler<HandlerMembers, Proof>:
@@ -251,10 +251,10 @@ where
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "the handler's `AllowedEffects` permits an effect missing from the stage \
-               `effects:` clause",
+               effect row",
     label = "the handler's `AllowedEffects` set is not contained in this effect manifest",
-    note = "the stage `effects:` clause is canonical: remove the extra effect from \
-            `AllowedEffects`, or add it to `effects:` first when the stage needs the \
+    note = "the stage effect row is canonical: remove the extra effect from \
+            `AllowedEffects`, or add it to the row first when the stage needs the \
             capability and then mirror the clause in `type AllowedEffects = \
             obzenflow_runtime::effect_set![...]` (FLOWIP-120z B9)"
 )]
@@ -2062,13 +2062,13 @@ pub fn validate_effect_fact_containment(
             // any I/O. Dispatch is by event type, so a collision would make
             // carrier reconstruction ambiguous.
             let mut members_by_event_type: HashMap<String, String> = HashMap::new();
-            for fact in &declaration.public_outcome_fact_types {
+            for fact in declaration.public_outcome_fact_types() {
                 if let Some(first_member) = members_by_event_type
                     .insert(fact.event_type.to_string(), fact.display_name.clone())
                 {
                     return Err(FlowBuildError::DuplicateEffectOutcomeFactEventType {
                         stage_name: name.clone(),
-                        effect_type: declaration.effect_type.to_string(),
+                        effect_type: declaration.effect_type().to_string(),
                         event_type: fact.event_type.to_string(),
                         first_member,
                         second_member: fact.display_name.clone(),
@@ -2077,7 +2077,7 @@ pub fn validate_effect_fact_containment(
                 if !contract_type_ids.contains(&fact.type_id) {
                     return Err(FlowBuildError::EffectFactNotInContract {
                         stage_name: name.clone(),
-                        effect_type: declaration.effect_type.to_string(),
+                        effect_type: declaration.effect_type().to_string(),
                         fact: fact.display_name.clone(),
                         contract: output_contract_display(metadata),
                     });

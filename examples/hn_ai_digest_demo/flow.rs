@@ -8,22 +8,26 @@ use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
 use anyhow::Result;
 use obzenflow::ai::{
-    ChatEffectBinding, ChunkInfo, EstimateSource, Prompt, SystemPrompt, TokenCount, UserPrompt,
+    ChatCompletion, ChatEffectBinding, ChunkInfo, EstimateSource, Prompt, SystemPrompt, TokenCount,
+    UserPrompt,
 };
 use obzenflow::sources::{http_pull_config, HttpPullSource};
 use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_transforms};
+use obzenflow_adapters::ai::CHAT_CLIENT;
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_adapters::middleware::{CircuitBreaker, RateLimiterBuilder};
 use obzenflow_core::ai::{
     AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply, ChatMessage,
-    ChatParams, ChatRequestSpec, ChatResponse, ChatTarget, Many, CHAT_CLIENT_PORT,
+    ChatParams, ChatRequestSpec, ChatResponse, ChatTarget, Many,
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::error::FlowBuildError;
 use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectPortRegistry, EffectPortResolver};
+use obzenflow_runtime::effects::{
+    EffectPortRegistry, EffectPortResolver, EffectRegistrationBuilder, LogicalEffectBindingName,
+};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -365,8 +369,26 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 binding: "chat".to_string(),
                 detail: error.to_string(),
             })?
-            .into_parts();
-        let chat_target = chat.target().clone();
+            .into_parts()
+            .map_err(|error| FlowBuildError::BindingConfiguration {
+                binding: "chat".to_string(),
+                detail: error.to_string(),
+            })?;
+        let (chat, chat_registration) = if let Some(resolver) = chat_resolver_override {
+            EffectRegistrationBuilder::<ChatCompletion>::new(
+                LogicalEffectBindingName::new("chat").expect("valid fixture binding name"),
+                chat.evidence().clone(),
+            )
+            .bind_deferred(CHAT_CLIENT, resolver)
+            .and_then(EffectRegistrationBuilder::finish)
+            .map_err(|error| FlowBuildError::BindingConfiguration {
+                binding: "chat".to_string(),
+                detail: error.to_string(),
+            })?
+        } else {
+            (chat, chat_registration)
+        };
+        let chat_target = chat.evidence().target().clone();
         let budget_per_group = resolve_hn_group_budget(budget_per_group_override, &chat_target);
         let system_prompt: SystemPrompt = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply."
             .into();
@@ -381,19 +403,17 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
             base_url: base_url_for_summary,
             ai_provider: chat_target.provider.to_string(),
             ai_model: chat_target.model.clone(),
-            token_estimator: chat.estimator().source(),
+            token_estimator: chat.evidence().estimator().source(),
             budget_per_group,
             interests,
             chat_prompt_system: system_prompt,
         });
-        let effect_ports = if let Some(resolver) = chat_resolver_override {
-            EffectPortRegistry::new().with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)
-        } else {
-            chat_registration.install_into(EffectPortRegistry::new())
-        }
-        .map_err(|error| FlowBuildError::BindingConfiguration {
-            binding: "chat".to_string(),
-            detail: error.to_string(),
+        let mut effect_ports = EffectPortRegistry::new();
+        effect_ports.install(chat_registration).map_err(|error| {
+            FlowBuildError::BindingConfiguration {
+                binding: "chat".to_string(),
+                detail: error.to_string(),
+            }
         })?;
 
         let decoder = hn_story_decoder(base_url, max_stories);

@@ -165,7 +165,6 @@ async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
                 numbers = source!(ProbeEvent => numbers_handler);
                 slow_ai = effectful_transform!(
                     ProbeEvent -> ProbeOutputEvent => slow_ai_handler,
-                    effects: [],
                     observers: [],
                 );
                 sink = sink!(ProbeOutputEvent => sink_handler);

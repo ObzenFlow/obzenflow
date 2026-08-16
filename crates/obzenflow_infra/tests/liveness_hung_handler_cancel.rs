@@ -217,7 +217,6 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
                 numbers = source!(ProbeEvent => one_event_source);
                 hung = effectful_transform!(
                     ProbeEvent -> ProbeEvent => hung_transform,
-                    effects: [],
                     observers: [
                         handler_observer(
                             "hung-handler-occurrences",

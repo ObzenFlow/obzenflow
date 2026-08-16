@@ -486,7 +486,7 @@ fn validate_failure_detail(
     error_type: &EffectFailureKind,
     detail: Option<&EffectFailureDetail>,
 ) -> Result<(), EffectError> {
-    let invariant_type = error_type.as_str() == "effect_port_binding_invariant_violation";
+    let invariant_type = error_type.as_str() == "target_invariant_violation";
     let invariant_detail = matches!(
         detail,
         Some(EffectFailureDetail::PortBindingInvariantViolation { .. })

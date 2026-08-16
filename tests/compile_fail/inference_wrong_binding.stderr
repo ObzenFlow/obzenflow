@@ -1,4 +1,4 @@
-error[E0277]: inference!: binding `embeddings` is not a ChatBindingContract
+error[E0277]: inference!: binding `embeddings` is not an EffectBinding<ChatCompletion>
   --> tests/compile_fail/inference_wrong_binding.rs:15:13
    |
 15 |       let _ = inference!(
@@ -7,21 +7,21 @@ error[E0277]: inference!: binding `embeddings` is not a ChatBindingContract
 17 | |             at_least_once(ChatCompletion) via embeddings with policy
 18 | |         } Output => role
 19 | |     );
-   | |_____^ expected a ChatBindingContract here
+   | |_____^ expected an EffectBinding<ChatCompletion> here
    |
    = help: the trait `InferenceChatBindingExpression<embeddings>` is not implemented for `bool`
-   = note: `via` selects the credential-free chat contract value; it is not a runtime port name
-help: the trait `InferenceChatBindingExpression<BindingName>` is implemented for `ChatBindingContract`
+   = note: `via` selects typed credential-free binding evidence; it is not a runtime port name
+help: the trait `InferenceChatBindingExpression<BindingName>` is implemented for `EffectBinding<ChatCompletion>`
   --> crates/obzenflow_dsl/src/dsl/ai_effect.rs
    |
-   | impl<BindingName> InferenceChatBindingExpression<BindingName> for ChatBindingContract {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `obzenflow_dsl::ai_effect::clone_inference_chat_contract`
+   | impl<BindingName> InferenceChatBindingExpression<BindingName> for EffectBinding<ChatCompletion> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `obzenflow_dsl::ai_effect::clone_inference_chat_binding`
   --> crates/obzenflow_dsl/src/dsl/ai_effect.rs
    |
-   | pub fn clone_inference_chat_contract<Binding, BindingName>(binding: &Binding) -> ChatBindingContract
-   |        ----------------------------- required by a bound in this function
-   | where
+   | pub fn clone_inference_chat_binding<Binding, BindingName>(
+   |        ---------------------------- required by a bound in this function
+...
    |     Binding: InferenceChatBindingExpression<BindingName> + ?Sized,
-   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `clone_inference_chat_contract`
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `clone_inference_chat_binding`
    = note: this error originates in the macro `$crate::__obzenflow_clone_ai_chat_contract` which comes from the expansion of the macro `inference` (in Nightly builds, run with -Z macro-backtrace for more info)

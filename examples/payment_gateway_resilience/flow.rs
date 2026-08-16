@@ -251,13 +251,12 @@ pub fn assemble_flow(
                 // refused the call, and the handler routes the refusal to
                 // manual review.
                 authorize_payment = effectful_transform!(
-                    ValidatedOrder -> {
+                    ValidatedOrder ->{ AuthorizePayment with gateway_resilience } {
                         PaymentAuthorized,
                         PaymentDeclined,
                         OrderCancelled,
                         PaymentAuthorizationUnavailable
                     } => gateway_transform,
-                    effects: [AuthorizePayment with gateway_resilience],
                 );
 
                 // Paid-order sink: a tiny in-process console integration. Its

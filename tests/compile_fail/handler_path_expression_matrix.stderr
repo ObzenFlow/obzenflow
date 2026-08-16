@@ -1,519 +1,519 @@
 error: source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MySource::new(...); events = source!(Event => source);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
+   |
+70 |     reject_in_every_slot!(make());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: async_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncSource::new(...); events = async_source!(Event => source);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
+   |
+70 |     reject_in_every_slot!(make());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyInfiniteSource::new(...); events = infinite_source!(Event => source);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
+   |
+70 |     reject_in_every_slot!(make());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: async_infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncInfiniteSource::new(...); events = async_infinite_source!(Event => source);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
+   |
+70 |     reject_in_every_slot!(make());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyTransform::new(...); output = transform!(Input -> Output => handler);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
+   |
+70 |     reject_in_every_slot!(make());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: effectful_transform!: expected `-> OutputType => handler` after input type
+  --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
+   |
+70 |     reject_in_every_slot!(make());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_transform_exact_contract` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyStateful::new(...); output = stateful!(Input -> Output => handler);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
+   |
+70 |     reject_in_every_slot!(make());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: effectful_stateful!: expected `-> OutputType => handler` after input type
+  --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
+   |
+70 |     reject_in_every_slot!(make());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_stateful_exact_contract` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: join!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = joins::inner::<Reference, Stream, Output, _, _, _, _>(...); output = join!(catalog reference: Reference, Stream -> Output => handler);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
+   |
+70 |     reject_in_every_slot!(make());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: sink!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let output = SinkTyped::new(...); events = sink!(Event => output);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
+   |
+70 |     reject_in_every_slot!(make());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let role = MyRole::new(...); answer = inference!(Input -> { ... } Output => role);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
+   |
+70 |     reject_in_every_slot!(make());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: ai_map_reduce! map role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let map_role = MyMapRole::new(...); result = ai_map_reduce!(Seed -> Out => { map: [Item] -> { ... } Partial => map_role, ... }, chunking: ...);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
+   |
+70 |     reject_in_every_slot!(make());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: ai_map_reduce! reduce role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let reduce_role = MyReduceRole::new(...); result = ai_map_reduce!(Seed -> Out => { ..., reduce: (Seed, [Partial]) -> { ... } Out => reduce_role }, chunking: ...);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
+   |
+70 |     reject_in_every_slot!(make());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MySource::new(...); events = source!(Event => source);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
+   |
+71 |     reject_in_every_slot!(Handler::new());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: async_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncSource::new(...); events = async_source!(Event => source);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
+   |
+71 |     reject_in_every_slot!(Handler::new());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyInfiniteSource::new(...); events = infinite_source!(Event => source);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
+   |
+71 |     reject_in_every_slot!(Handler::new());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: async_infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncInfiniteSource::new(...); events = async_infinite_source!(Event => source);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
+   |
+71 |     reject_in_every_slot!(Handler::new());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyTransform::new(...); output = transform!(Input -> Output => handler);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
+   |
+71 |     reject_in_every_slot!(Handler::new());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: effectful_transform!: expected `-> OutputType => handler` after input type
+  --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
+   |
+71 |     reject_in_every_slot!(Handler::new());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_transform_exact_contract` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyStateful::new(...); output = stateful!(Input -> Output => handler);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
+   |
+71 |     reject_in_every_slot!(Handler::new());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: effectful_stateful!: expected `-> OutputType => handler` after input type
+  --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
+   |
+71 |     reject_in_every_slot!(Handler::new());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_stateful_exact_contract` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: join!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = joins::inner::<Reference, Stream, Output, _, _, _, _>(...); output = join!(catalog reference: Reference, Stream -> Output => handler);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
+   |
+71 |     reject_in_every_slot!(Handler::new());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: sink!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let output = SinkTyped::new(...); events = sink!(Event => output);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
+   |
+71 |     reject_in_every_slot!(Handler::new());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let role = MyRole::new(...); answer = inference!(Input -> { ... } Output => role);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
+   |
+71 |     reject_in_every_slot!(Handler::new());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: ai_map_reduce! map role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let map_role = MyMapRole::new(...); result = ai_map_reduce!(Seed -> Out => { map: [Item] -> { ... } Partial => map_role, ... }, chunking: ...);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
+   |
+71 |     reject_in_every_slot!(Handler::new());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: ai_map_reduce! reduce role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let reduce_role = MyReduceRole::new(...); result = ai_map_reduce!(Seed -> Out => { ..., reduce: (Seed, [Partial]) -> { ... } Out => reduce_role }, chunking: ...);
+  --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
+   |
+71 |     reject_in_every_slot!(Handler::new());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MySource::new(...); events = source!(Event => source);
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
-72 |     reject_in_every_slot!(make());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     reject_in_every_slot!(Handler::builder().build());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: async_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncSource::new(...); events = async_source!(Event => source);
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
-72 |     reject_in_every_slot!(make());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     reject_in_every_slot!(Handler::builder().build());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyInfiniteSource::new(...); events = infinite_source!(Event => source);
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
-72 |     reject_in_every_slot!(make());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     reject_in_every_slot!(Handler::builder().build());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: async_infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncInfiniteSource::new(...); events = async_infinite_source!(Event => source);
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
-72 |     reject_in_every_slot!(make());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     reject_in_every_slot!(Handler::builder().build());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyTransform::new(...); output = transform!(Input -> Output => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
-72 |     reject_in_every_slot!(make());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     reject_in_every_slot!(Handler::builder().build());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: effectful_transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);
+error: effectful_transform!: expected `-> OutputType => handler` after input type
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
-72 |     reject_in_every_slot!(make());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     reject_in_every_slot!(Handler::builder().build());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_transform_exact_contract` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyStateful::new(...); output = stateful!(Input -> Output => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
-72 |     reject_in_every_slot!(make());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     reject_in_every_slot!(Handler::builder().build());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: effectful_stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], observers: [...]);
+error: effectful_stateful!: expected `-> OutputType => handler` after input type
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
-72 |     reject_in_every_slot!(make());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     reject_in_every_slot!(Handler::builder().build());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_stateful_exact_contract` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: join!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = joins::inner::<Reference, Stream, Output, _, _, _, _>(...); output = join!(catalog reference: Reference, Stream -> Output => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
-72 |     reject_in_every_slot!(make());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     reject_in_every_slot!(Handler::builder().build());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: sink!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let output = SinkTyped::new(...); events = sink!(Event => output);
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
-72 |     reject_in_every_slot!(make());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     reject_in_every_slot!(Handler::builder().build());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let role = MyRole::new(...); answer = inference!(Input -> { ... } Output => role);
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
-72 |     reject_in_every_slot!(make());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     reject_in_every_slot!(Handler::builder().build());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: ai_map_reduce! map role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let map_role = MyMapRole::new(...); result = ai_map_reduce!(Seed -> Out => { map: [Item] -> { ... } Partial => map_role, ... }, chunking: ...);
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
-72 |     reject_in_every_slot!(make());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     reject_in_every_slot!(Handler::builder().build());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: ai_map_reduce! reduce role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let reduce_role = MyReduceRole::new(...); result = ai_map_reduce!(Seed -> Out => { ..., reduce: (Seed, [Partial]) -> { ... } Out => reduce_role }, chunking: ...);
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
-72 |     reject_in_every_slot!(make());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+72 |     reject_in_every_slot!(Handler::builder().build());
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MySource::new(...); events = source!(Event => source);
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
-73 |     reject_in_every_slot!(Handler::new());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+73 |     reject_in_every_slot!(|| Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: async_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncSource::new(...); events = async_source!(Event => source);
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
-73 |     reject_in_every_slot!(Handler::new());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+73 |     reject_in_every_slot!(|| Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyInfiniteSource::new(...); events = infinite_source!(Event => source);
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
-73 |     reject_in_every_slot!(Handler::new());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+73 |     reject_in_every_slot!(|| Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: async_infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncInfiniteSource::new(...); events = async_infinite_source!(Event => source);
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
-73 |     reject_in_every_slot!(Handler::new());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+73 |     reject_in_every_slot!(|| Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyTransform::new(...); output = transform!(Input -> Output => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
-73 |     reject_in_every_slot!(Handler::new());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+73 |     reject_in_every_slot!(|| Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: effectful_transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);
+error: effectful_transform!: expected `-> OutputType => handler` after input type
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
-73 |     reject_in_every_slot!(Handler::new());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+73 |     reject_in_every_slot!(|| Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_transform_exact_contract` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyStateful::new(...); output = stateful!(Input -> Output => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
-73 |     reject_in_every_slot!(Handler::new());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+73 |     reject_in_every_slot!(|| Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: effectful_stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], observers: [...]);
+error: effectful_stateful!: expected `-> OutputType => handler` after input type
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
-73 |     reject_in_every_slot!(Handler::new());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+73 |     reject_in_every_slot!(|| Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_stateful_exact_contract` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: join!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = joins::inner::<Reference, Stream, Output, _, _, _, _>(...); output = join!(catalog reference: Reference, Stream -> Output => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
-73 |     reject_in_every_slot!(Handler::new());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+73 |     reject_in_every_slot!(|| Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: sink!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let output = SinkTyped::new(...); events = sink!(Event => output);
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
-73 |     reject_in_every_slot!(Handler::new());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+73 |     reject_in_every_slot!(|| Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let role = MyRole::new(...); answer = inference!(Input -> { ... } Output => role);
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
-73 |     reject_in_every_slot!(Handler::new());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+73 |     reject_in_every_slot!(|| Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: ai_map_reduce! map role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let map_role = MyMapRole::new(...); result = ai_map_reduce!(Seed -> Out => { map: [Item] -> { ... } Partial => map_role, ... }, chunking: ...);
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
-73 |     reject_in_every_slot!(Handler::new());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+73 |     reject_in_every_slot!(|| Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: ai_map_reduce! reduce role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let reduce_role = MyReduceRole::new(...); result = ai_map_reduce!(Seed -> Out => { ..., reduce: (Seed, [Partial]) -> { ... } Out => reduce_role }, chunking: ...);
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
-73 |     reject_in_every_slot!(Handler::new());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+73 |     reject_in_every_slot!(|| Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MySource::new(...); events = source!(Event => source);
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
-74 |     reject_in_every_slot!(Handler::builder().build());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+74 |     reject_in_every_slot!(Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: async_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncSource::new(...); events = async_source!(Event => source);
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
-74 |     reject_in_every_slot!(Handler::builder().build());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+74 |     reject_in_every_slot!(Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyInfiniteSource::new(...); events = infinite_source!(Event => source);
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
-74 |     reject_in_every_slot!(Handler::builder().build());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+74 |     reject_in_every_slot!(Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: async_infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncInfiniteSource::new(...); events = async_infinite_source!(Event => source);
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
-74 |     reject_in_every_slot!(Handler::builder().build());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+74 |     reject_in_every_slot!(Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyTransform::new(...); output = transform!(Input -> Output => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
-74 |     reject_in_every_slot!(Handler::builder().build());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+74 |     reject_in_every_slot!(Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: effectful_transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);
+error: effectful_transform!: expected `-> OutputType => handler` after input type
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
-74 |     reject_in_every_slot!(Handler::builder().build());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+74 |     reject_in_every_slot!(Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_transform_exact_contract` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyStateful::new(...); output = stateful!(Input -> Output => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
-74 |     reject_in_every_slot!(Handler::builder().build());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+74 |     reject_in_every_slot!(Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: effectful_stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], observers: [...]);
+error: effectful_stateful!: expected `-> OutputType => handler` after input type
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
-74 |     reject_in_every_slot!(Handler::builder().build());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+74 |     reject_in_every_slot!(Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_stateful_exact_contract` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: join!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = joins::inner::<Reference, Stream, Output, _, _, _, _>(...); output = join!(catalog reference: Reference, Stream -> Output => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
-74 |     reject_in_every_slot!(Handler::builder().build());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+74 |     reject_in_every_slot!(Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: sink!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let output = SinkTyped::new(...); events = sink!(Event => output);
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
-74 |     reject_in_every_slot!(Handler::builder().build());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+74 |     reject_in_every_slot!(Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let role = MyRole::new(...); answer = inference!(Input -> { ... } Output => role);
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
-74 |     reject_in_every_slot!(Handler::builder().build());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+74 |     reject_in_every_slot!(Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: ai_map_reduce! map role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let map_role = MyMapRole::new(...); result = ai_map_reduce!(Seed -> Out => { map: [Item] -> { ... } Partial => map_role, ... }, chunking: ...);
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
-74 |     reject_in_every_slot!(Handler::builder().build());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+74 |     reject_in_every_slot!(Handler { marker: () });
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error: ai_map_reduce! reduce role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let reduce_role = MyReduceRole::new(...); result = ai_map_reduce!(Seed -> Out => { ..., reduce: (Seed, [Partial]) -> { ... } Out => reduce_role }, chunking: ...);
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
-74 |     reject_in_every_slot!(Handler::builder().build());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MySource::new(...); events = source!(Event => source);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:75:5
-   |
-75 |     reject_in_every_slot!(|| Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: async_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncSource::new(...); events = async_source!(Event => source);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:75:5
-   |
-75 |     reject_in_every_slot!(|| Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyInfiniteSource::new(...); events = infinite_source!(Event => source);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:75:5
-   |
-75 |     reject_in_every_slot!(|| Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: async_infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncInfiniteSource::new(...); events = async_infinite_source!(Event => source);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:75:5
-   |
-75 |     reject_in_every_slot!(|| Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyTransform::new(...); output = transform!(Input -> Output => handler);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:75:5
-   |
-75 |     reject_in_every_slot!(|| Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: effectful_transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:75:5
-   |
-75 |     reject_in_every_slot!(|| Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyStateful::new(...); output = stateful!(Input -> Output => handler);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:75:5
-   |
-75 |     reject_in_every_slot!(|| Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: effectful_stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], observers: [...]);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:75:5
-   |
-75 |     reject_in_every_slot!(|| Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: join!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = joins::inner::<Reference, Stream, Output, _, _, _, _>(...); output = join!(catalog reference: Reference, Stream -> Output => handler);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:75:5
-   |
-75 |     reject_in_every_slot!(|| Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: sink!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let output = SinkTyped::new(...); events = sink!(Event => output);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:75:5
-   |
-75 |     reject_in_every_slot!(|| Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let role = MyRole::new(...); answer = inference!(Input -> { ... } Output => role);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:75:5
-   |
-75 |     reject_in_every_slot!(|| Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: ai_map_reduce! map role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let map_role = MyMapRole::new(...); result = ai_map_reduce!(Seed -> Out => { map: [Item] -> { ... } Partial => map_role, ... }, chunking: ...);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:75:5
-   |
-75 |     reject_in_every_slot!(|| Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: ai_map_reduce! reduce role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let reduce_role = MyReduceRole::new(...); result = ai_map_reduce!(Seed -> Out => { ..., reduce: (Seed, [Partial]) -> { ... } Out => reduce_role }, chunking: ...);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:75:5
-   |
-75 |     reject_in_every_slot!(|| Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MySource::new(...); events = source!(Event => source);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:76:5
-   |
-76 |     reject_in_every_slot!(Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: async_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncSource::new(...); events = async_source!(Event => source);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:76:5
-   |
-76 |     reject_in_every_slot!(Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyInfiniteSource::new(...); events = infinite_source!(Event => source);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:76:5
-   |
-76 |     reject_in_every_slot!(Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: async_infinite_source!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let source = MyAsyncInfiniteSource::new(...); events = async_infinite_source!(Event => source);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:76:5
-   |
-76 |     reject_in_every_slot!(Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyTransform::new(...); output = transform!(Input -> Output => handler);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:76:5
-   |
-76 |     reject_in_every_slot!(Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: effectful_transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:76:5
-   |
-76 |     reject_in_every_slot!(Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyStateful::new(...); output = stateful!(Input -> Output => handler);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:76:5
-   |
-76 |     reject_in_every_slot!(Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: effectful_stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], observers: [...]);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:76:5
-   |
-76 |     reject_in_every_slot!(Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: join!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = joins::inner::<Reference, Stream, Output, _, _, _, _>(...); output = join!(catalog reference: Reference, Stream -> Output => handler);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:76:5
-   |
-76 |     reject_in_every_slot!(Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: sink!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let output = SinkTyped::new(...); events = sink!(Event => output);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:76:5
-   |
-76 |     reject_in_every_slot!(Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let role = MyRole::new(...); answer = inference!(Input -> { ... } Output => role);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:76:5
-   |
-76 |     reject_in_every_slot!(Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: ai_map_reduce! map role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let map_role = MyMapRole::new(...); result = ai_map_reduce!(Seed -> Out => { map: [Item] -> { ... } Partial => map_role, ... }, chunking: ...);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:76:5
-   |
-76 |     reject_in_every_slot!(Handler { marker: () });
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error: ai_map_reduce! reduce role: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let reduce_role = MyReduceRole::new(...); result = ai_map_reduce!(Seed -> Out => { ..., reduce: (Seed, [Partial]) -> { ... } Out => reduce_role }, chunking: ...);
-  --> tests/compile_fail/handler_path_expression_matrix.rs:76:5
-   |
-76 |     reject_in_every_slot!(Handler { marker: () });
+74 |     reject_in_every_slot!(Handler { marker: () });
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)

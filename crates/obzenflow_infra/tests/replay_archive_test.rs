@@ -13,8 +13,8 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::id::{JournalId, SystemId};
 use obzenflow_core::journal::run_manifest::{
-    RunManifest, RunManifestStage, JOURNAL_FORMAT_VERSION, RUN_MANIFEST_FILENAME,
-    RUN_MANIFEST_VERSION,
+    RunManifest, RunManifestStage, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_FORMAT_VERSION,
+    RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
 use obzenflow_core::journal::ArchiveStatus;
 use obzenflow_core::WriterId;
@@ -22,10 +22,14 @@ use obzenflow_infra::journal::disk::log_record::{LogRecord, RECORD_FRAME_KIND};
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_runtime::replay::ReplayArchive;
 use obzenflow_runtime::replay::ReplayError;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use tempfile::tempdir;
 use ulid::Ulid;
+
+fn binding_descriptor_capabilities() -> BTreeMap<String, u32> {
+    BTreeMap::from([(EFFECT_BINDING_DESCRIPTOR_CAPABILITY.to_string(), 1)])
+}
 
 fn write_manifest(dir: &Path) {
     let mut stages = HashMap::new();
@@ -57,7 +61,7 @@ fn write_manifest(dir: &Path) {
         stages,
         system_journal_file: "system.log".to_string(),
         effective_config: None,
-        capabilities: Default::default(),
+        capabilities: binding_descriptor_capabilities(),
         bounded_direct_fact_admission: Vec::new(),
     };
 
@@ -182,6 +186,49 @@ async fn open_fails_when_system_log_missing_unless_allowed() {
 }
 
 #[tokio::test]
+async fn open_gates_binding_descriptor_capability_before_journal_decode() {
+    for version in [None, Some(2_u64)] {
+        let dir = tempdir().unwrap();
+        write_manifest(dir.path());
+        std::fs::write(dir.path().join("system.log"), b"not a journal frame").unwrap();
+
+        let manifest_path = dir.path().join(RUN_MANIFEST_FILENAME);
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        match version {
+            Some(version) => {
+                manifest["capabilities"][EFFECT_BINDING_DESCRIPTOR_CAPABILITY] =
+                    serde_json::json!(version);
+            }
+            None => {
+                manifest["capabilities"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(EFFECT_BINDING_DESCRIPTOR_CAPABILITY);
+            }
+        }
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let error = DiskReplayArchive::open(dir.path().to_path_buf(), true)
+            .await
+            .err()
+            .expect("missing or wrong descriptor capability must refuse the archive");
+        assert!(matches!(
+            error,
+            ReplayError::UnsupportedArchiveCapability {
+                capability: EFFECT_BINDING_DESCRIPTOR_CAPABILITY,
+                found,
+                supported: 1,
+            } if found == version
+        ));
+    }
+}
+
+#[tokio::test]
 async fn open_requires_completed_status_by_default() {
     let dir = tempdir().unwrap();
     write_manifest(dir.path());
@@ -246,7 +293,7 @@ fn write_manifest_with_version(dir: &Path, version: &str) {
         stages,
         system_journal_file: "system.log".to_string(),
         effective_config: None,
-        capabilities: Default::default(),
+        capabilities: binding_descriptor_capabilities(),
         bounded_direct_fact_admission: Vec::new(),
     };
 
