@@ -1854,6 +1854,137 @@ macro_rules! transform {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effect_entries {
+    // Generated AI surfaces accept one constrained row, but lower it through
+    // the same declaration and attachment rules as ordinary effectful stages.
+    (@generated_chat surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with { $($policy:tt)* }
+        $(,)?
+    }) => {
+        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
+    };
+    (@generated_chat surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with retry($($retry:tt)*)
+        $(,)?
+    }) => {
+        compile_error!(concat!(
+            $surface,
+            ": ChatCompletion is NonIdempotentAtLeastOnce; retry is forbidden"
+        ))
+    };
+    (@generated_chat surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with [$($policy:expr),* $(,)?]
+        $(,)?
+    }) => {
+        compile_error!(
+            "an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)"
+        )
+    };
+    (@generated_chat surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with $policy:expr
+        $(,)?
+    }) => {{
+        let __chat_binding: ::obzenflow_runtime::effects::EffectBinding<
+            ::obzenflow_adapters::ai::ChatCompletion,
+        > = $crate::__obzenflow_clone_ai_chat_contract!($surface, $binding);
+        let mut __chat_declarations: Vec<
+            ::obzenflow_runtime::effects::EffectDeclaration,
+        > = Vec::new();
+        let mut __chat_policy_attachments: Vec<
+            $crate::dsl::stage_descriptor::EffectPolicyAttachment,
+        > = Vec::new();
+        $crate::__obzenflow_effect_entries!(
+            @entry __chat_declarations,
+            __chat_policy_attachments,
+            [],
+            at_least_once(::obzenflow_adapters::ai::ChatCompletion)
+                via __chat_binding
+                with $policy
+        );
+        $crate::dsl::ai_effect::GeneratedChatEffectRow {
+            binding: __chat_binding,
+            declarations: __chat_declarations,
+            policy_attachments: __chat_policy_attachments,
+        }
+    }};
+    (@generated_chat surface = $surface:tt, row = { ChatCompletion $($rest:tt)* }) => {
+        compile_error!(concat!(
+            $surface,
+            ": paid non-idempotent ChatCompletion requires \
+             `at_least_once(ChatCompletion)` acknowledgement"
+        ))
+    };
+    (@generated_chat surface = $surface:tt, row = { transactional(ChatCompletion) $($rest:tt)* }) => {
+        compile_error!(concat!(
+            $surface,
+            ": ChatCompletion accepts only `at_least_once(ChatCompletion)`"
+        ))
+    };
+    (@generated_chat surface = $surface:tt, row = { $($invalid:tt)* }) => {
+        compile_error!(concat!(
+            $surface,
+            ": expected `at_least_once(ChatCompletion) via <chat binding> \
+             with <EffectResilience>`"
+        ))
+    };
+
+    // Preserve row diagnostics before the non-path role diagnostic without
+    // maintaining a second generated-row parser.
+    (@generated_chat_then surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with { $($policy:tt)* }
+        $(,)?
+    }, then = { $($then:tt)* }) => {
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = $surface,
+            row = { at_least_once(ChatCompletion) via $binding with { $($policy)* } }
+        )
+    };
+    (@generated_chat_then surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with retry($($retry:tt)*)
+        $(,)?
+    }, then = { $($then:tt)* }) => {
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = $surface,
+            row = { at_least_once(ChatCompletion) via $binding with retry($($retry)*) }
+        )
+    };
+    (@generated_chat_then surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with [$($policy:expr),* $(,)?]
+        $(,)?
+    }, then = { $($then:tt)* }) => {
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = $surface,
+            row = { at_least_once(ChatCompletion) via $binding with [$($policy),*] }
+        )
+    };
+    (@generated_chat_then surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with $policy:expr
+        $(,)?
+    }, then = { $($then:tt)* }) => {
+        $($then)*
+    };
+    (@generated_chat_then surface = $surface:tt, row = { $($invalid:tt)* }, then = { $($then:tt)* }) => {
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = $surface,
+            row = { $($invalid)* }
+        )
+    };
+
     // ── end of input ───────────────────────────────────────────────────
     (@entry $effects:ident, $atts:ident, [],) => {};
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+],) => {
@@ -4063,189 +4194,6 @@ macro_rules! __obzenflow_clone_ai_chat_contract {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_ai_chat_effect_row {
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with { $($policy:tt)* }
-            $(,)?
-        }
-    ) => {
-        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
-    };
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with retry($($retry:tt)*)
-            $(,)?
-        }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": ChatCompletion is NonIdempotentAtLeastOnce; retry is forbidden"
-        ))
-    };
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with [$($policy:expr),* $(,)?]
-            $(,)?
-        }
-    ) => {
-        compile_error!(
-            "an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)"
-        )
-    };
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with $policy:expr
-            $(,)?
-        }
-    ) => {{
-        let __chat_binding: ::obzenflow_runtime::effects::EffectBinding<
-            ::obzenflow_adapters::ai::ChatCompletion,
-        > =
-            $crate::__obzenflow_clone_ai_chat_contract!($surface, $binding);
-        let __chat_policy: Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory> = $policy;
-        (__chat_binding, __chat_policy)
-    }};
-    (
-        surface = $surface:tt,
-        row = { ChatCompletion $($rest:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": paid non-idempotent ChatCompletion requires \
-             `at_least_once(ChatCompletion)` acknowledgement"
-        ))
-    };
-    (
-        surface = $surface:tt,
-        row = { transactional(ChatCompletion) $($rest:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": ChatCompletion accepts only `at_least_once(ChatCompletion)`"
-        ))
-    };
-    (
-        surface = $surface:tt,
-        row = { $($invalid:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": expected `at_least_once(ChatCompletion) via <chat binding> \
-             with <EffectResilience>`"
-        ))
-    };
-}
-
-/// Preserve effect-row diagnostics before reporting a non-path AI role.
-///
-/// Before FLOWIP-133a, an expression role reached effect-row parsing. The
-/// teaching fallback must therefore validate the row first so narrowing the
-/// role slot does not mask an existing, more specific diagnostic.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_ai_effect_row_syntax_then {
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with { $($policy:tt)* }
-            $(,)?
-        },
-        then = { $($then:tt)* }
-    ) => {
-        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
-    };
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with retry($($retry:tt)*)
-            $(,)?
-        },
-        then = { $($then:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": ChatCompletion is NonIdempotentAtLeastOnce; retry is forbidden"
-        ))
-    };
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with [$($policy:expr),* $(,)?]
-            $(,)?
-        },
-        then = { $($then:tt)* }
-    ) => {
-        compile_error!(
-            "an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)"
-        )
-    };
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with $policy:expr
-            $(,)?
-        },
-        then = { $($then:tt)* }
-    ) => {
-        $($then)*
-    };
-    (
-        surface = $surface:tt,
-        row = { ChatCompletion $($rest:tt)* },
-        then = { $($then:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": paid non-idempotent ChatCompletion requires \
-             `at_least_once(ChatCompletion)` acknowledgement"
-        ))
-    };
-    (
-        surface = $surface:tt,
-        row = { transactional(ChatCompletion) $($rest:tt)* },
-        then = { $($then:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": ChatCompletion accepts only `at_least_once(ChatCompletion)`"
-        ))
-    };
-    (
-        surface = $surface:tt,
-        row = { $($invalid:tt)* },
-        then = { $($then:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": expected `at_least_once(ChatCompletion) via <chat binding> \
-             with <EffectResilience>`"
-        ))
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
 macro_rules! __obzenflow_inference_contract {
     (
         name = $name:literal,
@@ -4253,16 +4201,14 @@ macro_rules! __obzenflow_inference_contract {
         -> { $($row:tt)* } $out:ty => $role_head:ident $(:: $role_tail:ident)*
         $(,)?
     ) => {{
-        let (__chat_binding, __chat_policy) =
-            $crate::__obzenflow_ai_chat_effect_row!(
-                surface = "inference!",
-                row = { $($row)* }
-            );
+        let __chat_effect_row = $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = "inference!",
+            row = { $($row)* }
+        );
         $crate::dsl::inference::generated_inference::<$($input)+, $out, _>(
             $name,
             $role_head $(:: $role_tail)*,
-            __chat_binding,
-            __chat_policy,
+            __chat_effect_row,
         )
     }};
     (
@@ -4291,8 +4237,8 @@ macro_rules! __obzenflow_inference_contract {
         -> { $($row:tt)* } $out:ty => $role:expr
         $(,)?
     ) => {
-        $crate::__obzenflow_ai_effect_row_syntax_then!(
-            surface = "inference!",
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat_then surface = "inference!",
             row = { $($row)* },
             then = {
                 $crate::__obzenflow_handler_path_diagnostic!(
@@ -4354,10 +4300,8 @@ macro_rules! __obzenflow_ai_map_reduce_generated_typed {
         chunker = ($chunker:expr),
         map_role = ($map_role:expr),
         finalise_role = ($finalise_role:expr),
-        map_chat = ($map_chat:expr),
-        finalise_chat = ($finalise_chat:expr),
-        map_policy = ($map_policy:expr),
-        finalise_policy = ($finalise_policy:expr)
+        map_effect_row = ($map_effect_row:expr),
+        finalise_effect_row = ($finalise_effect_row:expr)
     ) => {{
         $crate::dsl::composites::ai_map_reduce::generated_map_reduce::<
             $($seed_ty)+,
@@ -4369,8 +4313,7 @@ macro_rules! __obzenflow_ai_map_reduce_generated_typed {
         >(
             $name,
             ($chunker, $map_role, $finalise_role),
-            ($map_chat, $finalise_chat),
-            ($map_policy, $finalise_policy),
+            ($map_effect_row, $finalise_effect_row),
         )
     }};
 }
@@ -4415,20 +4358,18 @@ macro_rules! __obzenflow_ai_map_reduce_build {
         finalise_row = { $($finalise_row:tt)* },
         chunking = { $($chunking:tt)+ }
     ) => {{
-        let (__map_chat, __map_policy) =
-            $crate::__obzenflow_ai_chat_effect_row!(
-                surface = "ai_map_reduce!",
-                row = { $($map_row)* }
-            );
-        let (__finalise_chat, __finalise_policy) =
-            $crate::__obzenflow_ai_chat_effect_row!(
-                surface = "ai_map_reduce!",
-                row = { $($finalise_row)* }
-            );
+        let __map_effect_row = $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = "ai_map_reduce!",
+            row = { $($map_row)* }
+        );
+        let __finalise_effect_row = $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = "ai_map_reduce!",
+            row = { $($finalise_row)* }
+        );
         let __chunker = $crate::__obzenflow_ai_map_reduce_chunker_by_budget!(
             seed_type = ($($seed_ty)+),
             item_type = ($item_ty),
-            estimator: __map_chat.evidence().estimator().estimator(),
+            estimator: __map_effect_row.binding.evidence().estimator().estimator(),
             $($chunking)+
         );
         let _: ::core::marker::PhantomData<$($seed_ty)+> =
@@ -4447,10 +4388,8 @@ macro_rules! __obzenflow_ai_map_reduce_build {
             chunker = (__chunker),
             map_role = ($map_role),
             finalise_role = ($finalise_role),
-            map_chat = (__map_chat),
-            finalise_chat = (__finalise_chat),
-            map_policy = (__map_policy),
-            finalise_policy = (__finalise_policy)
+            map_effect_row = (__map_effect_row),
+            finalise_effect_row = (__finalise_effect_row)
         )
     }};
 }
@@ -4498,12 +4437,12 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
         chunking: by_budget { $($chunking:tt)+ }
         $(,)?
     ) => {
-        $crate::__obzenflow_ai_effect_row_syntax_then!(
-            surface = "ai_map_reduce!",
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat_then surface = "ai_map_reduce!",
             row = { $($map_row)* },
             then = {
-                $crate::__obzenflow_ai_effect_row_syntax_then!(
-                    surface = "ai_map_reduce!",
+                $crate::__obzenflow_effect_entries!(
+                    @generated_chat_then surface = "ai_map_reduce!",
                     row = { $($finalise_row)* },
                     then = {
                         $crate::__obzenflow_handler_path_diagnostic!(
@@ -4527,12 +4466,12 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
         chunking: by_budget { $($chunking:tt)+ }
         $(,)?
     ) => {
-        $crate::__obzenflow_ai_effect_row_syntax_then!(
-            surface = "ai_map_reduce!",
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat_then surface = "ai_map_reduce!",
             row = { $($map_row)* },
             then = {
-                $crate::__obzenflow_ai_effect_row_syntax_then!(
-                    surface = "ai_map_reduce!",
+                $crate::__obzenflow_effect_entries!(
+                    @generated_chat_then surface = "ai_map_reduce!",
                     row = { $($finalise_row)* },
                     then = {
                         $crate::__obzenflow_handler_path_diagnostic!(
@@ -4556,12 +4495,12 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
         chunking: by_budget { $($chunking:tt)+ }
         $(,)?
     ) => {
-        $crate::__obzenflow_ai_effect_row_syntax_then!(
-            surface = "ai_map_reduce!",
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat_then surface = "ai_map_reduce!",
             row = { $($map_row)* },
             then = {
-                $crate::__obzenflow_ai_effect_row_syntax_then!(
-                    surface = "ai_map_reduce!",
+                $crate::__obzenflow_effect_entries!(
+                    @generated_chat_then surface = "ai_map_reduce!",
                     row = { $($finalise_row)* },
                     then = {
                         $crate::__obzenflow_handler_path_diagnostic!(

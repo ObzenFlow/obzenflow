@@ -656,19 +656,19 @@ impl EffectsCore {
             }
         }
 
-        // A replay hit above never touches a resolver. Only a selected live
-        // continuation resolves its declared ports, then performs the
-        // effect-specific metadata-only binding check before consulting the
-        // boundary or authoring an attempt.
-        let binding_context = self.live_effect_context(&declaration)?;
-        effect.validate_port_bindings(&binding_context)?;
-
+        // A replay hit above never requests generated live credit or touches
+        // a resolver. A selected live continuation first crosses the outer
+        // generated admission barrier, then constructs live authority and
+        // performs the effect-specific binding check.
         if let Some(admission) = self.ctx.backpressure_writer.direct_fact_admission() {
             admission
                 .request_live()
                 .await
                 .map_err(EffectError::Execution)?;
         }
+
+        let binding_context = self.live_effect_context(&declaration)?;
+        effect.validate_port_bindings(&binding_context)?;
 
         let identity = EffectIdentity {
             effect_type: E::EFFECT_TYPE,
@@ -2004,17 +2004,14 @@ impl EffectsCore {
                 .effect_ports
                 .scoped_view(registration, slots)
                 .map_err(|error| {
-                    let fault = match error.kind {
-                        super::ports::EffectPortViewBuildErrorKind::MissingRegistration => {
+                    let fault = match error {
+                        super::ports::EffectPortViewBuildError::MissingRegistration => {
                             BindingAuthorityFault::registration_missing(
                                 declaration.effect_type(),
                                 binding.clone(),
                             )
                         }
-                        super::ports::EffectPortViewBuildErrorKind::Resolver(_) => {
-                            let slot = error
-                                .slot
-                                .expect("resolver failures are tied to a declared typed slot");
+                        super::ports::EffectPortViewBuildError::Resolver { slot, .. } => {
                             BindingAuthorityFault::resolution_failed(
                                 declaration.effect_type(),
                                 binding.clone(),

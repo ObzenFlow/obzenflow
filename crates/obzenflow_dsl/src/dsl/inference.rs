@@ -4,19 +4,16 @@
 
 //! Generated scalar AI inference leaf.
 
-use super::ai_effect::{invoke_generated_chat, GeneratedChatInvocationError};
-use super::stage_descriptor::{
-    EffectPolicyAttachment, EffectfulTransformDescriptor, StageDescriptor,
+use super::ai_effect::{
+    invoke_generated_chat, GeneratedChatEffectRow, GeneratedChatInvocationError,
 };
+use super::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
 use super::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
 use async_trait::async_trait;
 use obzenflow_adapters::ai::{effect_error_to_handler_error, ChatCompletion};
-use obzenflow_adapters::middleware::MiddlewareFactory;
 use obzenflow_core::ai::AiInferenceRole;
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{
-    Effect, EffectBinding, EffectDeclaration, Effects, StageCompletion,
-};
+use obzenflow_runtime::effects::{EffectBinding, Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use std::fmt;
@@ -104,15 +101,18 @@ where
 pub fn generated_inference<Input, Out, Role>(
     name: impl Into<String>,
     role: Role,
-    chat_binding: EffectBinding<ChatCompletion>,
-    policy: Box<dyn MiddlewareFactory>,
+    effect_row: GeneratedChatEffectRow,
 ) -> Box<dyn StageDescriptor>
 where
     Input: TypedPayload + Clone + Send + Sync + 'static,
     Out: TypedPayload + Clone + Send + Sync + 'static,
     Role: AiInferenceRole<Input, Out>,
 {
-    let declaration = EffectDeclaration::named_at_least_once(&chat_binding);
+    let GeneratedChatEffectRow {
+        binding: chat_binding,
+        declarations,
+        policy_attachments,
+    } = effect_row;
     let handler = GeneratedInferenceHandler::<Input, Out, Role> {
         role: Arc::new(role),
         chat_binding,
@@ -124,11 +124,8 @@ where
         "stage",
         name,
         handler,
-        vec![declaration],
-        vec![EffectPolicyAttachment {
-            effect_type: ChatCompletion::EFFECT_TYPE,
-            factory: policy,
-        }],
+        declarations,
+        policy_attachments,
         direct_bound,
     );
     wrap_typed_descriptor(

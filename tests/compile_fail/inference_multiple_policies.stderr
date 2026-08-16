@@ -9,4 +9,4 @@ error: an effect's 'with' takes one policy expression; write 'with <policy>'; br
 20 | |     );
    | |_____^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_ai_chat_effect_row` which comes from the expansion of the macro `inference` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_effect_entries` which comes from the expansion of the macro `inference` (in Nightly builds, run with -Z macro-backtrace for more info)

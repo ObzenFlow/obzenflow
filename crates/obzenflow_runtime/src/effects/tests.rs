@@ -765,6 +765,62 @@ impl EffectBindingEvidence for VersionedBindingEvidence {
     }
 }
 
+trait NamedAffinePort: Send + Sync {
+    fn invoke(&self);
+}
+
+struct CountingNamedAffinePort {
+    calls: Arc<AtomicUsize>,
+}
+
+impl NamedAffinePort for CountingNamedAffinePort {
+    fn invoke(&self) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+const NAMED_AFFINE_PORT: EffectPortSlot<dyn NamedAffinePort> = EffectPortSlot::new("client");
+
+#[derive(Clone, Debug)]
+struct NamedAffineCountingEffect {
+    binding: EffectBindingUse<Self>,
+}
+
+#[async_trait]
+impl Effect for NamedAffineCountingEffect {
+    const EFFECT_TYPE: &'static str = "test.named_affine_counting";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+    type BindingMode = Named<VersionedBindingEvidence>;
+    type Outcome = CountingOutput;
+    type OutcomeSemantics = crate::effects::DomainFacts;
+
+    fn label(&self) -> &str {
+        "named-affine-counting"
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({ "kind": "named-affine-counting" })
+    }
+
+    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        ctx.port(NAMED_AFFINE_PORT)?.invoke();
+        Ok(CountingOutput { value: 1 })
+    }
+}
+
+impl NamedEffect for NamedAffineCountingEffect {
+    type BindingEvidence = VersionedBindingEvidence;
+
+    fn binding_use(&self) -> &EffectBindingUse<Self> {
+        &self.binding
+    }
+
+    fn required_slots() -> EffectPortSlotSet {
+        EffectPortSlotSet::single(NAMED_AFFINE_PORT)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ZeroSlotNamedEffect {
     value: u64,
@@ -1178,6 +1234,30 @@ fn zero_slot_named_binding(
     .unwrap()
 }
 
+fn deferred_named_affine_binding(
+    evidence: u64,
+    resolver_calls: Arc<AtomicUsize>,
+    port_calls: Arc<AtomicUsize>,
+) -> (
+    EffectBinding<NamedAffineCountingEffect>,
+    EffectRegistration<NamedAffineCountingEffect>,
+) {
+    let resolver: EffectPortResolver<dyn NamedAffinePort> = Arc::new(move || {
+        resolver_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(CountingNamedAffinePort {
+            calls: port_calls.clone(),
+        }) as Arc<dyn NamedAffinePort>)
+    });
+    EffectRegistrationBuilder::<NamedAffineCountingEffect>::new(
+        LogicalEffectBindingName::new("named_affine").unwrap(),
+        VersionedBindingEvidence(evidence),
+    )
+    .bind_deferred(NAMED_AFFINE_PORT, resolver)
+    .unwrap()
+    .finish()
+    .unwrap()
+}
+
 fn registry_with_transactional_counting(
     registration: EffectRegistration<TransactionalCountingEffect>,
 ) -> EffectPortRegistry {
@@ -1367,6 +1447,27 @@ fn zero_slot_named_invocation_context_with_mode(
     context
         .effect_declarations
         .push(EffectDeclaration::named(binding));
+    context
+}
+
+fn named_affine_invocation_context_with_mode(
+    journal: Arc<dyn Journal<ChainEvent>>,
+    parent: EventEnvelope<ChainEvent>,
+    effect_history: Option<Arc<EffectHistory>>,
+    effect_runtime_mode: EffectRuntimeMode,
+    effect_ports: EffectPortRegistry,
+    binding: &EffectBinding<NamedAffineCountingEffect>,
+) -> EffectInvocationContext {
+    let mut context = invocation_context_with_mode(
+        journal,
+        parent,
+        effect_history,
+        effect_runtime_mode,
+        effect_ports,
+    );
+    context
+        .effect_declarations
+        .push(EffectDeclaration::named_at_least_once(binding));
     context
 }
 
@@ -1863,6 +1964,114 @@ async fn direct_fact_execution_scope_matrix_separates_reconstruction_from_live_a
     .await;
     assert_scope_matrix_executable(resume_execution(), None, parent.clone(), 0).await;
     assert_scope_matrix_executable(resume_execution(), Some(in_doubt_history), parent, 1).await;
+}
+
+#[tokio::test]
+async fn generated_resume_withheld_credit_precedes_named_port_resolution() {
+    let stage_id = StageId::new();
+    let parent = parent_envelope(WriterId::from(stage_id));
+
+    let archived_journal = Arc::new(MemoryJournal::failing_group(
+        JournalOwner::stage(stage_id),
+        "effect-outcome:v1:",
+    ));
+    let (archived_binding, archived_registration) = deferred_named_affine_binding(
+        41,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let mut archived_registry = EffectPortRegistry::new();
+    archived_registry.install(archived_registration).unwrap();
+    let mut archived = EffectsCore::new(named_affine_invocation_context_with_mode(
+        archived_journal.clone(),
+        parent.clone(),
+        None,
+        EffectRuntimeMode::Live,
+        archived_registry.into_run_registry(),
+        &archived_binding,
+    ));
+    assert!(matches!(
+        archived
+            .perform(NamedAffineCountingEffect {
+                binding: archived_binding.invocation(),
+            })
+            .await,
+        Err(EffectError::Journal(_))
+    ));
+    let archived_cursor = cursor_started_in(&archived_journal);
+    let in_doubt_history = archive_current_cursor(&archived_journal, &archived_cursor).await;
+
+    for (history, expected_prefix_rows) in
+        [(None, 0_usize), (Some(in_doubt_history.clone()), 1_usize)]
+    {
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+        let resolver_calls = Arc::new(AtomicUsize::new(0));
+        let port_calls = Arc::new(AtomicUsize::new(0));
+        let (binding, registration) =
+            deferred_named_affine_binding(41, resolver_calls.clone(), port_calls.clone());
+        let mut registry = EffectPortRegistry::new();
+        registry.install(registration).unwrap();
+        let admission = crate::backpressure::DirectFactAdmission::new(
+            obzenflow_core::EventType::from("test.named-affine-resume"),
+            NonZeroU64::new(3).expect("non-zero direct-fact bound"),
+        );
+        let mut ctx = named_affine_invocation_context_with_mode(
+            journal.clone(),
+            parent.clone(),
+            history,
+            EffectRuntimeMode::ResumeIncomplete,
+            registry.into_run_registry(),
+            &binding,
+        );
+        ctx.runtime_execution = resume_execution();
+        ctx.backpressure_writer =
+            BackpressureWriter::disabled().with_direct_fact_admission(admission.clone());
+        let invocation = binding.invocation();
+        let mut effects = EffectsCore::new(ctx);
+        let task = tokio::spawn(async move {
+            effects
+                .perform(NamedAffineCountingEffect {
+                    binding: invocation,
+                })
+                .await
+        });
+
+        for _ in 0..64 {
+            if admission.is_requested() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            admission.is_requested(),
+            "a resumed live continuation must park at generated admission"
+        );
+        assert_eq!(
+            resolver_calls.load(Ordering::SeqCst),
+            0,
+            "withheld credit must prevent credential and client resolution"
+        );
+        assert_eq!(port_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(journal.events().len(), expected_prefix_rows);
+
+        let lease = crate::backpressure::DirectFactLease::try_acquire(
+            &BackpressureWriter::disabled(),
+            NonZeroU64::new(3).expect("non-zero direct-fact bound"),
+        )
+        .expect("local admission succeeds")
+        .expect("disabled global backpressure grants a local lease");
+        admission.grant(lease).expect("single live grant");
+        task.await
+            .expect("resume task joins")
+            .expect("admitted named affine effect succeeds");
+
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(port_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            admission.close().expect("admitted lease closes"),
+            expected_prefix_rows as u64 + 2
+        );
+    }
 }
 
 #[tokio::test]
@@ -4225,6 +4434,234 @@ async fn named_binding_family_mismatch_latches_before_cursor_or_io() {
     assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
     assert_eq!(declared_port_calls.load(Ordering::SeqCst), 0);
     assert_eq!(invocation_port_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn binding_mismatches_leave_terminal_and_in_doubt_archives_untouched() {
+    let stage_id = StageId::new();
+    let parent = parent_envelope(WriterId::from(stage_id));
+
+    let completed_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let (completed_binding, completed_registration) = deferred_named_affine_binding(
+        71,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let mut completed_registry = EffectPortRegistry::new();
+    completed_registry.install(completed_registration).unwrap();
+    let mut completed = EffectsCore::new(named_affine_invocation_context_with_mode(
+        completed_journal.clone(),
+        parent.clone(),
+        None,
+        EffectRuntimeMode::Live,
+        completed_registry.into_run_registry(),
+        &completed_binding,
+    ));
+    completed
+        .perform(NamedAffineCountingEffect {
+            binding: completed_binding.invocation(),
+        })
+        .await
+        .expect("completed archive fixture executes");
+    let completed_cursor = cursor_started_in(&completed_journal);
+    let completed_history = archive_current_cursor(&completed_journal, &completed_cursor).await;
+
+    let in_doubt_journal = Arc::new(MemoryJournal::failing_group(
+        JournalOwner::stage(stage_id),
+        "effect-outcome:v1:",
+    ));
+    let (in_doubt_binding, in_doubt_registration) = deferred_named_affine_binding(
+        71,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let mut in_doubt_registry = EffectPortRegistry::new();
+    in_doubt_registry.install(in_doubt_registration).unwrap();
+    let mut in_doubt = EffectsCore::new(named_affine_invocation_context_with_mode(
+        in_doubt_journal.clone(),
+        parent.clone(),
+        None,
+        EffectRuntimeMode::Live,
+        in_doubt_registry.into_run_registry(),
+        &in_doubt_binding,
+    ));
+    assert!(matches!(
+        in_doubt
+            .perform(NamedAffineCountingEffect {
+                binding: in_doubt_binding.invocation(),
+            })
+            .await,
+        Err(EffectError::Journal(_))
+    ));
+    let in_doubt_cursor = cursor_started_in(&in_doubt_journal);
+    let in_doubt_history = archive_current_cursor(&in_doubt_journal, &in_doubt_cursor).await;
+
+    for (archive_kind, history) in [
+        ("terminal", completed_history),
+        ("in_doubt", in_doubt_history),
+    ] {
+        for mismatch in [
+            BindingMismatchKind::ConstructionFamily,
+            BindingMismatchKind::Evidence,
+        ] {
+            let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+            let resolver_calls = Arc::new(AtomicUsize::new(0));
+            let port_calls = Arc::new(AtomicUsize::new(0));
+            let (declared_binding, declared_registration) =
+                deferred_named_affine_binding(71, resolver_calls.clone(), port_calls.clone());
+            drop(declared_registration);
+            let invocation = match mismatch {
+                BindingMismatchKind::ConstructionFamily => {
+                    let (other_binding, other_registration) = deferred_named_affine_binding(
+                        71,
+                        Arc::new(AtomicUsize::new(0)),
+                        Arc::new(AtomicUsize::new(0)),
+                    );
+                    drop(other_registration);
+                    other_binding.invocation()
+                }
+                BindingMismatchKind::Evidence => {
+                    declared_binding.invocation_with_evidence_for_test(VersionedBindingEvidence(72))
+                }
+                BindingMismatchKind::Mode => unreachable!("fixture covers named mismatches"),
+            };
+            let mut effects = EffectsCore::new(named_affine_invocation_context_with_mode(
+                journal.clone(),
+                parent.clone(),
+                Some(history.clone()),
+                EffectRuntimeMode::ResumeIncomplete,
+                EffectPortRegistry::new(),
+                &declared_binding,
+            ));
+
+            let fault = match effects
+                .perform(NamedAffineCountingEffect {
+                    binding: invocation,
+                })
+                .await
+                .expect_err("binding mismatch must precede archive selection")
+            {
+                EffectError::BindingAuthority { fault } => fault,
+                other => panic!(
+                    "expected {archive_kind} archive binding fault for {mismatch:?}, got {other:?}"
+                ),
+            };
+            assert_eq!(fault.mismatch_kind(), Some(mismatch));
+            assert_eq!(
+                effects.next_effect_ordinal_for_test(),
+                EffectOrdinal::new(0),
+                "the archive cursor must remain unreserved"
+            );
+            assert!(journal.events().is_empty());
+            assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(port_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                effects
+                    .ensure_authoring_open()
+                    .expect_err("the mismatch is invocation-terminal")
+                    .to_string(),
+                EffectError::BindingAuthority { fault }.to_string()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn concurrent_fan_out_shares_resolver_verdict_but_not_fatal_latches() {
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let port_calls = Arc::new(AtomicUsize::new(0));
+    let (binding, registration) =
+        deferred_named_affine_binding(81, resolver_calls.clone(), port_calls.clone());
+    let mut registry = EffectPortRegistry::new();
+    registry.install(registration).unwrap();
+    let run_registry = registry.into_run_registry();
+    let (mismatched_binding, mismatched_registration) = deferred_named_affine_binding(
+        81,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    drop(mismatched_registration);
+
+    let shared_flow = FlowId::new();
+    let shared_stage = StageId::new();
+    let parent = parent_envelope(WriterId::from(shared_stage));
+    let make_context =
+        |position: u64, journal: Arc<MemoryJournal<ChainEvent>>, ports: EffectPortRegistry| {
+            let mut context = named_affine_invocation_context_with_mode(
+                journal,
+                parent.clone(),
+                None,
+                EffectRuntimeMode::Live,
+                ports,
+                &binding,
+            );
+            context.flow_id = shared_flow;
+            context.stage_id = shared_stage;
+            context.stage_key = "fan_out_consumer".to_string();
+            context.writer_id = WriterId::from(shared_stage);
+            context.input_seq = StageInputPosition(position);
+            context
+        };
+
+    let first_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(shared_stage)));
+    let second_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(shared_stage)));
+    let fault_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(shared_stage)));
+    let mut first = EffectsCore::new(make_context(1, first_journal.clone(), run_registry.clone()));
+    let mut second = EffectsCore::new(make_context(
+        2,
+        second_journal.clone(),
+        run_registry.clone(),
+    ));
+    let mut faulted = EffectsCore::new(make_context(3, fault_journal.clone(), run_registry));
+    let first_invocation = binding.invocation();
+    let second_invocation = binding.invocation();
+    let fault_invocation = mismatched_binding.invocation();
+
+    let (first_join, second_join, fault_join) = tokio::join!(
+        async move {
+            let result = first
+                .perform(NamedAffineCountingEffect {
+                    binding: first_invocation,
+                })
+                .await;
+            (first, result)
+        },
+        async move {
+            let result = second
+                .perform(NamedAffineCountingEffect {
+                    binding: second_invocation,
+                })
+                .await;
+            (second, result)
+        },
+        async move {
+            let result = faulted
+                .perform(NamedAffineCountingEffect {
+                    binding: fault_invocation,
+                })
+                .await;
+            (faulted, result)
+        }
+    );
+
+    let (first, first_result) = first_join;
+    let (second, second_result) = second_join;
+    let (faulted, fault_result) = fault_join;
+    assert_eq!(first_result.unwrap(), CountingOutput { value: 1 });
+    assert_eq!(second_result.unwrap(), CountingOutput { value: 1 });
+    assert!(matches!(
+        fault_result,
+        Err(EffectError::BindingAuthority { ref fault })
+            if fault.mismatch_kind() == Some(BindingMismatchKind::ConstructionFamily)
+    ));
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(port_calls.load(Ordering::SeqCst), 2);
+    assert!(first.binding_fault_fatal().is_none());
+    assert!(second.binding_fault_fatal().is_none());
+    assert!(faulted.binding_fault_fatal().is_some());
+    assert_eq!(first_journal.events().len(), 2);
+    assert_eq!(second_journal.events().len(), 2);
+    assert!(fault_journal.events().is_empty());
 }
 
 #[tokio::test]

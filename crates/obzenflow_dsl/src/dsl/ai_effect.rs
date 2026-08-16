@@ -9,8 +9,23 @@ use obzenflow_adapters::middleware::MiddlewareFactory;
 use obzenflow_core::ai::{ChatCompletionReply, ChatRequestSpec};
 use obzenflow_core::StageFactSet;
 use obzenflow_runtime::effects::{
-    AllowedEffectsAllowEffect, EffectBinding, EffectOutcomeFitsOutput, EffectSet, Effects,
+    AllowedEffectsAllowEffect, EffectBinding, EffectDeclaration, EffectOutcomeFitsOutput,
+    EffectSet, Effects,
 };
+
+use super::stage_descriptor::EffectPolicyAttachment;
+
+/// Canonical lowering product for the one generated ChatCompletion row.
+///
+/// Exported only so authoring macros expanded in downstream crates can carry
+/// the exact declaration and policy vectors produced by the shared effect-row
+/// lowerer into the generated descriptor constructors.
+#[doc(hidden)]
+pub struct GeneratedChatEffectRow {
+    pub binding: EffectBinding<ChatCompletion>,
+    pub declarations: Vec<EffectDeclaration>,
+    pub policy_attachments: Vec<EffectPolicyAttachment>,
+}
 
 #[derive(Debug)]
 pub(crate) enum GeneratedChatInvocationError {

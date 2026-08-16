@@ -2691,8 +2691,10 @@ mod tests {
     };
     use obzenflow_runtime::control_plane::ControlPlaneProvider;
     use obzenflow_runtime::effects::{
-        Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError,
-        EffectPortSlotSet, EffectRegistrationBuilder, LogicalEffectBindingName, Named, NamedEffect,
+        transactional_effect_port_slot, Effect, EffectBinding, EffectBindingEvidence,
+        EffectBindingUse, EffectCommitHandle, EffectContext, EffectError, EffectPortSlotSet,
+        EffectRegistrationBuilder, LogicalEffectBindingName, Named, NamedEffect, RecordedReply,
+        TransactionalEffectPort,
     };
     use obzenflow_runtime::message_bus::FsmMessageBus;
     use obzenflow_runtime::stages::common::handlers::source::traits::FiniteSourceHandler;
@@ -2861,13 +2863,41 @@ mod tests {
         }
     }
 
+    struct SafetyTransactionalPort;
+
+    #[async_trait]
+    impl<const CLASS: u8> TransactionalEffectPort<NamedSafetyEffect<CLASS>>
+        for SafetyTransactionalPort
+    {
+        async fn execute_and_commit(
+            &self,
+            _effect: NamedSafetyEffect<CLASS>,
+            _ctx: &mut EffectContext,
+            commit: EffectCommitHandle<(), RecordedReply>,
+        ) -> Result<(), EffectError> {
+            commit.commit_success(&()).await?;
+            Ok(())
+        }
+    }
+
     fn safety_binding<const CLASS: u8>() -> EffectBinding<NamedSafetyEffect<CLASS>> {
-        let (binding, registration) = EffectRegistrationBuilder::<NamedSafetyEffect<CLASS>>::new(
+        let builder = EffectRegistrationBuilder::<NamedSafetyEffect<CLASS>>::new(
             LogicalEffectBindingName::new(format!("safety_{CLASS}")).unwrap(),
             SafetyBindingEvidence,
-        )
-        .finish()
-        .unwrap();
+        );
+        let (binding, registration) = if CLASS == 3 {
+            builder
+                .bind_eager(
+                    transactional_effect_port_slot::<NamedSafetyEffect<CLASS>>(),
+                    Arc::new(SafetyTransactionalPort)
+                        as Arc<dyn TransactionalEffectPort<NamedSafetyEffect<CLASS>>>,
+                )
+                .unwrap()
+                .finish()
+                .unwrap()
+        } else {
+            builder.finish().unwrap()
+        };
         drop(registration);
         binding
     }

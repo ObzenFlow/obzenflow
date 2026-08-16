@@ -10,18 +10,4 @@ error: an effect's 'with' takes one policy expression; write 'with <policy>'; br
 34 | |     );
    | |_____^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_ai_chat_effect_row` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error[E0282]: type annotations needed
-  --> tests/compile_fail/ai_map_reduce_multiple_policies.rs:18:13
-   |
-18 |       let _ = ai_map_reduce!(
-   |  _____________^
-19 | |         Seed -> Output => {
-20 | |             map: [Item] ->{
-21 | |                 at_least_once(ChatCompletion) via chat with { first, second }
-...  |
-34 | |     );
-   | |_____^ cannot infer type
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_ai_map_reduce_build` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_effect_entries` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)

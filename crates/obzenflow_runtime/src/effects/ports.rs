@@ -9,8 +9,8 @@ use super::binding::{
     EffectPortSlotRequirement,
 };
 use super::{
-    BindingAuthorityFault, EffectBinding, EffectDeclaration, EffectPortSlot,
-    LogicalEffectBindingName, NamedEffect,
+    transactional_effect_port_slot, BindingAuthorityFault, EffectBinding, EffectDeclaration,
+    EffectPortSlot, EffectSafety, LogicalEffectBindingName, NamedEffect,
 };
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
@@ -23,6 +23,7 @@ type ErasedResolver = Arc<dyn Fn() -> Result<ErasedPort, EffectPortResolutionErr
 const MAX_REPORTED_MISSING_SLOTS: usize = 16;
 
 /// Closed provider-side result for bounded local client construction.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EffectPortResolutionError {
     #[error("credential unavailable")]
@@ -112,10 +113,20 @@ pub struct EffectRegistrationBuilder<E: NamedEffect> {
 
 impl<E: NamedEffect> EffectRegistrationBuilder<E> {
     pub fn new(logical_name: LogicalEffectBindingName, evidence: E::BindingEvidence) -> Self {
+        let mut expected = E::required_slots().slots;
+        if matches!(E::SAFETY, EffectSafety::Transactional) {
+            let executor = transactional_effect_port_slot::<E>().requirement();
+            if !expected
+                .iter()
+                .any(|slot| slot.type_id == executor.type_id && slot.label == executor.label)
+            {
+                expected.push(executor);
+            }
+        }
         Self {
             logical_name,
             evidence,
-            expected: E::required_slots().slots,
+            expected,
             pending: Vec::new(),
             _effect: PhantomData,
         }
@@ -406,10 +417,7 @@ impl EffectPortRegistry {
         slots: &[BoundEffectPortSlot],
     ) -> Result<EffectPortView, EffectPortViewBuildError> {
         if !self.installed_coordinates.contains(&registration) {
-            return Err(EffectPortViewBuildError {
-                slot: None,
-                kind: EffectPortViewBuildErrorKind::MissingRegistration,
-            });
+            return Err(EffectPortViewBuildError::MissingRegistration);
         }
         let mut resolved = HashMap::with_capacity(slots.len());
         for slot in slots {
@@ -423,23 +431,15 @@ impl EffectPortRegistry {
         let Some(entries) = self.run_entries.as_ref() else {
             return match self.recipes.get(&slot.coordinate) {
                 Some(PortRecipe::Eager(port)) => Ok(Arc::clone(port)),
-                Some(PortRecipe::Deferred(_)) => Err(EffectPortViewBuildError {
-                    slot: Some(slot.requirement.label),
-                    kind: EffectPortViewBuildErrorKind::Resolver(
-                        ResolverVerdictError::NotMaterialised,
-                    ),
+                Some(PortRecipe::Deferred(_)) => Err(EffectPortViewBuildError::Resolver {
+                    slot: slot.requirement.label,
+                    verdict: ResolverVerdictError::NotMaterialised,
                 }),
-                None => Err(EffectPortViewBuildError {
-                    slot: Some(slot.requirement.label),
-                    kind: EffectPortViewBuildErrorKind::MissingRegistration,
-                }),
+                None => Err(EffectPortViewBuildError::MissingRegistration),
             };
         };
         let Some(entry) = entries.get(&slot.coordinate) else {
-            return Err(EffectPortViewBuildError {
-                slot: Some(slot.requirement.label),
-                kind: EffectPortViewBuildErrorKind::MissingRegistration,
-            });
+            return Err(EffectPortViewBuildError::MissingRegistration);
         };
         match entry {
             RunPortEntry::Eager(port) => Ok(Arc::clone(port)),
@@ -451,9 +451,9 @@ impl EffectPortRegistry {
                 })
                 .as_ref()
                 .map(Arc::clone)
-                .map_err(|error| EffectPortViewBuildError {
-                    slot: Some(slot.requirement.label),
-                    kind: EffectPortViewBuildErrorKind::Resolver(*error),
+                .map_err(|error| EffectPortViewBuildError::Resolver {
+                    slot: slot.requirement.label,
+                    verdict: *error,
                 }),
         }
     }
@@ -498,15 +498,12 @@ impl std::fmt::Debug for EffectPortView {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EffectPortViewBuildErrorKind {
+pub(crate) enum EffectPortViewBuildError {
     MissingRegistration,
-    Resolver(ResolverVerdictError),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct EffectPortViewBuildError {
-    pub(crate) slot: Option<&'static str>,
-    pub(crate) kind: EffectPortViewBuildErrorKind,
+    Resolver {
+        slot: &'static str,
+        verdict: ResolverVerdictError,
+    },
 }
 
 #[cfg(test)]
@@ -532,6 +529,19 @@ mod tests {
         }
     }
 
+    const AUTHORITY_CANARY: &str = "credential-canary://user:secret@provider.example";
+
+    #[derive(Clone, PartialEq, Eq)]
+    struct CanaryEvidence;
+
+    impl EffectBindingEvidence for CanaryEvidence {
+        const SCHEMA_VERSION: u32 = 1;
+
+        fn canonical_bytes(&self) -> BoundedBindingEvidence {
+            BoundedBindingEvidence::try_new(AUTHORITY_CANARY.as_bytes().to_vec()).unwrap()
+        }
+    }
+
     trait Port: Send + Sync {
         fn value(&self) -> usize;
     }
@@ -540,6 +550,17 @@ mod tests {
     impl Port for LivePort {
         fn value(&self) -> usize {
             7
+        }
+    }
+
+    #[derive(Debug)]
+    struct CanaryLivePort {
+        secret: &'static str,
+    }
+
+    impl Port for CanaryLivePort {
+        fn value(&self) -> usize {
+            self.secret.len()
         }
     }
 
@@ -582,6 +603,45 @@ mod tests {
 
     impl NamedEffect for BoundEffect {
         type BindingEvidence = Evidence;
+
+        fn binding_use(&self) -> &EffectBindingUse<Self> {
+            &self.binding
+        }
+
+        fn required_slots() -> EffectPortSlotSet {
+            EffectPortSlotSet::single(PORT)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct CanaryBoundEffect {
+        binding: EffectBindingUse<Self>,
+    }
+
+    #[async_trait]
+    impl Effect for CanaryBoundEffect {
+        const EFFECT_TYPE: &'static str = "binding.fixture.canary_effect";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Idempotent;
+        type BindingMode = Named<CanaryEvidence>;
+        type Outcome = Outcome;
+        type OutcomeSemantics = RecordedReply;
+
+        fn label(&self) -> &str {
+            "canary-fixture"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+            Ok(Outcome)
+        }
+    }
+
+    impl NamedEffect for CanaryBoundEffect {
+        type BindingEvidence = CanaryEvidence;
 
         fn binding_use(&self) -> &EffectBindingUse<Self> {
             &self.binding
@@ -709,6 +769,45 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct TransactionalEffectOmittingExecutor {
+        binding: EffectBindingUse<Self>,
+    }
+
+    #[async_trait]
+    impl Effect for TransactionalEffectOmittingExecutor {
+        const EFFECT_TYPE: &'static str = "binding.fixture.transactional_without_executor";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Transactional;
+        type BindingMode = Named<Evidence>;
+        type Outcome = Outcome;
+        type OutcomeSemantics = RecordedReply;
+
+        fn label(&self) -> &str {
+            "transactional-without-executor"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+            Ok(Outcome)
+        }
+    }
+
+    impl NamedEffect for TransactionalEffectOmittingExecutor {
+        type BindingEvidence = Evidence;
+
+        fn binding_use(&self) -> &EffectBindingUse<Self> {
+            &self.binding
+        }
+
+        fn required_slots() -> EffectPortSlotSet {
+            EffectPortSlotSet::new()
+        }
+    }
+
     fn name() -> LogicalEffectBindingName {
         LogicalEffectBindingName::new("fixture").unwrap()
     }
@@ -732,6 +831,20 @@ mod tests {
             .scoped_view(named.registration, &named.slots)
             .unwrap();
         assert_eq!(view.get(PORT).unwrap().value(), 7);
+    }
+
+    #[test]
+    fn transactional_registration_structurally_requires_the_reserved_executor() {
+        let error =
+            EffectRegistrationBuilder::<TransactionalEffectOmittingExecutor>::new(name(), Evidence)
+                .finish()
+                .expect_err("transactional bindings cannot omit their reserved executor");
+
+        assert!(matches!(
+            error,
+            EffectBindingBuildError::MissingSlots { slots, .. }
+                if slots == vec!["executor"]
+        ));
     }
 
     #[test]
@@ -866,7 +979,15 @@ mod tests {
             let error = registry
                 .scoped_view(named.registration, &named.slots)
                 .expect_err("a failed second slot cannot expose the first slot");
-            assert_eq!(error.slot, Some("fallback"));
+            assert!(matches!(
+                error,
+                EffectPortViewBuildError::Resolver {
+                    slot: "fallback",
+                    verdict: ResolverVerdictError::Provider(
+                        EffectPortResolutionError::ClientConstructionFailed
+                    ),
+                }
+            ));
         }
         assert_eq!(first_calls.load(Ordering::SeqCst), 1);
         assert_eq!(second_calls.load(Ordering::SeqCst), 1);
@@ -1008,10 +1129,13 @@ mod tests {
                 let error = run
                     .scoped_view(named.registration, &named.slots)
                     .expect_err("panics become a closed cached verdict");
-                assert_eq!(
-                    error.kind,
-                    EffectPortViewBuildErrorKind::Resolver(ResolverVerdictError::Panicked)
-                );
+                assert!(matches!(
+                    error,
+                    EffectPortViewBuildError::Resolver {
+                        slot: "client",
+                        verdict: ResolverVerdictError::Panicked,
+                    }
+                ));
             }
         }
         assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -1030,5 +1154,103 @@ mod tests {
         assert!(binding_debug.contains("<not disclosed>"));
         assert!(registration_debug.contains("<not disclosed>"));
         assert!(!registration_debug.contains("LivePort"));
+    }
+
+    #[test]
+    fn authority_canaries_are_absent_from_framework_projections() {
+        let builder = EffectRegistrationBuilder::<CanaryBoundEffect>::new(
+            LogicalEffectBindingName::new("canary").unwrap(),
+            CanaryEvidence,
+        )
+        .bind_eager(
+            PORT,
+            Arc::new(CanaryLivePort {
+                secret: AUTHORITY_CANARY,
+            }) as Arc<dyn Port>,
+        )
+        .unwrap();
+        let builder_debug = format!("{builder:?}");
+        let (binding, registration) = builder.finish().unwrap();
+        let registration_debug = format!("{registration:?}");
+        let declaration = EffectDeclaration::named(&binding);
+        let declaration_debug = format!("{declaration:?}");
+        let durable_identity =
+            serde_json::to_string(&declaration.binding_identity()).expect("identity serializes");
+        let effect_debug = format!(
+            "{:?}",
+            CanaryBoundEffect {
+                binding: binding.invocation(),
+            }
+        );
+        let binding_debug = format!("{binding:?}");
+        let mut registry = EffectPortRegistry::new();
+        registry.install(registration).unwrap();
+        let run = registry.into_run_registry();
+        let run_debug = format!("{run:?}");
+        let super::super::binding::EffectDeclarationBinding::Named(named) =
+            binding.declaration_binding()
+        else {
+            panic!("expected named declaration")
+        };
+        let view = run.scoped_view(named.registration, &named.slots).unwrap();
+        assert_eq!(view.get(PORT).unwrap().value(), AUTHORITY_CANARY.len());
+        let view_debug = format!("{view:?}");
+
+        let resolver: EffectPortResolver<dyn Port> = Arc::new(|| {
+            panic!("{AUTHORITY_CANARY}");
+        });
+        let (panic_binding, panic_registration) =
+            EffectRegistrationBuilder::<CanaryBoundEffect>::new(
+                LogicalEffectBindingName::new("panic_canary").unwrap(),
+                CanaryEvidence,
+            )
+            .bind_deferred(PORT, resolver)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let mut panic_registry = EffectPortRegistry::new();
+        panic_registry.install(panic_registration).unwrap();
+        let panic_registry = panic_registry.into_run_registry();
+        let super::super::binding::EffectDeclarationBinding::Named(panic_named) =
+            panic_binding.declaration_binding()
+        else {
+            panic!("expected named declaration")
+        };
+        let panic_error = panic_registry
+            .scoped_view(panic_named.registration, &panic_named.slots)
+            .expect_err("panic becomes a closed resolver verdict");
+        let panic_error_debug = format!("{panic_error:?}");
+        let fault = BindingAuthorityFault::resolution_failed(
+            CanaryBoundEffect::EFFECT_TYPE,
+            panic_binding.logical_name().clone(),
+            "client",
+        );
+        let fatal = fault.stage_fatal();
+        let effect_error = EffectError::BindingAuthority {
+            fault: fault.clone(),
+        };
+        let framework_surfaces = [
+            builder_debug,
+            registration_debug,
+            declaration_debug,
+            durable_identity,
+            effect_debug,
+            binding_debug,
+            run_debug,
+            view_debug,
+            panic_error_debug,
+            fault.to_string(),
+            format!("{fault:?}"),
+            fatal.detail,
+            format!("{:?}", fatal.reason),
+            effect_error.to_string(),
+            format!("{effect_error:?}"),
+        ];
+        for projection in framework_surfaces {
+            assert!(
+                !projection.contains(AUTHORITY_CANARY),
+                "framework projection disclosed authority canary: {projection}"
+            );
+        }
     }
 }

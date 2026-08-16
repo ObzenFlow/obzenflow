@@ -347,6 +347,18 @@ impl<E: NamedEffect> EffectBinding<E> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn invocation_with_evidence_for_test(
+        &self,
+        evidence: E::BindingEvidence,
+    ) -> EffectBindingUse<E> {
+        EffectBindingUse {
+            family: self.family.clone(),
+            evidence,
+            _effect: PhantomData,
+        }
+    }
+
     #[doc(hidden)]
     pub fn shares_construction_family(&self, other: &Self) -> bool {
         self.family.same_as(&other.family)
