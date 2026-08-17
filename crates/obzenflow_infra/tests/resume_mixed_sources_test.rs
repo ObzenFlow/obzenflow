@@ -314,7 +314,7 @@ fn build_flow(
                 inf = infinite_source!(ChannelTick => infinite_handler);
                 merge = transform!(ChannelTick -> Merged => merge_handler);
                 effectful = effectful_transform!(
-                    Merged ->{ CountingEffect } { MixedOutput, EffectValue } => effectful_handler,
+                    Merged -> { MixedOutput, EffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collect = sink!(MixedOutput => collect_handler);

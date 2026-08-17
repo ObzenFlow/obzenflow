@@ -299,10 +299,10 @@ pub fn build_flow(
             stages: {
                 orders = source!(ValidatedOrder => order_feed);
                 authorize_payment = effectful_transform!(
-                    ValidatedOrder ->{ ScriptedAuthorizePayment with gateway_resilience } {
+                    ValidatedOrder -> {
                         PaymentAuthorized,
                         PaymentAuthorizationUnavailable
-                    } => authorize_payment,
+                    } uses ScriptedAuthorizePayment with gateway_resilience => authorize_payment,
                     observers: []
                 );
                 paid_orders = sink!(PaymentAuthorized => record_authorized);

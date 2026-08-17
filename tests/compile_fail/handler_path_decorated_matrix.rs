@@ -45,7 +45,7 @@ fn main() {
     );
     let _ = obzenflow_dsl::effectful_transform!(
         name: "effectful_transform",
-        Input ->{ Effect } { Output, Alternate } => Handler::new(),
+        Input -> { Output, Alternate } uses Effect => Handler::new(),
         observers: [middleware],
         backpressure: backpressure
     );
@@ -58,7 +58,7 @@ fn main() {
     );
     let _ = obzenflow_dsl::effectful_stateful!(
         name: "effectful_stateful",
-        Input ->{ Effect } { Output, Alternate } => Handler::new(),
+        Input -> { Output, Alternate } uses Effect => Handler::new(),
         observers: [middleware],
         backpressure: backpressure
     );

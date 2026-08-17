@@ -416,7 +416,7 @@ macro_rules! single_effect_flow {
                 stages: {
                     input = source!(CompositionInput => placeholder!());
                     guarded = effectful_transform!(
-                        CompositionInput ->{ EffectA with $policy } CompositionFact => guarded_handler,
+                        CompositionInput -> CompositionFact uses EffectA with $policy => guarded_handler,
                         observers: [$($observer),*]
                     );
                     output = sink!(CompositionFact => placeholder!());
@@ -443,10 +443,12 @@ macro_rules! two_effect_flow {
                 stages: {
                     input = source!(CompositionInput => placeholder!());
                     guarded = effectful_transform!(
-                        CompositionInput ->{
+                        CompositionInput -> CompositionFact
+                        uses {
                             EffectA with $effect_a,
-                            EffectB with $effect_b
-                        } CompositionFact => guarded_handler,
+                            EffectB with $effect_b,
+                        }
+                        => guarded_handler,
                         observers: []
                     );
                     output = sink!(CompositionFact => placeholder!());

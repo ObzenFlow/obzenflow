@@ -11,17 +11,20 @@
 //! this order:
 //!
 //! ```ignore
-//! let (chat, chat_registration) =
-//!     ChatEffectBinding::from_config(&runtime_config.ai_models())?.into_parts()?;
+//! let mut effect_ports = EffectPortRegistry::new();
+//! let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?
+//!     .install_into(&mut effect_ports)?;
 //! let chat_handler = ChatTransformBuilder::from_binding(chat)
 //!     .logic_version("ticket-summary-v1")
 //!     .system("Summarise the ticket concisely.")
 //!     .build_typed::<TicketRaised, TicketSummarised>(prompt, map_response)?;
-//! let mut effect_ports = EffectPortRegistry::new();
-//! effect_ports.install(chat_registration)?;
 //!
 //! let stage = effectful_transform!(
-//!     TicketRaised ->{ at_least_once(ChatCompletion) via chat with ai_resilience() } TicketSummarised => chat_handler,
+//!     TicketRaised -> TicketSummarised
+//!     uses at_least_once(ChatCompletion)
+//!         via chat
+//!         with ai_resilience()
+//!     => chat_handler,
 //!     observers: [],
 //! );
 //! ```

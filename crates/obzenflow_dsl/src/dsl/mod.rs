@@ -99,10 +99,12 @@
 //! let _ = join!(reference: Carrier, stream: Order, out: Enriched; "enricher" => with_ref!(carriers, handler));
 //! ```
 //!
-//! ## FLOWIP-132a: effect rows live on the arrow
+//! ## FLOWIP-132a: effect capabilities follow the type transformation
 //!
-//! A pure effectful handler omits the row: `In -> Out`. A non-empty declaration
-//! uses `In ->{ Effect } Out`; `effects: [...]` and empty rows are rejected.
+//! A pure effectful handler omits the capability clause: `In -> Out`. A
+//! singleton declaration uses `In -> Out uses Effect`; braces are reserved for
+//! unordered sets of at least two effects. Detached `effects: [...]`, empty
+//! sets, braced singletons, and arrow-embedded effect rows are rejected.
 //!
 //! ```
 //! use async_trait::async_trait;
@@ -145,11 +147,11 @@
 //!     }
 //! }
 //!
-//! // Pure signature: no effect row.
+//! // Pure signature: no `uses` clause.
 //! let _ = effectful_transform!(In -> Out => Handler, observers: []);
 //! ```
 //!
-//! ## FLOWIP-120c H7: per-effect policies attach inline in the effect row
+//! ## FLOWIP-120c H7: per-effect policies attach inside `uses`
 //!
 //! A policy attaches to the exact effect it guards (`Effect with policy`).
 //!
@@ -165,7 +167,7 @@
 //! let handler = ();
 //!
 //! // `with` must be followed by one bare policy expression.
-//! let _ = effectful_transform!(In ->{ MyEffect with } Out => handler, observers: []);
+//! let _ = effectful_transform!(In -> Out uses MyEffect with => handler, observers: []);
 //! ```
 //!
 //! ## FLOWIP-115s: the canonical `sink!` grammar

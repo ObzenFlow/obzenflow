@@ -73,12 +73,12 @@ error: transform!: expected `-> OutputType => handler` after input type
    |
    = note: this error originates in the macro `$crate::__obzenflow_transform_exact_contract` which comes from the expansion of the macro `obzenflow_dsl::transform` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: effectful_transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input ->{ Effect } Output => handler, observers: [...]);
+error: effectful_transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output uses Effect => handler, observers: [...]);
   --> tests/compile_fail/handler_path_diagnostic_precedence.rs:51:13
    |
 51 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
-52 | |         Input ->{ Effect } Output => Handler::new(),
+52 | |         Input -> Output uses Effect => Handler::new(),
 53 | |         observers: [],
 54 | |     );
    | |_____^
@@ -90,9 +90,9 @@ error: inference!: `chunking` is not supported; use `ai_map!` or `ai_map_reduce!
    |
 57 |       let _ = obzenflow_dsl::inference!(
    |  _____________^
-58 | |         Input -> {
-59 | |             at_least_once(ChatCompletion) via chat with policy
-60 | |         } Output => Handler::new(),
+58 | |         Input -> Output
+59 | |         uses at_least_once(ChatCompletion) via chat with policy
+60 | |         => Handler::new(),
 61 | |         chunking: by_budget { fixture }
 62 | |     );
    | |_____^
@@ -104,9 +104,9 @@ error: inference!: paid non-idempotent ChatCompletion requires `at_least_once(Ch
    |
 65 |       let _ = obzenflow_dsl::inference!(
    |  _____________^
-66 | |         Input -> {
-67 | |             ChatCompletion via chat with policy
-68 | |         } Output => Handler::new()
+66 | |         Input -> Output
+67 | |         uses ChatCompletion via chat with policy
+68 | |         => Handler::new()
 69 | |     );
    | |_____^
    |
@@ -118,8 +118,8 @@ error: ai_map_reduce!: paid non-idempotent ChatCompletion requires `at_least_onc
 71 |       let _ = obzenflow_dsl::ai_map_reduce!(
    |  _____________^
 72 | |         Seed -> Output => {
-73 | |             map: [Item] -> {
-74 | |                 ChatCompletion via chat with policy
+73 | |             map: [Item] -> Partial
+74 | |             uses ChatCompletion via chat with policy
 ...  |
 80 | |         chunking: by_budget { fixture }
 81 | |     );

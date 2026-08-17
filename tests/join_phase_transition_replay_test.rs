@@ -325,7 +325,7 @@ fn build_live_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefini
                 stream_src = source!(StreamItem => stream_source);
                 joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joined);
                 effectful = effectful_transform!(
-                    JoinedItem ->{ CountingEffect } { FinalOutput, JoinEffectValue } => effectful,
+                    JoinedItem -> { FinalOutput, JoinEffectValue } uses CountingEffect => effectful,
                     observers: []
                 );
                 collector = sink!(FinalOutput => collector);

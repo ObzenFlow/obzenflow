@@ -87,27 +87,13 @@ fn materialised_failure_probe(
         assert_eq!(bootstrap.shutdown_timeout, Duration::from_secs(marker));
         assert!(!bootstrap.metrics.enabled);
 
-        let binding =
-            ChatEffectBinding::from_config(&runtime_config.ai_models()).map_err(|error| {
-                FlowBuildError::BindingConfiguration {
-                    binding: "chat".to_string(),
-                    detail: error.to_string(),
-                }
-            })?;
-        let (_chat, registration) =
-            binding
-                .into_parts()
-                .map_err(|error| FlowBuildError::BindingConfiguration {
-                    binding: "chat".to_string(),
-                    detail: error.to_string(),
-                })?;
         let mut effect_ports = EffectPortRegistry::new();
-        effect_ports.install(registration).map_err(|error| {
-            FlowBuildError::BindingConfiguration {
+        ChatEffectBinding::from_config(&runtime_config.ai_models())
+            .and_then(|binding| binding.install_into(&mut effect_ports))
+            .map_err(|error| FlowBuildError::BindingConfiguration {
                 binding: "chat".to_string(),
                 detail: error.to_string(),
-            }
-        })?;
+            })?;
 
         if matches!(kind, FailureKind::GenericAfterRegistration) {
             // Registration is deliberately deferred: reaching this sentinel proves

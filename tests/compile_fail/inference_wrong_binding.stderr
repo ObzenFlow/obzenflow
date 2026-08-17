@@ -3,10 +3,8 @@ error[E0277]: inference!: binding `embeddings` is not an EffectBinding<ChatCompl
    |
 15 |       let _ = inference!(
    |  _____________^
-16 | |         Input ->{
-17 | |             at_least_once(ChatCompletion) via embeddings with policy
-18 | |         } Output => role
-19 | |     );
+16 | |         Input -> Output uses at_least_once(ChatCompletion) via embeddings with policy => role
+17 | |     );
    | |_____^ expected an EffectBinding<ChatCompletion> here
    |
    = help: the trait `InferenceChatBindingExpression<embeddings>` is not implemented for `bool`

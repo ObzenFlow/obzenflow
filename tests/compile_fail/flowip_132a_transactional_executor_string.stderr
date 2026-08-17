@@ -3,7 +3,7 @@ error: transactional executors are typed bindings; write `transactional(Effect) 
    |
 10 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
-11 | |         Input ->{ transactional(FirstEffect, "ledger") } First => support::AllowsFirstEffect,
+11 | |         Input -> First uses transactional(FirstEffect, "ledger") => support::AllowsFirstEffect,
 12 | |         observers: []
 13 | |     );
    | |_____^

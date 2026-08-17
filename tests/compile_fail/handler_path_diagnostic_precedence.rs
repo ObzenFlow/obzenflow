@@ -49,33 +49,33 @@ fn main() {
         backpressure:
     );
     let _ = obzenflow_dsl::effectful_transform!(
-        Input ->{ Effect } Output => Handler::new(),
+        Input -> Output uses Effect => Handler::new(),
         observers: [],
     );
 
     // The unsupported inference chunking clause remains primary too.
     let _ = obzenflow_dsl::inference!(
-        Input -> {
-            at_least_once(ChatCompletion) via chat with policy
-        } Output => Handler::new(),
+        Input -> Output
+        uses at_least_once(ChatCompletion) via chat with policy
+        => Handler::new(),
         chunking: by_budget { fixture }
     );
 
     // Effect-row acknowledgement errors also precede role-slot errors.
     let _ = obzenflow_dsl::inference!(
-        Input -> {
-            ChatCompletion via chat with policy
-        } Output => Handler::new()
+        Input -> Output
+        uses ChatCompletion via chat with policy
+        => Handler::new()
     );
 
     let _ = obzenflow_dsl::ai_map_reduce!(
         Seed -> Output => {
-            map: [Item] -> {
-                ChatCompletion via chat with policy
-            } Partial => Handler::new(),
-            reduce: (Seed, [Partial]) -> {
-                at_least_once(ChatCompletion) via chat with policy
-            } Output => finalise_role,
+            map: [Item] -> Partial
+            uses ChatCompletion via chat with policy
+            => Handler::new(),
+            reduce: (Seed, [Partial]) -> Output
+            uses at_least_once(ChatCompletion) via chat with policy
+            => finalise_role,
         },
         chunking: by_budget { fixture }
     );

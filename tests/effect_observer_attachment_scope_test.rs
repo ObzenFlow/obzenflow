@@ -224,7 +224,9 @@ async fn public_effect_observer_path_keys_dispatch_and_shares_declaration_quaran
             stages: {
                 input = source!(Input => input_source);
                 observed = effectful_transform!(
-                    Input ->{ EffectA, EffectB } EffectFact => observed_handler,
+                    Input -> EffectFact
+                    uses { EffectA, EffectB }
+                    => observed_handler,
                     observers: [
                         effect_observer(
                             "panics-on-a",

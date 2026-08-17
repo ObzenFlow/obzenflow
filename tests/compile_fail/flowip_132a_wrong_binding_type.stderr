@@ -3,7 +3,7 @@ error[E0277]: binding `EffectBinding<OtherZeroSlotNamedEffect>` does not match d
    |
 11 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
-12 | |         Input ->{ ZeroSlotNamedEffect via other } First => support::AllowsZeroSlotNamedEffect,
+12 | |         Input -> First uses ZeroSlotNamedEffect via other => support::AllowsZeroSlotNamedEffect,
 13 | |         observers: []
 14 | |     );
    | |_____^ the binding selected by `via` belongs to a different effect

@@ -17,9 +17,9 @@ use obzenflow_core::ai::{AiProvider, EmbeddingClient, EmbeddingTarget};
 use obzenflow_core::config::SecretRef;
 use obzenflow_core::http_client::Url;
 use obzenflow_runtime::effects::{
-    EffectBinding, EffectBindingBuildError, EffectPortResolutionError,
-    EffectPortResolverWithMetadata, EffectRegistration, EffectRegistrationBuilder,
-    LogicalEffectBindingName, ResolvedEffectPort,
+    EffectBinding, EffectBindingBuildError, EffectPortRegistrationError, EffectPortRegistry,
+    EffectPortResolutionError, EffectPortResolver, EffectPortResolverWithMetadata,
+    EffectRegistration, EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort,
 };
 use obzenflow_runtime::runtime_config::AiModelsConfig;
 use std::sync::Arc;
@@ -42,6 +42,8 @@ pub enum EmbeddingEffectBindingError {
     InvalidEvidence(#[from] EmbeddingBindingEvidenceBuildError),
     #[error(transparent)]
     InvalidRegistration(#[from] EffectBindingBuildError),
+    #[error(transparent)]
+    Installation(#[from] EffectPortRegistrationError),
 }
 
 #[derive(Clone)]
@@ -57,11 +59,23 @@ impl std::fmt::Debug for DeferredProvider {
     }
 }
 
+#[derive(Clone)]
+enum DeferredEmbeddingAuthority {
+    Provider(DeferredProvider),
+    Resolver(EffectPortResolver<dyn EmbeddingClient>),
+}
+
+impl std::fmt::Debug for DeferredEmbeddingAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DeferredEmbeddingAuthority(<not disclosed>)")
+    }
+}
+
 /// One immutable embedding decision split later into contract evidence and
 /// opaque live registration authority.
 pub struct EmbeddingEffectBinding {
     evidence: EmbeddingBindingEvidence,
-    provider: DeferredProvider,
+    authority: DeferredEmbeddingAuthority,
 }
 
 impl std::fmt::Debug for EmbeddingEffectBinding {
@@ -149,7 +163,32 @@ impl EmbeddingEffectBinding {
         }
     }
 
-    pub fn into_parts(
+    /// Build an application-selected deferred embedding binding.
+    ///
+    /// The facade derives declaration evidence and snapshots the resolved
+    /// client's observed target. Callers do not construct registration slots or
+    /// metadata projections.
+    pub fn from_resolver(
+        target: EmbeddingTarget,
+        resolver: EffectPortResolver<dyn EmbeddingClient>,
+    ) -> Result<Self, EmbeddingEffectBindingError> {
+        Ok(Self {
+            evidence: EmbeddingBindingEvidence::new(target)?,
+            authority: DeferredEmbeddingAuthority::Resolver(resolver),
+        })
+    }
+
+    /// Install this facade-owned registration and return its lexical binding.
+    pub fn install_into(
+        self,
+        effect_ports: &mut EffectPortRegistry,
+    ) -> Result<EffectBinding<EmbeddingGeneration>, EmbeddingEffectBindingError> {
+        let (binding, registration) = self.into_parts()?;
+        effect_ports.install(registration)?;
+        Ok(binding)
+    }
+
+    fn into_parts(
         self,
     ) -> Result<
         (
@@ -159,10 +198,10 @@ impl EmbeddingEffectBinding {
         EmbeddingEffectBindingError,
     > {
         let target = self.evidence.target().clone();
-        let provider = Arc::new(self.provider);
+        let authority = Arc::new(self.authority);
         let resolver: EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> =
             Arc::new(move || {
-                let client = resolve_client(&target, &provider)?;
+                let client = resolve_client(&target, &authority)?;
                 // Snapshot the resolved client's observed target. Reusing the
                 // requested target here would make pre-boundary validation tautological.
                 let metadata = Arc::new(client.target().clone());
@@ -188,15 +227,19 @@ impl EmbeddingEffectBinding {
             evidence: EmbeddingBindingEvidence::new(bound_embedding_target(
                 provider, model, endpoint,
             ))?,
-            provider: deferred,
+            authority: DeferredEmbeddingAuthority::Provider(deferred),
         })
     }
 }
 
 fn resolve_client(
     target: &EmbeddingTarget,
-    provider: &DeferredProvider,
+    authority: &DeferredEmbeddingAuthority,
 ) -> Result<Arc<dyn EmbeddingClient>, EffectPortResolutionError> {
+    let provider = match authority {
+        DeferredEmbeddingAuthority::Provider(provider) => provider,
+        DeferredEmbeddingAuthority::Resolver(resolver) => return resolver(),
+    };
     let client = match provider {
         DeferredProvider::Ollama { base_url } => {
             NativeEmbeddingClient::ollama(target.model.clone(), base_url.clone())
@@ -251,16 +294,13 @@ mod tests {
 
     #[test]
     fn ollama_is_a_native_fingerprinted_binding() {
-        let (contract, registration) = EmbeddingEffectBinding::ollama("nomic-embed-text", None)
+        let mut registry = EffectPortRegistry::new();
+        let contract = EmbeddingEffectBinding::ollama("nomic-embed-text", None)
             .unwrap()
-            .into_parts()
+            .install_into(&mut registry)
             .unwrap();
         assert_eq!(contract.evidence().target().provider.as_str(), "ollama");
         assert_eq!(contract.evidence().target().model, "nomic-embed-text");
-        let mut registry = EffectPortRegistry::new();
-        registry
-            .install(registration)
-            .expect("sealed registration succeeds");
     }
 
     #[test]
@@ -273,18 +313,15 @@ mod tests {
     #[test]
     fn hosted_construction_and_registration_defer_and_hide_the_secret() {
         let secret_name = "FLOWIP_128B_MISSING_EMBEDDING_KEY";
-        let (contract, registration) =
-            EmbeddingEffectBinding::openai("text-embedding", SecretRef::new(secret_name))
-                .expect("binding construction does not resolve its secret")
-                .into_parts()
-                .unwrap();
+        let binding = EmbeddingEffectBinding::openai("text-embedding", SecretRef::new(secret_name))
+            .expect("binding construction does not resolve its secret");
+        let mut registry = EffectPortRegistry::new();
+        let contract = binding
+            .install_into(&mut registry)
+            .expect("deferred registration does not resolve its secret");
 
         let encoded_target = serde_json::to_string(contract.evidence().target()).unwrap();
         assert!(!encoded_target.contains(secret_name));
-        let mut registry = EffectPortRegistry::new();
-        registry
-            .install(registration)
-            .expect("deferred registration does not resolve its secret");
 
         let endpoint = Url::parse("https://user:password@example.com/v1").unwrap();
         let error = EmbeddingEffectBinding::openai_compatible(

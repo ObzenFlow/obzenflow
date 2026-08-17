@@ -311,7 +311,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
                     observers: []
                 );
                 authorize = effectful_transform!(
-                    ValidatedOrder ->{ AuthorizeEffect } { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } => authorize_handler,
+                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } uses AuthorizeEffect => authorize_handler,
                     observers: []
                 );
                 paid_orders = sink!(OrderAuthorized => paid_orders_handler);

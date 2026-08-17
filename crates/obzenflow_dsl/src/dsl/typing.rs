@@ -224,11 +224,11 @@ where
 /// Public only for exported macro expansion; it is not user-implemented API.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "the stage effect row declares an effect missing from the handler's \
+    message = "the stage `uses` clause declares an effect missing from the handler's \
                `AllowedEffects`",
     label = "this effect manifest is not contained in the handler's `AllowedEffects` set",
-    note = "the stage effect row is canonical: mirror its effects in `type \
-            AllowedEffects = obzenflow_runtime::effect_set![...]`, or change the row \
+    note = "the stage `uses` clause is canonical: mirror its effects in `type \
+            AllowedEffects = obzenflow_runtime::effect_set![...]`, or change the clause \
             first if the stage capability contract is wrong (FLOWIP-120z B9)"
 )]
 pub trait ManifestEffectsAreAllowedByHandler<HandlerMembers, Proof>:
@@ -251,10 +251,10 @@ where
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "the handler's `AllowedEffects` permits an effect missing from the stage \
-               effect row",
+               `uses` clause",
     label = "the handler's `AllowedEffects` set is not contained in this effect manifest",
-    note = "the stage effect row is canonical: remove the extra effect from \
-            `AllowedEffects`, or add it to the row first when the stage needs the \
+    note = "the stage `uses` clause is canonical: remove the extra effect from \
+            `AllowedEffects`, or add it to the clause first when the stage needs the \
             capability and then mirror the clause in `type AllowedEffects = \
             obzenflow_runtime::effect_set![...]` (FLOWIP-120z B9)"
 )]

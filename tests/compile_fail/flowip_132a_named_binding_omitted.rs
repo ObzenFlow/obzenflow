@@ -8,7 +8,7 @@ use support::{First, Input, ZeroSlotNamedEffect};
 
 fn main() {
     let _ = obzenflow_dsl::effectful_transform!(
-        Input ->{ ZeroSlotNamedEffect } First => support::AllowsZeroSlotNamedEffect,
+        Input -> First uses ZeroSlotNamedEffect => support::AllowsZeroSlotNamedEffect,
         observers: []
     );
 }

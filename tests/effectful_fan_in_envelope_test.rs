@@ -218,7 +218,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
                 source_a = source!(EnvelopeInput => source_a);
                 source_b = source!(EnvelopeInput => source_b);
                 effectful_merge = effectful_transform!(
-                    EnvelopeInput ->{ CountingEffect } { EnvelopeOutput, EnvelopeEffectValue } => effectful_merge,
+                    EnvelopeInput -> { EnvelopeOutput, EnvelopeEffectValue } uses CountingEffect => effectful_merge,
                     observers: []
                 );
                 collector = sink!(EnvelopeOutput => collector);

@@ -1,4 +1,4 @@
-error: effectful_transform!: detached `effects: [...]` was removed; write `Input -> { Effect } Output => handler`
+error: effectful_transform!: detached `effects: [...]` was removed; write `Input -> Output uses Effect => handler`
   --> tests/compile_fail/flowip_132a_detached_effects.rs:10:13
    |
 10 |       let _ = obzenflow_dsl::effectful_transform!(

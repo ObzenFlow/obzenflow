@@ -536,7 +536,7 @@ mod tests {
     fn effectful_transform_transactional_effect_clause_declares_executor() {
         let tx = tx_binding();
         let descriptor = crate::effectful_transform!(
-            In ->{ transactional(TxEffect) via tx } Out => TxFxTr,
+            In -> Out uses transactional(TxEffect) via tx => TxFxTr,
             observers: []
         );
 

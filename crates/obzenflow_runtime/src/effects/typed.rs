@@ -43,13 +43,13 @@ where
 /// handler's declared capability set.
 ///
 /// Its blanket implementation preserves the existing [`Member`] proof while
-/// keeping effect permission errors in the vocabulary of the stage effect row
+/// keeping effect permission errors in the vocabulary of the stage `uses` clause
 /// and `AllowedEffects`.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "effect `{Self}` is not declared in this handler's `AllowedEffects` set",
     label = "`{Self}` cannot be performed by this handler",
-    note = "add `{Self}` to the canonical stage `->{{ ... }}` row (using `transactional(...)`, \
+    note = "add `{Self}` to the canonical stage `uses` clause (using `transactional(...)`, \
             `via`, or bare `with` when required), then mirror its effect type in the handler's \
             `AllowedEffects`, or remove this `perform` call (FLOWIP-120z)"
 )]

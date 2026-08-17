@@ -1,8 +1,8 @@
 error[E0277]: effect declaration `ZeroSlotNamedEffect` requires a typed binding
-  --> tests/compile_fail/flowip_132a_named_binding_omitted.rs:11:19
+  --> tests/compile_fail/flowip_132a_named_binding_omitted.rs:11:29
    |
-11 |         Input ->{ ZeroSlotNamedEffect } First => support::AllowsZeroSlotNamedEffect,
-   |                   ^^^^^^^^^^^^^^^^^^^ this named effect is missing `via <binding>`
+11 |         Input -> First uses ZeroSlotNamedEffect => support::AllowsZeroSlotNamedEffect,
+   |                             ^^^^^^^^^^^^^^^^^^^ this named effect is missing `via <binding>`
    |
 help: the trait `EffectDeclarationWithoutBinding` is not implemented for `ZeroSlotNamedEffect`
   --> tests/compile_fail/support/typed_effectful.rs

@@ -262,8 +262,8 @@ fn undeclared_effect_fact_flow(journal_base: PathBuf) -> FlowDefinition {
     })
 }
 
-/// `effects: []` stages have no declarations, so containment has nothing to
-/// check and the build proceeds.
+/// An effect-free `Input -> Output` stage has no declarations, so containment
+/// has nothing to check and the build proceeds.
 fn empty_effects_flow(journal_base: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let inputs_handler = OneShotSource::new();

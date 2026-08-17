@@ -208,16 +208,16 @@ mod tests {
         let chat = test_chat_binding("test-model", "test-model");
         crate::ai_map_reduce!(
             TestSeed -> TestOut => {
-                map: [TestItem] ->{
-                    at_least_once(ChatCompletion)
+                map: [TestItem] -> TestPartial
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } TestPartial => TestMapRole,
-                reduce: (TestSeed, [TestPartial]) ->{
-                    at_least_once(ChatCompletion)
+                    => TestMapRole,
+                reduce: (TestSeed, [TestPartial]) -> TestOut
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } TestOut => TestFinaliseRole,
+                    => TestFinaliseRole,
             },
             chunking: by_budget {
                 items: |seed: &TestSeed| seed.items.clone(),
@@ -233,11 +233,11 @@ mod tests {
     fn inference_lowers_to_one_generated_transform_with_the_exact_three_row_plan() {
         let chat = test_chat_binding("test-model", "test-model");
         let mut inference = crate::inference!(
-            TestSeed ->{
-                at_least_once(ChatCompletion)
+            TestSeed -> TestOut
+                uses at_least_once(ChatCompletion)
                     via chat
                     with obzenflow_adapters::middleware::control::ai_resilience()
-            } TestOut => TestInferenceRole
+                => TestInferenceRole
         );
         inference.set_name("brief".to_string());
 
@@ -380,16 +380,16 @@ mod tests {
         let chat = test_chat_binding("test-model", "test-model");
         let digest = crate::ai_map_reduce!(
             TestSeed -> TestOut => {
-                map: [TestItem] ->{
-                    at_least_once(ChatCompletion)
+                map: [TestItem] -> TestPartial
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } TestPartial => TestMapRole,
-                reduce: (TestSeed, [TestPartial]) ->{
-                    at_least_once(ChatCompletion)
+                    => TestMapRole,
+                reduce: (TestSeed, [TestPartial]) -> TestOut
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } TestOut => TestFinaliseRole,
+                    => TestFinaliseRole,
             },
             chunking: by_budget {
                 items: |seed: &TestSeed| seed.items.clone(),
@@ -427,20 +427,20 @@ mod tests {
         let chat = test_chat_binding("test-model", "test-model");
         let digest = crate::ai_map_reduce!(
             TestSeed -> TestOut => {
-                map: [TestItem] ->{
-                    at_least_once(ChatCompletion)
+                map: [TestItem] -> TestPartial
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with Box::new(
                             obzenflow_adapters::middleware::RateLimiterFactory::new(1.0)
                         )
-                } TestPartial => TestMapRole,
-                reduce: (TestSeed, [TestPartial]) ->{
-                    at_least_once(ChatCompletion)
+                    => TestMapRole,
+                reduce: (TestSeed, [TestPartial]) -> TestOut
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with Box::new(
                             obzenflow_adapters::middleware::RateLimiterFactory::new(1.0)
                         )
-                } TestOut => TestFinaliseRole,
+                    => TestFinaliseRole,
             },
             chunking: by_budget {
                 items: |seed: &TestSeed| seed.items.clone(),
@@ -494,16 +494,16 @@ mod tests {
         );
         let digest = crate::ai_map_reduce!(
             TestSeed -> TestOut => {
-                map: [TestItem] ->{
-                    at_least_once(ChatCompletion)
+                map: [TestItem] -> TestPartial
+                    uses at_least_once(ChatCompletion)
                         via map_chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } TestPartial => TestMapRole,
-                reduce: (TestSeed, [TestPartial]) ->{
-                    at_least_once(ChatCompletion)
+                    => TestMapRole,
+                reduce: (TestSeed, [TestPartial]) -> TestOut
+                    uses at_least_once(ChatCompletion)
                         via finalise_chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } TestOut => TestFinaliseRole,
+                    => TestFinaliseRole,
             },
             chunking: by_budget {
                 items: |seed: &TestSeed| seed.items.clone(),

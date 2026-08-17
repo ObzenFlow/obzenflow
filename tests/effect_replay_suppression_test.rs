@@ -923,7 +923,7 @@ fn build_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput ->{ CountingEffect } { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -956,7 +956,7 @@ fn build_source_limiter_flow(
                     RateLimiterBuilder::new(1.0).build()
                 ]);
                 effectful = effectful_transform!(
-                    ReplayInput ->{ CountingEffect } { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -992,7 +992,7 @@ fn build_fast_limiter_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput ->{ CountingEffect with RateLimiterBuilder::new(1000.0).build() } { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with RateLimiterBuilder::new(1000.0).build() => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1040,7 +1040,7 @@ fn build_blocking_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput ->{ BlockingEffect with resilience } { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses BlockingEffect with resilience => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1085,7 +1085,7 @@ fn build_post_perform_blocking_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput ->{ CountingEffect with resilience } { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with resilience => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1126,7 +1126,7 @@ fn build_fan_out_flow(
                 inputs = source!(ReplayInput => inputs_handler);
                 fan_out = transform!(ReplayInput -> ReplayInput => fan_out_handler);
                 effectful = effectful_transform!(
-                    ReplayInput ->{ CountingEffect with resilience } { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with resilience => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1158,7 +1158,7 @@ fn build_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput ->{ CountingEffect } { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1198,7 +1198,7 @@ fn build_dishonest_one_fact_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput ->{ CountingEffect } { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1235,7 +1235,7 @@ fn build_error_after_commit_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput ->{ CountingEffect } { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1274,7 +1274,7 @@ fn build_apply_rejection_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput ->{ CountingEffect } { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1306,7 +1306,7 @@ fn build_product_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput ->{ ProductEffect } { ReplayOutput, ProductFirst, ProductSecond } => effectful_handler,
+                    ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } uses ProductEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -3505,7 +3505,7 @@ fn build_ported_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 ported = effectful_transform!(
-                    ReplayInput ->{ PortedEffect via ported_binding } { ReplayOutput, ReplayEffectValue } => ported_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses PortedEffect via ported_binding => ported_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -3853,7 +3853,7 @@ fn build_transactional_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 ledger = effectful_transform!(
-                    ReplayInput ->{ transactional(LedgerEffect) via ledger_binding with resilience } { ReplayOutput, ReplayEffectValue } => ledger_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses transactional(LedgerEffect) via ledger_binding with resilience => ledger_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -4160,7 +4160,7 @@ fn build_fail_fast_rejection_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput ->{ AlwaysFailingEffect with resilience } { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses AlwaysFailingEffect with resilience => effectful_handler,
                     observers: []);
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -4198,7 +4198,12 @@ fn build_multi_effect_per_effect_breaker_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput ->{ AlwaysFailingEffect with resilience, CountingEffect } { ReplayOutput, ReplayEffectValue } => effectful_handler,
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue }
+                    uses {
+                        AlwaysFailingEffect with resilience,
+                        CountingEffect,
+                    }
+                    => effectful_handler,
                     observers: []);
                 collector = sink!(ReplayOutput => collector_handler);
             },

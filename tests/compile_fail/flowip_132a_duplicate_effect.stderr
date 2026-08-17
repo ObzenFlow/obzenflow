@@ -3,9 +3,11 @@ error: effect declaration `FirstEffect` appears more than once; each effect type
    |
 10 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
-11 | |         Input ->{ FirstEffect, FirstEffect } First => support::AllowsFirstEffect,
-12 | |         observers: []
-13 | |     );
+11 | |         Input -> First
+12 | |         uses { FirstEffect, FirstEffect }
+13 | |         => support::AllowsFirstEffect,
+14 | |         observers: []
+15 | |     );
    | |_____^
    |
    = note: this error originates in the macro `__obzenflow_compare_effect_identifier` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)

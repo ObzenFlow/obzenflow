@@ -11,11 +11,11 @@ fn main() {
     let first = ();
     let second = ();
     let _ = obzenflow_dsl::effectful_transform!(
-        Input ->{ Effect with [first] } Output => Handler,
+        Input -> Output uses Effect with [first] => Handler,
         observers: []
     );
     let _ = obzenflow_dsl::effectful_transform!(
-        Input ->{ Effect with { first, second } } Output => Handler,
+        Input -> Output uses Effect with { first, second } => Handler,
         observers: []
     );
 }

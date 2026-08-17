@@ -158,8 +158,8 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 
 /// Async transform surface for replay-safe effects.
 ///
-/// The stage arrow and inline effect row are the canonical operator-facing
-/// contract. `Output` and `AllowedEffects` mirror those declarations so Rust
+/// The stage arrow and trailing `uses` clause are the canonical operator-facing
+/// contract. `Output` and `AllowedEffects` mirror them so Rust
 /// can reject an undeclared [`Effects::emit`] or [`Effects::perform`] inside
 /// this handler before the handler is erased for execution. They carry no
 /// runtime metadata and are never journalled.
@@ -167,7 +167,7 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 /// A single output fact may be named directly. For a multi-fact arrow, use
 /// [`obzenflow_core::stage_fact_set!`]. Always mirror effect types with
 /// [`crate::effect_set!`]; middleware and policy values remain only in the
-/// stage's effect row.
+/// stage's `uses` clause.
 ///
 /// ```ignore
 /// # use async_trait::async_trait;
@@ -212,7 +212,7 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
     label = "this handler does not match the effectful transform contract",
     note = "implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, \
             and `process`; `Input` must match the arrow input, while `Output` and \
-            `AllowedEffects` mirror the canonical arrow and effect row (FLOWIP-120z B9)"
+            `AllowedEffects` mirror the canonical arrow and `uses` clause (FLOWIP-120z B9)"
 )]
 #[async_trait]
 pub trait EffectfulTransformHandler: Send + Sync {

@@ -8,7 +8,7 @@ use support::{First, FirstEffect, Input};
 
 fn main() {
     let _ = obzenflow_dsl::effectful_transform!(
-        Input ->{ transactional(FirstEffect, "ledger") } First => support::AllowsFirstEffect,
+        Input -> First uses transactional(FirstEffect, "ledger") => support::AllowsFirstEffect,
         observers: []
     );
 }

@@ -90,23 +90,13 @@ impl AiInferenceRole<ReducedEvidence, DecisionBrief> for BriefRole {
 fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |runtime_config| {
         let ai_models = runtime_config.ai_models();
-        let (chat, chat_registration) = ChatEffectBinding::from_config(&ai_models)
-            .map_err(|error| FlowBuildError::BindingConfiguration {
-                binding: "chat".to_string(),
-                detail: error.to_string(),
-            })?
-            .into_parts()
+        let mut effect_ports = EffectPortRegistry::new();
+        let chat = ChatEffectBinding::from_config(&ai_models)
+            .and_then(|binding| binding.install_into(&mut effect_ports))
             .map_err(|error| FlowBuildError::BindingConfiguration {
                 binding: "chat".to_string(),
                 detail: error.to_string(),
             })?;
-        let mut effect_ports = EffectPortRegistry::new();
-        effect_ports.install(chat_registration).map_err(|error| {
-            FlowBuildError::BindingConfiguration {
-                binding: "chat".to_string(),
-                detail: error.to_string(),
-            }
-        })?;
         let evidence_source = sources::finite([input]);
         let brief_role = BriefRole;
         let display_brief = sinks::console(|brief: &DecisionBrief| {
@@ -121,11 +111,11 @@ fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowD
             stages: {
                 evidence = source!(ReducedEvidence => evidence_source);
                 brief = inference!(
-                    ReducedEvidence -> {
-                        at_least_once(ChatCompletion)
-                            via chat
-                            with ai_resilience()
-                    } DecisionBrief => brief_role
+                    ReducedEvidence -> DecisionBrief
+                    uses at_least_once(ChatCompletion)
+                        via chat
+                        with ai_resilience()
+                    => brief_role
                 );
                 display = sink!(DecisionBrief => display_brief);
             },

@@ -3,9 +3,9 @@ error: an effect's 'with' takes one policy expression; write 'with <policy>'; br
    |
 16 |       let _ = inference!(
    |  _____________^
-17 | |         Input ->{
-18 | |             at_least_once(ChatCompletion) via chat with { first, second }
-19 | |         } Output => role
+17 | |         Input -> Output
+18 | |             uses at_least_once(ChatCompletion) via chat with { first, second }
+19 | |             => role
 20 | |     );
    | |_____^
    |

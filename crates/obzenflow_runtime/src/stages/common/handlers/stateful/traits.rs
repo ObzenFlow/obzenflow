@@ -334,8 +334,8 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// stage cannot acknowledge the input, process later input, or complete drain
 /// because its state no longer represents a fold of its durable history.
 ///
-/// The stage arrow and inline effect row are the canonical operator-facing
-/// contract. `Output` and `AllowedEffects` mirror those declarations so Rust
+/// The stage arrow and trailing `uses` clause are the canonical operator-facing
+/// contract. `Output` and `AllowedEffects` mirror them so Rust
 /// can check `decide` before the handler is erased. They carry no runtime
 /// metadata and are never journalled.
 ///
@@ -396,7 +396,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// }
 /// ```
 ///
-/// Middleware and policy values stay solely in the stage's effect row;
+/// Middleware and policy values stay solely in the stage's `uses` clause;
 /// `AllowedEffects` mirrors effect types only.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not satisfy `EffectfulStatefulHandler` for this stage",
@@ -404,7 +404,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
     note = "implement `EffectfulStatefulHandler` with `State`, `Input`, `Output`, \
             `AllowedEffects`, `initial_state`, `decide`, and `apply`; `Input` must match the \
             arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and \
-            effect row (FLOWIP-120z B9)"
+            `uses` clause (FLOWIP-120z B9)"
 )]
 #[async_trait]
 pub trait EffectfulStatefulHandler: Send + Sync {

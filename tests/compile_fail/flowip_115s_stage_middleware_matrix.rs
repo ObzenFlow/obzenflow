@@ -16,12 +16,12 @@ fn main() {
     let _ = obzenflow_dsl::async_infinite_source!(Output => Handler, middleware: [observer]);
     let _ = obzenflow_dsl::transform!(Input -> Output => Handler, middleware: [observer]);
     let _ = obzenflow_dsl::effectful_transform!(
-        Input ->{ Effect } Output => Handler,
+        Input -> Output uses Effect => Handler,
         middleware: [observer]
     );
     let _ = obzenflow_dsl::stateful!(Input -> Output => Handler, middleware: [observer]);
     let _ = obzenflow_dsl::effectful_stateful!(
-        Input ->{ Effect } Output => Handler,
+        Input -> Output uses Effect => Handler,
         middleware: [observer]
     );
     let _ = obzenflow_dsl::join!(

@@ -57,8 +57,9 @@ configuration exposed through `poll_timeout()`, not stage syntax.
 The DSL has four core sections: optional `name` (flow identifier), `journals` (persistence backend), `stages` (bindings producing stage descriptors), and `topology` (edges connecting stages with `|>` and `<|` operators). Optional flow backpressure and effect-port sections sit between `journals` and `stages`. Middleware is declared only on the stage where it applies.
 
 See [the type-and-effect stage grammar](../../docs/type-and-effect-stage-grammar.md)
-for effect rows, typed `via` bindings, singleton `with` policies, and migration
-from detached declarations and raw port registries.
+for trailing `uses` capability declarations, typed `via` bindings, singleton
+`with` policies, and migration from detached declarations and raw port
+registries.
 
 ## AI stage shapes
 
@@ -66,15 +67,15 @@ Use `inference!` when each input is already bounded and needs exactly one model 
 
 ```rust,ignore
 brief = inference!(
-    ReducedEvidence -> {
-        at_least_once(ChatCompletion)
-            via chat
-            with ai_resilience()
-    } DecisionBrief => brief_role
+    ReducedEvidence -> DecisionBrief
+    uses at_least_once(ChatCompletion)
+        via chat
+        with ai_resilience()
+    => brief_role
 );
 ```
 
-Use `ai_map_reduce!` when the input must be token-budgeted, fanned out, collected, and finalised. Its map and reduce roles use the same effect row shown above. The lexical `via chat` operand is an `EffectBinding<ChatCompletion>`, not a registry name; normal configuration creates that binding and its consuming live registration together with `ChatEffectBinding::from_config(...).into_parts()`.
+Use `ai_map_reduce!` when the input must be token-budgeted, fanned out, collected, and finalised. Its map and reduce roles use the same trailing `uses` clause shown above. The lexical `via chat` operand is an `EffectBinding<ChatCompletion>`, not a registry name; normal configuration obtains it with `ChatEffectBinding::from_config(...).install_into(&mut effect_ports)` while the facade owns registration construction.
 
 AI roles prepare a target-free `ChatRequestSpec`. The generated handler retains that exact value, binds the configured target only at the effect boundary, records `ChatCompletionReply` as framework replay evidence, and passes the retained spec plus reply to interpretation. The reply is not a selectable stage output.
 

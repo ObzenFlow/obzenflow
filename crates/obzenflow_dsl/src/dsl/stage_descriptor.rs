@@ -1371,7 +1371,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
     }
 }
 
-/// The single control policy declared inline on one effect-row entry.
+/// The single control policy declared inline on one `uses` entry.
 pub struct EffectPolicyAttachment {
     pub effect_type: &'static str,
     pub factory: Box<dyn MiddlewareFactory>,
@@ -1421,7 +1421,7 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     handler: H,
     effects: Vec<EffectDeclaration>,
     observers: Vec<Box<dyn MiddlewareFactory>>,
-    /// Per-effect policy attachments from the effect row.
+    /// Per-effect policy attachments from the `uses` clause.
     /// (FLOWIP-120c H7).
     effect_policies: Vec<EffectPolicyAttachment>,
     direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan,

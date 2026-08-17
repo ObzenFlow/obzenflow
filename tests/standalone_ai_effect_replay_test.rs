@@ -29,7 +29,7 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::effects::{
-    EffectBinding, EffectPortRegistry, EffectPortResolverWithMetadata, EffectRegistrationBuilder,
+    EffectBinding, EffectPortRegistry, EffectPortResolver, EffectRegistrationBuilder,
     LogicalEffectBindingName, ResolvedEffectPort, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -179,13 +179,14 @@ fn base_bindings(
     ),
     FlowBuildError,
 > {
-    let (chat, _) = ChatEffectBinding::ollama("fixture-chat", chat_endpoint)
+    let mut effect_ports = EffectPortRegistry::new();
+    let chat = ChatEffectBinding::ollama("fixture-chat", chat_endpoint)
         .map_err(|error| binding_error("chat", error))?
-        .into_parts()
+        .install_into(&mut effect_ports)
         .map_err(|error| binding_error("chat", error))?;
-    let (embedding, _) = EmbeddingEffectBinding::ollama("fixture-embedding", None)
+    let embedding = EmbeddingEffectBinding::ollama("fixture-embedding", None)
         .map_err(|error| binding_error("embedding", error))?
-        .into_parts()
+        .install_into(&mut effect_ports)
         .map_err(|error| binding_error("embedding", error))?;
     Ok((chat, embedding))
 }
@@ -206,56 +207,38 @@ fn live_authority(
     };
     let chat_target = chat_seed.evidence().target().clone();
     let embedding_target = embedding_seed.evidence().target().clone();
-    let chat_resolver: EffectPortResolverWithMetadata<dyn ChatClient, ChatTarget> = Arc::new({
+    let chat_resolver: EffectPortResolver<dyn ChatClient> = Arc::new({
         let resolutions = counters.chat_resolutions.clone();
         let calls = counters.chat_calls.clone();
+        let target = chat_target.clone();
         move || {
-            let target = chat_target.clone();
+            let target = target.clone();
             resolutions.fetch_add(1, Ordering::SeqCst);
-            let client = Arc::new(FixtureChatClient {
+            Ok(Arc::new(FixtureChatClient {
                 target,
                 calls: calls.clone(),
-            }) as Arc<dyn ChatClient>;
-            let metadata = Arc::new(client.target().clone());
-            Ok(ResolvedEffectPort::new(client, metadata))
+            }) as Arc<dyn ChatClient>)
         }
     });
-    let embedding_resolver: EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> =
-        Arc::new({
-            let resolutions = counters.embedding_resolutions.clone();
-            let calls = counters.embedding_calls.clone();
-            move || {
-                let target = embedding_target.clone();
-                resolutions.fetch_add(1, Ordering::SeqCst);
-                let client = Arc::new(FixtureEmbeddingClient {
-                    target,
-                    calls: calls.clone(),
-                }) as Arc<dyn EmbeddingClient>;
-                let metadata = Arc::new(client.target().clone());
-                Ok(ResolvedEffectPort::new(client, metadata))
-            }
-        });
-    let (chat, chat_registration) = EffectRegistrationBuilder::<ChatCompletion>::new(
-        LogicalEffectBindingName::new("chat").expect("valid fixture binding name"),
-        chat_seed.evidence().clone(),
-    )
-    .bind_deferred_with_metadata(CHAT_CLIENT, chat_resolver)
-    .and_then(|builder| builder.finish())
-    .map_err(|error| binding_error("chat", error))?;
-    let (embedding, embedding_registration) =
-        EffectRegistrationBuilder::<EmbeddingGeneration>::new(
-            LogicalEffectBindingName::new("embedding").expect("valid fixture binding name"),
-            embedding_seed.evidence().clone(),
-        )
-        .bind_deferred_with_metadata(EMBEDDING_CLIENT, embedding_resolver)
-        .and_then(|builder| builder.finish())
-        .map_err(|error| binding_error("embedding", error))?;
+    let embedding_resolver: EffectPortResolver<dyn EmbeddingClient> = Arc::new({
+        let resolutions = counters.embedding_resolutions.clone();
+        let calls = counters.embedding_calls.clone();
+        let target = embedding_target.clone();
+        move || {
+            let target = target.clone();
+            resolutions.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(FixtureEmbeddingClient {
+                target,
+                calls: calls.clone(),
+            }) as Arc<dyn EmbeddingClient>)
+        }
+    });
     let mut effect_ports = EffectPortRegistry::new();
-    effect_ports
-        .install(chat_registration)
+    let chat = ChatEffectBinding::from_resolver(chat_target, chat_resolver)
+        .and_then(|binding| binding.install_into(&mut effect_ports))
         .map_err(|error| binding_error("chat", error))?;
-    effect_ports
-        .install(embedding_registration)
+    let embedding = EmbeddingEffectBinding::from_resolver(embedding_target, embedding_resolver)
+        .and_then(|binding| binding.install_into(&mut effect_ports))
         .map_err(|error| binding_error("embedding", error))?;
     Ok(AiAuthority {
         chat,
@@ -381,11 +364,19 @@ fn build_flow(
             stages: {
                 input = source!(TicketRaised => input);
                 chat = effectful_transform!(
-                    TicketRaised ->{ at_least_once(ChatCompletion) via chat with ai_resilience() } TicketSummarised => chat_handler,
+                    TicketRaised -> TicketSummarised
+                    uses at_least_once(ChatCompletion)
+                        via chat
+                        with ai_resilience()
+                    => chat_handler,
                     observers: [],
                 );
                 embedding = effectful_transform!(
-                    TicketSummarised ->{ at_least_once(EmbeddingGeneration) via embedding with ai_resilience() } TicketEmbedded => embedding_handler,
+                    TicketSummarised -> TicketEmbedded
+                    uses at_least_once(EmbeddingGeneration)
+                        via embedding
+                        with ai_resilience()
+                    => embedding_handler,
                     observers: [],
                 );
                 collected = sink!(TicketEmbedded => collected);

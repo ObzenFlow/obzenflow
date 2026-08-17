@@ -61,6 +61,7 @@ fn one_shot_witness_uses_the_locked_materializer_surface() {
         "FlowDefinition::materialize(move |runtime_config| {",
         "let ai_models = runtime_config.ai_models();",
         "ChatEffectBinding::from_config(&ai_models)",
+        "binding.install_into(&mut effect_ports)",
         "let evidence_source = sources::finite([input]);",
         "let brief_role = BriefRole;",
         "effect_ports,",
@@ -71,7 +72,19 @@ fn one_shot_witness_uses_the_locked_materializer_surface() {
         );
     }
 
-    for forbidden in ["bindings:", "effect_ports: effect_ports,", "std::env"] {
+    for forbidden in [
+        "bindings:",
+        "effect_ports: effect_ports,",
+        "std::env",
+        "EffectPortResolver",
+        "EffectRegistrationBuilder",
+        "LogicalEffectBindingName",
+        "ResolvedEffectPort",
+        "CHAT_CLIENT",
+        "bind_deferred_with_metadata",
+        ".into_parts()",
+        "chat_registration",
+    ] {
         assert!(
             !source.contains(forbidden),
             "one-shot builder must not regain the retired source spelling: {forbidden}"
@@ -405,11 +418,11 @@ where
             stages: {
                 evidence = source!(ReducedEvidence => evidence_handler);
                 brief = inference!(
-                    ReducedEvidence ->{
-                        at_least_once(ChatCompletion)
+                    ReducedEvidence -> DecisionBrief
+                        uses at_least_once(ChatCompletion)
                             via chat
                             with brief_policy
-                    } DecisionBrief => brief_role
+                        => brief_role
                 );
                 collected = sink!(DecisionBrief => collected_handler);
             },
@@ -452,11 +465,11 @@ fn build_credit_flow(
             stages: {
                 credit_evidence = source!(ReducedEvidence => credit_evidence);
                 credit_brief = inference!(
-                    ReducedEvidence ->{
-                        at_least_once(ChatCompletion)
+                    ReducedEvidence -> DecisionBrief
+                        uses at_least_once(ChatCompletion)
                             via chat
                             with ai_resilience()
-                    } DecisionBrief => brief_role
+                        => brief_role
                 );
                 credit_collected = sink!(DecisionBrief => credit_collected);
             },
@@ -504,11 +517,11 @@ fn build_fan_out_flow(
             stages: {
                 fan_out_evidence = source!(ReducedEvidence => fan_out_evidence);
                 fan_out_brief = inference!(
-                    ReducedEvidence ->{
-                        at_least_once(ChatCompletion)
+                    ReducedEvidence -> DecisionBrief
+                        uses at_least_once(ChatCompletion)
                             via chat
                             with ai_resilience()
-                    } DecisionBrief => brief_role
+                        => brief_role
                 );
                 fast_collected = sink!(DecisionBrief => fast_collected);
                 slow_collected = sink!(DecisionBrief => slow_collected);

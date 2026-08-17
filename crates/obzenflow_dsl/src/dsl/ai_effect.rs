@@ -15,10 +15,10 @@ use obzenflow_runtime::effects::{
 
 use super::stage_descriptor::EffectPolicyAttachment;
 
-/// Canonical lowering product for the one generated ChatCompletion row.
+/// Canonical lowering product for one generated `ChatCompletion` capability declaration.
 ///
 /// Exported only so authoring macros expanded in downstream crates can carry
-/// the exact declaration and policy vectors produced by the shared effect-row
+/// the exact declaration and policy vectors produced by the shared effect-entry
 /// lowerer into the generated descriptor constructors.
 #[doc(hidden)]
 pub struct GeneratedChatEffectRow {
@@ -36,7 +36,7 @@ pub(crate) enum GeneratedChatInvocationError {
 /// Macro type-checking seam for the lexical `via` operand.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "AI effect-row `via` binding is not an EffectBinding<ChatCompletion>",
+    message = "AI `uses`-clause `via` binding is not an EffectBinding<ChatCompletion>",
     label = "expected an EffectBinding<ChatCompletion> here",
     note = "`via` selects typed credential-free binding evidence; it is not a runtime port name"
 )]
@@ -106,7 +106,7 @@ pub(crate) fn require_generated_chat_resilience<'a>(
 
     Err(format!(
         "{surface}: generated {owner_kind} '{owner}' requires exactly one EffectResilience \
-         policy on 'ChatCompletion'; attach `with ai_resilience()` to the effect row \
+         policy on 'ChatCompletion'; attach `with ai_resilience()` to its `uses` entry \
          (found {resilience_count} EffectResilience policies across {} attachments)",
         declarations.len()
     ))

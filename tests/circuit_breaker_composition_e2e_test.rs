@@ -299,7 +299,7 @@ fn build_retry_flow(
                 inputs = source!(CompInput => source_handler with [source_breaker]);
                 fan_out = transform!(CompInput -> CompInput => fan_out_handler);
                 effectful = effectful_transform!(
-                    CompInput ->{ RetryOnceEffect with effect_resilience } { CompOutput, CompEffectValue } => effectful_handler,
+                    CompInput -> { CompOutput, CompEffectValue } uses RetryOnceEffect with effect_resilience => effectful_handler,
                     observers: []
                 );
                 collector = sink!(CompOutput => collector_handler with [sink_breaker]);

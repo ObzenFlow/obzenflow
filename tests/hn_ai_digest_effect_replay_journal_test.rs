@@ -23,6 +23,7 @@ mod mock_server;
 mod util;
 
 use async_trait::async_trait;
+use obzenflow::ai::ChatEffectBinding;
 use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, CHAT_CLIENT};
 use obzenflow_adapters::middleware::control::{
     ai_recovery_rejecting_resilience_for_test, ai_resilience,
@@ -456,6 +457,17 @@ fn counting_chat_resolver(
     })
 }
 
+fn counting_chat_binding(
+    target: ChatTarget,
+    resolutions: Arc<AtomicUsize>,
+    calls: Arc<AtomicUsize>,
+    forbidden: bool,
+) -> ChatEffectBinding {
+    let resolver = counting_chat_resolver(target.clone(), resolutions, calls, forbidden);
+    ChatEffectBinding::from_resolver(target, resolver)
+        .expect("fixture chat binding evidence is valid")
+}
+
 fn post_start_mismatch_port(
     resolutions: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
@@ -648,16 +660,16 @@ fn build_flow_with_chunk_plan(
                 seed = source!(DigestSeed => seed);
                 digest = ai_map_reduce!(
                     DigestSeed -> DigestOut => {
-                        map: [DigestItem] ->{
-                            at_least_once(ChatCompletion)
+                        map: [DigestItem] -> DigestPartial
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestPartial => map_role,
-                        reduce: (DigestSeed, [DigestPartial]) ->{
-                            at_least_once(ChatCompletion)
+                            => map_role,
+                        reduce: (DigestSeed, [DigestPartial]) -> DigestOut
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestOut => finalise_role,
+                            => finalise_role,
                     },
                     chunking: by_budget {
                         items: |seed: &DigestSeed| {
@@ -711,16 +723,16 @@ fn build_recovery_flow(
                 recovery_seed = source!(DigestSeed => recovery_seed);
                 recovery_digest = ai_map_reduce!(
                     DigestSeed -> DigestOut => {
-                        map: [DigestItem] ->{
-                            at_least_once(ChatCompletion)
+                        map: [DigestItem] -> DigestPartial
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with map_policy
-                        } DigestPartial => map_role,
-                        reduce: (DigestSeed, [DigestPartial]) ->{
-                            at_least_once(ChatCompletion)
+                            => map_role,
+                        reduce: (DigestSeed, [DigestPartial]) -> DigestOut
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestOut => finalise_role,
+                            => finalise_role,
                     },
                     chunking: by_budget {
                         items: |seed: &DigestSeed| {
@@ -774,16 +786,16 @@ fn build_credit_flow(
                 credit_seed = source!(DigestSeed => credit_seed);
                 credit_digest = ai_map_reduce!(
                     DigestSeed -> DigestOut => {
-                        map: [DigestItem] ->{
-                            at_least_once(ChatCompletion)
+                        map: [DigestItem] -> DigestPartial
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestPartial => map_role,
-                        reduce: (DigestSeed, [DigestPartial]) ->{
-                            at_least_once(ChatCompletion)
+                            => map_role,
+                        reduce: (DigestSeed, [DigestPartial]) -> DigestOut
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestOut => finalise_role,
+                            => finalise_role,
                     },
                     chunking: by_budget {
                         items: |seed: &DigestSeed| {
@@ -836,16 +848,16 @@ fn build_chunk_interruption_flow(
                 interrupt_seed = source!(DigestSeed => interrupt_seed);
                 interrupt_digest = ai_map_reduce!(
                     DigestSeed -> DigestOut => {
-                        map: [DigestItem] ->{
-                            at_least_once(ChatCompletion)
+                        map: [DigestItem] -> DigestPartial
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestPartial => map_role,
-                        reduce: (DigestSeed, [DigestPartial]) ->{
-                            at_least_once(ChatCompletion)
+                            => map_role,
+                        reduce: (DigestSeed, [DigestPartial]) -> DigestOut
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestOut => finalise_role,
+                            => finalise_role,
                     },
                     chunking: by_budget {
                         items: |seed: &DigestSeed| {
@@ -1338,13 +1350,13 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "let HnRunInputs {",
         "let ai_models = runtime_config.ai_models();",
         "ChatEffectBinding::from_config(&ai_models)",
-        "let (chat, chat_registration) =",
-        ".into_parts()",
-        "effect_ports.install(chat_registration)",
+        "chat_binding_override",
+        "binding.install_into(&mut effect_ports)",
         "effect_ports,",
         "let hn_source = HttpPullSource::new(decoder, http_source_config);",
-        "map: [FormattedStory] -> {",
-        "reduce: (HnTopStories, [HnDigestGroupSummary]) -> {",
+        "map: [FormattedStory] -> HnDigestGroupSummary",
+        "reduce: (HnTopStories, [HnDigestGroupSummary]) -> HnDigestSummary",
+        "uses at_least_once(ChatCompletion)",
         "via chat",
         "with ai_resilience()",
     ] {
@@ -1366,6 +1378,15 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "bindings:",
         "effect_ports: effect_ports,",
         "DemoConfig",
+        "chat_resolver_override",
+        "EffectPortResolver",
+        "EffectRegistrationBuilder",
+        "LogicalEffectBindingName",
+        "ResolvedEffectPort",
+        "CHAT_CLIENT",
+        "bind_deferred_with_metadata",
+        ".into_parts()",
+        "chat_registration",
     ] {
         assert!(
             !flow_source.contains(forbidden),
@@ -2474,7 +2495,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         demo_inputs.clone(),
         hn_demo_flow::HnFlowOptions {
             journal_base: journal_base.clone(),
-            chat_resolver_override: Some(counting_chat_resolver(
+            chat_binding_override: Some(counting_chat_binding(
                 production_target.clone(),
                 live_resolutions.clone(),
                 live_calls.clone(),
@@ -2546,7 +2567,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         replay_inputs,
         hn_demo_flow::HnFlowOptions {
             journal_base: journal_base.clone(),
-            chat_resolver_override: Some(counting_chat_resolver(
+            chat_binding_override: Some(counting_chat_binding(
                 production_target,
                 replay_resolutions.clone(),
                 replay_calls.clone(),

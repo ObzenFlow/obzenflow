@@ -3,7 +3,7 @@ error: an effect's 'with' takes one policy expression; write 'with <policy>'; br
    |
 13 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
-14 | |         Input ->{ Effect with [first] } Output => Handler,
+14 | |         Input -> Output uses Effect with [first] => Handler,
 15 | |         observers: []
 16 | |     );
    | |_____^
@@ -15,7 +15,7 @@ error: an effect's 'with' takes one policy expression; write 'with <policy>'; br
    |
 17 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
-18 | |         Input ->{ Effect with { first, second } } Output => Handler,
+18 | |         Input -> Output uses Effect with { first, second } => Handler,
 19 | |         observers: []
 20 | |     );
    | |_____^

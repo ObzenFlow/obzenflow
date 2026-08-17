@@ -209,16 +209,16 @@ macro_rules! generated_digest {
         let finalise_role = BuildFinaliseRole;
         ai_map_reduce!(
             BuildOnlySeed -> BuildOnlyOut => {
-                map: [BuildOnlyItem] ->{
-                    at_least_once(ChatCompletion)
+                map: [BuildOnlyItem] -> BuildOnlyPartial
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } BuildOnlyPartial => map_role,
-                reduce: (BuildOnlySeed, [BuildOnlyPartial]) ->{
-                    at_least_once(ChatCompletion)
+                    => map_role,
+                reduce: (BuildOnlySeed, [BuildOnlyPartial]) -> BuildOnlyOut
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } BuildOnlyOut => finalise_role,
+                    => finalise_role,
             },
             chunking: by_budget {
                 items: |seed: &BuildOnlySeed| {
@@ -413,16 +413,16 @@ async fn materializer_scope_remains_visible_to_ai_effects_and_effect_ports() {
                 seed = source!(BuildOnlySeed => seed_handler);
                 digest = ai_map_reduce!(
                     BuildOnlySeed -> BuildOnlyOut => {
-                        map: [BuildOnlyItem] ->{
-                            at_least_once(ChatCompletion)
+                        map: [BuildOnlyItem] -> BuildOnlyPartial
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with obzenflow_adapters::middleware::control::ai_resilience()
-                        } BuildOnlyPartial => bound_map_role,
-                        reduce: (BuildOnlySeed, [BuildOnlyPartial]) ->{
-                            at_least_once(ChatCompletion)
+                            => bound_map_role,
+                        reduce: (BuildOnlySeed, [BuildOnlyPartial]) -> BuildOnlyOut
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with obzenflow_adapters::middleware::control::ai_resilience()
-                        } BuildOnlyOut => bound_finalise_role,
+                            => bound_finalise_role,
                     },
                     chunking: by_budget {
                         items: |seed: &BuildOnlySeed| {
@@ -470,16 +470,16 @@ async fn ordinary_rust_bindings_remain_visible_to_test_flow() {
                 seed = source!(BuildOnlySeed => seed_handler);
                 digest = ai_map_reduce!(
                     BuildOnlySeed -> BuildOnlyOut => {
-                        map: [BuildOnlyItem] ->{
-                            at_least_once(ChatCompletion)
+                        map: [BuildOnlyItem] -> BuildOnlyPartial
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with obzenflow_adapters::middleware::control::ai_resilience()
-                        } BuildOnlyPartial => bound_map_role,
-                        reduce: (BuildOnlySeed, [BuildOnlyPartial]) ->{
-                            at_least_once(ChatCompletion)
+                            => bound_map_role,
+                        reduce: (BuildOnlySeed, [BuildOnlyPartial]) -> BuildOnlyOut
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with obzenflow_adapters::middleware::control::ai_resilience()
-                        } BuildOnlyOut => bound_finalise_role,
+                            => bound_finalise_role,
                     },
                     chunking: by_budget {
                         items: |seed: &BuildOnlySeed| {

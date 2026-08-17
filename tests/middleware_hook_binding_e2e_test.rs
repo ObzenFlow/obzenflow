@@ -483,7 +483,7 @@ fn build_flow(
                     HookProofFactory::new(counters.clone(), 1)
                 ]);
                 transform = effectful_transform!(
-                    HookInput ->{ HookEffect with Box::new(HookProofFactory::new(counters.clone(), 1)) } { HookOutput, HookEffectValue } => hook_transform,
+                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with Box::new(HookProofFactory::new(counters.clone(), 1)) => hook_transform,
                     observers: []
                 );
                 output = sink!(HookOutput => output_sink with [
@@ -517,7 +517,7 @@ fn build_failure_cause_flow(
             stages: {
                 input = source!(HookInput => hook_source);
                 transform = effectful_transform!(
-                    HookInput ->{ HookEffect with Box::new(BreakerCauseProofFactory) } { HookOutput, HookEffectValue } => hook_transform,
+                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with Box::new(BreakerCauseProofFactory) => hook_transform,
                     observers: []);
                 output = sink!(HookOutput => output_sink);
             },

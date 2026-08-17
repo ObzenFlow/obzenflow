@@ -254,11 +254,19 @@ fn finite_flow(
             stages: {
                 input = source!(TicketRaised => input);
                 chat = effectful_transform!(
-                    TicketRaised ->{ at_least_once(ChatCompletion) via chat with ai_resilience() } TicketSummarised => chat_handler,
+                    TicketRaised -> TicketSummarised
+                    uses at_least_once(ChatCompletion)
+                        via chat
+                        with ai_resilience()
+                    => chat_handler,
                     observers: [],
                 );
                 embedding = effectful_transform!(
-                    TicketSummarised ->{ at_least_once(EmbeddingGeneration) via embedding with ai_resilience() } TicketEmbedded => embedding_handler,
+                    TicketSummarised -> TicketEmbedded
+                    uses at_least_once(EmbeddingGeneration)
+                        via embedding
+                        with ai_resilience()
+                    => embedding_handler,
                     observers: [],
                 );
                 collected = sink!(TicketEmbedded => collected);
@@ -337,11 +345,19 @@ fn resumable_flow(
             stages: {
                 input = infinite_source!(TicketRaised => input);
                 chat = effectful_transform!(
-                    TicketRaised ->{ at_least_once(ChatCompletion) via chat with ai_resilience() } TicketSummarised => chat_handler,
+                    TicketRaised -> TicketSummarised
+                    uses at_least_once(ChatCompletion)
+                        via chat
+                        with ai_resilience()
+                    => chat_handler,
                     observers: [],
                 );
                 embedding = effectful_transform!(
-                    TicketSummarised ->{ at_least_once(EmbeddingGeneration) via embedding with ai_resilience() } TicketEmbedded => embedding_handler,
+                    TicketSummarised -> TicketEmbedded
+                    uses at_least_once(EmbeddingGeneration)
+                        via embedding
+                        with ai_resilience()
+                    => embedding_handler,
                     observers: [],
                 );
                 collected = sink!(TicketEmbedded => collected);
@@ -412,11 +428,19 @@ fn control_interleaving_flow(
             stages: {
                 input = source!(TicketRaised => input);
                 chat = effectful_transform!(
-                    TicketRaised ->{ at_least_once(ChatCompletion) via chat with ai_resilience() } TicketSummarised => chat_handler,
+                    TicketRaised -> TicketSummarised
+                    uses at_least_once(ChatCompletion)
+                        via chat
+                        with ai_resilience()
+                    => chat_handler,
                     observers: [],
                 );
                 embedding = effectful_transform!(
-                    TicketSummarised ->{ at_least_once(EmbeddingGeneration) via embedding with ai_resilience() } TicketEmbedded => embedding_handler,
+                    TicketSummarised -> TicketEmbedded
+                    uses at_least_once(EmbeddingGeneration)
+                        via embedding
+                        with ai_resilience()
+                    => embedding_handler,
                     observers: [],
                 );
                 collected = sink!(TicketEmbedded => collected);

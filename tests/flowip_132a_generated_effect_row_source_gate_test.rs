@@ -8,7 +8,7 @@ const AI_MAP_REDUCE: &str =
     include_str!("../crates/obzenflow_dsl/src/dsl/composites/ai_map_reduce.rs");
 
 #[test]
-fn generated_ai_rows_use_the_canonical_effect_row_lowerer() {
+fn generated_ai_uses_clauses_use_the_canonical_effect_entry_lowerer() {
     assert!(STAGE_MACROS.contains("@generated_chat surface"));
     assert!(STAGE_MACROS.contains("@entry __chat_declarations"));
     assert!(!STAGE_MACROS.contains("macro_rules! __obzenflow_ai_chat_effect_row"));

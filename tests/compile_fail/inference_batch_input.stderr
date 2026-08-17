@@ -3,10 +3,8 @@ error: inference!: batch input `[T]` is not supported; use `ai_map!` or `ai_map_
    |
  8 |       let _ = inference!(
    |  _____________^
- 9 | |         [Input] ->{
-10 | |             at_least_once(ChatCompletion) via chat with policy
-11 | |         } Output => role
-12 | |     );
+ 9 | |         [Input] -> Output uses at_least_once(ChatCompletion) via chat with policy => role
+10 | |     );
    | |_____^
    |
    = note: this error originates in the macro `inference` (in Nightly builds, run with -Z macro-backtrace for more info)

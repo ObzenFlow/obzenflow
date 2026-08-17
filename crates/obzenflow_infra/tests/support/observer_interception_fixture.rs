@@ -308,12 +308,12 @@ pub(crate) fn build_flow(
         };
         let authorised = match treatment {
             ObserverTreatment::WithoutObservers => effectful_transform!(
-                OrderAccepted ->{ AuthoriseShippingEffect } { ShippingAuthorised, ShippingReady } => authorise_shipping,
+                OrderAccepted -> { ShippingAuthorised, ShippingReady } uses AuthoriseShippingEffect => authorise_shipping,
                 observers: []
             ),
             ObserverTreatment::Observers | ObserverTreatment::PanickingObserver => {
                 effectful_transform!(
-                    OrderAccepted ->{ AuthoriseShippingEffect } { ShippingAuthorised, ShippingReady } => authorise_shipping,
+                    OrderAccepted -> { ShippingAuthorised, ShippingReady } uses AuthoriseShippingEffect => authorise_shipping,
                     observers: [effect_observer(
                         "effect-probe",
                         EffectProbeObserver {

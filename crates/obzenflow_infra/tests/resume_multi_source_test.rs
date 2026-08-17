@@ -280,7 +280,7 @@ fn build_flow(
                 src_b = infinite_source!(ChannelTick => source_b_handler);
                 merge = transform!(ChannelTick -> Merged => merge_handler);
                 effectful = effectful_transform!(
-                    Merged ->{ CountingEffect } { FanInOutput, EffectValue } => effectful_handler,
+                    Merged -> { FanInOutput, EffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collect = sink!(FanInOutput => collect_handler);

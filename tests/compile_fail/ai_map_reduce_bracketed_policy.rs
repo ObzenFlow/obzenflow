@@ -16,12 +16,8 @@ fn main() {
     let reduce_policy = obzenflow_adapters::middleware::control::ai_resilience();
     let _ = ai_map_reduce!(
         Seed -> Output => {
-            map: [Item] ->{
-                at_least_once(ChatCompletion) via chat with [map_policy]
-            } Partial => map_role,
-            reduce: (Seed, [Partial]) ->{
-                at_least_once(ChatCompletion) via chat with reduce_policy
-            } Output => finalise_role,
+            map: [Item] -> Partial uses at_least_once(ChatCompletion) via chat with [map_policy] => map_role,
+            reduce: (Seed, [Partial]) -> Output uses at_least_once(ChatCompletion) via chat with reduce_policy => finalise_role,
         },
         chunking: by_budget {
             items: |_seed: &Seed| Vec::<Item>::new(),

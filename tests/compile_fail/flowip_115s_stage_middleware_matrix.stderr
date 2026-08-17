@@ -38,12 +38,12 @@ error: 'middleware:' has been removed; use 'observers:' for passive observer mid
    |
    = note: this error originates in the macro `$crate::__obzenflow_stage_middleware_removed` which comes from the expansion of the macro `obzenflow_dsl::transform` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: effectful_transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input ->{ Effect } Output => handler, observers: [...]);
+error: effectful_transform!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output uses Effect => handler, observers: [...]);
   --> tests/compile_fail/flowip_115s_stage_middleware_matrix.rs:18:13
    |
 18 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
-19 | |         Input ->{ Effect } Output => Handler,
+19 | |         Input -> Output uses Effect => Handler,
 20 | |         middleware: [observer]
 21 | |     );
    | |_____^
@@ -58,12 +58,12 @@ error: 'middleware:' has been removed; use 'observers:' for passive observer mid
    |
    = note: this error originates in the macro `$crate::__obzenflow_stage_middleware_removed` which comes from the expansion of the macro `obzenflow_dsl::stateful` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: effectful_stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input ->{ Effect } Output => handler, observers: [...]);
+error: effectful_stateful!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output uses Effect => handler, observers: [...]);
   --> tests/compile_fail/flowip_115s_stage_middleware_matrix.rs:23:13
    |
 23 |       let _ = obzenflow_dsl::effectful_stateful!(
    |  _____________^
-24 | |         Input ->{ Effect } Output => Handler,
+24 | |         Input -> Output uses Effect => Handler,
 25 | |         middleware: [observer]
 26 | |     );
    | |_____^

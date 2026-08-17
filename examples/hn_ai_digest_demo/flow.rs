@@ -8,27 +8,22 @@ use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
 use anyhow::Result;
 use obzenflow::ai::{
-    ChatCompletion, ChatEffectBinding, ChunkInfo, EstimateSource, Prompt, SystemPrompt, TokenCount,
-    UserPrompt,
+    ChatEffectBinding, ChunkInfo, EstimateSource, Prompt, SystemPrompt, TokenCount, UserPrompt,
 };
 use obzenflow::sources::{http_pull_config, HttpPullSource};
 use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_transforms};
-use obzenflow_adapters::ai::CHAT_CLIENT;
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_adapters::middleware::{CircuitBreaker, RateLimiterBuilder};
 use obzenflow_core::ai::{
-    AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply, ChatMessage,
-    ChatParams, ChatRequestSpec, ChatResponse, ChatTarget, Many,
+    AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatCompletionReply, ChatMessage, ChatParams,
+    ChatRequestSpec, ChatResponse, ChatTarget, Many,
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::error::FlowBuildError;
 use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{
-    EffectPortRegistry, EffectPortResolver, EffectRegistrationBuilder, LogicalEffectBindingName,
-    ResolvedEffectPort,
-};
+use obzenflow_runtime::effects::EffectPortRegistry;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -326,14 +321,14 @@ fn resolve_hn_group_budget(budget_override: Option<TokenCount>, target: &ChatTar
 
 pub(crate) struct HnFlowOptions {
     pub journal_base: std::path::PathBuf,
-    pub chat_resolver_override: Option<EffectPortResolver<dyn ChatClient>>,
+    pub chat_binding_override: Option<ChatEffectBinding>,
 }
 
 impl Default for HnFlowOptions {
     fn default() -> Self {
         Self {
             journal_base: std::path::PathBuf::from("target/hn-ai-digest-logs"),
-            chat_resolver_override: None,
+            chat_binding_override: None,
         }
     }
 }
@@ -352,7 +347,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
         } = inputs;
         let HnFlowOptions {
             journal_base,
-            chat_resolver_override,
+            chat_binding_override,
         } = options;
 
         // The mock server binds an ephemeral loopback port for each process.
@@ -365,35 +360,16 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
         };
 
         let ai_models = runtime_config.ai_models();
-        let (chat, chat_registration) = ChatEffectBinding::from_config(&ai_models)
-            .map_err(|error| FlowBuildError::BindingConfiguration {
-                binding: "chat".to_string(),
-                detail: error.to_string(),
-            })?
-            .into_parts()
-            .map_err(|error| FlowBuildError::BindingConfiguration {
-                binding: "chat".to_string(),
-                detail: error.to_string(),
-            })?;
-        let (chat, chat_registration) = if let Some(resolver) = chat_resolver_override {
-            let resolver = std::sync::Arc::new(move || {
-                let port = resolver()?;
-                let metadata = std::sync::Arc::new(port.target().clone());
-                Ok(ResolvedEffectPort::new(port, metadata))
-            });
-            EffectRegistrationBuilder::<ChatCompletion>::new(
-                LogicalEffectBindingName::new("chat").expect("valid fixture binding name"),
-                chat.evidence().clone(),
-            )
-            .bind_deferred_with_metadata(CHAT_CLIENT, resolver)
-            .and_then(EffectRegistrationBuilder::finish)
-            .map_err(|error| FlowBuildError::BindingConfiguration {
-                binding: "chat".to_string(),
-                detail: error.to_string(),
-            })?
-        } else {
-            (chat, chat_registration)
-        };
+        let mut effect_ports = EffectPortRegistry::new();
+        let chat = match chat_binding_override {
+            Some(binding) => binding.install_into(&mut effect_ports),
+            None => ChatEffectBinding::from_config(&ai_models)
+                .and_then(|binding| binding.install_into(&mut effect_ports)),
+        }
+        .map_err(|error| FlowBuildError::BindingConfiguration {
+            binding: "chat".to_string(),
+            detail: error.to_string(),
+        })?;
         let chat_target = chat.evidence().target().clone();
         let budget_per_group = resolve_hn_group_budget(budget_per_group_override, &chat_target);
         let system_prompt: SystemPrompt = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply."
@@ -414,14 +390,6 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
             interests,
             chat_prompt_system: system_prompt,
         });
-        let mut effect_ports = EffectPortRegistry::new();
-        effect_ports.install(chat_registration).map_err(|error| {
-            FlowBuildError::BindingConfiguration {
-                binding: "chat".to_string(),
-                detail: error.to_string(),
-            }
-        })?;
-
         let decoder = hn_story_decoder(base_url, max_stories);
         let http_source_config = http_pull_config()
             .map_err(|error| {
@@ -479,17 +447,17 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 // - reduce's `[HnDigestGroupSummary]` is collected in chunk-index order.
                 digest = ai_map_reduce!(
                     HnTopStories -> HnDigestSummary => {
-                        map: [FormattedStory] -> {
-                            at_least_once(ChatCompletion)
-                                via chat
-                                with ai_resilience()
-                        } HnDigestGroupSummary => map_role,
+                        map: [FormattedStory] -> HnDigestGroupSummary
+                        uses at_least_once(ChatCompletion)
+                            via chat
+                            with ai_resilience()
+                        => map_role,
 
-                        reduce: (HnTopStories, [HnDigestGroupSummary]) -> {
-                            at_least_once(ChatCompletion)
-                                via chat
-                                with ai_resilience()
-                        } HnDigestSummary => finalise_role,
+                        reduce: (HnTopStories, [HnDigestGroupSummary]) -> HnDigestSummary
+                        uses at_least_once(ChatCompletion)
+                            via chat
+                            with ai_resilience()
+                        => finalise_role,
                     },
                     chunking: by_budget {
                         items: |seed: &HnTopStories| seed.stories.clone(),

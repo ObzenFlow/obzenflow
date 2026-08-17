@@ -282,10 +282,12 @@ fn build_two_effect_flow_future(
             stages: {
                 orders = source!(Item => one_shot_source);
                 authorize_payment = effectful_transform!(
-                    Item ->{
+                    Item -> PaymentEffectFact
+                    uses {
                         AuthorizePayment with authorize_resilience,
-                        RefundPayment with refund_resilience
-                    } PaymentEffectFact => payment_effects,
+                        RefundPayment with refund_resilience,
+                    }
+                    => payment_effects,
                     observers: []
                 );
                 output = sink!(PaymentEffectFact => null_sink);

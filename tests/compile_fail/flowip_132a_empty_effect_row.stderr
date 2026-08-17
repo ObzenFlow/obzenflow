@@ -1,14 +1,14 @@
-error: empty effect rows are not a purity marker; write `Input -> Output`
+error: empty effect sets are not a purity marker; write `Input -> Output => handler`
   --> tests/compile_fail/flowip_132a_empty_effect_row.rs:10:13
    |
 10 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
-11 | |         Input ->{} First => support::FirstOnly,
+11 | |         Input -> First uses {} => support::FirstOnly,
 12 | |         observers: []
 13 | |     );
    | |_____^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_effectful_transform_row_contract` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_multi_effect_uses_gate` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 warning: unused imports: `First` and `Input`
  --> tests/compile_fail/flowip_132a_empty_effect_row.rs:7:15

@@ -13,7 +13,7 @@ help: the trait `EffectfulTransformHandler` is not implemented for `RawTransform
    |
 27 | struct RawTransform;
    | ^^^^^^^^^^^^^^^^^^^
-   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and effect row (FLOWIP-120z B9)
+   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `uses` clause (FLOWIP-120z B9)
 help: the following other types implement trait `EffectfulTransformHandler`
   --> crates/obzenflow_adapters/src/ai/transforms/chat.rs
    |
@@ -62,7 +62,7 @@ help: the trait `EffectfulTransformHandler` is not implemented for `RawTransform
    |
 27 | struct RawTransform;
    | ^^^^^^^^^^^^^^^^^^^
-   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and effect row (FLOWIP-120z B9)
+   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `uses` clause (FLOWIP-120z B9)
 help: the following other types implement trait `EffectfulTransformHandler`
   --> crates/obzenflow_adapters/src/ai/transforms/chat.rs
    |
@@ -104,7 +104,7 @@ help: the trait `EffectfulTransformHandler` is not implemented for `RawTransform
    |
 27 | struct RawTransform;
    | ^^^^^^^^^^^^^^^^^^^
-   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and effect row (FLOWIP-120z B9)
+   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `uses` clause (FLOWIP-120z B9)
 help: the following other types implement trait `EffectfulTransformHandler`
   --> crates/obzenflow_adapters/src/ai/transforms/chat.rs
    |
@@ -143,7 +143,7 @@ help: the trait `EffectfulTransformHandler` is not implemented for `RawTransform
    |
 27 | struct RawTransform;
    | ^^^^^^^^^^^^^^^^^^^
-   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and effect row (FLOWIP-120z B9)
+   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `uses` clause (FLOWIP-120z B9)
 help: the following other types implement trait `EffectfulTransformHandler`
   --> crates/obzenflow_adapters/src/ai/transforms/chat.rs
    |
@@ -182,7 +182,7 @@ help: the trait `EffectfulTransformHandler` is not implemented for `RawTransform
    |
 27 | struct RawTransform;
    | ^^^^^^^^^^^^^^^^^^^
-   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and effect row (FLOWIP-120z B9)
+   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `uses` clause (FLOWIP-120z B9)
 help: the following other types implement trait `EffectfulTransformHandler`
   --> crates/obzenflow_adapters/src/ai/transforms/chat.rs
    |

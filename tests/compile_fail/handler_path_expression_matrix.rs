@@ -37,29 +37,29 @@ macro_rules! reject_in_every_slot {
         );
         let _ = obzenflow_dsl::sink!(Input => $($bad)+);
         let _ = obzenflow_dsl::inference!(
-            Input -> {
-                at_least_once(ChatCompletion) via chat with policy
-            } Output => $($bad)+
+            Input -> Output
+            uses at_least_once(ChatCompletion) via chat with policy
+            => $($bad)+
         );
         let _ = obzenflow_dsl::ai_map_reduce!(
             Seed -> Output => {
-                map: [Item] -> {
-                    at_least_once(ChatCompletion) via chat with policy
-                } Partial => $($bad)+,
-                reduce: (Seed, [Partial]) -> {
-                    at_least_once(ChatCompletion) via chat with policy
-                } Output => finalise_role,
+                map: [Item] -> Partial
+                uses at_least_once(ChatCompletion) via chat with policy
+                => $($bad)+,
+                reduce: (Seed, [Partial]) -> Output
+                uses at_least_once(ChatCompletion) via chat with policy
+                => finalise_role,
             },
             chunking: by_budget { fixture }
         );
         let _ = obzenflow_dsl::ai_map_reduce!(
             Seed -> Output => {
-                map: [Item] -> {
-                    at_least_once(ChatCompletion) via chat with policy
-                } Partial => map_role,
-                reduce: (Seed, [Partial]) -> {
-                    at_least_once(ChatCompletion) via chat with policy
-                } Output => $($bad)+,
+                map: [Item] -> Partial
+                uses at_least_once(ChatCompletion) via chat with policy
+                => map_role,
+                reduce: (Seed, [Partial]) -> Output
+                uses at_least_once(ChatCompletion) via chat with policy
+                => $($bad)+,
             },
             chunking: by_budget { fixture }
         );

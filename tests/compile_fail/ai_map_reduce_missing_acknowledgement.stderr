@@ -4,10 +4,10 @@ error: ai_map_reduce!: paid non-idempotent ChatCompletion requires `at_least_onc
 16 |       let _ = ai_map_reduce!(
    |  _____________^
 17 | |         Seed -> Output => {
-18 | |             map: [Item] ->{
-19 | |                 ChatCompletion via chat with policy
+18 | |             map: [Item] -> Partial uses ChatCompletion via chat with policy => map_role,
+19 | |             reduce: (Seed, [Partial]) -> Output uses at_least_once(ChatCompletion) via chat with policy => finalise_role,
 ...  |
-32 | |     );
+28 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_effect_entries` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)

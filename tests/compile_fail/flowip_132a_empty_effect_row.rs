@@ -8,7 +8,7 @@ use support::{First, Input};
 
 fn main() {
     let _ = obzenflow_dsl::effectful_transform!(
-        Input ->{} First => support::FirstOnly,
+        Input -> First uses {} => support::FirstOnly,
         observers: []
     );
 }
