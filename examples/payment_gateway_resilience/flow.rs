@@ -255,9 +255,11 @@ pub fn assemble_flow(
                         PaymentAuthorized,
                         PaymentDeclined,
                         OrderCancelled,
-                        PaymentAuthorizationUnavailable
-                    } => gateway_transform,
-                    effects: [AuthorizePayment with gateway_resilience],
+                        PaymentAuthorizationUnavailable,
+                    }
+                    uses AuthorizePayment
+                        with gateway_resilience
+                    => gateway_transform,
                 );
 
                 // Paid-order sink: a tiny in-process console integration. Its

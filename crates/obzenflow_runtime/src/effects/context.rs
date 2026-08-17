@@ -4,13 +4,45 @@
 
 use super::*;
 
+/// Structurally metadata-only view used before effect-boundary admission.
+///
+/// It deliberately exposes neither callable ports nor registry or resolver
+/// authority. Metadata is co-resolved with its callable port under the same
+/// run-scoped verdict.
+#[derive(Clone, Default)]
+pub struct EffectPortMetadataContext {
+    pub(super) metadata: super::ports::EffectPortMetadataView,
+}
+
+impl EffectPortMetadataContext {
+    /// Return the immutable snapshot for one declared metadata-bearing slot.
+    pub fn metadata<P, M>(&self, slot: EffectPortSlot<P, M>) -> Result<Arc<M>, EffectError>
+    where
+        P: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
+    {
+        self.metadata
+            .get(slot)
+            .ok_or_else(|| EffectError::target_invariant_violation(slot))
+    }
+}
+
+impl std::fmt::Debug for EffectPortMetadataContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EffectPortMetadataContext")
+            .field("metadata", &"<not disclosed>")
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct EffectContext {
     pub(super) is_replaying: bool,
     pub(super) flow_id: FlowId,
     pub(super) stage_key: String,
     pub(super) input_seq: StageInputPosition,
-    pub(super) ports: EffectPortRegistry,
+    pub(super) ports: super::ports::EffectPortView,
 }
 
 impl EffectContext {
@@ -58,16 +90,14 @@ impl EffectContext {
         fastrand::Rng::with_seed(u64::from_be_bytes(seed))
     }
 
-    pub fn port<T>(&self, name: &str) -> Result<Arc<T>, EffectError>
+    pub fn port<T, M>(&self, slot: EffectPortSlot<T, M>) -> Result<Arc<T>, EffectError>
     where
         T: ?Sized + Send + Sync + 'static,
+        M: Send + Sync + 'static,
     {
         self.ports
-            .get(name)
-            .ok_or_else(|| EffectError::MissingEffectPort {
-                type_name: std::any::type_name::<T>(),
-                name: name.to_string(),
-            })
+            .get(slot)
+            .ok_or_else(|| EffectError::target_invariant_violation(slot))
     }
 
     pub fn sleep(&self, duration: Duration) -> impl std::future::Future<Output = ()> + Send {
@@ -109,13 +139,18 @@ impl EffectInvocationContext {
         &self,
         effect_type: &'static str,
     ) -> Result<EffectDeclaration, EffectError> {
+        let reported_effect_type = if super::binding::validate_effect_type(effect_type).is_ok() {
+            effect_type
+        } else {
+            "invalid_effect_type"
+        };
         self.effect_declarations
             .iter()
-            .find(|declaration| declaration.effect_type == effect_type)
+            .find(|declaration| declaration.effect_type() == effect_type)
             .cloned()
             .ok_or_else(|| EffectError::UndeclaredEffect {
                 stage_key: self.stage_key.clone(),
-                effect_type: effect_type.to_string(),
+                effect_type: reported_effect_type.to_string(),
             })
     }
 }

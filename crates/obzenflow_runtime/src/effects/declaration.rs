@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::binding::EffectDeclarationBinding;
 use super::*;
 use obzenflow_core::StageFactSet;
 use serde::de::DeserializeOwned;
@@ -156,42 +157,280 @@ where
 
 #[derive(Debug, Clone)]
 pub struct EffectDeclaration {
-    pub effect_type: &'static str,
-    pub safety: EffectSafety,
-    pub idempotency_key_policy: IdempotencyKeyPolicy,
-    pub required_ports: Vec<EffectPortRequirement>,
-    pub transactional_executor: Option<&'static str>,
+    effect_type: &'static str,
+    safety: EffectSafety,
+    idempotency_key_policy: IdempotencyKeyPolicy,
+    syntax: EffectDeclarationSyntax,
+    pub(crate) binding: EffectDeclarationBinding,
     /// Event-sourcing meaning selected by the effect type.
-    pub outcome_kind: EffectOutcomeKind,
+    outcome_kind: EffectOutcomeKind,
     /// Public facts this effect may author. Recorded replies project an empty
     /// set and therefore never enter a stage output contract.
-    pub public_outcome_fact_types: Vec<TypedFactType>,
+    public_outcome_fact_types: Vec<TypedFactType>,
+}
+
+/// Lexical safety form selected by the stage declaration. This records an
+/// acknowledgement, not a second safety classification: [`Effect::SAFETY`]
+/// remains authoritative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectDeclarationSyntax {
+    Bare,
+    AtLeastOnce,
+    Transactional,
+}
+
+mod declaration_diagnostic_sealed {
+    use super::*;
+
+    pub trait WithoutBinding {}
+
+    impl<E> WithoutBinding for E where E: Effect<BindingMode = Portless> {}
+
+    pub trait BindingFor<E: Effect> {}
+
+    impl<E> BindingFor<E> for EffectBinding<E> where E: NamedEffect {}
+}
+
+/// Compiler-facing proof that an effect declaration may omit `via`.
+/// Exported stage macros use this facade so a named effect produces the
+/// authoring diagnostic instead of exposing `BindingMode` internals.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "effect declaration `{Self}` requires a typed binding",
+    label = "this named effect is missing `via <binding>`",
+    note = "write `{Self} via binding`, where `binding` is the matching `EffectBinding<{Self}>`"
+)]
+pub trait EffectDeclarationWithoutBinding:
+    Effect + declaration_diagnostic_sealed::WithoutBinding
+{
+    #[doc(hidden)]
+    fn declaration_without_binding() -> EffectDeclaration;
+
+    #[doc(hidden)]
+    fn at_least_once_declaration_without_binding() -> EffectDeclaration;
+}
+
+#[diagnostic::do_not_recommend]
+impl<E> EffectDeclarationWithoutBinding for E
+where
+    E: Effect<BindingMode = Portless>,
+{
+    fn declaration_without_binding() -> EffectDeclaration {
+        EffectDeclaration::for_binding::<E>(
+            EffectDeclarationBinding::Portless,
+            EffectDeclarationSyntax::Bare,
+        )
+    }
+
+    fn at_least_once_declaration_without_binding() -> EffectDeclaration {
+        EffectDeclaration::for_binding::<E>(
+            EffectDeclarationBinding::Portless,
+            EffectDeclarationSyntax::AtLeastOnce,
+        )
+    }
+}
+
+/// Compiler-facing proof that the lexical value after `via` is the exact
+/// typed binding belonging to the declared effect.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "binding `{Self}` does not match declared effect `{E}`",
+    label = "the binding selected by `via` belongs to a different effect",
+    note = "use the `EffectBinding<{E}>` produced for the effect named before `via`"
+)]
+pub trait EffectBindingFor<E: Effect>: declaration_diagnostic_sealed::BindingFor<E> {
+    #[doc(hidden)]
+    fn named_declaration_for(&self) -> EffectDeclaration;
+
+    #[doc(hidden)]
+    fn at_least_once_declaration_for(&self) -> EffectDeclaration;
+
+    #[doc(hidden)]
+    fn transactional_declaration_for(&self) -> EffectDeclaration;
+}
+
+#[diagnostic::do_not_recommend]
+impl<E> EffectBindingFor<E> for EffectBinding<E>
+where
+    E: NamedEffect,
+{
+    fn named_declaration_for(&self) -> EffectDeclaration {
+        EffectDeclaration::for_binding::<E>(
+            self.declaration_binding(),
+            EffectDeclarationSyntax::Bare,
+        )
+    }
+
+    fn at_least_once_declaration_for(&self) -> EffectDeclaration {
+        EffectDeclaration::for_binding::<E>(
+            self.declaration_binding(),
+            EffectDeclarationSyntax::AtLeastOnce,
+        )
+    }
+
+    fn transactional_declaration_for(&self) -> EffectDeclaration {
+        EffectDeclaration::for_binding::<E>(
+            self.declaration_binding(),
+            EffectDeclarationSyntax::Transactional,
+        )
+    }
+}
+
+#[doc(hidden)]
+pub fn declare_effect_without_binding<E>() -> EffectDeclaration
+where
+    E: EffectDeclarationWithoutBinding,
+{
+    E::declaration_without_binding()
+}
+
+#[doc(hidden)]
+pub fn declare_at_least_once_without_binding<E>() -> EffectDeclaration
+where
+    E: EffectDeclarationWithoutBinding,
+{
+    E::at_least_once_declaration_without_binding()
+}
+
+#[doc(hidden)]
+pub fn declare_named_effect<E, B>(binding: &B) -> EffectDeclaration
+where
+    E: Effect,
+    B: EffectBindingFor<E> + ?Sized,
+{
+    binding.named_declaration_for()
+}
+
+#[doc(hidden)]
+pub fn declare_named_at_least_once_effect<E, B>(binding: &B) -> EffectDeclaration
+where
+    E: Effect,
+    B: EffectBindingFor<E> + ?Sized,
+{
+    binding.at_least_once_declaration_for()
+}
+
+#[doc(hidden)]
+pub fn declare_transactional_effect<E, B>(binding: &B) -> EffectDeclaration
+where
+    E: Effect,
+    B: EffectBindingFor<E> + ?Sized,
+{
+    binding.transactional_declaration_for()
 }
 
 impl EffectDeclaration {
     pub fn of<E>() -> Self
     where
+        E: Effect<BindingMode = Portless>,
+    {
+        Self::for_binding::<E>(
+            EffectDeclarationBinding::Portless,
+            EffectDeclarationSyntax::Bare,
+        )
+    }
+
+    /// Declare a named effect using the lexical binding selected by `via`.
+    pub fn named<E>(binding: &EffectBinding<E>) -> Self
+    where
+        E: NamedEffect,
+    {
+        Self::for_binding::<E>(binding.declaration_binding(), EffectDeclarationSyntax::Bare)
+    }
+
+    fn for_binding<E>(binding: EffectDeclarationBinding, syntax: EffectDeclarationSyntax) -> Self
+    where
         E: Effect,
     {
-        let idempotency_key_policy = match E::SAFETY {
-            EffectSafety::Idempotent | EffectSafety::Transactional => {
+        assert!(
+            super::binding::validate_effect_type(E::EFFECT_TYPE).is_ok(),
+            "effect identifiers must contain dot-separated public identifier segments and be at most 255 ASCII bytes"
+        );
+        let idempotency_key_policy = match (E::SAFETY, syntax) {
+            (EffectSafety::NonIdempotentAtLeastOnce, EffectDeclarationSyntax::AtLeastOnce) => {
+                IdempotencyKeyPolicy::AtLeastOnceAcknowledged
+            }
+            (EffectSafety::Idempotent | EffectSafety::Transactional, _) => {
                 IdempotencyKeyPolicy::NotRequired
             }
-            EffectSafety::NonIdempotentRequiresKey => IdempotencyKeyPolicy::Required,
-            EffectSafety::NonIdempotentAtLeastOnce => IdempotencyKeyPolicy::NotRequired,
+            (EffectSafety::NonIdempotentRequiresKey, _) => IdempotencyKeyPolicy::Required,
+            (EffectSafety::NonIdempotentAtLeastOnce, _) => IdempotencyKeyPolicy::NotRequired,
         };
 
         Self {
             effect_type: E::EFFECT_TYPE,
             safety: E::SAFETY,
             idempotency_key_policy,
-            required_ports: E::required_ports(),
-            transactional_executor: None,
+            syntax,
+            binding,
             outcome_kind: <E::OutcomeSemantics as EffectOutcomeSemantics<E::Outcome>>::KIND,
             public_outcome_fact_types: <<E::OutcomeSemantics as EffectOutcomeSemantics<
                 E::Outcome,
             >>::PublicFacts as StageFactSet>::member_fact_types(
             ),
+        }
+    }
+
+    pub fn effect_type(&self) -> &'static str {
+        self.effect_type
+    }
+
+    pub fn safety(&self) -> EffectSafety {
+        self.safety
+    }
+
+    pub fn idempotency_key_policy(&self) -> IdempotencyKeyPolicy {
+        self.idempotency_key_policy
+    }
+
+    pub fn outcome_kind(&self) -> EffectOutcomeKind {
+        self.outcome_kind
+    }
+
+    pub fn public_outcome_fact_types(&self) -> &[TypedFactType] {
+        &self.public_outcome_fact_types
+    }
+
+    /// Validate the framework-visible effect identifier before a stage can be materialised.
+    pub fn validate_public_identifiers(&self) -> Result<(), BindingIdentifierError> {
+        super::binding::validate_effect_type(self.effect_type)
+    }
+
+    /// Check that the lexical wrapper agrees with the effect contract's one
+    /// authoritative safety classification.
+    #[doc(hidden)]
+    pub fn validate_safety_syntax(&self) -> Result<(), String> {
+        match (self.syntax, self.safety) {
+            (
+                EffectDeclarationSyntax::Bare,
+                EffectSafety::NonIdempotentAtLeastOnce,
+            ) => Err(format!(
+                "declares paid non-idempotent effect '{}' without explicit at_least_once(...) acknowledgement",
+                self.effect_type
+            )),
+            (EffectDeclarationSyntax::Bare, EffectSafety::Transactional) => Err(format!(
+                "declares transactional effect '{}' without the transactional(...) wrapper",
+                self.effect_type
+            )),
+            (
+                EffectDeclarationSyntax::AtLeastOnce,
+                safety @ (EffectSafety::Idempotent
+                | EffectSafety::NonIdempotentRequiresKey
+                | EffectSafety::Transactional),
+            ) => Err(format!(
+                "wraps effect '{}' with at_least_once(...), but its authoritative Effect::SAFETY is {safety:?}",
+                self.effect_type
+            )),
+            (
+                EffectDeclarationSyntax::Transactional,
+                safety @ (EffectSafety::Idempotent
+                | EffectSafety::NonIdempotentRequiresKey
+                | EffectSafety::NonIdempotentAtLeastOnce),
+            ) => Err(format!(
+                "wraps effect '{}' with transactional(...), but its authoritative Effect::SAFETY is {safety:?}",
+                self.effect_type
+            )),
+            _ => Ok(()),
         }
     }
 
@@ -199,44 +438,42 @@ impl EffectDeclaration {
     /// new at-least-once attempt after durable in-doubt evidence.
     pub fn at_least_once<E>() -> Self
     where
-        E: Effect,
+        E: Effect<BindingMode = Portless>,
     {
-        let mut declaration = Self::of::<E>();
-        declaration.safety = EffectSafety::NonIdempotentAtLeastOnce;
-        declaration.idempotency_key_policy = IdempotencyKeyPolicy::AtLeastOnceAcknowledged;
-        declaration
+        Self::for_binding::<E>(
+            EffectDeclarationBinding::Portless,
+            EffectDeclarationSyntax::AtLeastOnce,
+        )
     }
 
-    pub fn transactional_effect<E>(executor: &'static str) -> Self
+    /// Explicit at-least-once acknowledgement for a named effect.
+    pub fn named_at_least_once<E>(binding: &EffectBinding<E>) -> Self
     where
-        E: Effect,
+        E: NamedEffect,
     {
-        let mut required_ports = E::required_ports();
-        required_ports.push(EffectPortRequirement::of::<dyn TransactionalEffectPort<E>>(
-            executor,
-        ));
-
-        Self {
-            effect_type: E::EFFECT_TYPE,
-            safety: EffectSafety::Transactional,
-            idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
-            required_ports,
-            transactional_executor: Some(executor),
-            outcome_kind: <E::OutcomeSemantics as EffectOutcomeSemantics<E::Outcome>>::KIND,
-            public_outcome_fact_types: <<E::OutcomeSemantics as EffectOutcomeSemantics<
-                E::Outcome,
-            >>::PublicFacts as StageFactSet>::member_fact_types(
-            ),
-        }
+        Self::for_binding::<E>(
+            binding.declaration_binding(),
+            EffectDeclarationSyntax::AtLeastOnce,
+        )
     }
 
-    pub fn require_port<T>(mut self, name: impl Into<String>) -> Self
+    /// Select transactional execution through the named effect's reserved typed slot.
+    pub fn transactional<E>(binding: &EffectBinding<E>) -> Self
     where
-        T: ?Sized + Send + Sync + 'static,
+        E: NamedEffect,
     {
-        self.required_ports
-            .push(EffectPortRequirement::of::<T>(name));
-        self
+        Self::for_binding::<E>(
+            binding.declaration_binding(),
+            EffectDeclarationSyntax::Transactional,
+        )
+    }
+
+    pub(crate) fn binding_identity(&self) -> obzenflow_core::EffectBindingIdentity {
+        self.binding.identity()
+    }
+
+    pub(crate) fn binding(&self) -> &EffectDeclarationBinding {
+        &self.binding
     }
 }
 
@@ -245,6 +482,9 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
     const EFFECT_TYPE: &'static str;
     const SCHEMA_VERSION: u32;
     const SAFETY: EffectSafety;
+
+    /// Closed binding strategy for this effect contract.
+    type BindingMode: EffectBindingMode<Self>;
 
     /// The typed value returned to the handler after live execution or replay.
     type Outcome: Clone + Send + Sync + 'static;
@@ -259,19 +499,14 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
 
     async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError>;
 
-    /// Validate metadata on already-resolved required ports before boundary
-    /// admission. Implementations must not perform I/O or resolve another
-    /// port from this hook.
-    fn validate_port_bindings(&self, _ctx: &EffectContext) -> Result<(), EffectError> {
+    /// Validate immutable metadata co-resolved with required ports before
+    /// boundary admission. This context has no callable-port authority.
+    fn validate_port_metadata(&self, _ctx: &EffectPortMetadataContext) -> Result<(), EffectError> {
         Ok(())
     }
 
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
         None
-    }
-
-    fn required_ports() -> Vec<EffectPortRequirement> {
-        Vec::new()
     }
 }
 
@@ -283,4 +518,53 @@ pub trait TransactionalEffectPort<E: Effect>: Send + Sync {
         ctx: &mut EffectContext,
         commit: EffectCommitHandle<E::Outcome, E::OutcomeSemantics>,
     ) -> Result<E::Outcome, EffectError>;
+}
+
+/// Reserved effect-local slot used by `transactional(E) via binding`.
+pub const fn transactional_effect_port_slot<E: Effect>(
+) -> EffectPortSlot<dyn TransactionalEffectPort<E>> {
+    EffectPortSlot::new("executor")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Debug)]
+    struct InvalidIdentifierEffect;
+
+    #[async_trait]
+    impl Effect for InvalidIdentifierEffect {
+        const EFFECT_TYPE: &'static str = "https://credential-canary.example";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Idempotent;
+        type BindingMode = Portless;
+        type Outcome = ();
+        type OutcomeSemantics = RecordedReply;
+
+        fn label(&self) -> &str {
+            "invalid_identifier"
+        }
+
+        fn canonical_input(&self) -> Value {
+            Value::Null
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn invalid_effect_identifier_cannot_become_a_declaration_or_diagnostic_value() {
+        let panic = std::panic::catch_unwind(EffectDeclaration::of::<InvalidIdentifierEffect>)
+            .expect_err("invalid identifiers must fail at construction");
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+            .expect("constructor panic has a static curated message");
+        assert!(!message.contains("credential-canary"));
+        assert!(message.contains("effect identifiers must contain dot-separated"));
+    }
 }

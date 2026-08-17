@@ -4,24 +4,10 @@ error: ai_map_reduce!: expected `at_least_once(ChatCompletion) via <chat binding
 16 |       let _ = ai_map_reduce!(
    |  _____________^
 17 | |         Seed -> Output => {
-18 | |             map: [Item] ->{
-19 | |                 at_least_once(ChatCompletion) with policy
+18 | |             map: [Item] -> Partial uses at_least_once(ChatCompletion) with policy => map_role,
+19 | |             reduce: (Seed, [Partial]) -> Output uses at_least_once(ChatCompletion) via chat with policy => finalise_role,
 ...  |
-32 | |     );
+28 | |     );
    | |_____^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_ai_chat_effect_row` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error[E0282]: type annotations needed
-  --> tests/compile_fail/ai_map_reduce_missing_via.rs:16:13
-   |
-16 |       let _ = ai_map_reduce!(
-   |  _____________^
-17 | |         Seed -> Output => {
-18 | |             map: [Item] ->{
-19 | |                 at_least_once(ChatCompletion) with policy
-...  |
-32 | |     );
-   | |_____^ cannot infer type
-   |
-   = note: this error originates in the macro `$crate::__obzenflow_ai_map_reduce_build` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_effect_entries` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)

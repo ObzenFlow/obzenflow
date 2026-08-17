@@ -23,6 +23,8 @@ mod mock_server;
 mod util;
 
 use async_trait::async_trait;
+use obzenflow::ai::ChatEffectBinding;
+use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, CHAT_CLIENT};
 use obzenflow_adapters::middleware::control::{
     ai_recovery_rejecting_resilience_for_test, ai_resilience,
 };
@@ -32,11 +34,10 @@ use obzenflow_core::ai::{
     AiMapReduceJobFailed, AiMapReduceMapInput, AiMapReducePlanningFailed,
     AiMapReducePlanningManifest, AiMapReduceReduceInput, AiMapReduceRoleFailure,
     AiMapReduceTaggedPartial, AiMapRole, AiProvider, AiProviderFailureKind, AiRoleLogicFailure,
-    ChatBindingContract, ChatClient, ChatCompletionReply, ChatMessage, ChatParams, ChatRequest,
-    ChatRequestSpec, ChatResponse, ChatTarget, ChunkEnvelope, EstimateSource,
-    HeuristicTokenEstimator, Many, OversizeExhaustion, OversizePolicy, ResolvedTokenEstimator,
-    TokenCount, TokenEstimate, TokenEstimator, TokenEstimatorFallbackReason,
-    TokenEstimatorResolutionInfo, CHAT_CLIENT_PORT,
+    ChatClient, ChatCompletionReply, ChatMessage, ChatParams, ChatRequest, ChatRequestSpec,
+    ChatResponse, ChatTarget, ChunkEnvelope, EstimateSource, HeuristicTokenEstimator, Many,
+    OversizeExhaustion, OversizePolicy, ResolvedTokenEstimator, TokenCount, TokenEstimate,
+    TokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::event_envelope::EventEnvelope;
@@ -52,12 +53,14 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
 use obzenflow_core::{id::StageId, EventId, SystemId, TypedPayload, WriterId};
-use obzenflow_dsl::{ai_map_reduce, flow, sink, source, FlowDefinition};
+use obzenflow_dsl::{ai_map_reduce, flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::{
-    EffectPortRegistry, EffectPortResolver, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
+    EffectBinding, EffectPortRegistry, EffectPortResolutionError, EffectPortResolver,
+    EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort, SinkRedeliverySafety,
+    EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -350,28 +353,89 @@ fn always_oversize_estimator() -> ResolvedTokenEstimator {
     )
 }
 
+#[derive(Clone)]
+enum ChatPortRecipe {
+    Eager(Arc<dyn ChatClient>),
+    Deferred(EffectPortResolver<dyn ChatClient>),
+    Missing,
+}
+
+fn resolved_chat_port(port: Arc<dyn ChatClient>) -> ResolvedEffectPort<dyn ChatClient, ChatTarget> {
+    let metadata = Arc::new(port.target().clone());
+    ResolvedEffectPort::new(port, metadata)
+}
+
+// Keep fixture materialisation on FlowDefinition's concrete build-error API.
+#[allow(clippy::result_large_err)]
+fn materialise_chat_authority(
+    binding_target: ChatTarget,
+    binding_estimator: ResolvedTokenEstimator,
+    recipe: ChatPortRecipe,
+) -> Result<(EffectBinding<ChatCompletion>, EffectPortRegistry), FlowBuildError> {
+    let evidence =
+        ChatBindingEvidence::new(binding_target, binding_estimator).map_err(|error| {
+            FlowBuildError::BindingConfiguration {
+                binding: "chat".to_string(),
+                detail: error.to_string(),
+            }
+        })?;
+    let install = !matches!(recipe, ChatPortRecipe::Missing);
+    let builder = EffectRegistrationBuilder::<ChatCompletion>::new(
+        LogicalEffectBindingName::new("chat").expect("valid fixture binding name"),
+        evidence,
+    );
+    let builder = match recipe {
+        ChatPortRecipe::Eager(port) => {
+            builder.bind_eager_with_metadata(CHAT_CLIENT, resolved_chat_port(port))
+        }
+        ChatPortRecipe::Deferred(resolver) => builder.bind_deferred_with_metadata(
+            CHAT_CLIENT,
+            Arc::new(move || resolver().map(resolved_chat_port)),
+        ),
+        ChatPortRecipe::Missing => builder.bind_deferred_with_metadata(
+            CHAT_CLIENT,
+            Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
+        ),
+    }
+    .map_err(|error| FlowBuildError::BindingConfiguration {
+        binding: "chat".to_string(),
+        detail: error.to_string(),
+    })?;
+    let (binding, registration) =
+        builder
+            .finish()
+            .map_err(|error| FlowBuildError::BindingConfiguration {
+                binding: "chat".to_string(),
+                detail: error.to_string(),
+            })?;
+    let mut registry = EffectPortRegistry::new();
+    if install {
+        registry
+            .install(registration)
+            .map_err(|error| FlowBuildError::BindingConfiguration {
+                binding: "chat".to_string(),
+                detail: error.to_string(),
+            })?;
+    }
+    Ok((binding, registry))
+}
+
 fn deferred_chat_port(
     resolutions: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     forbidden: bool,
-) -> EffectPortRegistry {
+) -> ChatPortRecipe {
     let resolver: EffectPortResolver<dyn ChatClient> = Arc::new(move || {
-        let resolutions = resolutions.clone();
-        let calls = calls.clone();
-        Box::pin(async move {
-            resolutions.fetch_add(1, Ordering::SeqCst);
-            assert!(!forbidden, "strict replay resolved the deferred chat port");
-            Ok(Arc::new(CountingChatClient {
-                target: target(),
-                calls,
-                forbidden,
-                response_error: None,
-            }) as Arc<dyn ChatClient>)
-        })
+        resolutions.fetch_add(1, Ordering::SeqCst);
+        assert!(!forbidden, "strict replay resolved the deferred chat port");
+        Ok(Arc::new(CountingChatClient {
+            target: target(),
+            calls: calls.clone(),
+            forbidden,
+            response_error: None,
+        }) as Arc<dyn ChatClient>)
     });
-    EffectPortRegistry::new()
-        .with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)
-        .expect("one chat resolver is registered")
+    ChatPortRecipe::Deferred(resolver)
 }
 
 fn counting_chat_resolver(
@@ -382,47 +446,48 @@ fn counting_chat_resolver(
 ) -> EffectPortResolver<dyn ChatClient> {
     Arc::new(move || {
         let target = client_target.clone();
-        let resolutions = resolutions.clone();
-        let calls = calls.clone();
-        Box::pin(async move {
-            resolutions.fetch_add(1, Ordering::SeqCst);
-            assert!(!forbidden, "strict replay resolved the real-flow chat port");
-            Ok(Arc::new(CountingChatClient {
-                target,
-                calls,
-                forbidden,
-                response_error: None,
-            }) as Arc<dyn ChatClient>)
-        })
+        resolutions.fetch_add(1, Ordering::SeqCst);
+        assert!(!forbidden, "strict replay resolved the real-flow chat port");
+        Ok(Arc::new(CountingChatClient {
+            target,
+            calls: calls.clone(),
+            forbidden,
+            response_error: None,
+        }) as Arc<dyn ChatClient>)
     })
+}
+
+fn counting_chat_binding(
+    target: ChatTarget,
+    resolutions: Arc<AtomicUsize>,
+    calls: Arc<AtomicUsize>,
+    forbidden: bool,
+) -> ChatEffectBinding {
+    let resolver = counting_chat_resolver(target.clone(), resolutions, calls, forbidden);
+    ChatEffectBinding::from_resolver(target, resolver)
+        .expect("fixture chat binding evidence is valid")
 }
 
 fn post_start_mismatch_port(
     resolutions: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
-) -> EffectPortRegistry {
+) -> ChatPortRecipe {
     let resolver: EffectPortResolver<dyn ChatClient> = Arc::new(move || {
-        let resolutions = resolutions.clone();
-        let calls = calls.clone();
-        Box::pin(async move {
-            resolutions.fetch_add(1, Ordering::SeqCst);
-            Ok(Arc::new(CountingChatClient {
-                target: target(),
-                calls,
-                forbidden: false,
-                response_error: Some(AiClientError::target_mismatch(
-                    ChatTarget::new("fixture", "mutated-after-start"),
-                    target(),
-                )),
-            }) as Arc<dyn ChatClient>)
-        })
+        resolutions.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(CountingChatClient {
+            target: target(),
+            calls: calls.clone(),
+            forbidden: false,
+            response_error: Some(AiClientError::target_mismatch(
+                ChatTarget::new("fixture", "mutated-after-start"),
+                target(),
+            )),
+        }) as Arc<dyn ChatClient>)
     });
-    EffectPortRegistry::new()
-        .with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)
-        .expect("one mismatching chat resolver is registered")
+    ChatPortRecipe::Deferred(resolver)
 }
 
-fn eager_chat_port(calls: Arc<AtomicUsize>, forbidden: bool) -> EffectPortRegistry {
+fn eager_chat_port(calls: Arc<AtomicUsize>, forbidden: bool) -> ChatPortRecipe {
     eager_chat_port_for_target(calls, forbidden, target())
 }
 
@@ -430,48 +495,33 @@ fn eager_chat_port_for_target(
     calls: Arc<AtomicUsize>,
     forbidden: bool,
     client_target: ChatTarget,
-) -> EffectPortRegistry {
-    EffectPortRegistry::new()
-        .with_port::<dyn ChatClient>(
-            CHAT_CLIENT_PORT,
-            Arc::new(CountingChatClient {
-                target: client_target,
-                calls,
-                forbidden,
-                response_error: None,
-            }),
-        )
-        .expect("one eager chat port is registered")
+) -> ChatPortRecipe {
+    ChatPortRecipe::Eager(Arc::new(CountingChatClient {
+        target: client_target,
+        calls,
+        forbidden,
+        response_error: None,
+    }))
 }
 
-fn error_chat_port(calls: Arc<AtomicUsize>, error: AiClientError) -> EffectPortRegistry {
-    EffectPortRegistry::new()
-        .with_port::<dyn ChatClient>(
-            CHAT_CLIENT_PORT,
-            Arc::new(CountingChatClient {
-                target: target(),
-                calls,
-                forbidden: false,
-                response_error: Some(error),
-            }),
-        )
-        .expect("one failing chat port is registered")
+fn error_chat_port(calls: Arc<AtomicUsize>, error: AiClientError) -> ChatPortRecipe {
+    ChatPortRecipe::Eager(Arc::new(CountingChatClient {
+        target: target(),
+        calls,
+        forbidden: false,
+        response_error: Some(error),
+    }))
 }
 
 fn internally_retrying_chat_port(
     calls: Arc<AtomicUsize>,
     downstream_attempts: Arc<AtomicUsize>,
-) -> EffectPortRegistry {
-    EffectPortRegistry::new()
-        .with_port::<dyn ChatClient>(
-            CHAT_CLIENT_PORT,
-            Arc::new(InternallyRetryingChatClient {
-                target: target(),
-                calls,
-                downstream_attempts,
-            }),
-        )
-        .expect("one internally retrying chat port is registered")
+) -> ChatPortRecipe {
+    ChatPortRecipe::Eager(Arc::new(InternallyRetryingChatClient {
+        target: target(),
+        calls,
+        downstream_attempts,
+    }))
 }
 
 #[derive(Clone, Debug)]
@@ -533,7 +583,7 @@ impl InlineSink for CollectOut {
 fn build_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DigestOut>>>,
-    effect_ports: EffectPortRegistry,
+    effect_ports: ChatPortRecipe,
     backpressure_window: u64,
     map_request_target: ChatTarget,
     map_prepare_failure: bool,
@@ -555,7 +605,7 @@ fn build_flow(
 struct FlowBehaviour {
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DigestOut>>>,
-    effect_ports: EffectPortRegistry,
+    effect_ports: ChatPortRecipe,
     backpressure_window: u64,
     map_request_target: ChatTarget,
     map_prepare_failure: bool,
@@ -588,8 +638,8 @@ fn build_flow_with_chunk_plan(
         map_prepare_calls,
     } = behaviour;
     FlowDefinition::materialize(move |_runtime_config| {
-        let chat = ChatBindingContract::from_resolved(map_request_target, chat_estimator)
-            .expect("test chat target and estimator models agree");
+        let (chat, effect_ports) =
+            materialise_chat_authority(map_request_target, chat_estimator, effect_ports.clone())?;
         let seed = OneSeed::with_count(seed_count);
         let map_role = MapRole {
             fail_prepare: map_prepare_failure,
@@ -610,16 +660,16 @@ fn build_flow_with_chunk_plan(
                 seed = source!(DigestSeed => seed);
                 digest = ai_map_reduce!(
                     DigestSeed -> DigestOut => {
-                        map: [DigestItem] ->{
-                            at_least_once(ChatCompletion)
+                        map: [DigestItem] -> DigestPartial
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestPartial => map_role,
-                        reduce: (DigestSeed, [DigestPartial]) ->{
-                            at_least_once(ChatCompletion)
+                            => map_role,
+                        reduce: (DigestSeed, [DigestPartial]) -> DigestOut
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestOut => finalise_role,
+                            => finalise_role,
                     },
                     chunking: by_budget {
                         items: |seed: &DigestSeed| {
@@ -647,12 +697,12 @@ fn build_flow_with_chunk_plan(
 fn build_recovery_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DigestOut>>>,
-    effect_ports: EffectPortRegistry,
+    effect_ports: ChatPortRecipe,
     map_policy: Box<dyn MiddlewareFactory>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let chat = ChatBindingContract::from_resolved(target(), estimator())
-            .expect("test chat target and estimator models agree");
+        let (chat, effect_ports) =
+            materialise_chat_authority(target(), estimator(), effect_ports.clone())?;
         let recovery_seed = OneSeed::with_count(1);
         let map_role = MapRole {
             fail_prepare: false,
@@ -673,16 +723,16 @@ fn build_recovery_flow(
                 recovery_seed = source!(DigestSeed => recovery_seed);
                 recovery_digest = ai_map_reduce!(
                     DigestSeed -> DigestOut => {
-                        map: [DigestItem] ->{
-                            at_least_once(ChatCompletion)
+                        map: [DigestItem] -> DigestPartial
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with map_policy
-                        } DigestPartial => map_role,
-                        reduce: (DigestSeed, [DigestPartial]) ->{
-                            at_least_once(ChatCompletion)
+                            => map_role,
+                        reduce: (DigestSeed, [DigestPartial]) -> DigestOut
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestOut => finalise_role,
+                            => finalise_role,
                     },
                     chunking: by_budget {
                         items: |seed: &DigestSeed| {
@@ -710,12 +760,12 @@ fn build_recovery_flow(
 fn build_credit_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DigestOut>>>,
-    effect_ports: EffectPortRegistry,
+    effect_ports: ChatPortRecipe,
     prepare_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let chat = ChatBindingContract::from_resolved(target(), estimator())
-            .expect("test chat target and estimator models agree");
+        let (chat, effect_ports) =
+            materialise_chat_authority(target(), estimator(), effect_ports.clone())?;
         let credit_seed = OneSeed::with_count(2);
         let map_role = MapRole {
             fail_prepare: false,
@@ -736,16 +786,16 @@ fn build_credit_flow(
                 credit_seed = source!(DigestSeed => credit_seed);
                 credit_digest = ai_map_reduce!(
                     DigestSeed -> DigestOut => {
-                        map: [DigestItem] ->{
-                            at_least_once(ChatCompletion)
+                        map: [DigestItem] -> DigestPartial
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestPartial => map_role,
-                        reduce: (DigestSeed, [DigestPartial]) ->{
-                            at_least_once(ChatCompletion)
+                            => map_role,
+                        reduce: (DigestSeed, [DigestPartial]) -> DigestOut
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestOut => finalise_role,
+                            => finalise_role,
                     },
                     chunking: by_budget {
                         items: |seed: &DigestSeed| {
@@ -773,11 +823,11 @@ fn build_credit_flow(
 fn build_chunk_interruption_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DigestOut>>>,
-    effect_ports: EffectPortRegistry,
+    effect_ports: ChatPortRecipe,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let chat = ChatBindingContract::from_resolved(target(), estimator())
-            .expect("test chat target and estimator models agree");
+        let (chat, effect_ports) =
+            materialise_chat_authority(target(), estimator(), effect_ports.clone())?;
         let interrupt_seed = OneSeed::with_count(5);
         let map_role = MapRole {
             fail_prepare: false,
@@ -798,16 +848,16 @@ fn build_chunk_interruption_flow(
                 interrupt_seed = source!(DigestSeed => interrupt_seed);
                 interrupt_digest = ai_map_reduce!(
                     DigestSeed -> DigestOut => {
-                        map: [DigestItem] ->{
-                            at_least_once(ChatCompletion)
+                        map: [DigestItem] -> DigestPartial
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestPartial => map_role,
-                        reduce: (DigestSeed, [DigestPartial]) ->{
-                            at_least_once(ChatCompletion)
+                            => map_role,
+                        reduce: (DigestSeed, [DigestPartial]) -> DigestOut
+                            uses at_least_once(ChatCompletion)
                                 via chat
                                 with ai_resilience()
-                        } DigestOut => finalise_role,
+                            => finalise_role,
                     },
                     chunking: by_budget {
                         items: |seed: &DigestSeed| {
@@ -1300,13 +1350,13 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "let HnRunInputs {",
         "let ai_models = runtime_config.ai_models();",
         "ChatEffectBinding::from_config(&ai_models)",
-        "let (chat, chat_registration) =",
-        ".into_parts();",
-        "chat_registration.install_into(EffectPortRegistry::new())",
+        "chat_binding_override",
+        "binding.install_into(&mut effect_ports)",
         "effect_ports,",
         "let hn_source = HttpPullSource::new(decoder, http_source_config);",
-        "map: [FormattedStory] -> {",
-        "reduce: (HnTopStories, [HnDigestGroupSummary]) -> {",
+        "map: [FormattedStory] -> HnDigestGroupSummary",
+        "reduce: (HnTopStories, [HnDigestGroupSummary]) -> HnDigestSummary",
+        "uses at_least_once(ChatCompletion)",
         "via chat",
         "with ai_resilience()",
     ] {
@@ -1328,6 +1378,15 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "bindings:",
         "effect_ports: effect_ports,",
         "DemoConfig",
+        "chat_resolver_override",
+        "EffectPortResolver",
+        "EffectRegistrationBuilder",
+        "LogicalEffectBindingName",
+        "ResolvedEffectPort",
+        "CHAT_CLIENT",
+        "bind_deferred_with_metadata",
+        ".into_parts()",
+        "chat_registration",
     ] {
         assert!(
             !flow_source.contains(forbidden),
@@ -1961,7 +2020,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
         .run_async(build_flow(
             journal_base.clone(),
             empty_outputs.clone(),
-            EffectPortRegistry::new(),
+            ChatPortRecipe::Missing,
             3,
             target(),
             false,
@@ -1999,16 +2058,11 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
     let journal_base = temp.path().join("journals");
     let hanging_calls = Arc::new(AtomicUsize::new(0));
     let entered = Arc::new(Notify::new());
-    let hanging_ports = EffectPortRegistry::new()
-        .with_port::<dyn ChatClient>(
-            CHAT_CLIENT_PORT,
-            Arc::new(HangingChatClient {
-                target: target(),
-                calls: hanging_calls.clone(),
-                entered: entered.clone(),
-            }),
-        )
-        .expect("hanging chat port is registered");
+    let hanging_ports = ChatPortRecipe::Eager(Arc::new(HangingChatClient {
+        target: target(),
+        calls: hanging_calls.clone(),
+        entered: entered.clone(),
+    }));
 
     let live_task = tokio::spawn({
         let journal_base = journal_base.clone();
@@ -2131,7 +2185,7 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
         .run_async(build_recovery_flow(
             journal_base.clone(),
             strict_outputs,
-            EffectPortRegistry::new(),
+            ChatPortRecipe::Missing,
             ai_resilience(),
         ))
         .await
@@ -2441,7 +2495,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         demo_inputs.clone(),
         hn_demo_flow::HnFlowOptions {
             journal_base: journal_base.clone(),
-            chat_resolver_override: Some(counting_chat_resolver(
+            chat_binding_override: Some(counting_chat_binding(
                 production_target.clone(),
                 live_resolutions.clone(),
                 live_calls.clone(),
@@ -2513,7 +2567,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         replay_inputs,
         hn_demo_flow::HnFlowOptions {
             journal_base: journal_base.clone(),
-            chat_resolver_override: Some(counting_chat_resolver(
+            chat_binding_override: Some(counting_chat_binding(
                 production_target,
                 replay_resolutions.clone(),
                 replay_calls.clone(),
@@ -2716,17 +2770,19 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
 async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
+    let resolutions = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let result = FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(
             journal_base.clone(),
             Arc::new(Mutex::new(Vec::new())),
-            eager_chat_port_for_target(
+            ChatPortRecipe::Deferred(counting_chat_resolver(
+                ChatTarget::new("fixture", "wrong-client-model"),
+                resolutions.clone(),
                 calls.clone(),
                 false,
-                ChatTarget::new("fixture", "wrong-client-model"),
-            ),
+            )),
             3,
             target(),
             false,
@@ -2736,6 +2792,11 @@ async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
     assert!(
         result.is_err(),
         "a resolved client for another target must terminate the stage"
+    );
+    assert_eq!(
+        resolutions.load(Ordering::SeqCst),
+        1,
+        "port authority and its metadata snapshot must come from one resolver verdict"
     );
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -2752,6 +2813,13 @@ async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
                 || envelope.event.event_type() == EFFECT_RECORD_EVENT_TYPE
         }),
         "client target validation must precede the attempt boundary"
+    );
+    assert!(
+        !map.iter().any(|envelope| matches!(
+            &envelope.event.content,
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(_))
+        )),
+        "client target validation must precede policy observation"
     );
     assert!(
         chunk_failures(&map).is_empty(),
@@ -2799,17 +2867,12 @@ async fn endpoint_fingerprint_drift_is_rejected_by_effect_history_before_port_re
         .run_async(build_flow_with_behaviour(FlowBehaviour {
             journal_base: journal_base.clone(),
             outputs: Arc::new(Mutex::new(Vec::new())),
-            effect_ports: {
-                let resolver = counting_chat_resolver(
-                    endpoint_b.clone(),
-                    replay_resolutions.clone(),
-                    replay_calls.clone(),
-                    true,
-                );
-                EffectPortRegistry::new()
-                    .with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)
-                    .expect("endpoint-B replay resolver is registered")
-            },
+            effect_ports: ChatPortRecipe::Deferred(counting_chat_resolver(
+                endpoint_b.clone(),
+                replay_resolutions.clone(),
+                replay_calls.clone(),
+                true,
+            )),
             backpressure_window: 3,
             map_request_target: endpoint_b.clone(),
             map_prepare_failure: false,
@@ -2886,13 +2949,21 @@ async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
     };
     let record: EffectRecord =
         serde_json::from_value(payload.clone()).expect("effect failure record decodes");
-    assert!(matches!(
-        record.outcome,
-        EffectOutcomePayload::Failed {
-            detail: Some(EffectFailureDetail::PortBindingInvariantViolation { .. }),
-            ..
-        }
-    ));
+    let EffectOutcomePayload::Failed {
+        detail:
+            Some(EffectFailureDetail::PortBindingInvariantViolation {
+                port,
+                expected,
+                observed,
+            }),
+        ..
+    } = &record.outcome
+    else {
+        panic!("the target mismatch retains its typed physical failure shape")
+    };
+    assert_eq!(port, "chat");
+    assert_eq!(expected, "<not disclosed>");
+    assert_eq!(observed, "<not disclosed>");
     assert_eq!(
         failed
             .event

@@ -2,13 +2,18 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use async_trait::async_trait;
+use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, CHAT_CLIENT};
 use obzenflow_core::ai::{
-    AiFinaliseRole, AiInferenceRole, AiMapRole, AiRoleLogicFailure, ChatBindingContract,
-    ChatCompletionReply, ChatParams, ChatRequestSpec, ChatTarget, ChunkInfo,
-    HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenEstimatorFallbackReason,
-    TokenEstimatorResolutionInfo,
+    AiClientError, AiFinaliseRole, AiInferenceRole, AiMapRole, AiRoleLogicFailure, ChatClient,
+    ChatCompletionReply, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse, ChatTarget,
+    ChunkInfo, HeuristicTokenEstimator, Many, ResolvedTokenEstimator,
+    TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::effects::{
+    EffectBinding, EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -104,9 +109,25 @@ impl AiFinaliseRole<Seed, Many<Partial>, Output> for FinaliseRole {
     }
 }
 
-pub fn contract() -> ChatBindingContract {
-    ChatBindingContract::from_resolved(
-        ChatTarget::new("trybuild", "model"),
+struct FixtureChatClient {
+    target: ChatTarget,
+}
+
+#[async_trait]
+impl ChatClient for FixtureChatClient {
+    fn target(&self) -> &ChatTarget {
+        &self.target
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, AiClientError> {
+        unreachable!("trybuild never executes its application-local chat client")
+    }
+}
+
+pub fn binding() -> EffectBinding<ChatCompletion> {
+    let target = ChatTarget::new("trybuild", "model");
+    let evidence = ChatBindingEvidence::new(
+        target.clone(),
         ResolvedTokenEstimator::new(
             Arc::new(HeuristicTokenEstimator::default()),
             TokenEstimatorResolutionInfo::heuristic(
@@ -116,7 +137,25 @@ pub fn contract() -> ChatBindingContract {
             ),
         ),
     )
-    .expect("trybuild chat target and estimator models agree")
+    .expect("trybuild chat target and estimator models agree");
+    let (binding, registration) = EffectRegistrationBuilder::<ChatCompletion>::new(
+        LogicalEffectBindingName::new("trybuild_chat").unwrap(),
+        evidence,
+    )
+    .bind_eager_with_metadata(
+        CHAT_CLIENT,
+        ResolvedEffectPort::new(
+            Arc::new(FixtureChatClient {
+                target: target.clone(),
+            }) as Arc<dyn ChatClient>,
+            Arc::new(target),
+        ),
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+    drop(registration);
+    binding
 }
 
 fn spec() -> ChatRequestSpec {

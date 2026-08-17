@@ -35,7 +35,7 @@
 //!         }
 //!     })
 //! })
-//! ```
+//! ```ignore
 //!
 //! Both `placeholder!()` and `placeholder!("reason")` remain valid sketch
 //! markers. Async-source poll timeout is handler configuration exposed through
@@ -99,24 +99,59 @@
 //! let _ = join!(reference: Carrier, stream: Order, out: Enriched; "enricher" => with_ref!(carriers, handler));
 //! ```
 //!
-//! ## FLOWIP-120g: the `effects:` clause is mandatory on effectful macros
+//! ## FLOWIP-132a: effect capabilities follow the type transformation
 //!
-//! An effectful stage must declare its effects, even when the list is empty
-//! (`effects: []`). Omitting the clause must not compile, so "no effects" stays
-//! distinct from "forgot the declaration".
+//! A pure effectful handler omits the capability clause: `In -> Out`. A
+//! singleton declaration uses `In -> Out uses Effect`; braces are reserved for
+//! unordered sets of at least two effects. Detached `effects: [...]`, empty
+//! sets, braced singletons, and arrow-embedded effect rows are rejected.
 //!
-//! ```compile_fail
+//! ```
+//! use async_trait::async_trait;
+//! use obzenflow_core::TypedPayload;
 //! use obzenflow_dsl::effectful_transform;
+//! use obzenflow_runtime::effects::{Effects, StageCompletion};
+//! use obzenflow_runtime::stages::common::{
+//!     handlers::EffectfulTransformHandler,
+//!     HandlerError,
+//! };
+//! use serde::{Deserialize, Serialize};
 //!
+//! #[derive(Clone, Debug, Serialize, Deserialize)]
 //! struct In;
-//! struct Out;
-//! let handler = ();
+//! impl TypedPayload for In {
+//!     const EVENT_TYPE: &'static str = "docs.effectful-transform.input";
+//! }
 //!
-//! // Missing the mandatory `effects:` clause (jumping straight to `observers:`).
-//! let _ = effectful_transform!(In -> Out => handler, observers: []);
+//! #[derive(Clone, Debug, Serialize, Deserialize)]
+//! struct Out;
+//! impl TypedPayload for Out {
+//!     const EVENT_TYPE: &'static str = "docs.effectful-transform.output";
+//! }
+//!
+//! #[derive(Clone, Debug)]
+//! struct Handler;
+//!
+//! #[async_trait]
+//! impl EffectfulTransformHandler for Handler {
+//!     type Input = In;
+//!     type Output = Out;
+//!     type AllowedEffects = obzenflow_runtime::effect_set![];
+//!
+//!     async fn process(
+//!         &self,
+//!         _input: Self::Input,
+//!         _fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+//!     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+//!         unimplemented!()
+//!     }
+//! }
+//!
+//! // Pure signature: no `uses` clause.
+//! let _ = effectful_transform!(In -> Out => Handler, observers: []);
 //! ```
 //!
-//! ## FLOWIP-120c H7: per-effect policies attach inline in `effects:`
+//! ## FLOWIP-120c H7: per-effect policies attach inside `uses`
 //!
 //! A policy attaches to the exact effect it guards (`Effect with policy`).
 //!
@@ -132,7 +167,7 @@
 //! let handler = ();
 //!
 //! // `with` must be followed by one bare policy expression.
-//! let _ = effectful_transform!(In -> Out => handler, effects: [MyEffect with], observers: []);
+//! let _ = effectful_transform!(In -> Out uses MyEffect with => handler, observers: []);
 //! ```
 //!
 //! ## FLOWIP-115s: the canonical `sink!` grammar

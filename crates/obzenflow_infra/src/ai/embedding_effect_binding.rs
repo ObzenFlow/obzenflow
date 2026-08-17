@@ -9,70 +9,81 @@ use super::endpoint_identity::{
     endpoint_has_credentials,
 };
 use crate::ai::NativeEmbeddingClient;
-use obzenflow_core::ai::{
-    AiProvider, EmbeddingBindingContract, EmbeddingClient, EmbeddingTarget, EMBEDDING_CLIENT_PORT,
+use obzenflow_adapters::ai::{
+    EmbeddingBindingEvidence, EmbeddingBindingEvidenceBuildError, EmbeddingGeneration,
+    EMBEDDING_CLIENT,
 };
+use obzenflow_core::ai::{AiProvider, EmbeddingClient, EmbeddingTarget};
 use obzenflow_core::config::SecretRef;
 use obzenflow_core::http_client::Url;
 use obzenflow_runtime::effects::{
-    EffectPortRegistrationError, EffectPortRegistry, EffectPortResolutionError,
-    EffectPortResolveFuture, EffectPortResolver,
+    EffectBinding, EffectBindingBuildError, EffectPortRegistrationError, EffectPortRegistry,
+    EffectPortResolutionError, EffectPortResolver, EffectPortResolverWithMetadata,
+    EffectRegistration, EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort,
 };
 use obzenflow_runtime::runtime_config::AiModelsConfig;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum EmbeddingEffectBindingError {
     #[error(
-        "unsupported ai.models.provider='{provider}' (expected 'ollama', 'openai', or 'openai_compatible')"
+        "unsupported ai.models.provider (expected 'ollama', 'openai', or 'openai_compatible')"
     )]
-    UnsupportedProvider { provider: String },
+    UnsupportedProvider,
     #[error("ai.models.model is required for the single-target EmbeddingEffectBinding")]
     MissingModel,
     #[error("ai.models.base_url is required when ai.models.provider=openai_compatible")]
     MissingBaseUrl,
-    #[error("invalid ai.models.base_url: {message}")]
-    InvalidBaseUrl { message: String },
+    #[error("invalid ai.models.base_url")]
+    InvalidBaseUrl,
     #[error("AI effect binding endpoints must not contain URL credentials")]
     CredentialedBaseUrl,
+    #[error(transparent)]
+    InvalidEvidence(#[from] EmbeddingBindingEvidenceBuildError),
+    #[error(transparent)]
+    InvalidRegistration(#[from] EffectBindingBuildError),
+    #[error(transparent)]
+    Installation(#[from] EffectPortRegistrationError),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum DeferredProvider {
     Ollama { base_url: Option<Url> },
     OpenAi { api_key: SecretRef },
     OpenAiCompatible { api_key: SecretRef, base_url: Url },
 }
 
+impl std::fmt::Debug for DeferredProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DeferredProvider(<not disclosed>)")
+    }
+}
+
+#[derive(Clone)]
+enum DeferredEmbeddingAuthority {
+    Provider(DeferredProvider),
+    Resolver(EffectPortResolver<dyn EmbeddingClient>),
+}
+
+impl std::fmt::Debug for DeferredEmbeddingAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DeferredEmbeddingAuthority(<not disclosed>)")
+    }
+}
+
 /// One immutable embedding decision split later into contract evidence and
 /// opaque live registration authority.
 pub struct EmbeddingEffectBinding {
-    contract: EmbeddingBindingContract,
-    provider: DeferredProvider,
+    evidence: EmbeddingBindingEvidence,
+    authority: DeferredEmbeddingAuthority,
 }
 
 impl std::fmt::Debug for EmbeddingEffectBinding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("EmbeddingEffectBinding")
-            .field("contract", &self.contract)
+            .field("evidence", &"<not disclosed>")
             .field("registration", &"<opaque>")
-            .finish()
-    }
-}
-
-/// Opaque, consuming authority to install the single live embedding resolver.
-pub struct EmbeddingEffectRegistration {
-    target: EmbeddingTarget,
-    provider: DeferredProvider,
-}
-
-impl std::fmt::Debug for EmbeddingEffectRegistration {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("EmbeddingEffectRegistration")
-            .field("authority", &"<opaque>")
             .finish()
     }
 }
@@ -85,12 +96,12 @@ impl EmbeddingEffectBinding {
         let model = required_model(model.into())?;
         let endpoint = base_url.clone().unwrap_or_else(default_ollama_base_url);
         validate_endpoint(&endpoint)?;
-        Ok(Self::new_bound(
+        Self::new_bound(
             "ollama",
             model,
             &endpoint,
             DeferredProvider::Ollama { base_url },
-        ))
+        )
     }
 
     pub fn openai(
@@ -98,12 +109,12 @@ impl EmbeddingEffectBinding {
         api_key: SecretRef,
     ) -> Result<Self, EmbeddingEffectBindingError> {
         let model = required_model(model.into())?;
-        Ok(Self::new_bound(
+        Self::new_bound(
             "openai",
             model,
             &default_openai_base_url(),
             DeferredProvider::OpenAi { api_key },
-        ))
+        )
     }
 
     pub fn openai_compatible(
@@ -112,7 +123,7 @@ impl EmbeddingEffectBinding {
         base_url: Url,
     ) -> Result<Self, EmbeddingEffectBindingError> {
         validate_endpoint(&base_url)?;
-        Ok(Self::new_bound(
+        Self::new_bound(
             "openai_compatible",
             required_model(model.into())?,
             &base_url,
@@ -120,7 +131,7 @@ impl EmbeddingEffectBinding {
                 api_key,
                 base_url: base_url.clone(),
             },
-        ))
+        )
     }
 
     pub fn from_config(config: &AiModelsConfig) -> Result<Self, EmbeddingEffectBindingError> {
@@ -148,19 +159,62 @@ impl EmbeddingEffectBinding {
                 config.api_key_env.value.clone(),
                 base_url.ok_or(EmbeddingEffectBindingError::MissingBaseUrl)?,
             ),
-            _ => Err(EmbeddingEffectBindingError::UnsupportedProvider { provider }),
+            _ => Err(EmbeddingEffectBindingError::UnsupportedProvider),
         }
     }
 
-    pub fn into_parts(self) -> (EmbeddingBindingContract, EmbeddingEffectRegistration) {
-        let target = self.contract.target().clone();
+    /// Build an application-selected deferred embedding binding.
+    ///
+    /// The facade derives declaration evidence and snapshots the resolved
+    /// client's observed target. Callers do not construct registration slots or
+    /// metadata projections.
+    pub fn from_resolver(
+        target: EmbeddingTarget,
+        resolver: EffectPortResolver<dyn EmbeddingClient>,
+    ) -> Result<Self, EmbeddingEffectBindingError> {
+        Ok(Self {
+            evidence: EmbeddingBindingEvidence::new(target)?,
+            authority: DeferredEmbeddingAuthority::Resolver(resolver),
+        })
+    }
+
+    /// Install this facade-owned registration and return its lexical binding.
+    pub fn install_into(
+        self,
+        effect_ports: &mut EffectPortRegistry,
+    ) -> Result<EffectBinding<EmbeddingGeneration>, EmbeddingEffectBindingError> {
+        let (binding, registration) = self.into_parts()?;
+        effect_ports.install(registration)?;
+        Ok(binding)
+    }
+
+    fn into_parts(
+        self,
+    ) -> Result<
         (
-            self.contract,
-            EmbeddingEffectRegistration {
-                target,
-                provider: self.provider,
-            },
+            EffectBinding<EmbeddingGeneration>,
+            EffectRegistration<EmbeddingGeneration>,
+        ),
+        EmbeddingEffectBindingError,
+    > {
+        let target = self.evidence.target().clone();
+        let authority = Arc::new(self.authority);
+        let resolver: EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> =
+            Arc::new(move || {
+                let client = resolve_client(&target, &authority)?;
+                // Snapshot the resolved client's observed target. Reusing the
+                // requested target here would make pre-boundary validation tautological.
+                let metadata = Arc::new(client.target().clone());
+                Ok(ResolvedEffectPort::new(client, metadata))
+            });
+        EffectRegistrationBuilder::<EmbeddingGeneration>::new(
+            LogicalEffectBindingName::new("embedding")
+                .expect("framework embedding binding name is a valid public identifier"),
+            self.evidence,
         )
+        .bind_deferred_with_metadata(EMBEDDING_CLIENT, resolver)?
+        .finish()
+        .map_err(Into::into)
     }
 
     fn new_bound(
@@ -168,69 +222,47 @@ impl EmbeddingEffectBinding {
         model: String,
         endpoint: &Url,
         deferred: DeferredProvider,
-    ) -> Self {
-        Self {
-            contract: EmbeddingBindingContract::from_target(bound_embedding_target(
+    ) -> Result<Self, EmbeddingEffectBindingError> {
+        Ok(Self {
+            evidence: EmbeddingBindingEvidence::new(bound_embedding_target(
                 provider, model, endpoint,
-            )),
-            provider: deferred,
-        }
+            ))?,
+            authority: DeferredEmbeddingAuthority::Provider(deferred),
+        })
     }
 }
 
-impl EmbeddingEffectRegistration {
-    pub fn install_into(
-        self,
-        registry: EffectPortRegistry,
-    ) -> Result<EffectPortRegistry, EffectPortRegistrationError> {
-        registry.with_deferred::<dyn EmbeddingClient>(EMBEDDING_CLIENT_PORT, self.into_resolver())
-    }
-
-    fn into_resolver(self) -> EffectPortResolver<dyn EmbeddingClient> {
-        let binding = Arc::new(self);
-        Arc::new(move || {
-            let binding = Arc::clone(&binding);
-            Box::pin(async move { binding.resolve_client() })
-                as EffectPortResolveFuture<dyn EmbeddingClient>
-        })
-    }
-
-    fn resolve_client(&self) -> Result<Arc<dyn EmbeddingClient>, EffectPortResolutionError> {
-        let result =
-            catch_unwind(AssertUnwindSafe(|| match &self.provider {
-                DeferredProvider::Ollama { base_url } => {
-                    NativeEmbeddingClient::ollama(self.target.model.clone(), base_url.clone())
-                }
-                DeferredProvider::OpenAi { api_key } => {
-                    let secret = api_key.resolve().map_err(|error| {
-                        obzenflow_core::ai::AiClientError::Auth {
-                            message: error.to_string(),
-                        }
-                    })?;
-                    NativeEmbeddingClient::openai(self.target.model.clone(), secret.expose())
-                }
-                DeferredProvider::OpenAiCompatible { api_key, base_url } => {
-                    let secret = api_key.resolve().map_err(|error| {
-                        obzenflow_core::ai::AiClientError::Auth {
-                            message: error.to_string(),
-                        }
-                    })?;
-                    NativeEmbeddingClient::openai_compatible(
-                        self.target.model.clone(),
-                        secret.expose(),
-                        base_url.clone(),
-                    )
-                }
-            }));
-
-        match result {
-            Ok(Ok(client)) => Ok(Arc::new(client)),
-            Ok(Err(error)) => Err(EffectPortResolutionError::failed(error.to_string())),
-            Err(_) => Err(EffectPortResolutionError::failed(
-                "native embedding client construction panicked",
-            )),
+fn resolve_client(
+    target: &EmbeddingTarget,
+    authority: &DeferredEmbeddingAuthority,
+) -> Result<Arc<dyn EmbeddingClient>, EffectPortResolutionError> {
+    let provider = match authority {
+        DeferredEmbeddingAuthority::Provider(provider) => provider,
+        DeferredEmbeddingAuthority::Resolver(resolver) => return resolver(),
+    };
+    let client = match provider {
+        DeferredProvider::Ollama { base_url } => {
+            NativeEmbeddingClient::ollama(target.model.clone(), base_url.clone())
+        }
+        DeferredProvider::OpenAi { api_key } => {
+            let secret = api_key
+                .resolve()
+                .map_err(|_| EffectPortResolutionError::CredentialUnavailable)?;
+            NativeEmbeddingClient::openai(target.model.clone(), secret.expose())
+        }
+        DeferredProvider::OpenAiCompatible { api_key, base_url } => {
+            let secret = api_key
+                .resolve()
+                .map_err(|_| EffectPortResolutionError::CredentialUnavailable)?;
+            NativeEmbeddingClient::openai_compatible(
+                target.model.clone(),
+                secret.expose(),
+                base_url.clone(),
+            )
         }
     }
+    .map_err(|_| EffectPortResolutionError::ClientConstructionFailed)?;
+    Ok(Arc::new(client))
 }
 
 fn required_model(model: String) -> Result<String, EmbeddingEffectBindingError> {
@@ -243,9 +275,7 @@ fn required_model(model: String) -> Result<String, EmbeddingEffectBindingError> 
 }
 
 fn parse_url(raw: &str) -> Result<Url, EmbeddingEffectBindingError> {
-    Url::parse(raw).map_err(|error| EmbeddingEffectBindingError::InvalidBaseUrl {
-        message: error.to_string(),
-    })
+    Url::parse(raw).map_err(|_| EmbeddingEffectBindingError::InvalidBaseUrl)
 }
 
 fn validate_endpoint(endpoint: &Url) -> Result<(), EmbeddingEffectBindingError> {
@@ -260,21 +290,17 @@ fn validate_endpoint(endpoint: &Url) -> Result<(), EmbeddingEffectBindingError> 
 mod tests {
     use super::*;
     use obzenflow_core::config::SecretRef;
+    use obzenflow_runtime::effects::EffectPortRegistry;
 
     #[test]
     fn ollama_is_a_native_fingerprinted_binding() {
-        let (contract, registration) = EmbeddingEffectBinding::ollama("nomic-embed-text", None)
+        let mut registry = EffectPortRegistry::new();
+        let contract = EmbeddingEffectBinding::ollama("nomic-embed-text", None)
             .unwrap()
-            .into_parts();
-        assert_eq!(contract.target().provider.as_str(), "ollama");
-        assert_eq!(contract.target().model, "nomic-embed-text");
-        let registry = registration
-            .install_into(EffectPortRegistry::new())
-            .expect("sealed registration succeeds");
-        let requirement = obzenflow_runtime::effects::EffectPortRequirement::of::<
-            dyn EmbeddingClient,
-        >(EMBEDDING_CLIENT_PORT);
-        assert!(registry.contains_requirement(&requirement));
+            .install_into(&mut registry)
+            .unwrap();
+        assert_eq!(contract.evidence().target().provider.as_str(), "ollama");
+        assert_eq!(contract.evidence().target().model, "nomic-embed-text");
     }
 
     #[test]
@@ -287,16 +313,15 @@ mod tests {
     #[test]
     fn hosted_construction_and_registration_defer_and_hide_the_secret() {
         let secret_name = "FLOWIP_128B_MISSING_EMBEDDING_KEY";
-        let (contract, registration) =
-            EmbeddingEffectBinding::openai("text-embedding", SecretRef::new(secret_name))
-                .expect("binding construction does not resolve its secret")
-                .into_parts();
-
-        let encoded_target = serde_json::to_string(contract.target()).unwrap();
-        assert!(!encoded_target.contains(secret_name));
-        registration
-            .install_into(EffectPortRegistry::new())
+        let binding = EmbeddingEffectBinding::openai("text-embedding", SecretRef::new(secret_name))
+            .expect("binding construction does not resolve its secret");
+        let mut registry = EffectPortRegistry::new();
+        let contract = binding
+            .install_into(&mut registry)
             .expect("deferred registration does not resolve its secret");
+
+        let encoded_target = serde_json::to_string(contract.evidence().target()).unwrap();
+        assert!(!encoded_target.contains(secret_name));
 
         let endpoint = Url::parse("https://user:password@example.com/v1").unwrap();
         let error = EmbeddingEffectBinding::openai_compatible(

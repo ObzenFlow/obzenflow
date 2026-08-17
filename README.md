@@ -98,6 +98,7 @@ ObzenFlow follows an onion architecture: `obzenflow_core` defines the business d
 - `crates/obzenflow_dsl/README.md`: the `flow!` DSL and how it builds a runnable flow graph
 - `crates/obzenflow_infra/README.md`: `FlowApplication` + journaling/web/HTTP implementations, mostly behind feature flags
 - `crates/obzenflow_adapters/README.md`: middleware + concrete sources/sinks composed into flows
+- `docs/type-and-effect-stage-grammar.md`: `uses` capability clauses, lexical typed bindings, and migration from the pre-132a surface
 
 The root `obzenflow` crate is a convenience re-export layer for common sources/sinks (`src/sources.rs`, `src/sinks.rs`). The remaining workspace crates, `obzenflow_benchmarks` and `obzenflow_sketches`, are internal support crates outside the public surface.
 

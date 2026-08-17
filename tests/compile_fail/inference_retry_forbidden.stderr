@@ -3,10 +3,8 @@ error: inference!: ChatCompletion is NonIdempotentAtLeastOnce; retry is forbidde
    |
 14 |       let _ = inference!(
    |  _____________^
-15 | |         Input ->{
-16 | |             at_least_once(ChatCompletion) via chat with retry(3)
-17 | |         } Output => role
-18 | |     );
+15 | |         Input -> Output uses at_least_once(ChatCompletion) via chat with retry(3) => role
+16 | |     );
    | |_____^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_ai_chat_effect_row` which comes from the expansion of the macro `inference` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_effect_entries` which comes from the expansion of the macro `inference` (in Nightly builds, run with -Z macro-backtrace for more info)

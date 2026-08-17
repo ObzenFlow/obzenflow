@@ -9,18 +9,14 @@ mod support;
 use support::*;
 
 fn main() {
-    let chat = contract();
+    let chat = binding();
     let map_role = MapRole;
     let finalise_role = FinaliseRole;
     let policy = obzenflow_adapters::middleware::control::ai_resilience();
     let _ = ai_map_reduce!(
         Seed -> Output => {
-            map: [Item] ->{
-                at_least_once(ChatCompletion) with policy
-            } Partial => map_role,
-            reduce: (Seed, [Partial]) ->{
-                at_least_once(ChatCompletion) via chat with policy
-            } Output => finalise_role,
+            map: [Item] -> Partial uses at_least_once(ChatCompletion) with policy => map_role,
+            reduce: (Seed, [Partial]) -> Output uses at_least_once(ChatCompletion) via chat with policy => finalise_role,
         },
         chunking: by_budget {
             items: |_seed: &Seed| Vec::<Item>::new(),

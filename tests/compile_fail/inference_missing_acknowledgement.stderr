@@ -3,10 +3,8 @@ error: inference!: paid non-idempotent ChatCompletion requires `at_least_once(Ch
    |
 15 |       let _ = inference!(
    |  _____________^
-16 | |         Input ->{
-17 | |             ChatCompletion via chat with policy
-18 | |         } Output => role
-19 | |     );
+16 | |         Input -> Output uses ChatCompletion via chat with policy => role
+17 | |     );
    | |_____^
    |
-   = note: this error originates in the macro `$crate::__obzenflow_ai_chat_effect_row` which comes from the expansion of the macro `inference` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the macro `$crate::__obzenflow_effect_entries` which comes from the expansion of the macro `inference` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -6,11 +6,26 @@
 
 use obzenflow_adapters::ai::{ChatCompletion, ChatCompletionBuildError};
 use obzenflow_adapters::middleware::MiddlewareFactory;
-use obzenflow_core::ai::{ChatBindingContract, ChatCompletionReply, ChatRequestSpec};
+use obzenflow_core::ai::{ChatCompletionReply, ChatRequestSpec};
 use obzenflow_core::StageFactSet;
 use obzenflow_runtime::effects::{
-    AllowedEffectsAllowEffect, EffectOutcomeFitsOutput, EffectSet, Effects,
+    AllowedEffectsAllowEffect, EffectBinding, EffectDeclaration, EffectOutcomeFitsOutput,
+    EffectSet, Effects,
 };
+
+use super::stage_descriptor::EffectPolicyAttachment;
+
+/// Canonical lowering product for one generated `ChatCompletion` capability declaration.
+///
+/// Exported only so authoring macros expanded in downstream crates can carry
+/// the exact declaration and policy vectors produced by the shared effect-entry
+/// lowerer into the generated descriptor constructors.
+#[doc(hidden)]
+pub struct GeneratedChatEffectRow {
+    pub binding: EffectBinding<ChatCompletion>,
+    pub declarations: Vec<EffectDeclaration>,
+    pub policy_attachments: Vec<EffectPolicyAttachment>,
+}
 
 #[derive(Debug)]
 pub(crate) enum GeneratedChatInvocationError {
@@ -21,52 +36,54 @@ pub(crate) enum GeneratedChatInvocationError {
 /// Macro type-checking seam for the lexical `via` operand.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "AI effect-row `via` binding is not a ChatBindingContract",
-    label = "expected a ChatBindingContract here",
-    note = "`via` selects the credential-free chat contract value; it is not a runtime port name"
+    message = "AI `uses`-clause `via` binding is not an EffectBinding<ChatCompletion>",
+    label = "expected an EffectBinding<ChatCompletion> here",
+    note = "`via` selects typed credential-free binding evidence; it is not a runtime port name"
 )]
 pub trait ChatBindingExpression {
-    fn clone_chat_contract(&self) -> ChatBindingContract;
+    fn clone_chat_binding(&self) -> EffectBinding<ChatCompletion>;
 }
 
-impl ChatBindingExpression for ChatBindingContract {
-    fn clone_chat_contract(&self) -> ChatBindingContract {
+impl ChatBindingExpression for EffectBinding<ChatCompletion> {
+    fn clone_chat_binding(&self) -> EffectBinding<ChatCompletion> {
         self.clone()
     }
 }
 
 #[doc(hidden)]
-pub fn clone_chat_contract<Binding>(binding: &Binding) -> ChatBindingContract
+pub fn clone_chat_binding<Binding>(binding: &Binding) -> EffectBinding<ChatCompletion>
 where
     Binding: ChatBindingExpression + ?Sized,
 {
-    binding.clone_chat_contract()
+    binding.clone_chat_binding()
 }
 
 /// Inference-specific type-checking seam whose marker preserves the lexical
 /// binding name in the compiler diagnostic.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "inference!: binding `{BindingName}` is not a ChatBindingContract",
-    label = "expected a ChatBindingContract here",
-    note = "`via` selects the credential-free chat contract value; it is not a runtime port name"
+    message = "inference!: binding `{BindingName}` is not an EffectBinding<ChatCompletion>",
+    label = "expected an EffectBinding<ChatCompletion> here",
+    note = "`via` selects typed credential-free binding evidence; it is not a runtime port name"
 )]
 pub trait InferenceChatBindingExpression<BindingName> {
-    fn clone_inference_chat_contract(&self) -> ChatBindingContract;
+    fn clone_inference_chat_binding(&self) -> EffectBinding<ChatCompletion>;
 }
 
-impl<BindingName> InferenceChatBindingExpression<BindingName> for ChatBindingContract {
-    fn clone_inference_chat_contract(&self) -> ChatBindingContract {
+impl<BindingName> InferenceChatBindingExpression<BindingName> for EffectBinding<ChatCompletion> {
+    fn clone_inference_chat_binding(&self) -> EffectBinding<ChatCompletion> {
         self.clone()
     }
 }
 
 #[doc(hidden)]
-pub fn clone_inference_chat_contract<Binding, BindingName>(binding: &Binding) -> ChatBindingContract
+pub fn clone_inference_chat_binding<Binding, BindingName>(
+    binding: &Binding,
+) -> EffectBinding<ChatCompletion>
 where
     Binding: InferenceChatBindingExpression<BindingName> + ?Sized,
 {
-    binding.clone_inference_chat_contract()
+    binding.clone_inference_chat_binding()
 }
 
 pub(crate) fn require_generated_chat_resilience<'a>(
@@ -89,7 +106,7 @@ pub(crate) fn require_generated_chat_resilience<'a>(
 
     Err(format!(
         "{surface}: generated {owner_kind} '{owner}' requires exactly one EffectResilience \
-         policy on 'ChatCompletion'; attach `with ai_resilience()` to the effect row \
+         policy on 'ChatCompletion'; attach `with ai_resilience()` to its `uses` entry \
          (found {resilience_count} EffectResilience policies across {} attachments)",
         declarations.len()
     ))
@@ -102,7 +119,7 @@ pub(crate) fn require_generated_chat_resilience<'a>(
 /// request identity and live-call authority cannot drift by workload shape.
 pub(crate) async fn invoke_generated_chat<Output, AllowedEffects, EffectAt, OutcomeProof>(
     fx: &mut Effects<Output, AllowedEffects>,
-    binding: &ChatBindingContract,
+    binding: &EffectBinding<ChatCompletion>,
     request: &ChatRequestSpec,
     label: &'static str,
 ) -> Result<ChatCompletionReply, GeneratedChatInvocationError>
@@ -112,14 +129,9 @@ where
     ChatCompletion: AllowedEffectsAllowEffect<AllowedEffects, EffectAt>
         + EffectOutcomeFitsOutput<Output, OutcomeProof>,
 {
-    let bound_request = request.bind_target(binding.target());
-    let effect = ChatCompletion::new(
-        label,
-        bound_request,
-        binding.target().clone(),
-        binding.estimator().clone(),
-    )
-    .map_err(GeneratedChatInvocationError::Build)?;
+    let bound_request = request.bind_target(binding.evidence().target());
+    let effect = ChatCompletion::new(label, bound_request, binding.invocation())
+        .map_err(GeneratedChatInvocationError::Build)?;
     fx.perform(effect)
         .await
         .map_err(GeneratedChatInvocationError::Effect)

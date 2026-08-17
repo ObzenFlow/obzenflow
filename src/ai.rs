@@ -11,17 +11,20 @@
 //! this order:
 //!
 //! ```ignore
-//! let (chat, chat_registration) =
-//!     ChatEffectBinding::from_config(&runtime_config.ai_models())?.into_parts();
+//! let mut effect_ports = EffectPortRegistry::new();
+//! let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?
+//!     .install_into(&mut effect_ports)?;
 //! let chat_handler = ChatTransformBuilder::from_binding(chat)
 //!     .logic_version("ticket-summary-v1")
 //!     .system("Summarise the ticket concisely.")
 //!     .build_typed::<TicketRaised, TicketSummarised>(prompt, map_response)?;
-//! let effect_ports = chat_registration.install_into(EffectPortRegistry::new())?;
 //!
 //! let stage = effectful_transform!(
-//!     TicketRaised -> TicketSummarised => chat_handler,
-//!     effects: [at_least_once(ChatCompletion) with ai_resilience()],
+//!     TicketRaised -> TicketSummarised
+//!     uses at_least_once(ChatCompletion)
+//!         via chat
+//!         with ai_resilience()
+//!     => chat_handler,
 //!     observers: [],
 //! );
 //! ```
@@ -37,18 +40,17 @@ pub use obzenflow_adapters::ai::{
 
 pub use obzenflow_core::ai::{
     plan_chat_input_budget, plan_chunks_by_budget, remaining_budget, split_to_budget,
-    ChatBindingContract, ChatBindingFingerprint, ChatBudgetError, ChatBudgetMessage,
-    ChatBudgetPlan, ChatBudgetSpec, ChatBudgetTemplate, ChatCompletionReply, ChatMessage,
-    ChatModelProfile, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse, ChatResponseFormat,
-    ChatRole, ChatTarget, ChunkEnvelope, ChunkExclusionReason, ChunkInfo, ChunkPlan,
-    ChunkPlanningConfig, ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary,
-    ChunkRenderContext, ContextWindowSource, EmbeddingBindingContract, EmbeddingBindingFingerprint,
-    EmbeddingDimensions, EmbeddingGenerationReply, EmbeddingParams, EmbeddingRequest,
-    EmbeddingRequestSpec, EmbeddingResponse, EmbeddingTarget, EstimateSource,
-    HeuristicTokenEstimator, OversizeExhaustion, OversizePolicy, ResolvedTokenEstimator,
-    SplitGroup, SystemPrompt, TokenCount, TokenEstimate, TokenEstimationError, TokenEstimator,
-    TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo, ToolCall, ToolDefinition, Usage,
-    UsageSource, UserPrompt,
+    ChatBindingFingerprint, ChatBudgetError, ChatBudgetMessage, ChatBudgetPlan, ChatBudgetSpec,
+    ChatBudgetTemplate, ChatCompletionReply, ChatMessage, ChatModelProfile, ChatParams,
+    ChatRequest, ChatRequestSpec, ChatResponse, ChatResponseFormat, ChatRole, ChatTarget,
+    ChunkEnvelope, ChunkExclusionReason, ChunkInfo, ChunkPlan, ChunkPlanningConfig,
+    ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary, ChunkRenderContext,
+    ContextWindowSource, EmbeddingBindingFingerprint, EmbeddingDimensions,
+    EmbeddingGenerationReply, EmbeddingParams, EmbeddingRequest, EmbeddingRequestSpec,
+    EmbeddingResponse, EmbeddingTarget, EstimateSource, HeuristicTokenEstimator,
+    OversizeExhaustion, OversizePolicy, ResolvedTokenEstimator, SplitGroup, SystemPrompt,
+    TokenCount, TokenEstimate, TokenEstimationError, TokenEstimator, TokenEstimatorFallbackReason,
+    TokenEstimatorResolutionInfo, ToolCall, ToolDefinition, Usage, UsageSource, UserPrompt,
 };
 
 pub use obzenflow_infra::ai::{
@@ -61,6 +63,6 @@ pub use obzenflow_infra::ai::TiktokenEstimator;
 
 #[cfg(feature = "ai")]
 pub use obzenflow_infra::ai::{
-    ChatEffectBinding, ChatEffectBindingError, ChatEffectRegistration, EmbeddingEffectBinding,
-    EmbeddingEffectBindingError, EmbeddingEffectRegistration, ModelConfig,
+    ChatEffectBinding, ChatEffectBindingError, EmbeddingEffectBinding, EmbeddingEffectBindingError,
+    ModelConfig,
 };

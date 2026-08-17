@@ -5,11 +5,10 @@
 use crate::ai::{effect_error_to_handler_error, ChatCompletion};
 use async_trait::async_trait;
 use obzenflow_core::ai::{
-    ChatBindingContract, ChatMessage, ChatParams, ChatRequestSpec, ChatResponse,
-    ChatResponseFormat, ToolDefinition,
+    ChatMessage, ChatParams, ChatRequestSpec, ChatResponse, ChatResponseFormat, ToolDefinition,
 };
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{Effects, StageCompletion};
+use obzenflow_runtime::effects::{EffectBinding, Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use std::fmt;
@@ -31,7 +30,7 @@ pub(crate) struct ChatTransformSettings {
 
 /// Typed standalone chat handler whose only live authority is `fx.perform`.
 pub struct ChatTransform<In, Out> {
-    binding: ChatBindingContract,
+    binding: EffectBinding<ChatCompletion>,
     system: Option<String>,
     params: ChatParams,
     tools: Vec<ToolDefinition>,
@@ -44,7 +43,7 @@ pub struct ChatTransform<In, Out> {
 
 impl<In, Out> ChatTransform<In, Out> {
     pub(crate) fn from_parts(
-        binding: ChatBindingContract,
+        binding: EffectBinding<ChatCompletion>,
         settings: ChatTransformSettings,
         input_to_prompt: Arc<PromptMapper<In>>,
         response_to_output: Arc<ResponseMapper<In, Out>>,
@@ -118,12 +117,11 @@ where
             tools: self.tools.clone(),
             response_format: self.response_format.clone(),
         };
-        let request = spec.bind_target(self.binding.target());
+        let request = spec.bind_target(self.binding.evidence().target());
         let effect = ChatCompletion::new(
             STANDALONE_CHAT_COMPLETION_LABEL,
             request,
-            self.binding.target().clone(),
-            self.binding.estimator().clone(),
+            self.binding.invocation(),
         )
         .map_err(|error| HandlerError::Validation(error.to_string()))?;
         let reply = fx

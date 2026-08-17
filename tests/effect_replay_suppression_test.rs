@@ -17,17 +17,20 @@ use obzenflow_core::{
     event::{ChainEventContent, StageLifecycleEvent, SystemEvent, SystemEventType},
     id::{StageId, SystemId},
     journal::{journal_owner::JournalOwner, Journal},
-    StageOutputs, TypedPayload,
+    BoundedBindingEvidence, StageOutputs, TypedPayload,
 };
 use obzenflow_dsl::{
     effectful_stateful, effectful_transform, flow, sink, source, transform, FlowDefinition,
 };
-use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::application::{ApplicationError, FlowApplication};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    is_framework_effect_event_type, Effect, EffectCommitHandle, EffectContext, EffectCursor,
-    EffectError, EffectPortRegistry, EffectPortRequirement, EffectRecord, EffectSafety, Effects,
-    IdempotencyKey, SinkRedeliverySafety, TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
+    is_framework_effect_event_type, transactional_effect_port_slot, Effect, EffectBinding,
+    EffectBindingEvidence, EffectBindingUse, EffectCommitHandle, EffectContext, EffectCursor,
+    EffectError, EffectPortRegistry, EffectPortResolver, EffectPortSlot, EffectPortSlotSet,
+    EffectRecord, EffectRegistration, EffectRegistrationBuilder, EffectSafety, Effects,
+    IdempotencyKey, LogicalEffectBindingName, Named, NamedEffect, SinkRedeliverySafety,
+    TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -83,11 +86,22 @@ impl TypedPayload for ReplayEffectValue {
 #[derive(Clone, Debug)]
 struct ReplaySource {
     next_value: u64,
+    calls: Option<Arc<AtomicUsize>>,
 }
 
 impl ReplaySource {
     fn new() -> Self {
-        Self { next_value: 1 }
+        Self {
+            next_value: 1,
+            calls: None,
+        }
+    }
+
+    fn counted(calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            next_value: 1,
+            calls: Some(calls),
+        }
     }
 }
 
@@ -95,6 +109,9 @@ impl TypedFiniteSourceHandler for ReplaySource {
     type Output = ReplayInput;
 
     fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        if let Some(calls) = &self.calls {
+            calls.fetch_add(1, Ordering::SeqCst);
+        }
         if self.next_value > 3 {
             return Ok(None);
         }
@@ -165,6 +182,7 @@ impl Effect for CountingEffect {
     const EFFECT_TYPE: &'static str = "effect_replay.counting";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = ReplayEffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -224,6 +242,7 @@ impl Effect for BlockingEffect {
     const EFFECT_TYPE: &'static str = "effect_replay.blocking";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = ReplayEffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -410,6 +429,7 @@ impl Effect for AlwaysFailingEffect {
     const EFFECT_TYPE: &'static str = "effect_replay.always_failing";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = ReplayEffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -761,6 +781,7 @@ impl Effect for ProductEffect {
     const EFFECT_TYPE: &'static str = "effect_replay.product";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = ProductOutcome;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -902,8 +923,7 @@ fn build_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [CountingEffect],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -936,8 +956,7 @@ fn build_source_limiter_flow(
                     RateLimiterBuilder::new(1.0).build()
                 ]);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [CountingEffect],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -973,8 +992,7 @@ fn build_fast_limiter_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [CountingEffect with RateLimiterBuilder::new(1000.0).build()],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with RateLimiterBuilder::new(1000.0).build() => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1022,8 +1040,7 @@ fn build_blocking_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [BlockingEffect with resilience],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses BlockingEffect with resilience => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1068,8 +1085,7 @@ fn build_post_perform_blocking_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [CountingEffect with resilience],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with resilience => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1110,8 +1126,7 @@ fn build_fan_out_flow(
                 inputs = source!(ReplayInput => inputs_handler);
                 fan_out = transform!(ReplayInput -> ReplayInput => fan_out_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [CountingEffect with resilience],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect with resilience => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1143,8 +1158,7 @@ fn build_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [CountingEffect],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1184,8 +1198,7 @@ fn build_dishonest_one_fact_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [CountingEffect],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1222,8 +1235,7 @@ fn build_error_after_commit_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [CountingEffect],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1262,8 +1274,7 @@ fn build_apply_rejection_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [CountingEffect],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -1295,8 +1306,7 @@ fn build_product_stateful_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_stateful!(
-                    ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } => effectful_handler,
-                    effects: [ProductEffect],
+                    ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } uses ProductEffect => effectful_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -3352,7 +3362,7 @@ async fn resume_incomplete_archive_suppresses_committed_effect_records() {
 // but left the authoring-surface supply path unexercised end to end. These tests
 // drive a populated `EffectPortRegistry` through the `flow!` `effect_ports:`
 // clause into the ordinary flow builder -> `with_effect_ports`, covering
-// materialisation-time `required_ports` validation and live `EffectContext::port`
+// materialisation-time exact-slot validation and live typed `EffectContext::port(slot)`
 // access for both an ordinary ported effect and a transactional
 // execute-and-record port.
 // ============================================================================
@@ -3361,6 +3371,19 @@ async fn resume_incomplete_archive_suppresses_committed_effect_records() {
 /// `EffectContext::port` during live execution.
 trait GreetingPort: Send + Sync {
     fn greet(&self, value: u64) -> u64;
+}
+
+const GREETING_PORT: EffectPortSlot<dyn GreetingPort> = EffectPortSlot::new("primary");
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PortedBindingEvidence;
+
+impl EffectBindingEvidence for PortedBindingEvidence {
+    const SCHEMA_VERSION: u32 = 1;
+
+    fn canonical_bytes(&self) -> BoundedBindingEvidence {
+        BoundedBindingEvidence::try_new(b"ported-greeting".to_vec()).unwrap()
+    }
 }
 
 struct DoublingGreetingPort;
@@ -3376,6 +3399,7 @@ impl GreetingPort for DoublingGreetingPort {
 struct PortedEffect {
     value: u64,
     calls: Arc<AtomicUsize>,
+    binding: EffectBindingUse<Self>,
 }
 
 #[async_trait]
@@ -3383,6 +3407,7 @@ impl Effect for PortedEffect {
     const EFFECT_TYPE: &'static str = "effect_port_supply.ported";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = Named<PortedBindingEvidence>;
 
     type Outcome = ReplayEffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -3397,20 +3422,29 @@ impl Effect for PortedEffect {
 
     async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let port = ctx.port::<dyn GreetingPort>("primary")?;
+        let port = ctx.port(GREETING_PORT)?;
         Ok(ReplayEffectValue {
             effect_value: port.greet(self.value),
         })
     }
+}
 
-    fn required_ports() -> Vec<EffectPortRequirement> {
-        vec![EffectPortRequirement::of::<dyn GreetingPort>("primary")]
+impl NamedEffect for PortedEffect {
+    type BindingEvidence = PortedBindingEvidence;
+
+    fn binding_use(&self) -> &EffectBindingUse<Self> {
+        &self.binding
+    }
+
+    fn required_slots() -> EffectPortSlotSet {
+        EffectPortSlotSet::single(GREETING_PORT)
     }
 }
 
 #[derive(Clone, Debug)]
 struct PortedTransform {
     calls: Arc<AtomicUsize>,
+    binding: EffectBindingUse<PortedEffect>,
 }
 
 #[async_trait]
@@ -3428,6 +3462,7 @@ impl EffectfulTransformHandler for PortedTransform {
             .perform(PortedEffect {
                 value: input.value,
                 calls: self.calls.clone(),
+                binding: self.binding.clone(),
             })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
@@ -3448,13 +3483,18 @@ impl EffectfulTransformHandler for PortedTransform {
 
 fn build_ported_flow(
     journal_base: PathBuf,
+    source_calls: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
-    ports: EffectPortRegistry,
+    authority: (EffectBinding<PortedEffect>, EffectPortRegistry),
 ) -> FlowDefinition {
+    let (ported_binding, ports) = authority;
     FlowDefinition::materialize(move |_runtime_config| {
-        let inputs_handler = ReplaySource::new();
-        let ported_handler = PortedTransform { calls };
+        let inputs_handler = ReplaySource::counted(source_calls);
+        let ported_handler = PortedTransform {
+            calls,
+            binding: ported_binding.invocation(),
+        };
         let collector_handler = CollectSink { outputs };
 
         Ok(flow! {
@@ -3465,8 +3505,7 @@ fn build_ported_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 ported = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => ported_handler,
-                    effects: [PortedEffect],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses PortedEffect via ported_binding => ported_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -3480,32 +3519,71 @@ fn build_ported_flow(
     })
 }
 
+fn ported_binding(
+    port: Arc<dyn GreetingPort>,
+) -> (
+    EffectBinding<PortedEffect>,
+    EffectRegistration<PortedEffect>,
+) {
+    EffectRegistrationBuilder::<PortedEffect>::new(
+        LogicalEffectBindingName::new("greeting").unwrap(),
+        PortedBindingEvidence,
+    )
+    .bind_eager(GREETING_PORT, port)
+    .unwrap()
+    .finish()
+    .unwrap()
+}
+
+fn deferred_ported_binding(
+    resolver_calls: Arc<AtomicUsize>,
+) -> (
+    EffectBinding<PortedEffect>,
+    EffectRegistration<PortedEffect>,
+) {
+    let resolver: EffectPortResolver<dyn GreetingPort> = Arc::new(move || {
+        resolver_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(DoublingGreetingPort) as Arc<dyn GreetingPort>)
+    });
+    EffectRegistrationBuilder::<PortedEffect>::new(
+        LogicalEffectBindingName::new("greeting").unwrap(),
+        PortedBindingEvidence,
+    )
+    .bind_deferred(GREETING_PORT, resolver)
+    .unwrap()
+    .finish()
+    .unwrap()
+}
+
 #[tokio::test]
-async fn flow_supplied_registry_satisfies_required_effect_port() {
+async fn application_local_builder_runs_live_and_strict_replays_with_an_empty_registry() {
     let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
     let calls = Arc::new(AtomicUsize::new(0));
+    let source_calls = Arc::new(AtomicUsize::new(0));
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
+    let (binding, registration) = ported_binding(Arc::new(DoublingGreetingPort));
     let mut ports = EffectPortRegistry::new();
-    ports
-        .insert::<dyn GreetingPort>("primary", Arc::new(DoublingGreetingPort))
-        .expect("greeting port registration is unique");
+    ports.install(registration).unwrap();
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(build_ported_flow(
-            journal_base,
+            journal_base.clone(),
+            source_calls.clone(),
             calls.clone(),
             outputs.clone(),
-            ports,
+            (binding, ports),
         ))
         .await
         .expect("a flow that supplies the required effect port should materialise and run");
 
     assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let live_source_calls = source_calls.load(Ordering::SeqCst);
+    assert!(live_source_calls > 0, "the live source must be polled");
     let domain = outputs.lock().expect("outputs lock poisoned").clone();
     assert_eq!(
         domain,
@@ -3524,6 +3602,46 @@ async fn flow_supplied_registry_satisfies_required_effect_port() {
             },
         ]
     );
+
+    let archive = latest_run_dir(&journal_base);
+    let replay_outputs = Arc::new(Mutex::new(Vec::new()));
+    let (replay_binding, unused_registration) = ported_binding(Arc::new(DoublingGreetingPort));
+    drop(unused_registration);
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            archive.as_os_str().to_os_string(),
+            OsString::from("--verify"),
+        ])
+        .run_async(build_ported_flow(
+            journal_base,
+            source_calls.clone(),
+            calls.clone(),
+            replay_outputs.clone(),
+            (replay_binding, EffectPortRegistry::new()),
+        ))
+        .await
+        .expect("strict replay must accept an empty executable registry");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "strict replay must not execute the application-local effect"
+    );
+    assert_eq!(
+        source_calls.load(Ordering::SeqCst),
+        live_source_calls,
+        "strict replay must not poll the live source"
+    );
+    assert_eq!(
+        replay_outputs
+            .lock()
+            .expect("outputs lock poisoned")
+            .clone(),
+        domain,
+        "strict replay must reproduce the live application-local outputs"
+    );
 }
 
 #[tokio::test]
@@ -3533,30 +3651,56 @@ async fn flow_without_required_effect_port_fails_closed_at_materialisation() {
     let journal_base = temp.path().join("journals");
 
     let calls = Arc::new(AtomicUsize::new(0));
+    let source_calls = Arc::new(AtomicUsize::new(0));
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
-    // No port is registered, so the descriptor's declared `required_ports`
-    // cannot be satisfied and materialisation must reject the flow.
+    // The binding is valid but its opaque registration is deliberately not
+    // installed. Descriptor materialisation must fail without resolving its
+    // deferred port or allowing the pipeline to reach `Materialized`.
+    let (binding, registration) = deferred_ported_binding(resolver_calls.clone());
+    drop(registration);
     let err = FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(build_ported_flow(
-            journal_base,
+            journal_base.clone(),
+            source_calls.clone(),
             calls.clone(),
             outputs.clone(),
-            EffectPortRegistry::new(),
+            (binding, EffectPortRegistry::new()),
         ))
         .await
-        .expect_err("a flow missing the required effect port must fail closed at materialisation");
+        .expect_err("a flow missing the selected binding registration must fail closed");
 
-    let message = err.to_string();
+    let detail = match err {
+        ApplicationError::FlowBuildFailed(detail) => detail,
+        other => panic!("missing registration failed after materialisation: {other:?}"),
+    };
     assert!(
-        message.contains("requires effect port") && message.contains("primary"),
-        "materialisation error should name the missing port, got: {message}"
+        detail.contains(
+            "Effectful stage 'ported' cannot materialise: binding 'greeting' for effect \
+             'effect_port_supply.ported' has no installed registration"
+        ),
+        "unexpected build failure: {detail}"
+    );
+    assert_eq!(
+        source_calls.load(Ordering::SeqCst),
+        0,
+        "the source must not be polled before registration preflight passes"
     );
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
         "the effect must not execute when its required port is unregistered"
+    );
+    assert_eq!(
+        resolver_calls.load(Ordering::SeqCst),
+        0,
+        "registration preflight must not invoke deferred resolvers"
+    );
+    assert!(
+        outputs.lock().expect("outputs lock poisoned").is_empty(),
+        "no stage work may be emitted before registration preflight passes"
     );
 }
 
@@ -3568,6 +3712,18 @@ async fn flow_without_required_effect_port_fails_closed_at_materialisation() {
 #[derive(Clone, Debug)]
 struct LedgerEffect {
     value: u64,
+    binding: EffectBindingUse<Self>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LedgerBindingEvidence;
+
+impl EffectBindingEvidence for LedgerBindingEvidence {
+    const SCHEMA_VERSION: u32 = 1;
+
+    fn canonical_bytes(&self) -> BoundedBindingEvidence {
+        BoundedBindingEvidence::try_new(b"ledger-transaction".to_vec()).unwrap()
+    }
 }
 
 #[async_trait]
@@ -3575,6 +3731,7 @@ impl Effect for LedgerEffect {
     const EFFECT_TYPE: &'static str = "effect_port_supply.ledger";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Transactional;
+    type BindingMode = Named<LedgerBindingEvidence>;
 
     type Outcome = ReplayEffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -3593,6 +3750,18 @@ impl Effect for LedgerEffect {
         Ok(ReplayEffectValue {
             effect_value: self.value,
         })
+    }
+}
+
+impl NamedEffect for LedgerEffect {
+    type BindingEvidence = LedgerBindingEvidence;
+
+    fn binding_use(&self) -> &EffectBindingUse<Self> {
+        &self.binding
+    }
+
+    fn required_slots() -> EffectPortSlotSet {
+        EffectPortSlotSet::single(transactional_effect_port_slot::<Self>())
     }
 }
 
@@ -3618,7 +3787,9 @@ impl TransactionalEffectPort<LedgerEffect> for LedgerPort {
 }
 
 #[derive(Clone, Debug)]
-struct LedgerTransform;
+struct LedgerTransform {
+    binding: EffectBindingUse<LedgerEffect>,
+}
 
 #[async_trait]
 impl EffectfulTransformHandler for LedgerTransform {
@@ -3632,7 +3803,10 @@ impl EffectfulTransformHandler for LedgerTransform {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let committed = fx
-            .perform(LedgerEffect { value: input.value })
+            .perform(LedgerEffect {
+                value: input.value,
+                binding: self.binding.clone(),
+            })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 
@@ -3653,8 +3827,9 @@ impl EffectfulTransformHandler for LedgerTransform {
 fn build_transactional_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
-    ports: EffectPortRegistry,
+    authority: (EffectBinding<LedgerEffect>, EffectPortRegistry),
 ) -> FlowDefinition {
+    let (ledger_binding, ports) = authority;
     FlowDefinition::materialize(move |_runtime_config| {
         let resilience = EffectResilience::with_breaker(
             CircuitBreaker::builder()
@@ -3665,7 +3840,9 @@ fn build_transactional_flow(
         .build()
         .expect("transactional resilience configuration");
         let inputs_handler = SingleReplaySource::new();
-        let ledger_handler = LedgerTransform;
+        let ledger_handler = LedgerTransform {
+            binding: ledger_binding.invocation(),
+        };
         let collector_handler = CollectSink { outputs };
 
         Ok(flow! {
@@ -3676,8 +3853,7 @@ fn build_transactional_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 ledger = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => ledger_handler,
-                    effects: [transactional(LedgerEffect, "ledger_tx") with resilience],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses transactional(LedgerEffect) via ledger_binding with resilience => ledger_handler,
                     observers: []
                 );
                 collector = sink!(ReplayOutput => collector_handler);
@@ -3691,6 +3867,22 @@ fn build_transactional_flow(
     })
 }
 
+fn ledger_binding(
+    port: Arc<dyn TransactionalEffectPort<LedgerEffect>>,
+) -> (
+    EffectBinding<LedgerEffect>,
+    EffectRegistration<LedgerEffect>,
+) {
+    EffectRegistrationBuilder::<LedgerEffect>::new(
+        LogicalEffectBindingName::new("ledger_tx").unwrap(),
+        LedgerBindingEvidence,
+    )
+    .bind_eager(transactional_effect_port_slot::<LedgerEffect>(), port)
+    .unwrap()
+    .finish()
+    .unwrap()
+}
+
 #[tokio::test]
 async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
     let _guard = effect_replay_test_guard().await;
@@ -3700,22 +3892,18 @@ async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
     let port_calls = Arc::new(AtomicUsize::new(0));
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
+    let (binding, registration) = ledger_binding(Arc::new(LedgerPort {
+        calls: port_calls.clone(),
+    }));
     let mut ports = EffectPortRegistry::new();
-    ports
-        .insert::<dyn TransactionalEffectPort<LedgerEffect>>(
-            "ledger_tx",
-            Arc::new(LedgerPort {
-                calls: port_calls.clone(),
-            }),
-        )
-        .expect("ledger port registration is unique");
+    ports.install(registration).unwrap();
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(build_transactional_flow(
             journal_base.clone(),
             outputs.clone(),
-            ports,
+            (binding, ports),
         ))
         .await
         .expect("a transactional flow with a supplied executor port should materialise and run");
@@ -3770,15 +3958,10 @@ async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
 
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    let mut replay_ports = EffectPortRegistry::new();
-    replay_ports
-        .insert::<dyn TransactionalEffectPort<LedgerEffect>>(
-            "ledger_tx",
-            Arc::new(LedgerPort {
-                calls: replay_calls.clone(),
-            }),
-        )
-        .expect("replay ledger port registration is unique");
+    let (replay_binding, replay_registration) = ledger_binding(Arc::new(LedgerPort {
+        calls: replay_calls.clone(),
+    }));
+    drop(replay_registration);
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
@@ -3788,7 +3971,7 @@ async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
         .run_async(build_transactional_flow(
             journal_base.clone(),
             replay_outputs.clone(),
-            replay_ports,
+            (replay_binding, EffectPortRegistry::new()),
         ))
         .await
         .expect("transactional replay should use the atomically recorded outcome");
@@ -3977,8 +4160,7 @@ fn build_fail_fast_rejection_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [AlwaysFailingEffect with resilience],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue } uses AlwaysFailingEffect with resilience => effectful_handler,
                     observers: []);
                 collector = sink!(ReplayOutput => collector_handler);
             },
@@ -4016,8 +4198,12 @@ fn build_multi_effect_per_effect_breaker_flow(
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 effectful = effectful_transform!(
-                    ReplayInput -> { ReplayOutput, ReplayEffectValue } => effectful_handler,
-                    effects: [AlwaysFailingEffect with resilience, CountingEffect],
+                    ReplayInput -> { ReplayOutput, ReplayEffectValue }
+                    uses {
+                        AlwaysFailingEffect with resilience,
+                        CountingEffect,
+                    }
+                    => effectful_handler,
                     observers: []);
                 collector = sink!(ReplayOutput => collector_handler);
             },

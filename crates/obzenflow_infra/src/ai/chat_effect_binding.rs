@@ -9,73 +9,80 @@ use super::endpoint_identity::{
 };
 use super::resolve_estimator_for_model;
 use crate::ai::rig::RigChatClient;
-use obzenflow_core::ai::{
-    AiProvider, ChatBindingContract, ChatBindingContractError, ChatClient, ChatTarget,
-    CHAT_CLIENT_PORT,
+use obzenflow_adapters::ai::{
+    ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, CHAT_CLIENT,
 };
+use obzenflow_core::ai::{AiProvider, ChatClient, ChatTarget};
 use obzenflow_core::config::SecretRef;
 use obzenflow_core::http_client::Url;
 use obzenflow_runtime::effects::{
-    EffectPortRegistrationError, EffectPortRegistry, EffectPortResolutionError,
-    EffectPortResolveFuture, EffectPortResolver,
+    EffectBinding, EffectBindingBuildError, EffectPortRegistrationError, EffectPortRegistry,
+    EffectPortResolutionError, EffectPortResolver, EffectPortResolverWithMetadata,
+    EffectRegistration, EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort,
 };
 use obzenflow_runtime::runtime_config::AiModelsConfig;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum ChatEffectBindingError {
     #[error(
-        "unsupported ai.models.provider='{provider}' (expected 'ollama', 'openai', or 'openai_compatible')"
+        "unsupported ai.models.provider (expected 'ollama', 'openai', or 'openai_compatible')"
     )]
-    UnsupportedProvider { provider: String },
+    UnsupportedProvider,
     #[error("ai.models.model is required for the single-target ChatEffectBinding")]
     MissingModel,
     #[error("ai.models.base_url is required when ai.models.provider=openai_compatible")]
     MissingBaseUrl,
-    #[error("invalid ai.models.base_url: {message}")]
-    InvalidBaseUrl { message: String },
+    #[error("invalid ai.models.base_url")]
+    InvalidBaseUrl,
     #[error("AI effect binding endpoints must not contain URL credentials")]
     CredentialedBaseUrl,
     #[error(transparent)]
-    InvalidContract(#[from] ChatBindingContractError),
+    InvalidEvidence(#[from] ChatBindingEvidenceBuildError),
+    #[error(transparent)]
+    InvalidRegistration(#[from] EffectBindingBuildError),
+    #[error(transparent)]
+    Installation(#[from] EffectPortRegistrationError),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum DeferredProvider {
     Ollama { base_url: Option<Url> },
     OpenAi { api_key: SecretRef },
     OpenAiCompatible { api_key: SecretRef, base_url: Url },
 }
 
+impl std::fmt::Debug for DeferredProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DeferredProvider(<not disclosed>)")
+    }
+}
+
+#[derive(Clone)]
+enum DeferredChatAuthority {
+    Provider(DeferredProvider),
+    Resolver(EffectPortResolver<dyn ChatClient>),
+}
+
+impl std::fmt::Debug for DeferredChatAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DeferredChatAuthority(<not disclosed>)")
+    }
+}
+
 /// One immutable configuration decision waiting to be split into
 /// credential-free contract evidence and opaque live registration authority.
 pub struct ChatEffectBinding {
-    contract: ChatBindingContract,
-    provider: DeferredProvider,
+    evidence: ChatBindingEvidence,
+    authority: DeferredChatAuthority,
 }
 
 impl std::fmt::Debug for ChatEffectBinding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ChatEffectBinding")
-            .field("contract", &self.contract)
+            .field("evidence", &"<not disclosed>")
             .field("registration", &"<opaque>")
-            .finish()
-    }
-}
-
-/// Opaque, consuming authority to install the single live chat resolver.
-pub struct ChatEffectRegistration {
-    target: ChatTarget,
-    provider: DeferredProvider,
-}
-
-impl std::fmt::Debug for ChatEffectRegistration {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ChatEffectRegistration")
-            .field("authority", &"<opaque>")
             .finish()
     }
 }
@@ -162,24 +169,64 @@ impl ChatEffectBinding {
                     endpoint,
                 )
             }
-            _ => {
-                return Err(ChatEffectBindingError::UnsupportedProvider {
-                    provider: provider.clone(),
-                })
-            }
+            _ => return Err(ChatEffectBindingError::UnsupportedProvider),
         };
         Self::new_bound(provider, model, endpoint, deferred)
     }
 
-    pub fn into_parts(self) -> (ChatBindingContract, ChatEffectRegistration) {
-        let target = self.contract.target().clone();
+    /// Build an application-selected deferred chat binding.
+    ///
+    /// The facade derives the declaration evidence and snapshots the resolved
+    /// client's observed target. Callers do not construct registration slots or
+    /// metadata projections.
+    pub fn from_resolver(
+        target: ChatTarget,
+        resolver: EffectPortResolver<dyn ChatClient>,
+    ) -> Result<Self, ChatEffectBindingError> {
+        let estimator = resolve_estimator_for_model(&target.model);
+        Ok(Self {
+            evidence: ChatBindingEvidence::new(target, estimator)?,
+            authority: DeferredChatAuthority::Resolver(resolver),
+        })
+    }
+
+    /// Install this facade-owned registration and return its lexical binding.
+    pub fn install_into(
+        self,
+        effect_ports: &mut EffectPortRegistry,
+    ) -> Result<EffectBinding<ChatCompletion>, ChatEffectBindingError> {
+        let (binding, registration) = self.into_parts()?;
+        effect_ports.install(registration)?;
+        Ok(binding)
+    }
+
+    fn into_parts(
+        self,
+    ) -> Result<
         (
-            self.contract,
-            ChatEffectRegistration {
-                target,
-                provider: self.provider,
-            },
+            EffectBinding<ChatCompletion>,
+            EffectRegistration<ChatCompletion>,
+        ),
+        ChatEffectBindingError,
+    > {
+        let target = self.evidence.target().clone();
+        let authority = Arc::new(self.authority);
+        let resolver: EffectPortResolverWithMetadata<dyn ChatClient, ChatTarget> =
+            Arc::new(move || {
+                let client = resolve_client(&target, &authority)?;
+                // Snapshot the resolved client's observed target. Reusing the
+                // requested target here would make pre-boundary validation tautological.
+                let metadata = Arc::new(client.target().clone());
+                Ok(ResolvedEffectPort::new(client, metadata))
+            });
+        EffectRegistrationBuilder::<ChatCompletion>::new(
+            LogicalEffectBindingName::new("chat")
+                .expect("framework chat binding name is a valid public identifier"),
+            self.evidence,
         )
+        .bind_deferred_with_metadata(CHAT_CLIENT, resolver)?
+        .finish()
+        .map_err(Into::into)
     }
 
     fn new_bound(
@@ -191,71 +238,47 @@ impl ChatEffectBinding {
         let target = bound_chat_target(provider, model.clone(), &endpoint);
         let estimator = resolve_estimator_for_model(&model);
         Ok(Self {
-            contract: ChatBindingContract::from_resolved(target, estimator)?,
-            provider: deferred,
+            evidence: ChatBindingEvidence::new(target, estimator)?,
+            authority: DeferredChatAuthority::Provider(deferred),
         })
     }
 }
 
-impl ChatEffectRegistration {
-    pub fn install_into(
-        self,
-        registry: EffectPortRegistry,
-    ) -> Result<EffectPortRegistry, EffectPortRegistrationError> {
-        registry.with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, self.into_resolver())
-    }
-
-    fn into_resolver(self) -> EffectPortResolver<dyn ChatClient> {
-        let binding = Arc::new(self);
-        Arc::new(move || {
-            let binding = Arc::clone(&binding);
-            Box::pin(async move { binding.resolve_client() })
-                as EffectPortResolveFuture<dyn ChatClient>
-        })
-    }
-
-    fn resolve_client(&self) -> Result<Arc<dyn ChatClient>, EffectPortResolutionError> {
-        let result =
-            catch_unwind(AssertUnwindSafe(|| match &self.provider {
-                DeferredProvider::Ollama { base_url } => {
-                    RigChatClient::ollama(self.target.model.clone(), base_url.clone())
-                }
-                DeferredProvider::OpenAi { api_key } => {
-                    let secret = api_key.resolve().map_err(|error| {
-                        obzenflow_core::ai::AiClientError::Auth {
-                            message: error.to_string(),
-                        }
-                    })?;
-                    RigChatClient::openai(self.target.model.clone(), secret.expose())
-                }
-                DeferredProvider::OpenAiCompatible { api_key, base_url } => {
-                    let secret = api_key.resolve().map_err(|error| {
-                        obzenflow_core::ai::AiClientError::Auth {
-                            message: error.to_string(),
-                        }
-                    })?;
-                    RigChatClient::openai_compatible(
-                        self.target.model.clone(),
-                        secret.expose(),
-                        base_url.clone(),
-                    )
-                }
-            }));
-
-        match result {
-            Ok(Ok(client)) => Ok(Arc::new(client)),
-            Ok(Err(error)) => Err(EffectPortResolutionError::failed(error.to_string())),
-            Err(_) => Err(EffectPortResolutionError::failed(
-                "Rig chat client construction panicked",
-            )),
+fn resolve_client(
+    target: &ChatTarget,
+    authority: &DeferredChatAuthority,
+) -> Result<Arc<dyn ChatClient>, EffectPortResolutionError> {
+    let provider = match authority {
+        DeferredChatAuthority::Provider(provider) => provider,
+        DeferredChatAuthority::Resolver(resolver) => return resolver(),
+    };
+    let client = match provider {
+        DeferredProvider::Ollama { base_url } => {
+            RigChatClient::ollama(target.model.clone(), base_url.clone())
+        }
+        DeferredProvider::OpenAi { api_key } => {
+            let secret = api_key
+                .resolve()
+                .map_err(|_| EffectPortResolutionError::CredentialUnavailable)?;
+            RigChatClient::openai(target.model.clone(), secret.expose())
+        }
+        DeferredProvider::OpenAiCompatible { api_key, base_url } => {
+            let secret = api_key
+                .resolve()
+                .map_err(|_| EffectPortResolutionError::CredentialUnavailable)?;
+            RigChatClient::openai_compatible(
+                target.model.clone(),
+                secret.expose(),
+                base_url.clone(),
+            )
         }
     }
+    .map_err(|_| EffectPortResolutionError::ClientConstructionFailed)?;
+    Ok(Arc::new(client))
 }
 
 fn parse_url(raw: &str) -> Result<Url, ChatEffectBindingError> {
-    Url::parse(raw).map_err(|error| ChatEffectBindingError::InvalidBaseUrl {
-        message: error.to_string(),
-    })
+    Url::parse(raw).map_err(|_| ChatEffectBindingError::InvalidBaseUrl)
 }
 
 fn required_model(model: String) -> Result<String, ChatEffectBindingError> {
@@ -281,6 +304,7 @@ mod tests {
     use obzenflow_core::config::{
         ConfigScope, ConfigSource, ConfigSubject, ConfigValueMeta, SecretRef,
     };
+    use obzenflow_runtime::effects::EffectPortRegistry;
     use obzenflow_runtime::runtime_config::Resolved;
 
     fn resolved<T>(key_path: &str, value: T) -> Resolved<T> {
@@ -307,6 +331,13 @@ mod tests {
         }
     }
 
+    fn install(binding: ChatEffectBinding) -> EffectBinding<ChatCompletion> {
+        let mut effect_ports = EffectPortRegistry::new();
+        binding
+            .install_into(&mut effect_ports)
+            .expect("facade installation succeeds")
+    }
+
     #[test]
     fn generated_chat_binding_requires_an_explicit_model() {
         let error = ChatEffectBinding::from_config(&config("ollama", None, None))
@@ -326,13 +357,17 @@ mod tests {
             Some("http://127.0.0.1:12345/v1"),
         ))
         .expect("local non-secret binding construction succeeds");
-        let (contract, _registration) = binding.into_parts();
+        let contract = install(binding);
 
         assert!(contract
+            .evidence()
             .target()
             .logically_matches(&ChatTarget::new("openai_compatible", "fixture-model")));
-        assert!(contract.target().binding_fingerprint.is_some());
-        assert_eq!(contract.estimator().info().model, contract.target().model);
+        assert!(contract.evidence().target().binding_fingerprint.is_some());
+        assert_eq!(
+            contract.evidence().estimator().info().model,
+            contract.evidence().target().model
+        );
     }
 
     #[test]
@@ -356,48 +391,42 @@ mod tests {
         ))
         .unwrap();
 
-        let (left, _) = left.into_parts();
-        let (equivalent, _) = equivalent.into_parts();
-        let (right, _) = right.into_parts();
-        assert_eq!(left.target(), equivalent.target());
-        assert_ne!(left.target(), right.target());
+        let left = install(left);
+        let equivalent = install(equivalent);
+        let right = install(right);
+        assert_eq!(left.evidence().target(), equivalent.evidence().target());
+        assert_ne!(left.evidence().target(), right.evidence().target());
 
-        let encoded = serde_json::to_string(left.target()).unwrap();
+        let encoded = serde_json::to_string(left.evidence().target()).unwrap();
         assert!(!encoded.contains("127.0.0.1"));
         assert!(!encoded.contains("12345"));
     }
 
     #[test]
     fn clones_share_one_contract_family_but_equal_constructions_do_not() {
-        let (left, _) =
-            ChatEffectBinding::from_config(&config("ollama", Some("fixture-model"), None))
-                .unwrap()
-                .into_parts();
+        let left = install(
+            ChatEffectBinding::from_config(&config("ollama", Some("fixture-model"), None)).unwrap(),
+        );
         let alias = left.clone();
-        let (equal_but_separate, _) =
-            ChatEffectBinding::from_config(&config("ollama", Some("fixture-model"), None))
-                .unwrap()
-                .into_parts();
+        let equal_but_separate = install(
+            ChatEffectBinding::from_config(&config("ollama", Some("fixture-model"), None)).unwrap(),
+        );
 
-        assert!(left.shares_construction_origin(&alias));
-        assert!(!left.shares_construction_origin(&equal_but_separate));
-        assert_eq!(left.target(), equal_but_separate.target());
+        assert!(left.shares_construction_family(&alias));
+        assert!(!left.shares_construction_family(&equal_but_separate));
+        assert_eq!(
+            left.evidence().target(),
+            equal_but_separate.evidence().target()
+        );
     }
 
     #[test]
     fn registration_installs_only_at_the_sealed_chat_coordinate() {
-        let (_, registration) =
-            ChatEffectBinding::from_config(&config("ollama", Some("fixture-model"), None))
-                .unwrap()
-                .into_parts();
-
-        let registry = registration
-            .install_into(EffectPortRegistry::new())
+        let mut registry = EffectPortRegistry::new();
+        ChatEffectBinding::from_config(&config("ollama", Some("fixture-model"), None))
+            .unwrap()
+            .install_into(&mut registry)
             .expect("first sealed registration succeeds");
-        let requirement = obzenflow_runtime::effects::EffectPortRequirement::of::<dyn ChatClient>(
-            CHAT_CLIENT_PORT,
-        );
-        assert!(registry.contains_requirement(&requirement));
     }
 
     #[test]

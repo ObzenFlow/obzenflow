@@ -9,14 +9,16 @@ mod support;
 use support::*;
 
 fn main() {
-    let chat = contract();
+    let chat = binding();
     let role = InferenceRole;
     let policy = obzenflow_adapters::middleware::control::ai_resilience();
     let _ = inference!(
-        Input ->{
-            at_least_once(ChatCompletion) via chat with policy
-            at_least_once(ChatCompletion) via chat with
-                obzenflow_adapters::middleware::control::ai_resilience()
-        } Output => role
+        Input -> Output
+            uses {
+                at_least_once(ChatCompletion) via chat with policy,
+                at_least_once(ChatCompletion) via chat with
+                    obzenflow_adapters::middleware::control::ai_resilience(),
+            }
+            => role
     );
 }

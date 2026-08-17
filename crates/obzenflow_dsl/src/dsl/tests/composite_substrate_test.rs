@@ -11,7 +11,10 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use obzenflow_core::TypedPayload;
-    use obzenflow_runtime::effects::{EffectDeclaration, EffectSafety, IdempotencyKeyPolicy};
+    use obzenflow_runtime::effects::{
+        Effect, EffectContext, EffectDeclaration, EffectError, EffectSafety, Portless,
+        RecordedReply,
+    };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::TransformHandler;
     use obzenflow_topology::EdgeKind;
@@ -56,6 +59,31 @@ mod tests {
     payload!(CompletedP, "test.branch.completed");
     payload!(FailedP, "test.branch.failed");
     payload!(UnrelatedP, "test.branch.unrelated");
+
+    #[derive(Clone, Debug)]
+    struct FixtureEffect;
+
+    #[async_trait::async_trait]
+    impl Effect for FixtureEffect {
+        const EFFECT_TYPE: &'static str = "test.fixture_effect";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Idempotent;
+        type BindingMode = Portless;
+        type Outcome = ();
+        type OutcomeSemantics = RecordedReply;
+
+        fn label(&self) -> &str {
+            "fixture"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+            Ok(())
+        }
+    }
 
     fn typed_transform(
         name: &str,
@@ -105,15 +133,7 @@ mod tests {
         }
 
         fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-            vec![EffectDeclaration {
-                effect_type: "test.fixture_effect",
-                safety: EffectSafety::Transactional,
-                idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
-                required_ports: Vec::new(),
-                transactional_executor: None,
-                outcome_kind: obzenflow_runtime::effects::EffectOutcomeKind::DomainFacts,
-                public_outcome_fact_types: Vec::new(),
-            }]
+            vec![EffectDeclaration::of::<FixtureEffect>()]
         }
 
         async fn create_handle(
@@ -636,6 +656,6 @@ mod tests {
         assert_eq!(artifacts.stage_subgraphs["fx__worker"].role, "worker");
         let declarations = stages["fx__worker"].effect_declarations();
         assert_eq!(declarations.len(), 1);
-        assert_eq!(declarations[0].effect_type, "test.fixture_effect");
+        assert_eq!(declarations[0].effect_type(), "test.fixture_effect");
     }
 }

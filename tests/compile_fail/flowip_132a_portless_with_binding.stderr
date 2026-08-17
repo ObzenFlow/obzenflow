@@ -1,0 +1,29 @@
+error[E0277]: binding `EffectBinding<ZeroSlotNamedEffect>` does not match declared effect `FirstEffect`
+  --> tests/compile_fail/flowip_132a_portless_with_binding.rs:11:13
+   |
+11 |       let _ = obzenflow_dsl::effectful_transform!(
+   |  _____________^
+12 | |         Input -> First uses FirstEffect via binding => support::AllowsFirstEffect,
+13 | |         observers: []
+14 | |     );
+   | |_____^ the binding selected by `via` belongs to a different effect
+   |
+   = note: use the `EffectBinding<FirstEffect>` produced for the effect named before `via`
+help: the trait `EffectBindingFor<FirstEffect>` is not implemented for `EffectBinding<ZeroSlotNamedEffect>`
+      but trait `EffectBindingFor<ZeroSlotNamedEffect>` is implemented for it
+  --> crates/obzenflow_runtime/src/effects/declaration.rs
+   |
+   | / impl<E> EffectBindingFor<E> for EffectBinding<E>
+   | | where
+   | |     E: NamedEffect,
+   | |___________________^
+   = help: for that trait implementation, expected `ZeroSlotNamedEffect`, found `FirstEffect`
+note: required by a bound in `declare_named_effect`
+  --> crates/obzenflow_runtime/src/effects/declaration.rs
+   |
+   | pub fn declare_named_effect<E, B>(binding: &B) -> EffectDeclaration
+   |        -------------------- required by a bound in this function
+...
+   |     B: EffectBindingFor<E> + ?Sized,
+   |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `declare_named_effect`
+   = note: this error originates in the macro `$crate::__obzenflow_effect_entries` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)

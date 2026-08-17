@@ -30,6 +30,7 @@ impl Effect for PingEffect {
     const EFFECT_TYPE: &'static str = "test.ping";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = crate::effects::Portless;
 
     type Outcome = PingOutput;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;

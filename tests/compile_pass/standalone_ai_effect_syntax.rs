@@ -12,6 +12,7 @@ use obzenflow_core::config::SecretRef;
 use obzenflow_core::http_client::Url;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::effectful_transform;
+use obzenflow_runtime::effects::EffectPortRegistry;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,10 +60,12 @@ fn main() {
     )
     .unwrap();
 
-    let (chat, _chat_registration) = ChatEffectBinding::ollama("model", None)
+    let mut effect_ports = EffectPortRegistry::new();
+    let chat = ChatEffectBinding::ollama("model", None)
         .unwrap()
-        .into_parts();
-    let chat_handler = ChatTransformBuilder::from_binding(chat)
+        .install_into(&mut effect_ports)
+        .unwrap();
+    let chat_handler = ChatTransformBuilder::from_binding(chat.clone())
         .logic_version("chat-v1")
         .system("Be concise")
         .temperature(0.2)
@@ -82,16 +85,19 @@ fn main() {
         )
         .unwrap();
     let _chat = effectful_transform!(
-        Input -> ChatOutput => chat_handler,
-        effects: [at_least_once(ChatCompletion) with ai_resilience()],
+        Input -> ChatOutput
+        uses at_least_once(ChatCompletion)
+            via chat
+            with ai_resilience()
+        => chat_handler,
         observers: [],
     );
 
-    let (embedding, _embedding_registration) =
-        EmbeddingEffectBinding::ollama("embedding-model", None)
-            .unwrap()
-            .into_parts();
-    let embedding_handler = EmbeddingTransformBuilder::from_binding(embedding)
+    let embedding = EmbeddingEffectBinding::ollama("embedding-model", None)
+        .unwrap()
+        .install_into(&mut effect_ports)
+        .unwrap();
+    let embedding_handler = EmbeddingTransformBuilder::from_binding(embedding.clone())
         .logic_version("embedding-v1")
         .dimensions(EmbeddingDimensions::try_from(3).unwrap())
         .build_typed::<ChatOutput, EmbeddingOutput>(
@@ -100,8 +106,11 @@ fn main() {
         )
         .unwrap();
     let _embedding = effectful_transform!(
-        ChatOutput -> EmbeddingOutput => embedding_handler,
-        effects: [at_least_once(EmbeddingGeneration) with ai_resilience()],
+        ChatOutput -> EmbeddingOutput
+        uses at_least_once(EmbeddingGeneration)
+            via embedding
+            with ai_resilience()
+        => embedding_handler,
         observers: [],
     );
 }

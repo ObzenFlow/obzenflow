@@ -1,0 +1,11 @@
+error[E0599]: no method named `resolver` found for struct `EffectRegistration<E>` in the current scope
+ --> tests/compile_fail/flowip_132a_opaque_registration.rs:8:26
+  |
+8 |     let _ = registration.resolver();
+  |                          ^^^^^^^^ method not found in `EffectRegistration<E>`
+
+error[E0616]: field `entries` of struct `EffectRegistration` is private
+ --> tests/compile_fail/flowip_132a_opaque_registration.rs:9:26
+  |
+9 |     let _ = registration.entries;
+  |                          ^^^^^^^ private field

@@ -45,7 +45,6 @@ impl TransformHandler for RawTransform {
 fn main() {
     let _ = obzenflow_dsl::effectful_transform!(
         Input -> First => RawTransform,
-        effects: [],
         observers: []
     );
 }

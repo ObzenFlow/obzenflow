@@ -3,12 +3,13 @@
 // https://obzenflow.dev
 
 use super::transforms::ChatTransformSettings;
-use super::{ChatTransform, EmbeddingTransform};
+use super::{ChatCompletion, ChatTransform, EmbeddingGeneration, EmbeddingTransform};
 use obzenflow_core::ai::{
-    ChatBindingContract, ChatParams, ChatResponse, ChatResponseFormat, EmbeddingBindingContract,
-    EmbeddingDimensions, EmbeddingParams, EmbeddingResponse, ToolDefinition,
+    ChatParams, ChatResponse, ChatResponseFormat, EmbeddingDimensions, EmbeddingParams,
+    EmbeddingResponse, ToolDefinition,
 };
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::effects::EffectBinding;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde_json::Value;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use std::sync::Arc;
 /// Deterministic typed builder for one standalone chat effect per input.
 #[derive(Clone)]
 pub struct ChatTransformBuilder {
-    binding: ChatBindingContract,
+    binding: EffectBinding<ChatCompletion>,
     logic_version: Option<String>,
     system: Option<String>,
     params: ChatParams,
@@ -26,7 +27,7 @@ pub struct ChatTransformBuilder {
 
 impl ChatTransformBuilder {
     /// Begin from credential-free binding evidence. This is the sole constructor.
-    pub fn from_binding(binding: ChatBindingContract) -> Self {
+    pub fn from_binding(binding: EffectBinding<ChatCompletion>) -> Self {
         Self {
             binding,
             logic_version: None,
@@ -116,14 +117,14 @@ impl ChatTransformBuilder {
 /// Deterministic typed builder for one standalone embedding effect per input.
 #[derive(Clone)]
 pub struct EmbeddingTransformBuilder {
-    binding: EmbeddingBindingContract,
+    binding: EffectBinding<EmbeddingGeneration>,
     logic_version: Option<String>,
     dimensions: Option<EmbeddingDimensions>,
 }
 
 impl EmbeddingTransformBuilder {
     /// Begin from credential-free binding evidence. This is the sole constructor.
-    pub fn from_binding(binding: EmbeddingBindingContract) -> Self {
+    pub fn from_binding(binding: EffectBinding<EmbeddingGeneration>) -> Self {
         Self {
             binding,
             logic_version: None,
@@ -181,6 +182,7 @@ fn required_logic_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::{ChatBindingEvidence, EmbeddingBindingEvidence, CHAT_CLIENT, EMBEDDING_CLIENT};
     use obzenflow_core::ai::{
         embedding_binding_fingerprint, AiProvider, ChatTarget, EmbeddingTarget,
         HeuristicTokenEstimator, ResolvedTokenEstimator, TokenEstimatorFallbackReason,
@@ -199,8 +201,12 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.standalone_builder.output";
     }
 
-    fn chat_binding() -> ChatBindingContract {
-        ChatBindingContract::from_resolved(
+    use obzenflow_runtime::effects::{
+        EffectPortResolutionError, EffectRegistrationBuilder, LogicalEffectBindingName,
+    };
+
+    fn chat_binding() -> EffectBinding<ChatCompletion> {
+        let evidence = ChatBindingEvidence::new(
             ChatTarget::new("fixture", "model"),
             ResolvedTokenEstimator::new(
                 Arc::new(HeuristicTokenEstimator::default()),
@@ -211,16 +217,41 @@ mod tests {
                 ),
             ),
         )
+        .unwrap();
+        EffectRegistrationBuilder::<ChatCompletion>::new(
+            LogicalEffectBindingName::new("chat").unwrap(),
+            evidence,
+        )
+        .bind_deferred_with_metadata(
+            CHAT_CLIENT,
+            Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
+        )
         .unwrap()
+        .finish()
+        .unwrap()
+        .0
     }
 
-    fn embedding_binding() -> EmbeddingBindingContract {
+    fn embedding_binding() -> EffectBinding<EmbeddingGeneration> {
         let provider = AiProvider::new("fixture");
-        EmbeddingBindingContract::from_target(EmbeddingTarget::new(
+        let evidence = EmbeddingBindingEvidence::new(EmbeddingTarget::new(
             provider.clone(),
             "model",
             embedding_binding_fingerprint(&provider, "model", "http://fixture.invalid"),
         ))
+        .unwrap();
+        EffectRegistrationBuilder::<EmbeddingGeneration>::new(
+            LogicalEffectBindingName::new("embedding").unwrap(),
+            evidence,
+        )
+        .bind_deferred_with_metadata(
+            EMBEDDING_CLIENT,
+            Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
+        )
+        .unwrap()
+        .finish()
+        .unwrap()
+        .0
     }
 
     #[test]

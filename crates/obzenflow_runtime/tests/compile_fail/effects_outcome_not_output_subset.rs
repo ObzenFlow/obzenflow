@@ -27,6 +27,7 @@ impl Effect for AllowedEffect {
     const EFFECT_TYPE: &'static str = "compile_fail.effects.subset.allowed";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = crate::effects::Portless;
     type Outcome = EffectOutcome;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 

@@ -13,7 +13,9 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::event_envelope::JournalGroupMember;
 use obzenflow_core::event::{EventEnvelope, JournalEvent};
 use obzenflow_core::journal::{ArchiveStatus, JournalError, JournalReader, StatusDerivation};
-use obzenflow_core::{JournalId, JournalOwner, JournalWriterId, TypedPayload};
+use obzenflow_core::{
+    BoundedBindingEvidence, JournalId, JournalOwner, JournalWriterId, TypedPayload,
+};
 use obzenflow_topology::{TopologyBuilder, TypeHintInfo};
 use serde_json::json;
 use std::num::NonZeroU64;
@@ -349,6 +351,7 @@ impl Effect for CountingEffect {
     const EFFECT_TYPE: &'static str = "test.counting";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = crate::effects::Portless;
 
     type Outcome = CountingOutput;
     type OutcomeSemantics = crate::effects::DomainFacts;
@@ -393,6 +396,7 @@ impl Effect for RecordedReplyEffect {
     const EFFECT_TYPE: &'static str = "test.recorded_reply";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = crate::effects::Portless;
 
     type Outcome = RecordedReplyValue;
     type OutcomeSemantics = crate::effects::RecordedReply;
@@ -425,6 +429,142 @@ enum AdapterSettlement {
 struct ConsumeOneEffectThenSettle {
     calls: Arc<AtomicUsize>,
     settlement: AdapterSettlement,
+}
+
+#[derive(Clone, Debug)]
+struct CatchBindingFaultThenSettle {
+    invocation_binding: EffectBinding<ZeroSlotNamedEffect>,
+    calls: Arc<AtomicUsize>,
+    settlement: AdapterSettlement,
+}
+
+#[async_trait]
+impl crate::stages::common::handlers::EffectfulTransformHandler for CatchBindingFaultThenSettle {
+    type Input = FirstOutput;
+    type Output = CountingOutput;
+    type AllowedEffects = crate::effect_set![ZeroSlotNamedEffect];
+
+    async fn process(
+        &self,
+        input: Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
+    {
+        // Build the receipt before the authority fault, then deliberately
+        // catch the effect error. Adapter postflight must still make false
+        // success impossible.
+        let prebuilt_receipt = fx
+            .complete_empty()
+            .map_err(Into::<crate::stages::common::handler_error::HandlerError>::into)?;
+        let _caught = fx
+            .perform(ZeroSlotNamedEffect {
+                value: input.value,
+                calls: self.calls.clone(),
+                binding: self.invocation_binding.invocation(),
+            })
+            .await
+            .expect_err("the fixture intentionally mixes construction families");
+
+        match self.settlement {
+            AdapterSettlement::Success => Ok(prebuilt_receipt),
+            AdapterSettlement::Nonfatal => {
+                Err(crate::stages::common::handler_error::HandlerError::Domain(
+                    "caught binding fault".to_string(),
+                ))
+            }
+            AdapterSettlement::Fatal => {
+                Err(crate::stages::common::handler_error::HandlerError::Fatal(
+                    crate::stages::common::handler_error::StageFatal::new(
+                        obzenflow_core::event::StageFatalCode::Protocol,
+                        obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
+                        "handler fatal must lose to the binding latch",
+                    ),
+                ))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FoldThenCatchBindingFault {
+    invocation_binding: EffectBinding<ZeroSlotNamedEffect>,
+    valid_calls: Arc<AtomicUsize>,
+    mismatched_calls: Arc<AtomicUsize>,
+    apply_calls: Arc<AtomicUsize>,
+    reject_fold: bool,
+    settlement: AdapterSettlement,
+}
+
+#[async_trait]
+impl crate::stages::common::handlers::EffectfulStatefulHandler for FoldThenCatchBindingFault {
+    type State = u64;
+    type Input = FirstOutput;
+    type Output = CountingOutput;
+    type AllowedEffects = crate::effect_set![CountingEffect, ZeroSlotNamedEffect];
+
+    fn initial_state(&self) -> Self::State {
+        0
+    }
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
+    {
+        fx.perform(CountingEffect {
+            value: input.value,
+            label: "stateful-before-binding-fault",
+            calls: self.valid_calls.clone(),
+        })
+        .await
+        .map_err(crate::stages::common::handler_error::HandlerError::from)?;
+        let prebuilt_receipt = fx
+            .complete()
+            .map_err(crate::stages::common::handler_error::HandlerError::from)?;
+        let _caught = fx
+            .perform(ZeroSlotNamedEffect {
+                value: input.value,
+                calls: self.mismatched_calls.clone(),
+                binding: self.invocation_binding.invocation(),
+            })
+            .await
+            .expect_err("the fixture intentionally mixes construction families");
+
+        match self.settlement {
+            AdapterSettlement::Success => Ok(prebuilt_receipt),
+            AdapterSettlement::Nonfatal => {
+                Err(crate::stages::common::handler_error::HandlerError::Domain(
+                    "caught binding fault after a committed fact".to_string(),
+                ))
+            }
+            AdapterSettlement::Fatal => {
+                Err(crate::stages::common::handler_error::HandlerError::Fatal(
+                    crate::stages::common::handler_error::StageFatal::new(
+                        obzenflow_core::event::StageFatalCode::Protocol,
+                        obzenflow_core::event::StageFatalReason::ProtocolInputIntegrity,
+                        "handler fatal must lose after the committed fact folds",
+                    ),
+                ))
+            }
+        }
+    }
+
+    fn apply(
+        &mut self,
+        state: &mut Self::State,
+        fact: Self::Output,
+    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+        self.apply_calls.fetch_add(1, Ordering::SeqCst);
+        if self.reject_fold {
+            return Err(crate::stages::common::handler_error::HandlerError::Domain(
+                "injected fold rejection".to_string(),
+            ));
+        }
+        *state += fact.value;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -478,6 +618,7 @@ impl Effect for AffineCountingEffect {
     const EFFECT_TYPE: &'static str = "test.affine_counting";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+    type BindingMode = crate::effects::Portless;
 
     type Outcome = CountingOutput;
     type OutcomeSemantics = crate::effects::DomainFacts;
@@ -506,6 +647,7 @@ impl Effect for InvariantAffineEffect {
     const EFFECT_TYPE: &'static str = "test.invariant_affine";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+    type BindingMode = crate::effects::Portless;
 
     type Outcome = CountingOutput;
     type OutcomeSemantics = crate::effects::DomainFacts;
@@ -520,11 +662,9 @@ impl Effect for InvariantAffineEffect {
 
     async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(EffectError::EffectPortBindingInvariantViolation {
-            port: "chat".to_string(),
-            expected: "fixture/expected".to_string(),
-            observed: "fixture/observed".to_string(),
-        })
+        Err(EffectError::target_invariant_violation(
+            EffectPortSlot::<()>::new("chat"),
+        ))
     }
 }
 
@@ -539,6 +679,7 @@ impl Effect for FailingEffect {
     const EFFECT_TYPE: &'static str = "test.failing";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = crate::effects::Portless;
 
     type Outcome = CountingOutput;
     type OutcomeSemantics = crate::effects::DomainFacts;
@@ -561,6 +702,18 @@ impl Effect for FailingEffect {
 struct TransactionalCountingEffect {
     value: u64,
     normal_calls: Arc<AtomicUsize>,
+    binding: EffectBindingUse<Self>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TransactionalCountingEvidence;
+
+impl EffectBindingEvidence for TransactionalCountingEvidence {
+    const SCHEMA_VERSION: u32 = 1;
+
+    fn canonical_bytes(&self) -> BoundedBindingEvidence {
+        BoundedBindingEvidence::try_new(b"transactional-counting-fixture".to_vec()).unwrap()
+    }
 }
 
 #[async_trait]
@@ -568,6 +721,7 @@ impl Effect for TransactionalCountingEffect {
     const EFFECT_TYPE: &'static str = "test.transactional_counting";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Transactional;
+    type BindingMode = Named<TransactionalCountingEvidence>;
 
     type Outcome = CountingOutput;
     type OutcomeSemantics = crate::effects::DomainFacts;
@@ -585,6 +739,129 @@ impl Effect for TransactionalCountingEffect {
         Ok(CountingOutput {
             value: self.value + 10,
         })
+    }
+}
+
+impl NamedEffect for TransactionalCountingEffect {
+    type BindingEvidence = TransactionalCountingEvidence;
+
+    fn binding_use(&self) -> &EffectBindingUse<Self> {
+        &self.binding
+    }
+
+    fn required_slots() -> EffectPortSlotSet {
+        EffectPortSlotSet::single(transactional_effect_port_slot::<Self>())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VersionedBindingEvidence(u64);
+
+impl EffectBindingEvidence for VersionedBindingEvidence {
+    const SCHEMA_VERSION: u32 = 1;
+
+    fn canonical_bytes(&self) -> BoundedBindingEvidence {
+        BoundedBindingEvidence::try_new(self.0.to_be_bytes().to_vec()).unwrap()
+    }
+}
+
+trait NamedAffinePort: Send + Sync {
+    fn invoke(&self);
+}
+
+struct CountingNamedAffinePort {
+    calls: Arc<AtomicUsize>,
+}
+
+impl NamedAffinePort for CountingNamedAffinePort {
+    fn invoke(&self) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+const NAMED_AFFINE_PORT: EffectPortSlot<dyn NamedAffinePort> = EffectPortSlot::new("client");
+
+#[derive(Clone, Debug)]
+struct NamedAffineCountingEffect {
+    binding: EffectBindingUse<Self>,
+}
+
+#[async_trait]
+impl Effect for NamedAffineCountingEffect {
+    const EFFECT_TYPE: &'static str = "test.named_affine_counting";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+    type BindingMode = Named<VersionedBindingEvidence>;
+    type Outcome = CountingOutput;
+    type OutcomeSemantics = crate::effects::DomainFacts;
+
+    fn label(&self) -> &str {
+        "named-affine-counting"
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({ "kind": "named-affine-counting" })
+    }
+
+    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        ctx.port(NAMED_AFFINE_PORT)?.invoke();
+        Ok(CountingOutput { value: 1 })
+    }
+}
+
+impl NamedEffect for NamedAffineCountingEffect {
+    type BindingEvidence = VersionedBindingEvidence;
+
+    fn binding_use(&self) -> &EffectBindingUse<Self> {
+        &self.binding
+    }
+
+    fn required_slots() -> EffectPortSlotSet {
+        EffectPortSlotSet::single(NAMED_AFFINE_PORT)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ZeroSlotNamedEffect {
+    value: u64,
+    calls: Arc<AtomicUsize>,
+    binding: EffectBindingUse<Self>,
+}
+
+#[async_trait]
+impl Effect for ZeroSlotNamedEffect {
+    const EFFECT_TYPE: &'static str = "test.zero_slot_named";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = Named<VersionedBindingEvidence>;
+    type Outcome = CountingOutput;
+    type OutcomeSemantics = crate::effects::DomainFacts;
+
+    fn label(&self) -> &str {
+        "zero-slot-named"
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({ "value": self.value })
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(CountingOutput {
+            value: self.value + 1,
+        })
+    }
+}
+
+impl NamedEffect for ZeroSlotNamedEffect {
+    type BindingEvidence = VersionedBindingEvidence;
+
+    fn binding_use(&self) -> &EffectBindingUse<Self> {
+        &self.binding
+    }
+
+    fn required_slots() -> EffectPortSlotSet {
+        EffectPortSlotSet::new()
     }
 }
 
@@ -815,6 +1092,7 @@ impl Effect for MultiFactEffect {
     const EFFECT_TYPE: &'static str = "test.multi_fact";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = crate::effects::Portless;
 
     type Outcome = MultiFactOutcome;
     type OutcomeSemantics = crate::effects::DomainFacts;
@@ -921,6 +1199,71 @@ fn deterministic_typed_output_events_preserve_ordinals() {
 struct TransactionalCountingPort {
     calls: Arc<AtomicUsize>,
     commit: bool,
+}
+
+fn transactional_counting_binding(
+    port: Arc<dyn TransactionalEffectPort<TransactionalCountingEffect>>,
+) -> (
+    EffectBinding<TransactionalCountingEffect>,
+    EffectRegistration<TransactionalCountingEffect>,
+) {
+    EffectRegistrationBuilder::<TransactionalCountingEffect>::new(
+        LogicalEffectBindingName::new("tx").unwrap(),
+        TransactionalCountingEvidence,
+    )
+    .bind_eager(
+        transactional_effect_port_slot::<TransactionalCountingEffect>(),
+        port,
+    )
+    .unwrap()
+    .finish()
+    .unwrap()
+}
+
+fn zero_slot_named_binding(
+    evidence: u64,
+) -> (
+    EffectBinding<ZeroSlotNamedEffect>,
+    EffectRegistration<ZeroSlotNamedEffect>,
+) {
+    EffectRegistrationBuilder::<ZeroSlotNamedEffect>::new(
+        LogicalEffectBindingName::new("zero_slot").unwrap(),
+        VersionedBindingEvidence(evidence),
+    )
+    .finish()
+    .unwrap()
+}
+
+fn deferred_named_affine_binding(
+    evidence: u64,
+    resolver_calls: Arc<AtomicUsize>,
+    port_calls: Arc<AtomicUsize>,
+) -> (
+    EffectBinding<NamedAffineCountingEffect>,
+    EffectRegistration<NamedAffineCountingEffect>,
+) {
+    let resolver: EffectPortResolver<dyn NamedAffinePort> = Arc::new(move || {
+        resolver_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(CountingNamedAffinePort {
+            calls: port_calls.clone(),
+        }) as Arc<dyn NamedAffinePort>)
+    });
+    EffectRegistrationBuilder::<NamedAffineCountingEffect>::new(
+        LogicalEffectBindingName::new("named_affine").unwrap(),
+        VersionedBindingEvidence(evidence),
+    )
+    .bind_deferred(NAMED_AFFINE_PORT, resolver)
+    .unwrap()
+    .finish()
+    .unwrap()
+}
+
+fn registry_with_transactional_counting(
+    registration: EffectRegistration<TransactionalCountingEffect>,
+) -> EffectPortRegistry {
+    let mut registry = EffectPortRegistry::new();
+    registry.install(registration).unwrap();
+    registry
 }
 
 #[async_trait]
@@ -1057,13 +1400,75 @@ fn invocation_context_with_mode(
             EffectDeclaration::of::<MultiFactEffect>(),
             EffectDeclaration::of::<KeylessEffect>(),
             EffectDeclaration::of::<KeyedEffect>(),
-            EffectDeclaration::transactional_effect::<TransactionalCountingEffect>("tx"),
         ],
         output_contract: StageOutputContract::empty(),
         backpressure_writer: BackpressureWriter::disabled(),
         emit_enabled: false,
         effect_boundary: None,
     }
+}
+
+fn transactional_invocation_context_with_mode(
+    journal: Arc<dyn Journal<ChainEvent>>,
+    parent: EventEnvelope<ChainEvent>,
+    effect_history: Option<Arc<EffectHistory>>,
+    effect_runtime_mode: EffectRuntimeMode,
+    effect_ports: EffectPortRegistry,
+    binding: &EffectBinding<TransactionalCountingEffect>,
+) -> EffectInvocationContext {
+    let mut context = invocation_context_with_mode(
+        journal,
+        parent,
+        effect_history,
+        effect_runtime_mode,
+        effect_ports,
+    );
+    context
+        .effect_declarations
+        .push(EffectDeclaration::transactional(binding));
+    context
+}
+
+fn zero_slot_named_invocation_context_with_mode(
+    journal: Arc<dyn Journal<ChainEvent>>,
+    parent: EventEnvelope<ChainEvent>,
+    effect_history: Option<Arc<EffectHistory>>,
+    effect_runtime_mode: EffectRuntimeMode,
+    effect_ports: EffectPortRegistry,
+    binding: &EffectBinding<ZeroSlotNamedEffect>,
+) -> EffectInvocationContext {
+    let mut context = invocation_context_with_mode(
+        journal,
+        parent,
+        effect_history,
+        effect_runtime_mode,
+        effect_ports,
+    );
+    context
+        .effect_declarations
+        .push(EffectDeclaration::named(binding));
+    context
+}
+
+fn named_affine_invocation_context_with_mode(
+    journal: Arc<dyn Journal<ChainEvent>>,
+    parent: EventEnvelope<ChainEvent>,
+    effect_history: Option<Arc<EffectHistory>>,
+    effect_runtime_mode: EffectRuntimeMode,
+    effect_ports: EffectPortRegistry,
+    binding: &EffectBinding<NamedAffineCountingEffect>,
+) -> EffectInvocationContext {
+    let mut context = invocation_context_with_mode(
+        journal,
+        parent,
+        effect_history,
+        effect_runtime_mode,
+        effect_ports,
+    );
+    context
+        .effect_declarations
+        .push(EffectDeclaration::named_at_least_once(binding));
+    context
 }
 
 /// Metadata-only archive used to exercise the real resume strategy. Effect
@@ -1254,6 +1659,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
         in_doubt_ctx.stage_logic_version.clone(),
         AffineCountingEffect::EFFECT_TYPE,
         AffineCountingEffect::SCHEMA_VERSION,
+        obzenflow_core::EffectBindingIdentity::Portless,
     )
     .expect("affine descriptor");
     let descriptor_hash = descriptor_hash(&descriptor).expect("affine descriptor hash");
@@ -1558,6 +1964,114 @@ async fn direct_fact_execution_scope_matrix_separates_reconstruction_from_live_a
     .await;
     assert_scope_matrix_executable(resume_execution(), None, parent.clone(), 0).await;
     assert_scope_matrix_executable(resume_execution(), Some(in_doubt_history), parent, 1).await;
+}
+
+#[tokio::test]
+async fn generated_resume_withheld_credit_precedes_named_port_resolution() {
+    let stage_id = StageId::new();
+    let parent = parent_envelope(WriterId::from(stage_id));
+
+    let archived_journal = Arc::new(MemoryJournal::failing_group(
+        JournalOwner::stage(stage_id),
+        "effect-outcome:v1:",
+    ));
+    let (archived_binding, archived_registration) = deferred_named_affine_binding(
+        41,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let mut archived_registry = EffectPortRegistry::new();
+    archived_registry.install(archived_registration).unwrap();
+    let mut archived = EffectsCore::new(named_affine_invocation_context_with_mode(
+        archived_journal.clone(),
+        parent.clone(),
+        None,
+        EffectRuntimeMode::Live,
+        archived_registry.into_run_registry(),
+        &archived_binding,
+    ));
+    assert!(matches!(
+        archived
+            .perform(NamedAffineCountingEffect {
+                binding: archived_binding.invocation(),
+            })
+            .await,
+        Err(EffectError::Journal(_))
+    ));
+    let archived_cursor = cursor_started_in(&archived_journal);
+    let in_doubt_history = archive_current_cursor(&archived_journal, &archived_cursor).await;
+
+    for (history, expected_prefix_rows) in
+        [(None, 0_usize), (Some(in_doubt_history.clone()), 1_usize)]
+    {
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+        let resolver_calls = Arc::new(AtomicUsize::new(0));
+        let port_calls = Arc::new(AtomicUsize::new(0));
+        let (binding, registration) =
+            deferred_named_affine_binding(41, resolver_calls.clone(), port_calls.clone());
+        let mut registry = EffectPortRegistry::new();
+        registry.install(registration).unwrap();
+        let admission = crate::backpressure::DirectFactAdmission::new(
+            obzenflow_core::EventType::from("test.named-affine-resume"),
+            NonZeroU64::new(3).expect("non-zero direct-fact bound"),
+        );
+        let mut ctx = named_affine_invocation_context_with_mode(
+            journal.clone(),
+            parent.clone(),
+            history,
+            EffectRuntimeMode::ResumeIncomplete,
+            registry.into_run_registry(),
+            &binding,
+        );
+        ctx.runtime_execution = resume_execution();
+        ctx.backpressure_writer =
+            BackpressureWriter::disabled().with_direct_fact_admission(admission.clone());
+        let invocation = binding.invocation();
+        let mut effects = EffectsCore::new(ctx);
+        let task = tokio::spawn(async move {
+            effects
+                .perform(NamedAffineCountingEffect {
+                    binding: invocation,
+                })
+                .await
+        });
+
+        for _ in 0..64 {
+            if admission.is_requested() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            admission.is_requested(),
+            "a resumed live continuation must park at generated admission"
+        );
+        assert_eq!(
+            resolver_calls.load(Ordering::SeqCst),
+            0,
+            "withheld credit must prevent credential and client resolution"
+        );
+        assert_eq!(port_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(journal.events().len(), expected_prefix_rows);
+
+        let lease = crate::backpressure::DirectFactLease::try_acquire(
+            &BackpressureWriter::disabled(),
+            NonZeroU64::new(3).expect("non-zero direct-fact bound"),
+        )
+        .expect("local admission succeeds")
+        .expect("disabled global backpressure grants a local lease");
+        admission.grant(lease).expect("single live grant");
+        task.await
+            .expect("resume task joins")
+            .expect("admitted named affine effect succeeds");
+
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(port_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            admission.close().expect("admitted lease closes"),
+            expected_prefix_rows as u64 + 2
+        );
+    }
 }
 
 #[tokio::test]
@@ -2285,8 +2799,8 @@ async fn recorded_reply_is_replay_authority_but_not_a_public_output_fact() {
     let mut live = EffectsCore::new(live_ctx);
 
     let declaration = EffectDeclaration::of::<RecordedReplyEffect>();
-    assert_eq!(declaration.outcome_kind, EffectOutcomeKind::RecordedReply);
-    assert!(declaration.public_outcome_fact_types.is_empty());
+    assert_eq!(declaration.outcome_kind(), EffectOutcomeKind::RecordedReply);
+    assert!(declaration.public_outcome_fact_types().is_empty());
 
     let reply = live
         .perform(RecordedReplyEffect {
@@ -2433,6 +2947,195 @@ async fn run_consume_one_adapter(
         obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
     )
     .await
+}
+
+async fn run_caught_binding_fault_adapter(
+    settlement: AdapterSettlement,
+) -> (
+    Result<Vec<ChainEvent>, crate::stages::common::handler_error::HandlerError>,
+    Arc<AtomicUsize>,
+    Arc<MemoryJournal<ChainEvent>>,
+) {
+    use crate::stages::common::handlers::{
+        EffectfulTransformHandlerAdapter, UnifiedTransformHandler,
+    };
+
+    let stage_id = StageId::new();
+    let input = ChainEventFactory::data_event(
+        WriterId::from(stage_id),
+        FirstOutput::versioned_event_type(),
+        json!({ "value": 9 }),
+    );
+    let parent = EventEnvelope::new(JournalWriterId::new(), input);
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let (declared_binding, declared_registration) = zero_slot_named_binding(7);
+    let (invocation_binding, invocation_registration) = zero_slot_named_binding(7);
+    drop(invocation_registration);
+    let mut registry = EffectPortRegistry::new();
+    registry.install(declared_registration).unwrap();
+    let mut context = zero_slot_named_invocation_context_with_mode(
+        journal.clone(),
+        parent.clone(),
+        None,
+        EffectRuntimeMode::Live,
+        registry,
+        &declared_binding,
+    );
+    context.output_contract = output_contract_for::<CountingOutput>();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let adapter = EffectfulTransformHandlerAdapter::new(
+        CatchBindingFaultThenSettle {
+            invocation_binding,
+            calls: calls.clone(),
+            settlement,
+        },
+        Arc::new(AbortingBoundary),
+    );
+    let result = UnifiedTransformHandler::process(
+        &adapter,
+        parent.event,
+        Some(context),
+        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+    )
+    .await;
+    (result, calls, journal)
+}
+
+#[tokio::test]
+async fn transform_adapter_binding_latch_supersedes_every_handler_settlement() {
+    for settlement in [
+        AdapterSettlement::Success,
+        AdapterSettlement::Nonfatal,
+        AdapterSettlement::Fatal,
+    ] {
+        let (result, calls, journal) = run_caught_binding_fault_adapter(settlement).await;
+        let error = result.expect_err("a caught binding fault must remain invocation-terminal");
+        assert!(matches!(
+            error,
+            crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
+                if fatal.code == obzenflow_core::event::StageFatalCode::Configuration
+                    && fatal.reason
+                        == obzenflow_core::event::StageFatalReason::EffectPortBindingMismatch
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(journal.events().is_empty());
+    }
+}
+
+async fn run_stateful_binding_fault_adapter(
+    settlement: AdapterSettlement,
+    reject_fold: bool,
+) -> (
+    Result<(), crate::stages::common::handler_error::HandlerError>,
+    u64,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    Arc<MemoryJournal<ChainEvent>>,
+) {
+    use crate::stages::common::handlers::{
+        EffectfulStatefulHandlerAdapter, UnifiedStatefulHandler,
+    };
+
+    let stage_id = StageId::new();
+    let input = ChainEventFactory::data_event(
+        WriterId::from(stage_id),
+        FirstOutput::versioned_event_type(),
+        json!({ "value": 9 }),
+    );
+    let parent = EventEnvelope::new(JournalWriterId::new(), input.clone());
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let (declared_binding, declared_registration) = zero_slot_named_binding(7);
+    let (invocation_binding, invocation_registration) = zero_slot_named_binding(7);
+    drop(invocation_registration);
+    let mut registry = EffectPortRegistry::new();
+    registry.install(declared_registration).unwrap();
+    let mut context = zero_slot_named_invocation_context_with_mode(
+        journal.clone(),
+        parent,
+        None,
+        EffectRuntimeMode::Live,
+        registry,
+        &declared_binding,
+    );
+    context.output_contract = output_contract_for::<CountingOutput>();
+    let valid_calls = Arc::new(AtomicUsize::new(0));
+    let mismatched_calls = Arc::new(AtomicUsize::new(0));
+    let apply_calls = Arc::new(AtomicUsize::new(0));
+    let mut adapter = EffectfulStatefulHandlerAdapter(FoldThenCatchBindingFault {
+        invocation_binding,
+        valid_calls: valid_calls.clone(),
+        mismatched_calls: mismatched_calls.clone(),
+        apply_calls: apply_calls.clone(),
+        reject_fold,
+        settlement,
+    });
+    let mut state = 0;
+    let result = UnifiedStatefulHandler::accumulate(
+        &mut adapter,
+        &mut state,
+        input,
+        Some(context),
+        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+    )
+    .await;
+    (
+        result,
+        state,
+        valid_calls,
+        mismatched_calls,
+        apply_calls,
+        journal,
+    )
+}
+
+#[tokio::test]
+async fn stateful_adapter_folds_once_then_applies_binding_fatal_precedence() {
+    for settlement in [
+        AdapterSettlement::Success,
+        AdapterSettlement::Nonfatal,
+        AdapterSettlement::Fatal,
+    ] {
+        let (result, state, valid_calls, mismatched_calls, apply_calls, journal) =
+            run_stateful_binding_fault_adapter(settlement, false).await;
+        let error = result.expect_err("the binding latch wins after the committed fact folds");
+        assert!(matches!(
+            error,
+            crate::stages::common::handler_error::HandlerError::Fatal(ref fatal)
+                if fatal.code == obzenflow_core::event::StageFatalCode::Configuration
+                    && fatal.reason
+                        == obzenflow_core::event::StageFatalReason::EffectPortBindingMismatch
+        ));
+        assert_eq!(state, 10, "the committed CountingOutput folds exactly once");
+        assert_eq!(valid_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(mismatched_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(effect_records(&journal).len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn stateful_fold_rejection_precedes_binding_latch_and_preserves_installed_state() {
+    let (result, state, valid_calls, mismatched_calls, apply_calls, journal) =
+        run_stateful_binding_fault_adapter(AdapterSettlement::Fatal, true).await;
+    let error = result.expect_err("rejection of an already committed fact is priority one");
+    assert!(matches!(
+        error,
+        crate::stages::common::handler_error::HandlerError::ContractViolation(ref detail)
+            if detail.contains("injected fold rejection")
+    ));
+    assert_eq!(
+        state, 0,
+        "a rejected draft must not replace installed state"
+    );
+    assert_eq!(valid_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(mismatched_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        effect_records(&journal).len(),
+        1,
+        "the already committed fact is not rolled back"
+    );
 }
 
 #[tokio::test]
@@ -3373,28 +4076,26 @@ async fn transactional_effect_uses_registered_port_and_commits_once() {
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
-    let mut ports = EffectPortRegistry::new();
-    ports
-        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-            "tx",
-            Arc::new(TransactionalCountingPort {
-                calls: transactional_calls.clone(),
-                commit: true,
-            }),
-        )
-        .expect("transactional test port registration is unique");
-    let mut effects = EffectsCore::new(invocation_context_with_mode(
+    let (binding, registration) =
+        transactional_counting_binding(Arc::new(TransactionalCountingPort {
+            calls: transactional_calls.clone(),
+            commit: true,
+        }));
+    let ports = registry_with_transactional_counting(registration);
+    let mut effects = EffectsCore::new(transactional_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
         EffectRuntimeMode::Live,
         ports,
+        &binding,
     ));
 
     let output = effects
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: normal_calls.clone(),
+            binding: binding.invocation(),
         })
         .await
         .expect("transactional port should commit");
@@ -3413,27 +4114,25 @@ async fn transactional_effect_live_return_comes_from_committed_record_not_port_r
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let port_calls = Arc::new(AtomicUsize::new(0));
-    let mut ports = EffectPortRegistry::new();
-    ports
-        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-            "tx",
-            Arc::new(DivergentTransactionalPort {
-                calls: port_calls.clone(),
-            }),
-        )
-        .expect("transactional test port registration is unique");
-    let mut live = EffectsCore::new(invocation_context_with_mode(
+    let (binding, registration) =
+        transactional_counting_binding(Arc::new(DivergentTransactionalPort {
+            calls: port_calls.clone(),
+        }));
+    let ports = registry_with_transactional_counting(registration);
+    let mut live = EffectsCore::new(transactional_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
         EffectRuntimeMode::Live,
         ports,
+        &binding,
     ));
 
     let live_output = live
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: normal_calls.clone(),
+            binding: binding.invocation(),
         })
         .await
         .expect("transactional effect should commit");
@@ -3450,18 +4149,20 @@ async fn transactional_effect_live_return_comes_from_committed_record_not_port_r
         EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
             .expect("history should index"),
     );
-    let mut replay = EffectsCore::new(invocation_context_with_mode(
+    let mut replay = EffectsCore::new(transactional_invocation_context_with_mode(
         Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
         EffectRuntimeMode::ReplayStrict,
         EffectPortRegistry::new(),
+        &binding,
     ));
 
     let replay_output = replay
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: normal_calls.clone(),
+            binding: binding.invocation(),
         })
         .await
         .expect("strict replay should reconstruct the committed value");
@@ -3483,26 +4184,24 @@ async fn transactional_effect_replay_does_not_require_port_or_execute() {
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
-    let mut ports = EffectPortRegistry::new();
-    ports
-        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-            "tx",
-            Arc::new(TransactionalCountingPort {
-                calls: transactional_calls,
-                commit: true,
-            }),
-        )
-        .expect("transactional test port registration is unique");
-    let mut live = EffectsCore::new(invocation_context_with_mode(
+    let (binding, registration) =
+        transactional_counting_binding(Arc::new(TransactionalCountingPort {
+            calls: transactional_calls,
+            commit: true,
+        }));
+    let ports = registry_with_transactional_counting(registration);
+    let mut live = EffectsCore::new(transactional_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
         EffectRuntimeMode::Live,
         ports,
+        &binding,
     ));
     live.perform(TransactionalCountingEffect {
         value: 7,
         normal_calls: normal_calls.clone(),
+        binding: binding.invocation(),
     })
     .await
     .expect("live transactional effect should commit");
@@ -3512,18 +4211,20 @@ async fn transactional_effect_replay_does_not_require_port_or_execute() {
         EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
             .expect("history should index"),
     );
-    let mut replay = EffectsCore::new(invocation_context_with_mode(
+    let mut replay = EffectsCore::new(transactional_invocation_context_with_mode(
         Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
         EffectRuntimeMode::ReplayStrict,
         EffectPortRegistry::new(),
+        &binding,
     ));
 
     let output = replay
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: normal_calls.clone(),
+            binding: binding.invocation(),
         })
         .await
         .expect("strict replay should use recorded transactional output");
@@ -3538,28 +4239,26 @@ async fn transactional_effect_missing_commit_fails() {
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
-    let mut ports = EffectPortRegistry::new();
-    ports
-        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-            "tx",
-            Arc::new(TransactionalCountingPort {
-                calls: transactional_calls.clone(),
-                commit: false,
-            }),
-        )
-        .expect("transactional test port registration is unique");
-    let mut effects = EffectsCore::new(invocation_context_with_mode(
+    let (binding, registration) =
+        transactional_counting_binding(Arc::new(TransactionalCountingPort {
+            calls: transactional_calls.clone(),
+            commit: false,
+        }));
+    let ports = registry_with_transactional_counting(registration);
+    let mut effects = EffectsCore::new(transactional_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
         EffectRuntimeMode::Live,
         ports,
+        &binding,
     ));
 
     let err = effects
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: normal_calls.clone(),
+            binding: binding.invocation(),
         })
         .await
         .expect_err("transactional port returning without commit must fail");
@@ -3578,22 +4277,485 @@ async fn transactional_effect_missing_port_fails_before_execute() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
-    let mut effects = EffectsCore::new(invocation_context(
+    let (binding, registration) =
+        transactional_counting_binding(Arc::new(TransactionalCountingPort {
+            calls: Arc::new(AtomicUsize::new(0)),
+            commit: true,
+        }));
+    drop(registration);
+    let mut effects = EffectsCore::new(transactional_invocation_context_with_mode(
         journal,
         parent_envelope(WriterId::from(stage_id)),
         None,
+        EffectRuntimeMode::Live,
+        EffectPortRegistry::new(),
+        &binding,
     ));
 
     let err = effects
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: normal_calls.clone(),
+            binding: binding.invocation(),
         })
         .await
         .expect_err("missing transactional port must fail before execution");
 
-    assert!(matches!(err, EffectError::MissingEffectPort { .. }));
+    let EffectError::BindingAuthority { fault } = err else {
+        panic!("expected a binding-authority fault")
+    };
+    assert_eq!(
+        fault.reason(),
+        obzenflow_core::event::StageFatalReason::EffectPortRegistrationMissing
+    );
     assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn named_binding_family_mismatch_latches_before_cursor_or_io() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let declared_port_calls = Arc::new(AtomicUsize::new(0));
+    let invocation_port_calls = Arc::new(AtomicUsize::new(0));
+    let normal_calls = Arc::new(AtomicUsize::new(0));
+
+    let (declared_binding, declared_registration) =
+        transactional_counting_binding(Arc::new(TransactionalCountingPort {
+            calls: declared_port_calls.clone(),
+            commit: true,
+        }));
+    let (invocation_binding, invocation_registration) =
+        transactional_counting_binding(Arc::new(TransactionalCountingPort {
+            calls: invocation_port_calls.clone(),
+            commit: true,
+        }));
+    drop(invocation_registration);
+
+    // Both constructions have the same public name and evidence, but each
+    // builder mints a distinct, opaque construction-family token. A binding
+    // from one family must never borrow another family's installed authority.
+    assert_eq!(
+        EffectDeclaration::transactional(&declared_binding).binding_identity(),
+        EffectDeclaration::transactional(&invocation_binding).binding_identity(),
+        "durable descriptor identity is evidence-based, not process-family-based"
+    );
+
+    let ports = registry_with_transactional_counting(declared_registration);
+    let mut effects = EffectsCore::new(transactional_invocation_context_with_mode(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+        EffectRuntimeMode::Live,
+        ports,
+        &declared_binding,
+    ));
+
+    let first_error = effects
+        .perform(TransactionalCountingEffect {
+            value: 7,
+            normal_calls: normal_calls.clone(),
+            binding: invocation_binding.invocation(),
+        })
+        .await
+        .expect_err("an independently constructed binding must be rejected");
+    let first_fault = match first_error {
+        EffectError::BindingAuthority { fault } => fault,
+        other => panic!("expected a binding-authority fault, got {other:?}"),
+    };
+    assert_eq!(
+        first_fault.mismatch_kind(),
+        Some(BindingMismatchKind::ConstructionFamily)
+    );
+    assert_eq!(
+        effects.next_effect_ordinal_for_test(),
+        EffectOrdinal::new(0),
+        "authority is checked before reserving a durable effect cursor"
+    );
+    assert!(journal.events().is_empty());
+    assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(declared_port_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(invocation_port_calls.load(Ordering::SeqCst), 0);
+
+    let ensure_fault = match effects
+        .ensure_authoring_open()
+        .expect_err("the first authority fault closes the invocation")
+    {
+        EffectError::BindingAuthority { fault } => fault,
+        other => panic!("expected the latched binding-authority fault, got {other:?}"),
+    };
+    assert_eq!(ensure_fault, first_fault);
+
+    let capture_fault = match effects
+        .capture("after-binding-fault", 1_u64)
+        .await
+        .expect_err("capture must be closed after a binding-authority fault")
+    {
+        EffectError::BindingAuthority { fault } => fault,
+        other => panic!("expected the latched binding-authority fault, got {other:?}"),
+    };
+    assert_eq!(capture_fault, first_fault);
+
+    let emit_fault = match effects
+        .emit(CountingOutput { value: 1 })
+        .await
+        .expect_err("emit must be closed after a binding-authority fault")
+    {
+        EffectError::BindingAuthority { fault } => fault,
+        other => panic!("expected the latched binding-authority fault, got {other:?}"),
+    };
+    assert_eq!(emit_fault, first_fault);
+
+    let later_perform_fault = match effects
+        .perform(TransactionalCountingEffect {
+            value: 8,
+            normal_calls: normal_calls.clone(),
+            binding: declared_binding.invocation(),
+        })
+        .await
+        .expect_err("even a valid later binding cannot reopen the invocation")
+    {
+        EffectError::BindingAuthority { fault } => fault,
+        other => panic!("expected the latched binding-authority fault, got {other:?}"),
+    };
+    assert_eq!(later_perform_fault, first_fault);
+
+    let fatal = effects
+        .binding_fault_fatal()
+        .expect("the latched authority fault must map to a stage fatal");
+    assert_eq!(
+        fatal.code,
+        obzenflow_core::event::StageFatalCode::Configuration
+    );
+    assert_eq!(
+        fatal.reason,
+        obzenflow_core::event::StageFatalReason::EffectPortBindingMismatch
+    );
+    assert!(journal.events().is_empty());
+    assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(declared_port_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(invocation_port_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn binding_mismatches_leave_terminal_and_in_doubt_archives_untouched() {
+    let stage_id = StageId::new();
+    let parent = parent_envelope(WriterId::from(stage_id));
+
+    let completed_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let (completed_binding, completed_registration) = deferred_named_affine_binding(
+        71,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let mut completed_registry = EffectPortRegistry::new();
+    completed_registry.install(completed_registration).unwrap();
+    let mut completed = EffectsCore::new(named_affine_invocation_context_with_mode(
+        completed_journal.clone(),
+        parent.clone(),
+        None,
+        EffectRuntimeMode::Live,
+        completed_registry.into_run_registry(),
+        &completed_binding,
+    ));
+    completed
+        .perform(NamedAffineCountingEffect {
+            binding: completed_binding.invocation(),
+        })
+        .await
+        .expect("completed archive fixture executes");
+    let completed_cursor = cursor_started_in(&completed_journal);
+    let completed_history = archive_current_cursor(&completed_journal, &completed_cursor).await;
+
+    let in_doubt_journal = Arc::new(MemoryJournal::failing_group(
+        JournalOwner::stage(stage_id),
+        "effect-outcome:v1:",
+    ));
+    let (in_doubt_binding, in_doubt_registration) = deferred_named_affine_binding(
+        71,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let mut in_doubt_registry = EffectPortRegistry::new();
+    in_doubt_registry.install(in_doubt_registration).unwrap();
+    let mut in_doubt = EffectsCore::new(named_affine_invocation_context_with_mode(
+        in_doubt_journal.clone(),
+        parent.clone(),
+        None,
+        EffectRuntimeMode::Live,
+        in_doubt_registry.into_run_registry(),
+        &in_doubt_binding,
+    ));
+    assert!(matches!(
+        in_doubt
+            .perform(NamedAffineCountingEffect {
+                binding: in_doubt_binding.invocation(),
+            })
+            .await,
+        Err(EffectError::Journal(_))
+    ));
+    let in_doubt_cursor = cursor_started_in(&in_doubt_journal);
+    let in_doubt_history = archive_current_cursor(&in_doubt_journal, &in_doubt_cursor).await;
+
+    for (archive_kind, history) in [
+        ("terminal", completed_history),
+        ("in_doubt", in_doubt_history),
+    ] {
+        for mismatch in [
+            BindingMismatchKind::ConstructionFamily,
+            BindingMismatchKind::Evidence,
+        ] {
+            let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+            let resolver_calls = Arc::new(AtomicUsize::new(0));
+            let port_calls = Arc::new(AtomicUsize::new(0));
+            let (declared_binding, declared_registration) =
+                deferred_named_affine_binding(71, resolver_calls.clone(), port_calls.clone());
+            drop(declared_registration);
+            let invocation = match mismatch {
+                BindingMismatchKind::ConstructionFamily => {
+                    let (other_binding, other_registration) = deferred_named_affine_binding(
+                        71,
+                        Arc::new(AtomicUsize::new(0)),
+                        Arc::new(AtomicUsize::new(0)),
+                    );
+                    drop(other_registration);
+                    other_binding.invocation()
+                }
+                BindingMismatchKind::Evidence => {
+                    declared_binding.invocation_with_evidence_for_test(VersionedBindingEvidence(72))
+                }
+                BindingMismatchKind::Mode => unreachable!("fixture covers named mismatches"),
+            };
+            let mut effects = EffectsCore::new(named_affine_invocation_context_with_mode(
+                journal.clone(),
+                parent.clone(),
+                Some(history.clone()),
+                EffectRuntimeMode::ResumeIncomplete,
+                EffectPortRegistry::new(),
+                &declared_binding,
+            ));
+
+            let fault = match effects
+                .perform(NamedAffineCountingEffect {
+                    binding: invocation,
+                })
+                .await
+                .expect_err("binding mismatch must precede archive selection")
+            {
+                EffectError::BindingAuthority { fault } => fault,
+                other => panic!(
+                    "expected {archive_kind} archive binding fault for {mismatch:?}, got {other:?}"
+                ),
+            };
+            assert_eq!(fault.mismatch_kind(), Some(mismatch));
+            assert_eq!(
+                effects.next_effect_ordinal_for_test(),
+                EffectOrdinal::new(0),
+                "the archive cursor must remain unreserved"
+            );
+            assert!(journal.events().is_empty());
+            assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(port_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                effects
+                    .ensure_authoring_open()
+                    .expect_err("the mismatch is invocation-terminal")
+                    .to_string(),
+                EffectError::BindingAuthority { fault }.to_string()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn concurrent_fan_out_shares_resolver_verdict_but_not_fatal_latches() {
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let port_calls = Arc::new(AtomicUsize::new(0));
+    let (binding, registration) =
+        deferred_named_affine_binding(81, resolver_calls.clone(), port_calls.clone());
+    let mut registry = EffectPortRegistry::new();
+    registry.install(registration).unwrap();
+    let run_registry = registry.into_run_registry();
+    let (mismatched_binding, mismatched_registration) = deferred_named_affine_binding(
+        81,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    drop(mismatched_registration);
+
+    let shared_flow = FlowId::new();
+    let shared_stage = StageId::new();
+    let parent = parent_envelope(WriterId::from(shared_stage));
+    let make_context =
+        |position: u64, journal: Arc<MemoryJournal<ChainEvent>>, ports: EffectPortRegistry| {
+            let mut context = named_affine_invocation_context_with_mode(
+                journal,
+                parent.clone(),
+                None,
+                EffectRuntimeMode::Live,
+                ports,
+                &binding,
+            );
+            context.flow_id = shared_flow;
+            context.stage_id = shared_stage;
+            context.stage_key = "fan_out_consumer".to_string();
+            context.writer_id = WriterId::from(shared_stage);
+            context.input_seq = StageInputPosition(position);
+            context
+        };
+
+    let first_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(shared_stage)));
+    let second_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(shared_stage)));
+    let fault_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(shared_stage)));
+    let mut first = EffectsCore::new(make_context(1, first_journal.clone(), run_registry.clone()));
+    let mut second = EffectsCore::new(make_context(
+        2,
+        second_journal.clone(),
+        run_registry.clone(),
+    ));
+    let mut faulted = EffectsCore::new(make_context(3, fault_journal.clone(), run_registry));
+    let first_invocation = binding.invocation();
+    let second_invocation = binding.invocation();
+    let fault_invocation = mismatched_binding.invocation();
+
+    let (first_join, second_join, fault_join) = tokio::join!(
+        async move {
+            let result = first
+                .perform(NamedAffineCountingEffect {
+                    binding: first_invocation,
+                })
+                .await;
+            (first, result)
+        },
+        async move {
+            let result = second
+                .perform(NamedAffineCountingEffect {
+                    binding: second_invocation,
+                })
+                .await;
+            (second, result)
+        },
+        async move {
+            let result = faulted
+                .perform(NamedAffineCountingEffect {
+                    binding: fault_invocation,
+                })
+                .await;
+            (faulted, result)
+        }
+    );
+
+    let (first, first_result) = first_join;
+    let (second, second_result) = second_join;
+    let (faulted, fault_result) = fault_join;
+    assert_eq!(first_result.unwrap(), CountingOutput { value: 1 });
+    assert_eq!(second_result.unwrap(), CountingOutput { value: 1 });
+    assert!(matches!(
+        fault_result,
+        Err(EffectError::BindingAuthority { ref fault })
+            if fault.mismatch_kind() == Some(BindingMismatchKind::ConstructionFamily)
+    ));
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(port_calls.load(Ordering::SeqCst), 2);
+    assert!(first.binding_fault_fatal().is_none());
+    assert!(second.binding_fault_fatal().is_none());
+    assert!(faulted.binding_fault_fatal().is_some());
+    assert_eq!(first_journal.events().len(), 2);
+    assert_eq!(second_journal.events().len(), 2);
+    assert!(fault_journal.events().is_empty());
+}
+
+#[tokio::test]
+async fn rebuilt_named_binding_replays_by_evidence_and_changed_evidence_rejects() {
+    let stage_id = StageId::new();
+    let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let (live_binding, live_registration) = zero_slot_named_binding(7);
+    let mut live_registry = EffectPortRegistry::new();
+    live_registry.install(live_registration).unwrap();
+    let mut live = EffectsCore::new(zero_slot_named_invocation_context_with_mode(
+        live_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+        EffectRuntimeMode::Live,
+        live_registry,
+        &live_binding,
+    ));
+
+    let live_output = live
+        .perform(ZeroSlotNamedEffect {
+            value: 11,
+            calls: live_calls.clone(),
+            binding: live_binding.invocation(),
+        })
+        .await
+        .expect("the live zero-slot named effect should execute");
+    assert_eq!(live_output, CountingOutput { value: 12 });
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+
+    let records = effect_records(&live_journal);
+    let live_descriptor = records[0].descriptor.clone();
+    assert!(matches!(
+        live_descriptor.binding,
+        obzenflow_core::EffectBindingIdentity::Named { .. }
+    ));
+    let history = Arc::new(
+        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
+            .expect("live history should index"),
+    );
+
+    // A new materialisation necessarily mints a different construction
+    // family. Equal versioned evidence must nevertheless reproduce the
+    // descriptor and authorise strict replay without a registration.
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let (rebuilt_binding, rebuilt_registration) = zero_slot_named_binding(7);
+    drop(rebuilt_registration);
+    assert!(!live_binding.shares_construction_family(&rebuilt_binding));
+    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let mut replay = EffectsCore::new(zero_slot_named_invocation_context_with_mode(
+        replay_journal,
+        parent_envelope(WriterId::from(stage_id)),
+        Some(history.clone()),
+        EffectRuntimeMode::ReplayStrict,
+        EffectPortRegistry::new(),
+        &rebuilt_binding,
+    ));
+    let replay_output = replay
+        .perform(ZeroSlotNamedEffect {
+            value: 11,
+            calls: replay_calls.clone(),
+            binding: rebuilt_binding.invocation(),
+        })
+        .await
+        .expect("same evidence in a rebuilt family should replay");
+    assert_eq!(replay_output, live_output);
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+
+    // Changing only evidence changes the durable descriptor. Declaration and
+    // invocation still share their new family, so rejection is a replay
+    // descriptor mismatch, before any live authority can be consulted.
+    let changed_calls = Arc::new(AtomicUsize::new(0));
+    let (changed_binding, changed_registration) = zero_slot_named_binding(8);
+    drop(changed_registration);
+    let changed_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let mut changed_replay = EffectsCore::new(zero_slot_named_invocation_context_with_mode(
+        changed_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(history),
+        EffectRuntimeMode::ReplayStrict,
+        EffectPortRegistry::new(),
+        &changed_binding,
+    ));
+    let error = changed_replay
+        .perform(ZeroSlotNamedEffect {
+            value: 11,
+            calls: changed_calls.clone(),
+            binding: changed_binding.invocation(),
+        })
+        .await
+        .expect_err("changed evidence must reject the archived descriptor");
+    assert!(matches!(error, EffectError::DescriptorMismatch { .. }));
+    assert_eq!(changed_calls.load(Ordering::SeqCst), 0);
+    assert!(changed_journal.events().is_empty());
 }
 
 #[tokio::test]
@@ -3833,42 +4995,6 @@ async fn mixed_origin_group_is_rejected_as_provenance_mismatch() {
         .expect_err("a group disagreeing on origin must fail loud");
 
     assert!(matches!(err, EffectError::EffectProvenanceMismatch(_)));
-}
-
-trait DemoPort: Send + Sync {
-    fn value(&self) -> u64;
-}
-
-struct DemoPortImpl;
-
-impl DemoPort for DemoPortImpl {
-    fn value(&self) -> u64 {
-        42
-    }
-}
-
-#[test]
-fn effect_context_resolves_typed_trait_object_ports() {
-    let mut ports = EffectPortRegistry::new();
-    ports
-        .insert::<dyn DemoPort>("primary", Arc::new(DemoPortImpl))
-        .expect("demo test port registration is unique");
-    let ctx = EffectContext {
-        is_replaying: false,
-        flow_id: FlowId::new(),
-        stage_key: "effect_stage".to_string(),
-        input_seq: StageInputPosition(3),
-        ports,
-    };
-
-    let port = ctx
-        .port::<dyn DemoPort>("primary")
-        .expect("registered port should resolve");
-    assert_eq!(port.value(), 42);
-    assert!(matches!(
-        ctx.port::<dyn DemoPort>("missing"),
-        Err(EffectError::MissingEffectPort { .. })
-    ));
 }
 
 #[tokio::test]
@@ -4150,11 +5276,12 @@ impl EffectBoundary for InvariantEvidenceBoundary {
         };
         use obzenflow_core::event::payloads::observability_payload::CircuitBreakerHealthClassification;
 
+        assert_eq!(identity.safety, EffectSafety::NonIdempotentAtLeastOnce);
         self.consults.fetch_add(1, Ordering::SeqCst);
         let execution = operation.execute().await;
         assert!(matches!(
             execution.result(),
-            Err(EffectError::EffectPortBindingInvariantViolation { .. })
+            Err(EffectError::EffectTargetInvariantViolation { .. })
         ));
         let attempt = execution.attempt();
         let evidence_writer = WriterId::from(StageId::new());
@@ -4392,7 +5519,7 @@ async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
         .expect_err("the successful terminal retains the typed invariant failure");
     assert!(matches!(
         terminal_error,
-        EffectError::EffectPortBindingInvariantViolation { .. }
+        EffectError::EffectTargetInvariantViolation { .. }
     ));
 
     assert_eq!(first_calls.load(Ordering::SeqCst), 1);
@@ -4428,13 +5555,56 @@ async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
         Some(Some(EffectAttemptOrdinal::new(3)))
     );
 
+    // FLOWIP-132a good-camper correction: effect control identity is stable
+    // across replay, but its admission sequence belongs to the run that
+    // appends it. Give every archived escape and terminal control an explicit
+    // old-run sequence so the replay below proves both clone paths re-author
+    // that coordinate instead of leaking it into the candidate run.
+    let mut sequenced_history = selected.clone();
+    let mut archived_sequence = 100_u64;
+    for controls in sequenced_history.escape_control_batches.values_mut() {
+        for event in controls {
+            event.admission_seq = Some(obzenflow_core::AdmissionSeq(archived_sequence));
+            archived_sequence += 1;
+        }
+    }
+    for event in sequenced_history
+        .terminal_group_events
+        .iter_mut()
+        .filter(|event| !event.is_data())
+    {
+        event.admission_seq = Some(obzenflow_core::AdmissionSeq(archived_sequence));
+        archived_sequence += 1;
+    }
+    let archived_control_ids = sequenced_history
+        .escape_control_batches
+        .values()
+        .flatten()
+        .chain(
+            sequenced_history
+                .terminal_group_events
+                .iter()
+                .filter(|event| !event.is_data()),
+        )
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
+    assert!(!archived_control_ids.is_empty());
+    let replay_history = Arc::new(
+        EffectHistory::from_cursor_history_for_test(
+            cursor.recorded_flow_id.clone(),
+            cursor.clone(),
+            sequenced_history,
+        )
+        .expect("sequenced cursor history remains valid replay evidence"),
+    );
+
     let replay = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_consults = Arc::new(AtomicUsize::new(0));
     let mut replay_ctx = invocation_context_with_mode(
         replay.clone(),
         parent,
-        Some(terminal_history),
+        Some(replay_history),
         EffectRuntimeMode::ReplayStrict,
         EffectPortRegistry::new(),
     );
@@ -4452,10 +5622,22 @@ async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
     assert!(matches!(replay_error, EffectError::RecordedFailure { .. }));
     assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
     assert_eq!(replay_consults.load(Ordering::SeqCst), 0);
+    let replayed_controls = replay
+        .events()
+        .into_iter()
+        .filter(|envelope| archived_control_ids.contains(&envelope.event.id))
+        .collect::<Vec<_>>();
+    assert_eq!(replayed_controls.len(), archived_control_ids.len());
+    assert!(
+        replayed_controls
+            .iter()
+            .all(|envelope| envelope.event.admission_seq.is_none()),
+        "replayed escape and terminal controls must request a fresh current-run sequence"
+    );
     assert_eq!(
         comparable_effect_journal(&terminal),
         comparable_effect_journal(&replay),
-        "strict replay rematerialises Starts, attempt-scoped escape batches, and terminal byte-for-byte"
+        "strict replay preserves Start, attempt-scoped escape-batch, and terminal durable identity"
     );
 }
 
@@ -4760,6 +5942,7 @@ impl Effect for KeylessEffect {
     const EFFECT_TYPE: &'static str = "test.keyless";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = crate::effects::Portless;
 
     type Outcome = CountingOutput;
     type OutcomeSemantics = crate::effects::DomainFacts;
@@ -4789,6 +5972,7 @@ impl Effect for KeyedEffect {
     const EFFECT_TYPE: &'static str = "test.keyed";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = crate::effects::Portless;
 
     type Outcome = CountingOutput;
     type OutcomeSemantics = crate::effects::DomainFacts;
@@ -5213,22 +6397,19 @@ async fn transactional_boundary_executes_and_commits_the_single_use_operation_on
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let boundary_consults = Arc::new(AtomicUsize::new(0));
-    let mut ports = EffectPortRegistry::new();
-    ports
-        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-            "tx",
-            Arc::new(TransactionalCountingPort {
-                calls: transactional_calls.clone(),
-                commit: true,
-            }),
-        )
-        .expect("transactional test port registration is unique");
-    let mut ctx = invocation_context_with_mode(
+    let (binding, registration) =
+        transactional_counting_binding(Arc::new(TransactionalCountingPort {
+            calls: transactional_calls.clone(),
+            commit: true,
+        }));
+    let ports = registry_with_transactional_counting(registration);
+    let mut ctx = transactional_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
         EffectRuntimeMode::Live,
         ports,
+        &binding,
     );
     ctx.effect_boundary = Some(Arc::new(CountingBoundary {
         consults: boundary_consults.clone(),
@@ -5239,6 +6420,7 @@ async fn transactional_boundary_executes_and_commits_the_single_use_operation_on
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: normal_calls.clone(),
+            binding: binding.invocation(),
         })
         .await
         .expect("single-use boundary execution should commit");
@@ -5262,21 +6444,18 @@ async fn transactional_boundary_committed_failure_overrides_port_return_and_repl
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let port_calls = Arc::new(AtomicUsize::new(0));
     let live_boundary_consults = Arc::new(AtomicUsize::new(0));
-    let mut ports = EffectPortRegistry::new();
-    ports
-        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-            "tx",
-            Arc::new(CommittedFailureTransactionalPort {
-                calls: port_calls.clone(),
-            }),
-        )
-        .expect("transactional test port registration is unique");
-    let mut live_ctx = invocation_context_with_mode(
+    let (binding, registration) =
+        transactional_counting_binding(Arc::new(CommittedFailureTransactionalPort {
+            calls: port_calls.clone(),
+        }));
+    let ports = registry_with_transactional_counting(registration);
+    let mut live_ctx = transactional_invocation_context_with_mode(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
         EffectRuntimeMode::Live,
         ports,
+        &binding,
     );
     live_ctx.effect_boundary = Some(Arc::new(CountingBoundary {
         consults: live_boundary_consults.clone(),
@@ -5287,6 +6466,7 @@ async fn transactional_boundary_committed_failure_overrides_port_return_and_repl
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: normal_calls.clone(),
+            binding: binding.invocation(),
         })
         .await
         .expect_err("the committed failure must override the port's success return");
@@ -5310,12 +6490,13 @@ async fn transactional_boundary_committed_failure_overrides_port_return_and_repl
         .expect("committed transactional failure indexes"),
     );
     let replay_boundary_consults = Arc::new(AtomicUsize::new(0));
-    let mut replay_ctx = invocation_context_with_mode(
+    let mut replay_ctx = transactional_invocation_context_with_mode(
         Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id))),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
         EffectRuntimeMode::ReplayStrict,
         EffectPortRegistry::new(),
+        &binding,
     );
     replay_ctx.effect_boundary = Some(Arc::new(CountingBoundary {
         consults: replay_boundary_consults.clone(),
@@ -5326,6 +6507,7 @@ async fn transactional_boundary_committed_failure_overrides_port_return_and_repl
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls,
+            binding: binding.invocation(),
         })
         .await
         .expect_err("strict replay must return the recorded committed failure");
@@ -5341,22 +6523,19 @@ async fn transactional_boundary_foreign_abort_cannot_reclassify_a_committed_oper
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
-    let mut ports = EffectPortRegistry::new();
-    ports
-        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-            "tx",
-            Arc::new(TransactionalCountingPort {
-                calls: transactional_calls.clone(),
-                commit: true,
-            }),
-        )
-        .expect("transactional test port registration is unique");
-    let mut ctx = invocation_context_with_mode(
+    let (binding, registration) =
+        transactional_counting_binding(Arc::new(TransactionalCountingPort {
+            calls: transactional_calls.clone(),
+            commit: true,
+        }));
+    let ports = registry_with_transactional_counting(registration);
+    let mut ctx = transactional_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
         EffectRuntimeMode::Live,
         ports,
+        &binding,
     );
     ctx.effect_boundary = Some(Arc::new(ExecutedThenForeignAbortBoundary));
     let mut effects = EffectsCore::new(ctx);
@@ -5365,6 +6544,7 @@ async fn transactional_boundary_foreign_abort_cannot_reclassify_a_committed_oper
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: normal_calls.clone(),
+            binding: binding.invocation(),
         })
         .await
         .expect("the supplied operation's committed outcome must remain terminal");
@@ -5387,22 +6567,19 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let foreign_calls = Arc::new(AtomicUsize::new(0));
-    let mut ports = EffectPortRegistry::new();
-    ports
-        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-            "tx",
-            Arc::new(TransactionalCountingPort {
-                calls: transactional_calls.clone(),
-                commit: true,
-            }),
-        )
-        .expect("transactional test port registration is unique");
-    let mut live_ctx = invocation_context_with_mode(
+    let (binding, registration) =
+        transactional_counting_binding(Arc::new(TransactionalCountingPort {
+            calls: transactional_calls.clone(),
+            commit: true,
+        }));
+    let ports = registry_with_transactional_counting(registration);
+    let mut live_ctx = transactional_invocation_context_with_mode(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
         EffectRuntimeMode::Live,
         ports,
+        &binding,
     );
     live_ctx.effect_boundary = Some(Arc::new(ForeignExecutionBoundary {
         foreign_calls: foreign_calls.clone(),
@@ -5413,6 +6590,7 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: normal_calls.clone(),
+            binding: binding.invocation(),
         })
         .await
         .expect_err("a foreign execution report must fail closed");
@@ -5436,34 +6614,24 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
         )
         .expect("recorded provenance failure indexes"),
     );
-    let replay_port_calls = Arc::new(AtomicUsize::new(0));
-    let mut replay_ports = EffectPortRegistry::new();
-    replay_ports
-        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-            "tx",
-            Arc::new(TransactionalCountingPort {
-                calls: replay_port_calls.clone(),
-                commit: true,
-            }),
-        )
-        .expect("transactional replay test port registration is unique");
-    let mut replay = EffectsCore::new(invocation_context_with_mode(
+    let mut replay = EffectsCore::new(transactional_invocation_context_with_mode(
         replay_journal,
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
         EffectRuntimeMode::ReplayStrict,
-        replay_ports,
+        EffectPortRegistry::new(),
+        &binding,
     ));
 
     let replay_err = replay
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls,
+            binding: binding.invocation(),
         })
         .await
         .expect_err("strict replay returns the recorded provenance failure");
     assert!(matches!(replay_err, EffectError::RecordedFailure { .. }));
-    assert_eq!(replay_port_calls.load(Ordering::SeqCst), 0);
     assert_eq!(foreign_calls.load(Ordering::SeqCst), 1);
 }
 
@@ -5473,22 +6641,19 @@ async fn transactional_boundary_abort_records_failure_and_replays() {
     let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
-    let mut ports = EffectPortRegistry::new();
-    ports
-        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-            "tx",
-            Arc::new(TransactionalCountingPort {
-                calls: transactional_calls.clone(),
-                commit: true,
-            }),
-        )
-        .expect("transactional test port registration is unique");
-    let mut live_ctx = invocation_context_with_mode(
+    let (binding, registration) =
+        transactional_counting_binding(Arc::new(TransactionalCountingPort {
+            calls: transactional_calls.clone(),
+            commit: true,
+        }));
+    let ports = registry_with_transactional_counting(registration);
+    let mut live_ctx = transactional_invocation_context_with_mode(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
         EffectRuntimeMode::Live,
         ports,
+        &binding,
     );
     live_ctx.effect_boundary = Some(Arc::new(AbortingBoundary));
     let mut live = EffectsCore::new(live_ctx);
@@ -5497,6 +6662,7 @@ async fn transactional_boundary_abort_records_failure_and_replays() {
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: normal_calls.clone(),
+            binding: binding.invocation(),
         })
         .await
         .expect_err("boundary abort must reject the transactional effect");
@@ -5525,29 +6691,20 @@ async fn transactional_boundary_abort_records_failure_and_replays() {
         )
         .expect("recorded rejection indexes"),
     );
-    let mut replay_ports = EffectPortRegistry::new();
-    let replay_port_calls = Arc::new(AtomicUsize::new(0));
-    replay_ports
-        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-            "tx",
-            Arc::new(TransactionalCountingPort {
-                calls: replay_port_calls.clone(),
-                commit: true,
-            }),
-        )
-        .expect("transactional replay test port registration is unique");
-    let mut replay = EffectsCore::new(invocation_context_with_mode(
+    let mut replay = EffectsCore::new(transactional_invocation_context_with_mode(
         replay_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
         EffectRuntimeMode::ReplayStrict,
-        replay_ports,
+        EffectPortRegistry::new(),
+        &binding,
     ));
 
     let replay_err = replay
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: normal_calls.clone(),
+            binding: binding.invocation(),
         })
         .await
         .expect_err("strict replay returns the recorded rejection");
@@ -5556,7 +6713,6 @@ async fn transactional_boundary_abort_records_failure_and_replays() {
         matches!(&replay_err, EffectError::RecordedFailure { .. }),
         "expected RecordedFailure, got {replay_err:?}"
     );
-    assert_eq!(replay_port_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -5569,6 +6725,11 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
     let writer_id = WriterId::from(stage_id);
     let flow_id = FlowId::new();
     let parent = parent_envelope(writer_id);
+    let (binding, registration) =
+        transactional_counting_binding(Arc::new(TransactionalCountingPort {
+            calls: Arc::new(AtomicUsize::new(0)),
+            commit: true,
+        }));
 
     let make_ctx = |journal: Arc<MemoryJournal<ChainEvent>>,
                     boundary: Option<Arc<dyn EffectBoundary>>,
@@ -5595,7 +6756,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
         effect_ports: ports,
         effect_declarations: vec![
             EffectDeclaration::of::<CountingEffect>(),
-            EffectDeclaration::transactional_effect::<TransactionalCountingEffect>("tx"),
+            EffectDeclaration::transactional(&binding),
         ],
         output_contract: StageOutputContract::empty(),
         backpressure_writer: BackpressureWriter::disabled(),
@@ -5605,16 +6766,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
 
     // Run A: aborted transactional effect, then a counting effect.
     let journal_a = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let mut ports_a = EffectPortRegistry::new();
-    ports_a
-        .insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
-            "tx",
-            Arc::new(TransactionalCountingPort {
-                calls: Arc::new(AtomicUsize::new(0)),
-                commit: true,
-            }),
-        )
-        .expect("transactional test port registration is unique");
+    let ports_a = registry_with_transactional_counting(registration);
     let mut effects_a = EffectsCore::new(make_ctx(
         journal_a.clone(),
         Some(Arc::new(TransactionalOnlyAbortBoundary)),
@@ -5624,6 +6776,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
         .perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: Arc::new(AtomicUsize::new(0)),
+            binding: binding.invocation(),
         })
         .await
         .expect_err("boundary aborts the transactional effect");

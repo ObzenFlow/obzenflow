@@ -162,6 +162,7 @@ impl Effect for CountingEffect {
     const EFFECT_TYPE: &'static str = "join_replay.counting";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = JoinEffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -324,8 +325,7 @@ fn build_live_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefini
                 stream_src = source!(StreamItem => stream_source);
                 joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joined);
                 effectful = effectful_transform!(
-                    JoinedItem -> { FinalOutput, JoinEffectValue } => effectful,
-                    effects: [CountingEffect],
+                    JoinedItem -> { FinalOutput, JoinEffectValue } uses CountingEffect => effectful,
                     observers: []
                 );
                 collector = sink!(FinalOutput => collector);

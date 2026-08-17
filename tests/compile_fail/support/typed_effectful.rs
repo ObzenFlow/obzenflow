@@ -5,7 +5,9 @@
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, StageCompletion,
+    Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError,
+    EffectPortSlotSet, EffectRegistrationBuilder, EffectSafety, Effects,
+    LogicalEffectBindingName, Named, NamedEffect, StageCompletion,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -39,6 +41,7 @@ impl Effect for FirstEffect {
     const EFFECT_TYPE: &'static str = "compile_fail.effectful.first_effect";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = obzenflow_runtime::effects::Portless;
     type Outcome = First;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
 
@@ -53,6 +56,115 @@ impl Effect for FirstEffect {
     async fn execute(&self, _ctx: &mut EffectContext) -> Result<First, EffectError> {
         Ok(First)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZeroSlotEvidence(pub &'static str);
+
+impl EffectBindingEvidence for ZeroSlotEvidence {
+    const SCHEMA_VERSION: u32 = 1;
+
+    fn canonical_bytes(&self) -> obzenflow_core::BoundedBindingEvidence {
+        obzenflow_core::BoundedBindingEvidence::try_new(self.0.as_bytes().to_vec()).unwrap()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ZeroSlotNamedEffect {
+    binding: EffectBindingUse<Self>,
+}
+
+#[async_trait]
+impl Effect for ZeroSlotNamedEffect {
+    const EFFECT_TYPE: &'static str = "compile_fail.effectful.zero_slot_named";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = Named<ZeroSlotEvidence>;
+    type Outcome = First;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
+
+    fn label(&self) -> &str {
+        "zero_slot"
+    }
+
+    fn canonical_input(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<First, EffectError> {
+        Ok(First)
+    }
+}
+
+impl NamedEffect for ZeroSlotNamedEffect {
+    type BindingEvidence = ZeroSlotEvidence;
+
+    fn binding_use(&self) -> &EffectBindingUse<Self> {
+        &self.binding
+    }
+
+    fn required_slots() -> EffectPortSlotSet {
+        EffectPortSlotSet::new()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OtherZeroSlotNamedEffect {
+    binding: EffectBindingUse<Self>,
+}
+
+#[async_trait]
+impl Effect for OtherZeroSlotNamedEffect {
+    const EFFECT_TYPE: &'static str = "compile_fail.effectful.other_zero_slot_named";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = Named<ZeroSlotEvidence>;
+    type Outcome = First;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
+
+    fn label(&self) -> &str {
+        "other_zero_slot"
+    }
+
+    fn canonical_input(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<First, EffectError> {
+        Ok(First)
+    }
+}
+
+impl NamedEffect for OtherZeroSlotNamedEffect {
+    type BindingEvidence = ZeroSlotEvidence;
+
+    fn binding_use(&self) -> &EffectBindingUse<Self> {
+        &self.binding
+    }
+
+    fn required_slots() -> EffectPortSlotSet {
+        EffectPortSlotSet::new()
+    }
+}
+
+pub fn zero_slot_binding() -> EffectBinding<ZeroSlotNamedEffect> {
+    EffectRegistrationBuilder::<ZeroSlotNamedEffect>::new(
+        LogicalEffectBindingName::new("zero_slot").unwrap(),
+        ZeroSlotEvidence("zero"),
+    )
+    .finish()
+    .unwrap()
+    .0
+}
+
+pub fn other_zero_slot_binding() -> EffectBinding<OtherZeroSlotNamedEffect> {
+    EffectRegistrationBuilder::<OtherZeroSlotNamedEffect>::new(
+        LogicalEffectBindingName::new("other_zero_slot").unwrap(),
+        ZeroSlotEvidence("other"),
+    )
+    .finish()
+    .unwrap()
+    .0
 }
 
 #[derive(Clone, Debug)]
@@ -101,6 +213,25 @@ impl EffectfulTransformHandler for AllowsFirstEffect {
     type Input = Input;
     type Output = First;
     type AllowedEffects = obzenflow_runtime::effect_set![FirstEffect];
+
+    async fn process(
+        &self,
+        _input: Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+        fx.emit(First).await?;
+        Ok(fx.complete()?)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AllowsZeroSlotNamedEffect;
+
+#[async_trait]
+impl EffectfulTransformHandler for AllowsZeroSlotNamedEffect {
+    type Input = Input;
+    type Output = First;
+    type AllowedEffects = obzenflow_runtime::effect_set![ZeroSlotNamedEffect];
 
     async fn process(
         &self,

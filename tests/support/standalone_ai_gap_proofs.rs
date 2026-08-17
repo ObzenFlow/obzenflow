@@ -153,43 +153,28 @@ impl EmbeddingClient for WideEmbeddingClient {
 }
 
 fn fixture_targets() -> (ChatTarget, EmbeddingTarget) {
-    let (chat, _) = ChatEffectBinding::ollama("fixture-chat", None)
-        .unwrap()
-        .into_parts();
-    let (embedding, _) = EmbeddingEffectBinding::ollama("fixture-embedding", None)
-        .unwrap()
-        .into_parts();
-    (chat.target().clone(), embedding.target().clone())
+    let (chat, embedding) = base_bindings(None).expect("fixture bindings");
+    (
+        chat.evidence().target().clone(),
+        embedding.evidence().target().clone(),
+    )
 }
 
-fn eager_registry(
-    chat: Arc<dyn ChatClient>,
-    embedding: Arc<dyn EmbeddingClient>,
-) -> EffectPortRegistry {
-    EffectPortRegistry::new()
-        .with_port::<dyn ChatClient>(CHAT_CLIENT_PORT, chat)
-        .unwrap()
-        .with_port::<dyn EmbeddingClient>(EMBEDDING_CLIENT_PORT, embedding)
-        .unwrap()
+fn successful_authority(counters: AuthorityCounters) -> AiAuthority {
+    live_authority(None, Some(counters)).expect("fixture authority")
 }
 
-fn successful_registry(counters: AuthorityCounters) -> EffectPortRegistry {
-    let (chat_target, embedding_target) = fixture_targets();
-    live_registry(chat_target, embedding_target, counters)
+fn empty_authority() -> AiAuthority {
+    live_authority(None, None).expect("fixture replay authority")
 }
 
 fn handlers(
+    chat: EffectBinding<ChatCompletion>,
+    embedding: EffectBinding<EmbeddingGeneration>,
     mapper_failure: MapperFailure,
     mapper_counters: MapperCounters,
     embedding_dimensions: EmbeddingDimensions,
 ) -> GapHandlerBuildResult {
-    let (chat, _) = ChatEffectBinding::ollama("fixture-chat", None)
-        .map_err(|error| Box::new(binding_error("chat", error)))?
-        .into_parts();
-    let (embedding, _) = EmbeddingEffectBinding::ollama("fixture-embedding", None)
-        .map_err(|error| Box::new(binding_error("embedding", error)))?
-        .into_parts();
-
     let request_calls = mapper_counters.request;
     let response_calls = mapper_counters.response;
     let chat = ChatTransformBuilder::from_binding(chat)
@@ -239,13 +224,18 @@ fn finite_flow(
     journal_base: PathBuf,
     tickets: Vec<TicketRaised>,
     outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
-    effect_ports: EffectPortRegistry,
+    authority: AiAuthority,
     mapper_failure: MapperFailure,
     mapper_counters: MapperCounters,
     embedding_dimensions: EmbeddingDimensions,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
+        let chat = authority.chat.clone();
+        let embedding = authority.embedding.clone();
+        let effect_ports = authority.effect_ports.clone();
         let (chat_handler, embedding_handler) = handlers(
+            chat.clone(),
+            embedding.clone(),
             mapper_failure,
             mapper_counters.clone(),
             embedding_dimensions,
@@ -264,13 +254,19 @@ fn finite_flow(
             stages: {
                 input = source!(TicketRaised => input);
                 chat = effectful_transform!(
-                    TicketRaised -> TicketSummarised => chat_handler,
-                    effects: [at_least_once(ChatCompletion) with ai_resilience()],
+                    TicketRaised -> TicketSummarised
+                    uses at_least_once(ChatCompletion)
+                        via chat
+                        with ai_resilience()
+                    => chat_handler,
                     observers: [],
                 );
                 embedding = effectful_transform!(
-                    TicketSummarised -> TicketEmbedded => embedding_handler,
-                    effects: [at_least_once(EmbeddingGeneration) with ai_resilience()],
+                    TicketSummarised -> TicketEmbedded
+                    uses at_least_once(EmbeddingGeneration)
+                        via embedding
+                        with ai_resilience()
+                    => embedding_handler,
                     observers: [],
                 );
                 collected = sink!(TicketEmbedded => collected);
@@ -322,10 +318,15 @@ fn resumable_flow(
     first_id: u64,
     count: u64,
     outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
-    effect_ports: EffectPortRegistry,
+    authority: AiAuthority,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
+        let chat = authority.chat.clone();
+        let embedding = authority.embedding.clone();
+        let effect_ports = authority.effect_ports.clone();
         let (chat_handler, embedding_handler) = handlers(
+            chat.clone(),
+            embedding.clone(),
             MapperFailure::None,
             MapperCounters::default(),
             EmbeddingDimensions::try_from(3).unwrap(),
@@ -344,13 +345,19 @@ fn resumable_flow(
             stages: {
                 input = infinite_source!(TicketRaised => input);
                 chat = effectful_transform!(
-                    TicketRaised -> TicketSummarised => chat_handler,
-                    effects: [at_least_once(ChatCompletion) with ai_resilience()],
+                    TicketRaised -> TicketSummarised
+                    uses at_least_once(ChatCompletion)
+                        via chat
+                        with ai_resilience()
+                    => chat_handler,
                     observers: [],
                 );
                 embedding = effectful_transform!(
-                    TicketSummarised -> TicketEmbedded => embedding_handler,
-                    effects: [at_least_once(EmbeddingGeneration) with ai_resilience()],
+                    TicketSummarised -> TicketEmbedded
+                    uses at_least_once(EmbeddingGeneration)
+                        via embedding
+                        with ai_resilience()
+                    => embedding_handler,
                     observers: [],
                 );
                 collected = sink!(TicketEmbedded => collected);
@@ -393,11 +400,16 @@ impl TypedFiniteSourceHandler for TwoTicketSource {
 fn control_interleaving_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<TicketEmbedded>>>,
-    effect_ports: EffectPortRegistry,
+    authority: AiAuthority,
     mapper_counters: MapperCounters,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
+        let chat = authority.chat.clone();
+        let embedding = authority.embedding.clone();
+        let effect_ports = authority.effect_ports.clone();
         let (chat_handler, embedding_handler) = handlers(
+            chat.clone(),
+            embedding.clone(),
             MapperFailure::None,
             mapper_counters.clone(),
             EmbeddingDimensions::try_from(3).unwrap(),
@@ -416,13 +428,19 @@ fn control_interleaving_flow(
             stages: {
                 input = source!(TicketRaised => input);
                 chat = effectful_transform!(
-                    TicketRaised -> TicketSummarised => chat_handler,
-                    effects: [at_least_once(ChatCompletion) with ai_resilience()],
+                    TicketRaised -> TicketSummarised
+                    uses at_least_once(ChatCompletion)
+                        via chat
+                        with ai_resilience()
+                    => chat_handler,
                     observers: [],
                 );
                 embedding = effectful_transform!(
-                    TicketSummarised -> TicketEmbedded => embedding_handler,
-                    effects: [at_least_once(EmbeddingGeneration) with ai_resilience()],
+                    TicketSummarised -> TicketEmbedded
+                    uses at_least_once(EmbeddingGeneration)
+                        via embedding
+                        with ai_resilience()
+                    => embedding_handler,
                     observers: [],
                 );
                 collected = sink!(TicketEmbedded => collected);
@@ -575,7 +593,7 @@ async fn resume_suppresses_the_committed_prefix_and_executes_one_live_tail_occur
             1,
             1,
             recorded_outputs.clone(),
-            successful_registry(recorded_counters.clone()),
+            successful_authority(recorded_counters.clone()),
         ),
         &recorded_outputs,
         1,
@@ -594,7 +612,7 @@ async fn resume_suppresses_the_committed_prefix_and_executes_one_live_tail_occur
             2,
             1,
             resumed_outputs.clone(),
-            successful_registry(resumed_counters.clone()),
+            successful_authority(resumed_counters.clone()),
         ),
         &resumed_outputs,
         2,
@@ -645,7 +663,7 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
     let initial_chat_calls = Arc::new(AtomicUsize::new(0));
     let initial_embedding_calls = Arc::new(AtomicUsize::new(0));
     let physical_success = Arc::new(Notify::new());
-    let ports = eager_registry(
+    let ports = eager_authority(
         Arc::new(FixtureChatClient {
             target: chat_target,
             calls: initial_chat_calls.clone(),
@@ -727,7 +745,7 @@ async fn ambiguity_recovery_repeats_only_the_in_doubt_embedding_occurrence() {
                 description: "ambiguous embedding".to_string(),
             }],
             resumed_outputs.clone(),
-            successful_registry(resumed_counters.clone()),
+            successful_authority(resumed_counters.clone()),
             MapperFailure::None,
             MapperCounters::default(),
             EmbeddingDimensions::try_from(3).unwrap(),
@@ -773,7 +791,7 @@ async fn recorded_provider_failure_replays_with_the_same_public_classification()
     let journal_base = temp.path().join("journals");
     let (chat_target, embedding_target) = fixture_targets();
     let live_calls = Arc::new(AtomicUsize::new(0));
-    let live_ports = eager_registry(
+    let live_ports = eager_authority(
         Arc::new(FailingChatClient {
             target: chat_target,
             calls: live_calls.clone(),
@@ -827,7 +845,7 @@ async fn recorded_provider_failure_replays_with_the_same_public_classification()
                 description: "provider failure".to_string(),
             }],
             Arc::new(Mutex::new(Vec::new())),
-            EffectPortRegistry::new(),
+            empty_authority(),
             MapperFailure::None,
             MapperCounters::default(),
             EmbeddingDimensions::try_from(3).unwrap(),
@@ -867,7 +885,7 @@ async fn deterministic_mapper_failures_round_trip_on_their_distinct_error_routes
                     description: "deterministic mapper failure".to_string(),
                 }],
                 Arc::new(Mutex::new(Vec::new())),
-                successful_registry(live_counters.clone()),
+                successful_authority(live_counters.clone()),
                 failure,
                 MapperCounters::default(),
                 EmbeddingDimensions::try_from(3).unwrap(),
@@ -908,7 +926,7 @@ async fn deterministic_mapper_failures_round_trip_on_their_distinct_error_routes
                     description: "deterministic mapper failure".to_string(),
                 }],
                 Arc::new(Mutex::new(Vec::new())),
-                EffectPortRegistry::new(),
+                empty_authority(),
                 failure,
                 MapperCounters::default(),
                 EmbeddingDimensions::try_from(3).unwrap(),
@@ -932,7 +950,7 @@ async fn held_provider_serialises_data_and_keeps_eof_out_of_mappers() {
     let release = Arc::new(Semaphore::new(0));
     let mapper_counters = MapperCounters::default();
     let outputs = Arc::new(Mutex::new(Vec::new()));
-    let ports = eager_registry(
+    let ports = eager_authority(
         Arc::new(GatedChatClient {
             target: chat_target,
             calls: chat_calls.clone(),
@@ -1047,7 +1065,7 @@ async fn maximum_release_fixture_measures_one_normalised_reply_and_one_domain_ve
     let journal_base = temp.path().join("journals");
     let (chat_target, embedding_target) = fixture_targets();
     let wide_calls = Arc::new(AtomicUsize::new(0));
-    let ports = eager_registry(
+    let ports = eager_authority(
         Arc::new(FixtureChatClient {
             target: chat_target,
             calls: Arc::new(AtomicUsize::new(0)),

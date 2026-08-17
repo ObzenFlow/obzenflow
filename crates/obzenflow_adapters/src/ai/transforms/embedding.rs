@@ -4,11 +4,9 @@
 
 use crate::ai::{effect_error_to_handler_error, EmbeddingGeneration};
 use async_trait::async_trait;
-use obzenflow_core::ai::{
-    EmbeddingBindingContract, EmbeddingParams, EmbeddingRequestSpec, EmbeddingResponse,
-};
+use obzenflow_core::ai::{EmbeddingParams, EmbeddingRequestSpec, EmbeddingResponse};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{Effects, StageCompletion};
+use obzenflow_runtime::effects::{EffectBinding, Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use std::fmt;
@@ -23,7 +21,7 @@ type ResponseMapper<In, Out> =
 
 /// Typed standalone embedding handler whose only live authority is `fx.perform`.
 pub struct EmbeddingTransform<In, Out> {
-    binding: EmbeddingBindingContract,
+    binding: EffectBinding<EmbeddingGeneration>,
     params: EmbeddingParams,
     input_to_inputs: Arc<InputsMapper<In>>,
     response_to_output: Arc<ResponseMapper<In, Out>>,
@@ -33,7 +31,7 @@ pub struct EmbeddingTransform<In, Out> {
 
 impl<In, Out> EmbeddingTransform<In, Out> {
     pub(crate) fn from_parts(
-        binding: EmbeddingBindingContract,
+        binding: EffectBinding<EmbeddingGeneration>,
         params: EmbeddingParams,
         input_to_inputs: Arc<InputsMapper<In>>,
         response_to_output: Arc<ResponseMapper<In, Out>>,
@@ -92,11 +90,11 @@ where
             inputs: (self.input_to_inputs)(&input)?,
             params: self.params.clone(),
         };
-        let request = spec.bind_target(self.binding.target());
+        let request = spec.bind_target(self.binding.evidence().target());
         let effect = EmbeddingGeneration::new(
             STANDALONE_EMBEDDING_GENERATION_LABEL,
             request,
-            self.binding.target().clone(),
+            self.binding.invocation(),
         )
         .map_err(|error| HandlerError::Validation(error.to_string()))?;
         let reply = fx

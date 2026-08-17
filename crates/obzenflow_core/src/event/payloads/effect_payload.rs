@@ -242,6 +242,7 @@ pub struct EffectDescriptor {
     pub schema_version: EffectSchemaVersion,
     pub stage_logic_version: StageLogicVersion,
     pub canonical_input_hash: CanonicalInputHash,
+    pub binding: crate::effect_binding::EffectBindingIdentity,
 }
 
 impl EffectDescriptor {
@@ -252,12 +253,31 @@ impl EffectDescriptor {
         stage_logic_version: impl Into<StageLogicVersion>,
         canonical_input_hash: impl Into<CanonicalInputHash>,
     ) -> Self {
+        Self::with_binding(
+            effect_type,
+            label,
+            schema_version,
+            stage_logic_version,
+            canonical_input_hash,
+            crate::effect_binding::EffectBindingIdentity::Portless,
+        )
+    }
+
+    pub fn with_binding(
+        effect_type: impl Into<EffectType>,
+        label: impl Into<EffectLabel>,
+        schema_version: impl Into<EffectSchemaVersion>,
+        stage_logic_version: impl Into<StageLogicVersion>,
+        canonical_input_hash: impl Into<CanonicalInputHash>,
+        binding: crate::effect_binding::EffectBindingIdentity,
+    ) -> Self {
         Self {
             effect_type: effect_type.into(),
             label: label.into(),
             schema_version: schema_version.into(),
             stage_logic_version: stage_logic_version.into(),
             canonical_input_hash: canonical_input_hash.into(),
+            binding,
         }
     }
 }
@@ -529,6 +549,9 @@ pub struct EffectFailureCause {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectFailureDetail {
+    /// The selected live/recorded target disagreed with credential-free
+    /// binding evidence. The physical shape predates FLOWIP-132a; values that
+    /// could disclose target or provider configuration are fixed sentinels.
     PortBindingInvariantViolation {
         port: String,
         expected: String,
@@ -780,7 +803,8 @@ mod tests {
                 "label": "test",
                 "schema_version": 1,
                 "stage_logic_version": "v1",
-                "canonical_input_hash": "input"
+                "canonical_input_hash": "input",
+                "binding": { "mode": "portless" }
             },
             "framework_owned": true
         }))
@@ -855,7 +879,8 @@ mod tests {
                 "label": "test",
                 "schema_version": 1,
                 "stage_logic_version": "v1",
-                "canonical_input_hash": "input"
+                "canonical_input_hash": "input",
+                "binding": { "mode": "portless" }
             }
         }))
         .expect("pre-120h provenance should deserialize with origin defaulted");

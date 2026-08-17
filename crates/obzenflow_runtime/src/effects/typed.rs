@@ -43,14 +43,14 @@ where
 /// handler's declared capability set.
 ///
 /// Its blanket implementation preserves the existing [`Member`] proof while
-/// keeping effect permission errors in the vocabulary of `effects:` and
-/// `AllowedEffects`.
+/// keeping effect permission errors in the vocabulary of the stage `uses` clause
+/// and `AllowedEffects`.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "effect `{Self}` is not declared in this handler's `AllowedEffects` set",
     label = "`{Self}` cannot be performed by this handler",
-    note = "add `{Self}` to the canonical stage `effects:` clause (using `transactional(...)` or \
-            `with [...]` when required), then mirror its effect type in the handler's \
+    note = "add `{Self}` to the canonical stage `uses` clause (using `transactional(...)`, \
+            `via`, or bare `with` when required), then mirror its effect type in the handler's \
             `AllowedEffects`, or remove this `perform` call (FLOWIP-120z)"
 )]
 pub trait AllowedEffectsAllowEffect<AllowedEffects, At> {}
@@ -154,6 +154,7 @@ where
 
     /// Complete an invocation that authored at least one durable output fact.
     pub fn complete(&self) -> Result<StageCompletion<Output>, EffectError> {
+        self.core.ensure_authoring_open()?;
         let (committed, event_types) = self.core.committed_fact_evidence();
         if committed == 0 {
             return Err(EffectError::CompletedWithoutOutput {
@@ -165,6 +166,7 @@ where
 
     /// Complete a deliberately output-free invocation.
     pub fn complete_empty(&self) -> Result<StageCompletion<Output>, EffectError> {
+        self.core.ensure_authoring_open()?;
         let (committed, event_types) = self.core.committed_fact_evidence();
         if committed != 0 {
             return Err(EffectError::CompletedEmptyWithOutput {
@@ -200,6 +202,12 @@ where
 
     pub(crate) fn drain_committed_facts(&mut self) -> Vec<ChainEvent> {
         self.core.drain_committed_facts()
+    }
+
+    pub(crate) fn binding_fault_fatal(
+        &self,
+    ) -> Option<crate::stages::common::handler_error::StageFatal> {
+        self.core.binding_fault_fatal()
     }
 
     pub(crate) async fn preflight_settlement_has_no_unused_history(

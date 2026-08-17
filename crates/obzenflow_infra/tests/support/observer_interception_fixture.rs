@@ -148,6 +148,7 @@ impl Effect for AuthoriseShippingEffect {
     const EFFECT_TYPE: &'static str = "shipping.authorise";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = ShippingAuthorised;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -307,14 +308,12 @@ pub(crate) fn build_flow(
         };
         let authorised = match treatment {
             ObserverTreatment::WithoutObservers => effectful_transform!(
-                OrderAccepted -> { ShippingAuthorised, ShippingReady } => authorise_shipping,
-                effects: [AuthoriseShippingEffect],
+                OrderAccepted -> { ShippingAuthorised, ShippingReady } uses AuthoriseShippingEffect => authorise_shipping,
                 observers: []
             ),
             ObserverTreatment::Observers | ObserverTreatment::PanickingObserver => {
                 effectful_transform!(
-                    OrderAccepted -> { ShippingAuthorised, ShippingReady } => authorise_shipping,
-                    effects: [AuthoriseShippingEffect],
+                    OrderAccepted -> { ShippingAuthorised, ShippingReady } uses AuthoriseShippingEffect => authorise_shipping,
                     observers: [effect_observer(
                         "effect-probe",
                         EffectProbeObserver {

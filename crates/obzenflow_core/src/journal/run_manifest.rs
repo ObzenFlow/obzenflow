@@ -27,6 +27,8 @@ pub const RUN_MANIFEST_VERSION: &str = "2.0";
 pub const JOURNAL_FORMAT_VERSION: u32 = 2;
 pub const EFFECT_ATTEMPT_HISTORY_CAPABILITY: &str = "effect_attempt_history";
 pub const BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY: &str = "bounded_direct_fact_admission";
+/// Every persisted effect descriptor carries an explicit portless/named binding identity.
+pub const EFFECT_BINDING_DESCRIPTOR_CAPABILITY: &str = "effect_binding_descriptor";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {

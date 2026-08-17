@@ -1763,10 +1763,9 @@ fn classify_physical_result(
             None
         }
         (PhysicalCallOutcome::Succeeded, Err(_)) => Some(FailureClassification::Success),
-        (
-            PhysicalCallOutcome::Failed,
-            Err(EffectError::EffectPortBindingInvariantViolation { .. }),
-        ) => Some(FailureClassification::Ignored),
+        (PhysicalCallOutcome::Failed, Err(EffectError::EffectTargetInvariantViolation { .. })) => {
+            Some(FailureClassification::Ignored)
+        }
         (PhysicalCallOutcome::Failed, Err(error)) if error_has_health_observation(error) => {
             Some(breaker.classify_effect_error(event, error, ctx))
         }
@@ -1796,7 +1795,8 @@ fn error_has_health_observation(error: &EffectError) -> bool {
                 | "domain"
                 | "execution"
         ),
-        EffectError::Serialization(_)
+        EffectError::BindingAuthority { .. }
+        | EffectError::Serialization(_)
         | EffectError::Journal(_)
         | EffectError::MissingRecordedEffect { .. }
         | EffectError::EffectInDoubt { .. }
@@ -1811,10 +1811,7 @@ fn error_has_health_observation(error: &EffectError) -> bool {
         | EffectError::EmitUnsupported { .. }
         | EffectError::CompletedWithoutOutput { .. }
         | EffectError::CompletedEmptyWithOutput { .. }
-        | EffectError::MissingEffectPort { .. }
-        | EffectError::EffectPortResolutionFailed { .. }
-        | EffectError::EffectPortBindingMismatch { .. }
-        | EffectError::EffectPortBindingInvariantViolation { .. }
+        | EffectError::EffectTargetInvariantViolation { .. }
         | EffectError::DependencyFailed { .. }
         | EffectError::RecoveryAbandoned { .. }
         | EffectError::TransactionalCommitMissing { .. }
@@ -2042,11 +2039,9 @@ mod tests {
             "test.effect_input.v1",
             serde_json::json!({}),
         );
-        let result = Err(EffectError::EffectPortBindingInvariantViolation {
-            port: "chat".to_string(),
-            expected: "fixture/bound".to_string(),
-            observed: "fixture/mutated".to_string(),
-        });
+        let result = Err(EffectError::target_invariant_violation(
+            obzenflow_runtime::effects::EffectPortSlot::<()>::new("chat"),
+        ));
         let ctx = crate::middleware::MiddlewareContext::with_scope(
             obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         );

@@ -1,7 +1,8 @@
-error[E0046]: not all trait items implemented, missing: `SAFETY`
+error[E0046]: not all trait items implemented, missing: `SAFETY`, `BindingMode`
   --> tests/compile_fail/effect_missing_safety.rs:22:1
    |
 22 | impl Effect for MissingSafetyEffect {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `SAFETY` in implementation
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `SAFETY`, `BindingMode` in implementation
    |
    = help: implement the missing item: `const SAFETY: EffectSafety = /* value */;`
+   = help: implement the missing item: `type BindingMode = /* Type */;`

@@ -168,7 +168,7 @@ match outcome {
 }
 ```
 
-Because the effect is declared (`effects: [AuthorizePayment]` on the stage), the
+Because the stage declares `uses AuthorizePayment`, the
 runtime validates the idempotency key before any I/O and journals the outcome
 after it. A non-idempotent charge therefore carries a key the gateway can dedupe
 on, enforced at build and before execution rather than by hope.

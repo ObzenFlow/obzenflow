@@ -7,14 +7,10 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU32;
-use std::sync::Arc;
-
-use super::ResolvedTokenEstimator;
-
 /// The sealed runtime coordinate for ObzenFlow's concrete chat capability.
 ///
-/// User-facing AI syntax selects a [`ChatBindingContract`] lexically. It does
-/// not select or manufacture a runtime registry coordinate.
+/// User-facing AI syntax selects a typed effect binding lexically. It does not
+/// select or manufacture a runtime registry coordinate.
 pub const CHAT_CLIENT_PORT: &str = "chat";
 
 /// The sealed runtime coordinate for ObzenFlow's concrete embedding capability.
@@ -381,8 +377,8 @@ impl ChatRequest {
 /// Target-free request material prepared by an AI role.
 ///
 /// Provider, model, and endpoint identity belong to the selected
-/// [`ChatBindingContract`], not to role logic. Binding a spec produces the
-/// canonical `ChatRequest` wire shape.
+/// the selected typed chat binding, not to role logic. Binding a spec produces
+/// the canonical `ChatRequest` wire shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatRequestSpec {
     pub messages: Vec<ChatMessage>,
@@ -404,76 +400,6 @@ impl ChatRequestSpec {
             tools: self.tools.clone(),
             response_format: self.response_format.clone(),
         }
-    }
-}
-
-struct ChatBindingContractInner {
-    target: ChatTarget,
-    estimator: ResolvedTokenEstimator,
-}
-
-#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
-pub enum ChatBindingContractError {
-    #[error(
-        "chat target model '{target_model}' does not match token estimator model '{estimator_model}'"
-    )]
-    EstimatorModelMismatch {
-        target_model: String,
-        estimator_model: String,
-    },
-}
-
-/// Credential-free, immutable evidence for one concrete chat binding.
-///
-/// Clones share a construction family. That process-local relationship is
-/// used only while building an AI map-reduce composite and is never
-/// serialised, hashed, journalled, or used as live registration authority.
-#[derive(Clone)]
-pub struct ChatBindingContract(Arc<ChatBindingContractInner>);
-
-impl ChatBindingContract {
-    /// Infrastructure-only construction seam. This creates no client or live
-    /// invocation authority.
-    #[doc(hidden)]
-    pub fn from_resolved(
-        target: ChatTarget,
-        estimator: ResolvedTokenEstimator,
-    ) -> Result<Self, ChatBindingContractError> {
-        if target.model != estimator.info().model {
-            return Err(ChatBindingContractError::EstimatorModelMismatch {
-                target_model: target.model,
-                estimator_model: estimator.info().model.clone(),
-            });
-        }
-        Ok(Self(Arc::new(ChatBindingContractInner {
-            target,
-            estimator,
-        })))
-    }
-
-    pub fn target(&self) -> &ChatTarget {
-        &self.0.target
-    }
-
-    pub fn estimator(&self) -> &ResolvedTokenEstimator {
-        &self.0.estimator
-    }
-
-    /// Build-local proof that two values are clones or aliases of the same
-    /// immutable target-and-estimator decision.
-    #[doc(hidden)]
-    pub fn shares_construction_origin(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl fmt::Debug for ChatBindingContract {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ChatBindingContract")
-            .field("target", &self.0.target)
-            .field("estimator_resolution", self.0.estimator.info())
-            .finish_non_exhaustive()
     }
 }
 
@@ -616,36 +542,6 @@ impl fmt::Display for EmbeddingTarget {
     }
 }
 
-#[derive(Clone)]
-pub struct EmbeddingBindingContract(Arc<EmbeddingTarget>);
-
-impl EmbeddingBindingContract {
-    /// Infrastructure-only construction seam. This creates no client or live
-    /// invocation authority.
-    #[doc(hidden)]
-    pub fn from_target(target: EmbeddingTarget) -> Self {
-        Self(Arc::new(target))
-    }
-
-    pub fn target(&self) -> &EmbeddingTarget {
-        &self.0
-    }
-
-    #[doc(hidden)]
-    pub fn shares_construction_origin(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl fmt::Debug for EmbeddingBindingContract {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("EmbeddingBindingContract")
-            .field("target", &self.0)
-            .finish_non_exhaustive()
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct EmbeddingParams {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -706,9 +602,6 @@ pub struct EmbeddingGenerationReply {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::{
-        HeuristicTokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
-    };
 
     #[test]
     fn ai_provider_normalizes_to_lowercase() {
@@ -766,32 +659,6 @@ mod tests {
                 "params": {},
                 "response_format": {"kind": "json_object"}
             })
-        );
-    }
-
-    #[test]
-    fn chat_binding_contract_rejects_an_estimator_for_another_model() {
-        let estimator = ResolvedTokenEstimator::new(
-            Arc::new(HeuristicTokenEstimator::default()),
-            TokenEstimatorResolutionInfo::heuristic(
-                "estimator-model",
-                TokenEstimatorFallbackReason::ExplicitHeuristic,
-                None,
-            ),
-        );
-
-        let error = ChatBindingContract::from_resolved(
-            ChatTarget::new("fixture", "target-model"),
-            estimator,
-        )
-        .expect_err("a contract cannot carry contradictory model evidence");
-
-        assert_eq!(
-            error,
-            ChatBindingContractError::EstimatorModelMismatch {
-                target_model: "target-model".to_string(),
-                estimator_model: "estimator-model".to_string(),
-            }
         );
     }
 

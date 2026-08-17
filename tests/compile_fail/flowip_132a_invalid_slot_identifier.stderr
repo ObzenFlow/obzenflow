@@ -1,0 +1,14 @@
+error[E0080]: evaluation panicked: effect port slot names must match [A-Za-z_][A-Za-z0-9_]{0,63}
+ --> tests/compile_fail/flowip_132a_invalid_slot_identifier.rs:7:37
+  |
+7 | const INVALID: EffectPortSlot<()> = EffectPortSlot::new("https://credential-canary.example");
+  |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `INVALID` failed inside this call
+  |
+note: inside `EffectPortSlot::<()>::new`
+ --> crates/obzenflow_runtime/src/effects/binding.rs
+  |
+  | /         assert!(
+  | |             is_public_identifier_const(label),
+  | |             "effect port slot names must match [A-Za-z_][A-Za-z0-9_]{{0,63}}"
+  | |         );
+  | |_________^ the failure occurred here

@@ -377,6 +377,7 @@ impl RuntimeEffect for HookEffect {
     const EFFECT_TYPE: &'static str = "middleware_hook_binding.effect";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = HookEffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -482,8 +483,7 @@ fn build_flow(
                     HookProofFactory::new(counters.clone(), 1)
                 ]);
                 transform = effectful_transform!(
-                    HookInput -> { HookOutput, HookEffectValue } => hook_transform,
-                    effects: [HookEffect with Box::new(HookProofFactory::new(counters.clone(), 1))],
+                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with Box::new(HookProofFactory::new(counters.clone(), 1)) => hook_transform,
                     observers: []
                 );
                 output = sink!(HookOutput => output_sink with [
@@ -517,8 +517,7 @@ fn build_failure_cause_flow(
             stages: {
                 input = source!(HookInput => hook_source);
                 transform = effectful_transform!(
-                    HookInput -> { HookOutput, HookEffectValue } => hook_transform,
-                    effects: [HookEffect with Box::new(BreakerCauseProofFactory)],
+                    HookInput -> { HookOutput, HookEffectValue } uses HookEffect with Box::new(BreakerCauseProofFactory) => hook_transform,
                     observers: []);
                 output = sink!(HookOutput => output_sink);
             },

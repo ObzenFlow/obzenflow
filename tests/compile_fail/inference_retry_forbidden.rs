@@ -9,11 +9,9 @@ mod support;
 use support::*;
 
 fn main() {
-    let chat = contract();
+    let chat = binding();
     let role = InferenceRole;
     let _ = inference!(
-        Input ->{
-            at_least_once(ChatCompletion) via chat with retry(3)
-        } Output => role
+        Input -> Output uses at_least_once(ChatCompletion) via chat with retry(3) => role
     );
 }

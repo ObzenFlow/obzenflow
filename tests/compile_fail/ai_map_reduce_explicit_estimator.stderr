@@ -4,10 +4,10 @@ error: ai_map_reduce!: `chunking.estimator` is supplied by `via chat`
  8 |       let _ = ai_map_reduce!(
    |  _____________^
  9 | |         Seed -> Out => {
-10 | |             map: [Item] ->{
-11 | |                 at_least_once(ChatCompletion) via chat with policy
+10 | |             map: [Item] -> Partial uses at_least_once(ChatCompletion) via chat with policy => map_role,
+11 | |             reduce: (Seed, [Partial]) -> Out uses at_least_once(ChatCompletion) via chat with policy => finalise_role,
 ...  |
-21 | |     );
+17 | |     );
    | |_____^
    |
    = note: this error originates in the macro `$crate::__obzenflow_ai_map_reduce_build` which comes from the expansion of the macro `ai_map_reduce` (in Nightly builds, run with -Z macro-backtrace for more info)

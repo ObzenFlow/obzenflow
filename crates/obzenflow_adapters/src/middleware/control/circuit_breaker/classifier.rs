@@ -54,7 +54,8 @@ fn effect_error_kind(error: &EffectError) -> ErrorKind {
         EffectError::Validation(_) => ErrorKind::Validation,
         EffectError::Domain(_) => ErrorKind::Domain,
         EffectError::RecordedFailure { error_type, .. } => recorded_error_kind(error_type.as_str()),
-        EffectError::Serialization(_)
+        EffectError::BindingAuthority { .. }
+        | EffectError::Serialization(_)
         | EffectError::Journal(_)
         | EffectError::MissingRecordedEffect { .. }
         | EffectError::EffectInDoubt { .. }
@@ -67,10 +68,7 @@ fn effect_error_kind(error: &EffectError) -> ErrorKind {
         | EffectError::UndeclaredEffect { .. }
         | EffectError::UndeclaredOutput { .. }
         | EffectError::EmitUnsupported { .. }
-        | EffectError::MissingEffectPort { .. }
-        | EffectError::EffectPortResolutionFailed { .. }
-        | EffectError::EffectPortBindingMismatch { .. }
-        | EffectError::EffectPortBindingInvariantViolation { .. }
+        | EffectError::EffectTargetInvariantViolation { .. }
         | EffectError::DependencyFailed { .. }
         | EffectError::RecoveryAbandoned { .. }
         | EffectError::TransactionalCommitMissing { .. }

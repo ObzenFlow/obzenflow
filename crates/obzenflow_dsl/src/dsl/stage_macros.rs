@@ -15,12 +15,12 @@
 //! infinite_source!(Out => handler)
 //! async_infinite_source!(Out => handler)
 //! transform!(In -> Out => handler)
-//! effectful_transform!(In -> Out => handler, effects: [], observers: [])
+//! effectful_transform!(In -> Out uses Effect => handler, observers: [])
 //! stateful!(In -> Out => handler)
-//! effectful_stateful!(In -> Out => handler, effects: [], observers: [])
+//! effectful_stateful!(In -> Out uses Effect => handler, observers: [])
 //! sink!(In => handler)
 //! join!(catalog CatalogStage: Catalog, Stream -> Out => handler)
-//! inference!(In -> { /* effect row */ } Out => role)
+//! inference!(In -> Out uses at_least_once(ChatCompletion) via chat with policy => role)
 //! ai_map_reduce!(Seed -> Out => { /* named roles */ }, chunking: by_budget { /* ... */ })
 //! ```
 //!
@@ -1845,30 +1845,7 @@ macro_rules! transform {
 // effectful_transform!
 // ============================================================================
 
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_effect_declarations_vec {
-    (@push $effects:ident,) => {};
-    (@push $effects:ident, at_least_once($effect:ty) $(, $($rest:tt)*)?) => {{
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
-        $crate::__obzenflow_effect_declarations_vec!(@push $effects, $($($rest)*)?);
-    }};
-    (@push $effects:ident, transactional($effect:ty, $executor:expr) $(, $($rest:tt)*)?) => {{
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
-        $crate::__obzenflow_effect_declarations_vec!(@push $effects, $($($rest)*)?);
-    }};
-    (@push $effects:ident, $effect:ty $(, $($rest:tt)*)?) => {{
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$effect>());
-        $crate::__obzenflow_effect_declarations_vec!(@push $effects, $($($rest)*)?);
-    }};
-    ($($effect_spec:tt)*) => {{
-        let mut __obzenflow_effects = Vec::new();
-        $crate::__obzenflow_effect_declarations_vec!(@push __obzenflow_effects, $($effect_spec)*);
-        __obzenflow_effects
-    }};
-}
-
-/// Entry parser for the `effects:` clause with inline per-effect policy
+/// Entry parser for a `uses` clause with inline per-effect policy
 /// attachments: `Effect with policy`. Each effect position accepts exactly
 /// one aggregate policy expression.
 ///
@@ -1877,13 +1854,160 @@ macro_rules! __obzenflow_effect_declarations_vec {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effect_entries {
+    // Generated AI surfaces accept one constrained row, but lower it through
+    // the same declaration and attachment rules as ordinary effectful stages.
+    (@generated_chat surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with { $($policy:tt)* }
+        $(,)?
+    }) => {
+        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
+    };
+    (@generated_chat surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with retry($($retry:tt)*)
+        $(,)?
+    }) => {
+        compile_error!(concat!(
+            $surface,
+            ": ChatCompletion is NonIdempotentAtLeastOnce; retry is forbidden"
+        ))
+    };
+    (@generated_chat surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with [$($policy:expr),* $(,)?]
+        $(,)?
+    }) => {
+        compile_error!(
+            "an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)"
+        )
+    };
+    (@generated_chat surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with $policy:expr
+        $(,)?
+    }) => {{
+        let __chat_binding: ::obzenflow_runtime::effects::EffectBinding<
+            ::obzenflow_adapters::ai::ChatCompletion,
+        > = $crate::__obzenflow_clone_ai_chat_contract!($surface, $binding);
+        let mut __chat_declarations: Vec<
+            ::obzenflow_runtime::effects::EffectDeclaration,
+        > = Vec::new();
+        let mut __chat_policy_attachments: Vec<
+            $crate::dsl::stage_descriptor::EffectPolicyAttachment,
+        > = Vec::new();
+        $crate::__obzenflow_effect_entries!(
+            @entry __chat_declarations,
+            __chat_policy_attachments,
+            [],
+            at_least_once(::obzenflow_adapters::ai::ChatCompletion)
+                via __chat_binding
+                with $policy
+        );
+        $crate::dsl::ai_effect::GeneratedChatEffectRow {
+            binding: __chat_binding,
+            declarations: __chat_declarations,
+            policy_attachments: __chat_policy_attachments,
+        }
+    }};
+    (@generated_chat surface = $surface:tt, row = { ChatCompletion $($rest:tt)* }) => {
+        compile_error!(concat!(
+            $surface,
+            ": paid non-idempotent ChatCompletion requires \
+             `at_least_once(ChatCompletion)` acknowledgement"
+        ))
+    };
+    (@generated_chat surface = $surface:tt, row = { transactional(ChatCompletion) $($rest:tt)* }) => {
+        compile_error!(concat!(
+            $surface,
+            ": ChatCompletion accepts only `at_least_once(ChatCompletion)`"
+        ))
+    };
+    (@generated_chat surface = $surface:tt, row = { $($invalid:tt)* }) => {
+        compile_error!(concat!(
+            $surface,
+            ": expected `at_least_once(ChatCompletion) via <chat binding> \
+             with <EffectResilience>`"
+        ))
+    };
+
+    // Preserve row diagnostics before the non-path role diagnostic without
+    // maintaining a second generated-row parser.
+    (@generated_chat_then surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with { $($policy:tt)* }
+        $(,)?
+    }, then = { $($then:tt)* }) => {
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = $surface,
+            row = { at_least_once(ChatCompletion) via $binding with { $($policy)* } }
+        )
+    };
+    (@generated_chat_then surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with retry($($retry:tt)*)
+        $(,)?
+    }, then = { $($then:tt)* }) => {
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = $surface,
+            row = { at_least_once(ChatCompletion) via $binding with retry($($retry)*) }
+        )
+    };
+    (@generated_chat_then surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with [$($policy:expr),* $(,)?]
+        $(,)?
+    }, then = { $($then:tt)* }) => {
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = $surface,
+            row = { at_least_once(ChatCompletion) via $binding with [$($policy),*] }
+        )
+    };
+    (@generated_chat_then surface = $surface:tt, row = {
+        at_least_once(ChatCompletion)
+            via $binding:ident
+            with $policy:expr
+        $(,)?
+    }, then = { $($then:tt)* }) => {
+        $($then)*
+    };
+    (@generated_chat_then surface = $surface:tt, row = { $($invalid:tt)* }, then = { $($then:tt)* }) => {
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = $surface,
+            row = { $($invalid)* }
+        )
+    };
+
     // ── end of input ───────────────────────────────────────────────────
     (@entry $effects:ident, $atts:ident, [],) => {};
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+],) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
+        $effects.push(::obzenflow_runtime::effects::declare_effect_without_binding::<$($acc)+>());
     };
 
     // ── paid non-idempotent acknowledgement entries ──────────────────
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) via $binding:ident with $policy:expr, $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::declare_named_at_least_once_effect::<$effect, _>(&$binding));
+        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) via $binding:ident with $policy:expr) => {
+        $effects.push(::obzenflow_runtime::effects::declare_named_at_least_once_effect::<$effect, _>(&$binding));
+        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
+    };
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) via $binding:ident, $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::declare_named_at_least_once_effect::<$effect, _>(&$binding));
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+    (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) via $binding:ident) => {
+        $effects.push(::obzenflow_runtime::effects::declare_named_at_least_once_effect::<$effect, _>(&$binding));
+    };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
         compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
     };
@@ -1891,44 +2015,65 @@ macro_rules! __obzenflow_effect_entries {
         compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
     };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with $policy:expr, $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
+        $effects.push(::obzenflow_runtime::effects::declare_at_least_once_without_binding::<$effect>());
         $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty) with $policy:expr) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
+        $effects.push(::obzenflow_runtime::effects::declare_at_least_once_without_binding::<$effect>());
         $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
     };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty), $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
+        $effects.push(::obzenflow_runtime::effects::declare_at_least_once_without_binding::<$effect>());
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
     (@entry $effects:ident, $atts:ident, [], at_least_once($effect:ty)) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::at_least_once::<$effect>());
+        $effects.push(::obzenflow_runtime::effects::declare_at_least_once_without_binding::<$effect>());
     };
 
     // ── transactional entries (recognized at entry start) ─────────────
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident with [$($policy:expr),* $(,)?] $($rest:tt)*) => {
         compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
     };
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with { $($policy:tt)* } $($rest:tt)*) => {
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident with { $($policy:tt)* } $($rest:tt)*) => {
         compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
     };
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with $policy:expr, $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident with $policy:expr, $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::declare_transactional_effect::<$effect, _>(&$binding));
         $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with $policy:expr) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident with $policy:expr) => {
+        $effects.push(::obzenflow_runtime::effects::declare_transactional_effect::<$effect, _>(&$binding));
         $crate::__obzenflow_effect_entries!(@attach $atts, $effect, $policy);
     };
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr), $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident, $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::declare_transactional_effect::<$effect, _>(&$binding));
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
-    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr)) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty) via $binding:ident) => {
+        $effects.push(::obzenflow_runtime::effects::declare_transactional_effect::<$effect, _>(&$binding));
+    };
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) $($rest:tt)*) => {
+        compile_error!("transactional executors are typed bindings; write `transactional(Effect) via binding`");
+    };
+
+    // ── named ordinary entries ─────────────────────────────────────────
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], via $binding:ident with $policy:expr, $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::declare_named_effect::<$($acc)+, _>(&$binding));
+        $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, $policy);
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], via $binding:ident with $policy:expr) => {
+        $effects.push(::obzenflow_runtime::effects::declare_named_effect::<$($acc)+, _>(&$binding));
+        $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, $policy);
+    };
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], via $binding:ident, $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::declare_named_effect::<$($acc)+, _>(&$binding));
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], via $binding:ident) => {
+        $effects.push(::obzenflow_runtime::effects::declare_named_effect::<$($acc)+, _>(&$binding));
     };
 
     // ── bare `with` attachment terminator ──────────────────────────────
@@ -1939,18 +2084,18 @@ macro_rules! __obzenflow_effect_entries {
         compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
     };
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+], with $policy:expr, $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
+        $effects.push(::obzenflow_runtime::effects::declare_effect_without_binding::<$($acc)+>());
         $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, $policy);
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+], with $policy:expr) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
+        $effects.push(::obzenflow_runtime::effects::declare_effect_without_binding::<$($acc)+>());
         $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, $policy);
     };
 
     // ── comma terminator ────────────────────────────────────────────────
     (@entry $effects:ident, $atts:ident, [$($acc:tt)+], , $($rest:tt)*) => {
-        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
+        $effects.push(::obzenflow_runtime::effects::declare_effect_without_binding::<$($acc)+>());
         $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
     };
 
@@ -1971,7 +2116,137 @@ macro_rules! __obzenflow_effect_entries {
     }};
 }
 
-/// Fail before handler/type-contract expansion when an ordinary effect row
+/// Enforce the public `uses` delimiter law before lowering an effect entry.
+/// A bare clause denotes exactly one entry; a top-level comma means the
+/// author must use the unordered braced set form.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_single_effect_uses_gate {
+    (effects = [$($effects:tt)*], then = [$($then:tt)*]) => {
+        $crate::__obzenflow_single_effect_uses_gate!(
+            @scan
+            seen = no,
+            remaining = [$($effects)*],
+            then = [$($then)*]
+        )
+    };
+    (@scan seen = no, remaining = [], then = [$($then:tt)*]) => {
+        compile_error!("`uses` requires one effect; omit the clause for an effect-free stage")
+    };
+    (@scan seen = yes, remaining = [], then = [$($then:tt)*]) => {
+        $($then)*
+    };
+    (@scan seen = $seen:ident, remaining = [, $($rest:tt)*], then = [$($then:tt)*]) => {
+        compile_error!("multiple effects require an unordered set; write `uses { EffectA, EffectB }`")
+    };
+    (@scan seen = $seen:ident, remaining = [$next:tt $($rest:tt)*], then = [$($then:tt)*]) => {
+        $crate::__obzenflow_single_effect_uses_gate!(
+            @scan
+            seen = yes,
+            remaining = [$($rest)*],
+            then = [$($then)*]
+        )
+    };
+}
+
+/// Braces after `uses` are reserved for a genuine unordered set containing
+/// at least two entries. Commas inside grouped Rust syntax are not visible to
+/// this scanner, matching the effect-entry parser's existing requirement that
+/// generic types with top-level commas be parenthesised.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_multi_effect_uses_gate {
+    (effects = [$($effects:tt)*], then = [$($then:tt)*]) => {
+        $crate::__obzenflow_multi_effect_uses_gate!(
+            @scan
+            seen = no,
+            remaining = [$($effects)*],
+            then = [$($then)*]
+        )
+    };
+    (@scan seen = no, remaining = [], then = [$($then:tt)*]) => {
+        compile_error!("empty effect sets are not a purity marker; write `Input -> Output => handler`")
+    };
+    (@scan seen = yes, remaining = [], then = [$($then:tt)*]) => {
+        compile_error!("a single effect must be written bare; write `uses Effect`")
+    };
+    (@scan seen = yes, remaining = [,], then = [$($then:tt)*]) => {
+        compile_error!("a single effect must be written bare; write `uses Effect`")
+    };
+    (@scan seen = yes, remaining = [, $next:tt $($rest:tt)*], then = [$($then:tt)*]) => {
+        $($then)*
+    };
+    (@scan seen = $seen:ident, remaining = [$next:tt $($rest:tt)*], then = [$($then:tt)*]) => {
+        $crate::__obzenflow_multi_effect_uses_gate!(
+            @scan
+            seen = yes,
+            remaining = [$($rest)*],
+            then = [$($then)*]
+        )
+    };
+}
+
+/// Early teaching diagnostic for the common identifier-only `uses` clause. The
+/// general const guard still compares stable `EFFECT_TYPE`s for qualified and
+/// generic types; this gate prevents an exact duplicate from leaking the
+/// membership-proof implementation before that guard can speak.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effect_duplicate_gate {
+    (effects = [$($effect:ident),+ $(,)?], then = [$($then:tt)*]) => {
+        $crate::__obzenflow_effect_duplicate_gate!(
+            @next seen = [], remaining = [$($effect),+], then = [$($then)*]
+        )
+    };
+    (effects = [$($effects:tt)*], then = [$($then:tt)*]) => {
+        $($then)*
+    };
+    (@next seen = [$($seen:ident),*], remaining = [], then = [$($then:tt)*]) => {
+        $($then)*
+    };
+    (@next seen = [$($seen:ident),*], remaining = [$candidate:ident $(, $rest:ident)*], then = [$($then:tt)*]) => {
+        $crate::__obzenflow_effect_duplicate_gate!(
+            @search
+            all = [$($seen),*],
+            search = [$($seen),*],
+            candidate = $candidate,
+            remaining = [$($rest),*],
+            then = [$($then)*]
+        )
+    };
+    (@search all = [$($all:ident),*], search = [], candidate = $candidate:ident, remaining = [$($rest:ident),*], then = [$($then:tt)*]) => {
+        $crate::__obzenflow_effect_duplicate_gate!(
+            @next
+            seen = [$($all,)* $candidate],
+            remaining = [$($rest),*],
+            then = [$($then)*]
+        )
+    };
+    (@search all = [$($all:ident),*], search = [$head:ident $(, $tail:ident)*], candidate = $candidate:ident, remaining = [$($rest:ident),*], then = [$($then:tt)*]) => {{
+        macro_rules! __obzenflow_compare_effect_identifier {
+            ($head) => {
+                compile_error!(concat!(
+                    "effect declaration `",
+                    stringify!($candidate),
+                    "` appears more than once; each effect type may occur only once"
+                ))
+            };
+            ($_other:ident) => {
+                $crate::__obzenflow_effect_duplicate_gate!(
+                    @search
+                    all = [$($all),*],
+                    search = [$($tail),*],
+                    candidate = $candidate,
+                    remaining = [$($rest),*],
+                    then = [$($then)*]
+                )
+            };
+        }
+        __obzenflow_compare_effect_identifier!($candidate)
+    }};
+}
+
+/// Fail before handler/type-contract expansion when an ordinary `uses` clause
 /// uses a delimiter reserved by FLOWIP-115s. Keeping this as a token scanner
 /// lets qualified and generic effect types pass through without reconstructing
 /// a Rust type grammar in the public macro.
@@ -1980,7 +2255,13 @@ macro_rules! __obzenflow_effect_entries {
 macro_rules! __obzenflow_effect_policy_syntax_gate {
     (effects = [$($effects:tt)*], then = [$($then:tt)*]) => {
         $crate::__obzenflow_effect_policy_syntax_gate!(
-            @scan then = [$($then)*], $($effects)*
+            @scan then = [
+                $crate::__obzenflow_effect_duplicate_gate!(
+                    effects = [$($effects)*],
+                    then = [$($then)*]
+                )
+            ],
+            $($effects)*
         )
     };
     (@scan then = [$($then:tt)*],) => {
@@ -2012,6 +2293,19 @@ macro_rules! __obzenflow_effect_manifest_types {
         ::obzenflow_runtime::effect_set![$($types,)* $($acc)+]
     };
 
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) via $binding:ident with $policy:expr, $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) via $binding:ident with $policy:expr) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $effect]
+    };
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) via $binding:ident, $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [], at_least_once($effect:ty) via $binding:ident) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $effect]
+    };
+
     (@entry [$($types:ty,)*], [], at_least_once($effect:ty) with $policy:expr, $($rest:tt)*) => {
         $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
     };
@@ -2025,17 +2319,40 @@ macro_rules! __obzenflow_effect_manifest_types {
         ::obzenflow_runtime::effect_set![$($types,)* $effect]
     };
 
-    (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr) with $policy:expr, $($rest:tt)*) => {
+    (@entry [$($types:ty,)*], [], transactional($effect:ty) via $binding:ident with $policy:expr, $($rest:tt)*) => {
         $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
     };
-    (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr) with $policy:expr) => {
+    (@entry [$($types:ty,)*], [], transactional($effect:ty) via $binding:ident with $policy:expr) => {
         ::obzenflow_runtime::effect_set![$($types,)* $effect]
     };
+    (@entry [$($types:ty,)*], [], transactional($effect:ty) via $binding:ident, $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [], transactional($effect:ty) via $binding:ident) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $effect]
+    };
+    // Keep the type-only proof coherent while the value parser emits the
+    // single migration diagnostic for the retired string/expression executor
+    // form. Without these arms, the invalid entry is reinterpreted as a type
+    // and obscures the teaching error with unrelated trait failures.
     (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr), $($rest:tt)*) => {
         $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
     };
     (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr)) => {
         ::obzenflow_runtime::effect_set![$($types,)* $effect]
+    };
+
+    (@entry [$($types:ty,)*], [$($acc:tt)+], via $binding:ident with $policy:expr, $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $($acc)+,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [$($acc:tt)+], via $binding:ident with $policy:expr) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $($acc)+]
+    };
+    (@entry [$($types:ty,)*], [$($acc:tt)+], via $binding:ident, $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $($acc)+,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [$($acc:tt)+], via $binding:ident) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $($acc)+]
     };
 
     (@entry [$($types:ty,)*], [$($acc:tt)+], with $policy:expr, $($rest:tt)*) => {
@@ -2228,118 +2545,217 @@ macro_rules! __obzenflow_effectful_transform_typed {
 
 #[doc(hidden)]
 #[macro_export]
+macro_rules! __obzenflow_effectful_transform_row_contract {
+    (name = $name:literal, input = [$($in:tt)+], effects = [], $($rest:tt)*) => {
+        compile_error!("empty effect sets are not a purity marker; write `Input -> Output => handler`")
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)+], then = [
+            $crate::__obzenflow_effectful_transform_typed!(
+                input = exact($($in)+),
+                output = $first,
+                output_contract = [$first $(, $member)*],
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)+],
+                middleware = [$($observer),*]
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_transform_row_contract!(
+            name = $name,
+            input = [$($in)+],
+            effects = [$($effects)+],
+            output = { $first $(, $member)* } => $handler_head $(:: $handler_tail)*,
+            observers: []
+            $(, backpressure: $bp)?
+        )
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)+], then = [
+            $crate::__obzenflow_effectful_transform_typed!(
+                input = exact($($in)+),
+                output = $out,
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)+],
+                middleware = [$($observer),*]
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = $out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_transform_row_contract!(
+            name = $name,
+            input = [$($in)+],
+            effects = [$($effects)+],
+            output = $out => $handler_head $(:: $handler_tail)*,
+            observers: []
+            $(, backpressure: $bp)?
+        )
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = $($rest:tt)*) => {
+        $crate::__obzenflow_handler_path_diagnostic!(
+            "effectful_transform!",
+            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output uses Effect => handler, observers: [...]);"
+        )
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
 macro_rules! __obzenflow_effectful_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_effectful_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($out:ty),+ $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
-        $crate::__obzenflow_stage_middleware_removed!()
+    // Retired arrow-embedded rows receive one teaching diagnostic rather than
+    // falling through as a malformed output type.
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($effects:tt)* } { $first:ty $(, $member:ty)* $(,)? } => $($rest:tt)+) => {
+        compile_error!("effectful_transform!: arrow-embedded effect rows were removed; write `Input -> Output uses Effect => handler`")
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
-        $crate::__obzenflow_stage_middleware_removed!()
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($effects:tt)* } $out:ty => $($rest:tt)+) => {
+        compile_error!("effectful_transform!: arrow-embedded effect rows were removed; write `Input -> Output uses Effect => handler`")
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
-        $crate::__obzenflow_stage_middleware_removed!()
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
-            $crate::__obzenflow_effectful_transform_typed!(
-                input = exact($($in)+),
-                output = $first,
-                output_contract = [$first $(, $member)*],
-                name = $name,
-                handler = $handler_head $(:: $handler_tail)*,
-                effects = [$($effects)*],
-                middleware = [$($mw),*]
-                $(, backpressure = [$bp])?
-            )
-        ])
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
-            $crate::__obzenflow_effectful_transform_typed!(
-                input = exact($($in)+),
-                output = $out,
-                output_contract = [$($member),+],
-                name = $name,
-                handler = $handler_head $(:: $handler_tail)*,
-                effects = [$($effects)*],
-                middleware = [$($mw),*]
-                $(, backpressure = [$bp])?
-            )
-        ])
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
-            $crate::__obzenflow_effectful_transform_typed!(
-                input = exact($($in)+),
-                output = $out,
-                name = $name,
-                handler = $handler_head $(:: $handler_tail)*,
-                effects = [$($effects)*],
-                middleware = [$($mw),*]
-                $(, backpressure = [$bp])?
-            )
-        ])
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
-            $crate::__obzenflow_effectful_transform_typed!(
-                input = exact($($in)+),
-                output = $first,
-                output_contract = [$first $(, $member)*],
-                name = $name,
-                handler = $handler_head $(:: $handler_tail)*,
-                effects = [$($effects)*],
-                middleware = []
-                $(, backpressure = [$bp])?
-            )
-        ])
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
-            $crate::__obzenflow_effectful_transform_typed!(
-                input = exact($($in)+),
-                output = $out,
-                output_contract = [$($member),+],
-                name = $name,
-                handler = $handler_head $(:: $handler_tail)*,
-                effects = [$($effects)*],
-                middleware = []
-                $(, backpressure = [$bp])?
-            )
-        ])
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effect_policy_syntax_gate!(effects = [$($effects)*], then = [
-            $crate::__obzenflow_effectful_transform_typed!(
-                input = exact($($in)+),
-                output = $out,
-                name = $name,
-                handler = $handler_head $(:: $handler_tail)*,
-                effects = [$($effects)*],
-                middleware = []
-                $(, backpressure = [$bp])?
-            )
-        ])
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "effectful_transform!",
-            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);"
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_transform_exact_contract!(
+            @output
+            name = $name,
+            input = [$($in)+],
+            output = [],
+            $($rest)+
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "effectful_transform!",
-            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);"
+
+    // The complete output contract is collected before the capability
+    // clause. This avoids placing an arbitrary identifier after a `ty`
+    // fragment and lets scalar and braced output contracts share one parser.
+    (@output name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], uses { $($effects:tt)* } => $($rest:tt)+) => {
+        $crate::__obzenflow_multi_effect_uses_gate!(effects = [$($effects)*], then = [
+            $crate::__obzenflow_effectful_transform_row_contract!(
+                name = $name,
+                input = [$($in)+],
+                effects = [$($effects)*],
+                output = $($out)+ => $($rest)+
+            )
+        ])
+    };
+    (@output name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], uses $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_transform_exact_contract!(
+            @effect
+            name = $name,
+            input = [$($in)+],
+            output = [$($out)+],
+            effects = [],
+            $($rest)+
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+    (@output name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], => $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_transform_exact_contract!(
+            @pure
+            name = $name,
+            input = [$($in)+],
+            output = [$($out)+],
+            rest = [$($rest)+]
+        )
+    };
+    (@output name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)*], $tok:tt $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_transform_exact_contract!(
+            @output
+            name = $name,
+            input = [$($in)+],
+            output = [$($out)* $tok],
+            $($rest)+
+        )
+    };
+    (@output name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)*], $($rest:tt)*) => {
+        compile_error!("effectful_transform!: expected `Input -> Output uses Effect => handler`")
+    };
+
+    // A bare `uses` clause collects exactly one entry up to the existing
+    // signature-to-handler boundary.
+    (@effect name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], effects = [$($effects:tt)*], => $($rest:tt)+) => {
+        $crate::__obzenflow_single_effect_uses_gate!(effects = [$($effects)*], then = [
+            $crate::__obzenflow_effectful_transform_row_contract!(
+                name = $name,
+                input = [$($in)+],
+                effects = [$($effects)*],
+                output = $($out)+ => $($rest)+
+            )
+        ])
+    };
+    (@effect name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], effects = [$($effects:tt)*], $tok:tt $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_transform_exact_contract!(
+            @effect
+            name = $name,
+            input = [$($in)+],
+            output = [$($out)+],
+            effects = [$($effects)* $tok],
+            $($rest)+
+        )
+    };
+    (@effect name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], effects = [$($effects:tt)*], $($rest:tt)*) => {
+        compile_error!("effectful_transform!: expected `=> handler` after the `uses` clause")
+    };
+
+    // Effect-free `effectful_transform!` remains valid. These arms also keep
+    // the existing path-only handler contract and curated diagnostic.
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [{ $first:ty $(, $member:ty)* $(,)? }], rest = [$handler:expr, effects: [$($effects:tt)*] $($rest:tt)*]) => {
+        compile_error!("effectful_transform!: detached `effects: [...]` was removed; write `Input -> Output uses Effect => handler`")
+    };
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [$out:ty], rest = [$handler:expr, effects: [$($effects:tt)*] $($rest:tt)*]) => {
+        compile_error!("effectful_transform!: detached `effects: [...]` was removed; write `Input -> Output uses Effect => handler`")
+    };
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [{ $first:ty $(, $member:ty)* $(,)? }], rest = [$handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?]) => {
+        $crate::__obzenflow_effectful_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler_head $(:: $handler_tail)*,
+            effects = [],
+            middleware = [$($observer),*]
+            $(, backpressure = [$bp])?
+        )
+    };
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [{ $first:ty $(, $member:ty)* $(,)? }], rest = [$handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?]) => {
+        $crate::__obzenflow_effectful_transform_exact_contract!(
+            @pure
+            name = $name,
+            input = [$($in)+],
+            output = [{ $first $(, $member)* }],
+            rest = [$handler_head $(:: $handler_tail)*, observers: [] $(, backpressure: $bp)?]
+        )
+    };
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [$out:ty], rest = [$handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?]) => {
+        $crate::__obzenflow_effectful_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            name = $name,
+            handler = $handler_head $(:: $handler_tail)*,
+            effects = [],
+            middleware = [$($observer),*]
+            $(, backpressure = [$bp])?
+        )
+    };
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [$out:ty], rest = [$handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?]) => {
+        $crate::__obzenflow_effectful_transform_exact_contract!(
+            @pure
+            name = $name,
+            input = [$($in)+],
+            output = [$out],
+            rest = [$handler_head $(:: $handler_tail)*, observers: [] $(, backpressure: $bp)?]
+        )
+    };
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], rest = [$handler:expr $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?]) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "effectful_transform!",
-            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output => handler, effects: [...], observers: [...]);"
+            "let handler = MyEffectfulTransform::new(...); output = effectful_transform!(Input -> Output uses Effect => handler, observers: [...]);"
         )
+    };
+    (@collect name = $name:literal, in = (), -> $($rest:tt)*) => {
+        compile_error!("effectful_transform!: expected an input type before `->`")
     };
     (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
         $crate::__obzenflow_effectful_transform_exact_contract!(
@@ -2348,9 +2764,6 @@ macro_rules! __obzenflow_effectful_transform_exact_contract {
             in = ($($in)* $tok),
             $($rest)+
         )
-    };
-    (@collect name = $name:literal, in = (), -> $($rest:tt)*) => {
-        compile_error!("effectful_transform!: expected `InputType -> OutputType => handler`");
     };
     (@collect name = $name:literal, in = ($($in:tt)+), $($rest:tt)*) => {
         compile_error!("effectful_transform!: expected `-> OutputType => handler` after input type");
@@ -3069,8 +3482,17 @@ macro_rules! stateful {
 macro_rules! __obzenflow_effectful_stateful_untyped {
     (name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::EffectfulStatefulDescriptor;
+        let mut __obzenflow_effects: Vec<::obzenflow_runtime::effects::EffectDeclaration> =
+            Vec::new();
+        let mut __obzenflow_attachments: Vec<
+            $crate::dsl::stage_descriptor::EffectPolicyAttachment,
+        > = Vec::new();
+        $crate::__obzenflow_effect_entries!(
+            @entry __obzenflow_effects, __obzenflow_attachments, [], $($effects)*
+        );
+        debug_assert!(__obzenflow_attachments.is_empty());
         let mut __desc = EffectfulStatefulDescriptor::new($name, $handler)
-            .with_effect_declarations($crate::__obzenflow_effect_declarations_vec!($($effects)*))
+            .with_effect_declarations(__obzenflow_effects)
             $(.with_observer($mw))*;
         {
             #[allow(unused_mut)]
@@ -3080,6 +3502,91 @@ macro_rules! __obzenflow_effectful_stateful_untyped {
         }
         __desc.build()
     }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_stateful_effect_policy_gate {
+    (effects = [$($effects:tt)*], then = [$($then:tt)*]) => {
+        $crate::__obzenflow_stateful_effect_policy_gate!(
+            @scan
+            then = [
+                $crate::__obzenflow_effect_duplicate_gate!(
+                    effects = [$($effects)*],
+                    then = [$($then)*]
+                )
+            ],
+            $($effects)*
+        )
+    };
+    (@scan then = [$($then:tt)*],) => { $($then)* };
+    (@scan then = [$($then:tt)*], with $($rest:tt)*) => {
+        compile_error!("effectful_stateful!: effect policies require FLOWIP-120l stateful boundary binding; remove the `with` policy or complete FLOWIP-120l")
+    };
+    (@scan then = [$($then:tt)*], $next:tt $($rest:tt)*) => {
+        $crate::__obzenflow_stateful_effect_policy_gate!(@scan then = [$($then)*], $($rest)*)
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effectful_stateful_row_contract {
+    (name = $name:literal, input = [$($in:tt)+], effects = [], $($rest:tt)*) => {
+        compile_error!("empty effect sets are not a purity marker; write `Input -> Output => handler`")
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_stateful_effect_policy_gate!(effects = [$($effects)+], then = [
+            $crate::__obzenflow_effectful_stateful_typed!(
+                input = exact($($in)+),
+                output = $first,
+                output_contract = [$first $(, $member)*],
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)+],
+                middleware = [$($observer),*]
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_stateful_row_contract!(
+            name = $name,
+            input = [$($in)+],
+            effects = [$($effects)+],
+            output = { $first $(, $member)* } => $handler_head $(:: $handler_tail)*,
+            observers: []
+            $(, backpressure: $bp)?
+        )
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_stateful_effect_policy_gate!(effects = [$($effects)+], then = [
+            $crate::__obzenflow_effectful_stateful_typed!(
+                input = exact($($in)+),
+                output = $out,
+                name = $name,
+                handler = $handler_head $(:: $handler_tail)*,
+                effects = [$($effects)+],
+                middleware = [$($observer),*]
+                $(, backpressure = [$bp])?
+            )
+        ])
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = $out:ty => $handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?) => {
+        $crate::__obzenflow_effectful_stateful_row_contract!(
+            name = $name,
+            input = [$($in)+],
+            effects = [$($effects)+],
+            output = $out => $handler_head $(:: $handler_tail)*,
+            observers: []
+            $(, backpressure: $bp)?
+        )
+    };
+    (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = $($rest:tt)*) => {
+        $crate::__obzenflow_handler_path_diagnostic!(
+            "effectful_stateful!",
+            "let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output uses Effect => handler, observers: [...]);"
+        )
+    };
 }
 
 #[doc(hidden)]
@@ -3134,46 +3641,143 @@ macro_rules! __obzenflow_effectful_stateful_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_effectful_stateful_exact_contract!(@collect name = $name, in = (), $($rest)+)
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($out:ty),+ $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
-        $crate::__obzenflow_stage_middleware_removed!()
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($effects:tt)* } { $first:ty $(, $member:ty)* $(,)? } => $($rest:tt)+) => {
+        compile_error!("effectful_stateful!: arrow-embedded effect rows were removed; write `Input -> Output uses Effect => handler`")
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
-        $crate::__obzenflow_stage_middleware_removed!()
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $($effects:tt)* } $out:ty => $($rest:tt)+) => {
+        compile_error!("effectful_stateful!: arrow-embedded effect rows were removed; write `Input -> Output uses Effect => handler`")
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_stateful_exact_contract!(
+            @output
+            name = $name,
+            input = [$($in)+],
+            output = [],
+            $($rest)+
+        )
+    };
+
+    (@output name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], uses { $($effects:tt)* } => $($rest:tt)+) => {
+        $crate::__obzenflow_multi_effect_uses_gate!(effects = [$($effects)*], then = [
+            $crate::__obzenflow_effectful_stateful_row_contract!(
+                name = $name,
+                input = [$($in)+],
+                effects = [$($effects)*],
+                output = $($out)+ => $($rest)+
+            )
+        ])
+    };
+    (@output name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], uses $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_stateful_exact_contract!(
+            @effect
+            name = $name,
+            input = [$($in)+],
+            output = [$($out)+],
+            effects = [],
+            $($rest)+
+        )
+    };
+    (@output name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], => $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_stateful_exact_contract!(
+            @pure
+            name = $name,
+            input = [$($in)+],
+            output = [$($out)+],
+            rest = [$($rest)+]
+        )
+    };
+    (@output name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)*], $tok:tt $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_stateful_exact_contract!(
+            @output
+            name = $name,
+            input = [$($in)+],
+            output = [$($out)* $tok],
+            $($rest)+
+        )
+    };
+    (@output name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)*], $($rest:tt)*) => {
+        compile_error!("effectful_stateful!: expected `Input -> Output uses Effect => handler`")
+    };
+
+    (@effect name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], effects = [$($effects:tt)*], => $($rest:tt)+) => {
+        $crate::__obzenflow_single_effect_uses_gate!(effects = [$($effects)*], then = [
+            $crate::__obzenflow_effectful_stateful_row_contract!(
+                name = $name,
+                input = [$($in)+],
+                effects = [$($effects)*],
+                output = $($out)+ => $($rest)+
+            )
+        ])
+    };
+    (@effect name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], effects = [$($effects:tt)*], $tok:tt $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_stateful_exact_contract!(
+            @effect
+            name = $name,
+            input = [$($in)+],
+            output = [$($out)+],
+            effects = [$($effects)* $tok],
+            $($rest)+
+        )
+    };
+    (@effect name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], effects = [$($effects:tt)*], $($rest:tt)*) => {
+        compile_error!("effectful_stateful!: expected `=> handler` after the `uses` clause")
+    };
+
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [{ $first:ty $(, $member:ty)* $(,)? }], rest = [$handler:expr, effects: [$($effects:tt)*] $($rest:tt)*]) => {
+        compile_error!("effectful_stateful!: detached `effects: [...]` was removed; write `Input -> Output uses Effect => handler`")
+    };
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [$out:ty], rest = [$handler:expr, effects: [$($effects:tt)*] $($rest:tt)*]) => {
+        compile_error!("effectful_stateful!: detached `effects: [...]` was removed; write `Input -> Output uses Effect => handler`")
+    };
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [{ $first:ty $(, $member:ty)* $(,)? }], rest = [$handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?]) => {
         $crate::__obzenflow_effectful_stateful_typed!(
             input = exact($($in)+),
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = $handler_head $(:: $handler_tail)*,
-            effects = [$($effects)*],
-            middleware = [$($mw),*]
+            effects = [],
+            middleware = [$($observer),*]
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [{ $first:ty $(, $member:ty)* $(,)? }], rest = [$handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?]) => {
+        $crate::__obzenflow_effectful_stateful_exact_contract!(
+            @pure
+            name = $name,
+            input = [$($in)+],
+            output = [{ $first $(, $member)* }],
+            rest = [$handler_head $(:: $handler_tail)*, observers: [] $(, backpressure: $bp)?]
+        )
+    };
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [$out:ty], rest = [$handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?]) => {
         $crate::__obzenflow_effectful_stateful_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = $handler_head $(:: $handler_tail)*,
-            effects = [$($effects)*],
-            middleware = [$($mw),*]
+            effects = [],
+            middleware = [$($observer),*]
             $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_handler_path_diagnostic!(
-            "effectful_stateful!",
-            "let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], observers: [...]);"
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [$out:ty], rest = [$handler_head:ident $(:: $handler_tail:ident)* $(, backpressure: $bp:expr)? $(,)?]) => {
+        $crate::__obzenflow_effectful_stateful_exact_contract!(
+            @pure
+            name = $name,
+            input = [$($in)+],
+            output = [$out],
+            rest = [$handler_head $(:: $handler_tail)*, observers: [] $(, backpressure: $bp)?]
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], observers: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
+    (@pure name = $name:literal, input = [$($in:tt)+], output = [$($out:tt)+], rest = [$handler:expr $(, observers: [$($observer:expr),* $(,)?])? $(, backpressure: $bp:expr)? $(,)?]) => {
         $crate::__obzenflow_handler_path_diagnostic!(
             "effectful_stateful!",
-            "let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output => handler, effects: [...], observers: [...]);"
+            "let handler = MyEffectfulStateful::new(...); output = effectful_stateful!(Input -> Output uses Effect => handler, observers: [...]);"
         )
+    };
+    (@collect name = $name:literal, in = (), -> $($rest:tt)*) => {
+        compile_error!("effectful_stateful!: expected an input type before `->`")
     };
     (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
         $crate::__obzenflow_effectful_stateful_exact_contract!(
@@ -3182,9 +3786,6 @@ macro_rules! __obzenflow_effectful_stateful_exact_contract {
             in = ($($in)* $tok),
             $($rest)+
         )
-    };
-    (@collect name = $name:literal, in = (), -> $($rest:tt)*) => {
-        compile_error!("effectful_stateful!: expected `InputType -> OutputType => handler`");
     };
     (@collect name = $name:literal, in = ($($in:tt)+), $($rest:tt)*) => {
         compile_error!("effectful_stateful!: expected `-> OutputType => handler` after input type");
@@ -3801,261 +4402,225 @@ macro_rules! __obzenflow_clone_ai_chat_contract {
         struct $binding {
             _private: (),
         }
-        $crate::dsl::ai_effect::clone_inference_chat_contract::<_, $binding>(&$binding)
+        $crate::dsl::ai_effect::clone_inference_chat_binding::<_, $binding>(&$binding)
     }};
     ($surface:literal, $binding:ident) => {
-        $crate::dsl::ai_effect::clone_chat_contract(&$binding)
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_ai_chat_effect_row {
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with { $($policy:tt)* }
-            $(,)?
-        }
-    ) => {
-        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
-    };
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with retry($($retry:tt)*)
-            $(,)?
-        }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": ChatCompletion is NonIdempotentAtLeastOnce; retry is forbidden"
-        ))
-    };
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with [$($policy:expr),* $(,)?]
-            $(,)?
-        }
-    ) => {
-        compile_error!(
-            "an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)"
-        )
-    };
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with $policy:expr
-            $(,)?
-        }
-    ) => {{
-        let __chat_binding: ::obzenflow_core::ai::ChatBindingContract =
-            $crate::__obzenflow_clone_ai_chat_contract!($surface, $binding);
-        let __chat_policy: Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory> = $policy;
-        (__chat_binding, __chat_policy)
-    }};
-    (
-        surface = $surface:tt,
-        row = { ChatCompletion $($rest:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": paid non-idempotent ChatCompletion requires \
-             `at_least_once(ChatCompletion)` acknowledgement"
-        ))
-    };
-    (
-        surface = $surface:tt,
-        row = { transactional(ChatCompletion) $($rest:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": ChatCompletion accepts only `at_least_once(ChatCompletion)`"
-        ))
-    };
-    (
-        surface = $surface:tt,
-        row = { $($invalid:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": expected `at_least_once(ChatCompletion) via <chat binding> \
-             with <EffectResilience>`"
-        ))
-    };
-}
-
-/// Preserve effect-row diagnostics before reporting a non-path AI role.
-///
-/// Before FLOWIP-133a, an expression role reached effect-row parsing. The
-/// teaching fallback must therefore validate the row first so narrowing the
-/// role slot does not mask an existing, more specific diagnostic.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_ai_effect_row_syntax_then {
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with { $($policy:tt)* }
-            $(,)?
-        },
-        then = { $($then:tt)* }
-    ) => {
-        compile_error!("an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)")
-    };
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with retry($($retry:tt)*)
-            $(,)?
-        },
-        then = { $($then:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": ChatCompletion is NonIdempotentAtLeastOnce; retry is forbidden"
-        ))
-    };
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with [$($policy:expr),* $(,)?]
-            $(,)?
-        },
-        then = { $($then:tt)* }
-    ) => {
-        compile_error!(
-            "an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)"
-        )
-    };
-    (
-        surface = $surface:tt,
-        row = {
-            at_least_once(ChatCompletion)
-                via $binding:ident
-                with $policy:expr
-            $(,)?
-        },
-        then = { $($then:tt)* }
-    ) => {
-        $($then)*
-    };
-    (
-        surface = $surface:tt,
-        row = { ChatCompletion $($rest:tt)* },
-        then = { $($then:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": paid non-idempotent ChatCompletion requires \
-             `at_least_once(ChatCompletion)` acknowledgement"
-        ))
-    };
-    (
-        surface = $surface:tt,
-        row = { transactional(ChatCompletion) $($rest:tt)* },
-        then = { $($then:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": ChatCompletion accepts only `at_least_once(ChatCompletion)`"
-        ))
-    };
-    (
-        surface = $surface:tt,
-        row = { $($invalid:tt)* },
-        then = { $($then:tt)* }
-    ) => {
-        compile_error!(concat!(
-            $surface,
-            ": expected `at_least_once(ChatCompletion) via <chat binding> \
-             with <EffectResilience>`"
-        ))
+        $crate::dsl::ai_effect::clone_chat_binding(&$binding)
     };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_inference_contract {
+    // Retired arrow-embedded singleton row.
     (
         name = $name:literal,
         input = ($($input:tt)+),
         -> { $($row:tt)* } $out:ty => $role_head:ident $(:: $role_tail:ident)*
-        $(,)?
+        $($rest:tt)*
+    ) => {
+        compile_error!("inference!: arrow-embedded effect rows were removed; write `Input -> Output uses at_least_once(ChatCompletion) via chat with resilience => role`")
+    };
+    (
+        name = $name:literal,
+        input = ($($input:tt)+),
+        -> $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_inference_contract!(
+            @output
+            name = $name,
+            input = ($($input)+),
+            output = [],
+            $($rest)+
+        )
+    };
+
+    // Collect the complete output contract before `uses` so it reads and
+    // parses independently from the effect capability.
+    (
+        @output
+        name = $name:literal,
+        input = ($($input:tt)+),
+        output = [$($out:tt)+],
+        uses { $($row:tt)* } => $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_multi_effect_uses_gate!(effects = [$($row)*], then = [
+            $crate::__obzenflow_inference_contract!(
+                @lower
+                name = $name,
+                input = ($($input)+),
+                output = [$($out)+],
+                row = [$($row)*],
+                rest = [$($rest)+]
+            )
+        ])
+    };
+    (
+        @output
+        name = $name:literal,
+        input = ($($input:tt)+),
+        output = [$($out:tt)+],
+        uses $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_inference_contract!(
+            @effect
+            name = $name,
+            input = ($($input)+),
+            output = [$($out)+],
+            row = [],
+            $($rest)+
+        )
+    };
+    (
+        @output
+        name = $name:literal,
+        input = ($($input:tt)+),
+        output = [$($out:tt)+],
+        => $($rest:tt)+
+    ) => {
+        compile_error!(
+            "inference!: expected `Input -> Output uses at_least_once(ChatCompletion) \
+             via <chat binding> with <EffectResilience> => role`"
+        )
+    };
+    (
+        @output
+        name = $name:literal,
+        input = ($($input:tt)+),
+        output = [$($out:tt)*],
+        $token:tt $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_inference_contract!(
+            @output
+            name = $name,
+            input = ($($input)+),
+            output = [$($out)* $token],
+            $($rest)+
+        )
+    };
+    (
+        @output
+        name = $name:literal,
+        input = ($($input:tt)+),
+        output = [$($out:tt)*],
+        $($rest:tt)*
+    ) => {
+        compile_error!("inference!: expected `Input -> Output uses Effect => role`")
+    };
+
+    (
+        @effect
+        name = $name:literal,
+        input = ($($input:tt)+),
+        output = [$($out:tt)+],
+        row = [$($row:tt)*],
+        => $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_single_effect_uses_gate!(effects = [$($row)*], then = [
+            $crate::__obzenflow_inference_contract!(
+                @lower
+                name = $name,
+                input = ($($input)+),
+                output = [$($out)+],
+                row = [$($row)*],
+                rest = [$($rest)+]
+            )
+        ])
+    };
+    (
+        @effect
+        name = $name:literal,
+        input = ($($input:tt)+),
+        output = [$($out:tt)+],
+        row = [$($row:tt)*],
+        $token:tt $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_inference_contract!(
+            @effect
+            name = $name,
+            input = ($($input)+),
+            output = [$($out)+],
+            row = [$($row)* $token],
+            $($rest)+
+        )
+    };
+    (
+        @effect
+        name = $name:literal,
+        input = ($($input:tt)+),
+        output = [$($out:tt)+],
+        row = [$($row:tt)*],
+        $($rest:tt)*
+    ) => {
+        compile_error!("inference!: expected `=> role` after the `uses` clause")
+    };
+
+    (
+        @lower
+        name = $name:literal,
+        input = ($($input:tt)+),
+        output = [$out:ty],
+        row = [$($row:tt)*],
+        rest = [$role_head:ident $(:: $role_tail:ident)* $(,)?]
     ) => {{
-        let (__chat_binding, __chat_policy) =
-            $crate::__obzenflow_ai_chat_effect_row!(
-                surface = "inference!",
-                row = { $($row)* }
-            );
+        let __chat_effect_row = $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = "inference!",
+            row = { $($row)* }
+        );
         $crate::dsl::inference::generated_inference::<$($input)+, $out, _>(
             $name,
             $role_head $(:: $role_tail)*,
-            __chat_binding,
-            __chat_policy,
+            __chat_effect_row,
         )
     }};
     (
+        @lower
         name = $name:literal,
         input = ($($input:tt)+),
-        -> { $($row:tt)* } $out:ty => $role_head:ident $(:: $role_tail:ident)*,
-        chunking: $($chunking:tt)*
+        output = [$out:ty],
+        row = [$($row:tt)*],
+        rest = [$role:expr, chunking: $($chunking:tt)*]
     ) => {
         compile_error!(
             "inference!: `chunking` is not supported; use `ai_map!` or `ai_map_reduce!`"
         )
     };
     (
+        @lower
         name = $name:literal,
         input = ($($input:tt)+),
-        -> { $($row:tt)* } $out:ty => $role:expr,
-        chunking: $($chunking:tt)*
+        output = [$out:ty],
+        row = [$($row:tt)*],
+        rest = [$role:expr $(,)?]
     ) => {
-        compile_error!(
-            "inference!: `chunking` is not supported; use `ai_map!` or `ai_map_reduce!`"
-        )
-    };
-    (
-        name = $name:literal,
-        input = ($($input:tt)+),
-        -> { $($row:tt)* } $out:ty => $role:expr
-        $(,)?
-    ) => {
-        $crate::__obzenflow_ai_effect_row_syntax_then!(
-            surface = "inference!",
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat_then surface = "inference!",
             row = { $($row)* },
             then = {
                 $crate::__obzenflow_handler_path_diagnostic!(
                     "inference!",
-                    "let role = MyRole::new(...); answer = inference!(Input -> { ... } Output => role);"
+                    "let role = MyRole::new(...); answer = inference!(Input -> Output uses Effect => role);"
                 )
             }
         )
     };
     (
+        @lower
         name = $name:literal,
-        input = ($($input:tt)*),
-        -> $($rest:tt)+
+        input = ($($input:tt)+),
+        output = [$($out:tt)*],
+        row = [$($row:tt)*],
+        rest = [$($rest:tt)*]
     ) => {
-        compile_error!(
-            "inference!: expected `Input -> { at_least_once(ChatCompletion) \
-             via <chat binding> with <EffectResilience> } Output => role`"
-        )
+        compile_error!("inference!: expected one scalar output type before `uses`")
+    };
+
+    (
+        name = $name:literal,
+        input = (),
+        -> $($rest:tt)*
+    ) => {
+        compile_error!("inference!: expected an input type before `->`")
     };
     (
         name = $name:literal,
@@ -4099,10 +4664,8 @@ macro_rules! __obzenflow_ai_map_reduce_generated_typed {
         chunker = ($chunker:expr),
         map_role = ($map_role:expr),
         finalise_role = ($finalise_role:expr),
-        map_chat = ($map_chat:expr),
-        finalise_chat = ($finalise_chat:expr),
-        map_policy = ($map_policy:expr),
-        finalise_policy = ($finalise_policy:expr)
+        map_effect_row = ($map_effect_row:expr),
+        finalise_effect_row = ($finalise_effect_row:expr)
     ) => {{
         $crate::dsl::composites::ai_map_reduce::generated_map_reduce::<
             $($seed_ty)+,
@@ -4114,8 +4677,7 @@ macro_rules! __obzenflow_ai_map_reduce_generated_typed {
         >(
             $name,
             ($chunker, $map_role, $finalise_role),
-            ($map_chat, $finalise_chat),
-            ($map_policy, $finalise_policy),
+            ($map_effect_row, $finalise_effect_row),
         )
     }};
 }
@@ -4160,20 +4722,18 @@ macro_rules! __obzenflow_ai_map_reduce_build {
         finalise_row = { $($finalise_row:tt)* },
         chunking = { $($chunking:tt)+ }
     ) => {{
-        let (__map_chat, __map_policy) =
-            $crate::__obzenflow_ai_chat_effect_row!(
-                surface = "ai_map_reduce!",
-                row = { $($map_row)* }
-            );
-        let (__finalise_chat, __finalise_policy) =
-            $crate::__obzenflow_ai_chat_effect_row!(
-                surface = "ai_map_reduce!",
-                row = { $($finalise_row)* }
-            );
+        let __map_effect_row = $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = "ai_map_reduce!",
+            row = { $($map_row)* }
+        );
+        let __finalise_effect_row = $crate::__obzenflow_effect_entries!(
+            @generated_chat surface = "ai_map_reduce!",
+            row = { $($finalise_row)* }
+        );
         let __chunker = $crate::__obzenflow_ai_map_reduce_chunker_by_budget!(
             seed_type = ($($seed_ty)+),
             item_type = ($item_ty),
-            estimator: __map_chat.estimator().estimator(),
+            estimator: __map_effect_row.binding.evidence().estimator().estimator(),
             $($chunking)+
         );
         let _: ::core::marker::PhantomData<$($seed_ty)+> =
@@ -4192,32 +4752,543 @@ macro_rules! __obzenflow_ai_map_reduce_build {
             chunker = (__chunker),
             map_role = ($map_role),
             finalise_role = ($finalise_role),
-            map_chat = (__map_chat),
-            finalise_chat = (__finalise_chat),
-            map_policy = (__map_policy),
-            finalise_policy = (__finalise_policy)
+            map_effect_row = (__map_effect_row),
+            finalise_effect_row = (__finalise_effect_row)
         )
     }};
 }
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_ai_map_reduce_generated_contract {
+macro_rules! __obzenflow_ai_map_reduce_uses_contract {
+    // Retired map-role arrow row.
     (
+        @map
         name = $name:literal,
-        seed = ($($seed_ty:tt)+),
-        -> $out_ty:ty => {
-            map: [$item_ty:ty] -> { $($map_row:tt)* } $partial_ty:ty => $map_role_head:ident $(:: $map_role_tail:ident)*,
-            reduce: ($reduce_seed_ty:ty, [$reduce_partial_ty:ty])
-                -> { $($finalise_row:tt)* } $reduce_out_ty:ty => $finalise_role_head:ident $(:: $finalise_role_tail:ident)*
-                $(,)?
-        },
-        chunking: by_budget { $($chunking:tt)+ }
-        $(,)?
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        chunking = [$($chunking:tt)+],
+        roles = [
+            map: [$item_ty:ty] -> { $($row:tt)* } $partial_ty:ty => $($rest:tt)*
+        ]
+    ) => {
+        compile_error!("ai_map_reduce!: arrow-embedded effect rows were removed; write `map: [Item] -> Partial uses Effect => map_role`")
+    };
+    (
+        @map
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        chunking = [$($chunking:tt)+],
+        roles = [map: [$item_ty:ty] -> $($rest:tt)+]
+    ) => {
+        $crate::__obzenflow_ai_map_reduce_uses_contract!(
+            @map_output
+            name = $name,
+            seed_type = [$seed_ty],
+            out_type = [$out_ty],
+            item_type = [$item_ty],
+            chunking = [$($chunking)+],
+            output = [],
+            $($rest)+
+        )
+    };
+
+    (
+        @map_output
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        chunking = [$($chunking:tt)+],
+        output = [$($partial_ty:tt)+],
+        uses { $($row:tt)* } => $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_multi_effect_uses_gate!(effects = [$($row)*], then = [
+            $crate::__obzenflow_ai_map_reduce_uses_contract!(
+                @map_role
+                name = $name,
+                seed_type = [$seed_ty],
+                out_type = [$out_ty],
+                item_type = [$item_ty],
+                partial_type = [$($partial_ty)+],
+                map_row = [$($row)*],
+                chunking = [$($chunking)+],
+                role = [],
+                remaining = [$($rest)+]
+            )
+        ])
+    };
+    (
+        @map_output
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        chunking = [$($chunking:tt)+],
+        output = [$($partial_ty:tt)+],
+        uses $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_ai_map_reduce_uses_contract!(
+            @map_effect
+            name = $name,
+            seed_type = [$seed_ty],
+            out_type = [$out_ty],
+            item_type = [$item_ty],
+            partial_type = [$($partial_ty)+],
+            chunking = [$($chunking)+],
+            row = [],
+            $($rest)+
+        )
+    };
+    (
+        @map_output
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        chunking = [$($chunking:tt)+],
+        output = [$($partial_ty:tt)+],
+        => $($rest:tt)+
+    ) => {
+        compile_error!("ai_map_reduce!: map role requires `uses at_least_once(ChatCompletion) via <chat binding> with <EffectResilience>`")
+    };
+    (
+        @map_output
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        chunking = [$($chunking:tt)+],
+        output = [$($partial_ty:tt)*],
+        $token:tt $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_ai_map_reduce_uses_contract!(
+            @map_output
+            name = $name,
+            seed_type = [$seed_ty],
+            out_type = [$out_ty],
+            item_type = [$item_ty],
+            chunking = [$($chunking)+],
+            output = [$($partial_ty)* $token],
+            $($rest)+
+        )
+    };
+
+    (
+        @map_effect
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        chunking = [$($chunking:tt)+],
+        row = [$($row:tt)*],
+        => $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_single_effect_uses_gate!(effects = [$($row)*], then = [
+            $crate::__obzenflow_ai_map_reduce_uses_contract!(
+                @map_role
+                name = $name,
+                seed_type = [$seed_ty],
+                out_type = [$out_ty],
+                item_type = [$item_ty],
+                partial_type = [$($partial_ty)+],
+                map_row = [$($row)*],
+                chunking = [$($chunking)+],
+                role = [],
+                remaining = [$($rest)+]
+            )
+        ])
+    };
+    (
+        @map_effect
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        chunking = [$($chunking:tt)+],
+        row = [$($row:tt)*],
+        $token:tt $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_ai_map_reduce_uses_contract!(
+            @map_effect
+            name = $name,
+            seed_type = [$seed_ty],
+            out_type = [$out_ty],
+            item_type = [$item_ty],
+            partial_type = [$($partial_ty)+],
+            chunking = [$($chunking)+],
+            row = [$($row)* $token],
+            $($rest)+
+        )
+    };
+
+    // The comma followed by `reduce:` terminates the map role. Role
+    // expressions remain diagnosed after both effect clauses are validated.
+    (
+        @map_role
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        map_row = [$($map_row:tt)*],
+        chunking = [$($chunking:tt)+],
+        role = [$($map_role:tt)+],
+        remaining = [
+            , reduce: ($reduce_seed_ty:ty, [$reduce_partial_ty:ty])
+                -> { $($finalise_row:tt)* } $reduce_out_ty:ty => $($rest:tt)*
+        ]
+    ) => {
+        compile_error!("ai_map_reduce!: arrow-embedded effect rows were removed; write `reduce: (Seed, [Partial]) -> Output uses Effect => reduce_role`")
+    };
+    (
+        @map_role
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        map_row = [$($map_row:tt)*],
+        chunking = [$($chunking:tt)+],
+        role = [$($map_role:tt)+],
+        remaining = [
+            , reduce: ($reduce_seed_ty:ty, [$reduce_partial_ty:ty]) -> $($rest:tt)+
+        ]
+    ) => {
+        $crate::__obzenflow_ai_map_reduce_uses_contract!(
+            @reduce_output
+            name = $name,
+            seed_type = [$seed_ty],
+            out_type = [$out_ty],
+            item_type = [$item_ty],
+            partial_type = [$($partial_ty)+],
+            map_row = [$($map_row)*],
+            map_role = [$($map_role)+],
+            reduce_seed_type = [$reduce_seed_ty],
+            reduce_partial_type = [$reduce_partial_ty],
+            chunking = [$($chunking)+],
+            output = [],
+            $($rest)+
+        )
+    };
+    (
+        @map_role
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        map_row = [$($map_row:tt)*],
+        chunking = [$($chunking:tt)+],
+        role = [$($map_role:tt)*],
+        remaining = [$token:tt $($rest:tt)*]
+    ) => {
+        $crate::__obzenflow_ai_map_reduce_uses_contract!(
+            @map_role
+            name = $name,
+            seed_type = [$seed_ty],
+            out_type = [$out_ty],
+            item_type = [$item_ty],
+            partial_type = [$($partial_ty)+],
+            map_row = [$($map_row)*],
+            chunking = [$($chunking)+],
+            role = [$($map_role)* $token],
+            remaining = [$($rest)*]
+        )
+    };
+    (
+        @map_role
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        map_row = [$($map_row:tt)*],
+        chunking = [$($chunking:tt)+],
+        role = [$($map_role:tt)*],
+        remaining = []
+    ) => {
+        compile_error!("ai_map_reduce!: expected a role-local `reduce:` declaration after the map role")
+    };
+
+    (
+        @reduce_output
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        map_row = [$($map_row:tt)*],
+        map_role = [$($map_role:tt)+],
+        reduce_seed_type = [$reduce_seed_ty:ty],
+        reduce_partial_type = [$reduce_partial_ty:ty],
+        chunking = [$($chunking:tt)+],
+        output = [$($reduce_out_ty:tt)+],
+        uses { $($row:tt)* } => $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_multi_effect_uses_gate!(effects = [$($row)*], then = [
+            $crate::__obzenflow_ai_map_reduce_uses_contract!(
+                @reduce_role
+                name = $name,
+                seed_type = [$seed_ty],
+                out_type = [$out_ty],
+                item_type = [$item_ty],
+                partial_type = [$($partial_ty)+],
+                map_row = [$($map_row)*],
+                map_role = [$($map_role)+],
+                reduce_seed_type = [$reduce_seed_ty],
+                reduce_partial_type = [$reduce_partial_ty],
+                reduce_out_type = [$($reduce_out_ty)+],
+                finalise_row = [$($row)*],
+                chunking = [$($chunking)+],
+                role = [],
+                remaining = [$($rest)+]
+            )
+        ])
+    };
+    (
+        @reduce_output
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        map_row = [$($map_row:tt)*],
+        map_role = [$($map_role:tt)+],
+        reduce_seed_type = [$reduce_seed_ty:ty],
+        reduce_partial_type = [$reduce_partial_ty:ty],
+        chunking = [$($chunking:tt)+],
+        output = [$($reduce_out_ty:tt)+],
+        uses $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_ai_map_reduce_uses_contract!(
+            @reduce_effect
+            name = $name,
+            seed_type = [$seed_ty],
+            out_type = [$out_ty],
+            item_type = [$item_ty],
+            partial_type = [$($partial_ty)+],
+            map_row = [$($map_row)*],
+            map_role = [$($map_role)+],
+            reduce_seed_type = [$reduce_seed_ty],
+            reduce_partial_type = [$reduce_partial_ty],
+            reduce_out_type = [$($reduce_out_ty)+],
+            chunking = [$($chunking)+],
+            row = [],
+            $($rest)+
+        )
+    };
+    (
+        @reduce_output
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        map_row = [$($map_row:tt)*],
+        map_role = [$($map_role:tt)+],
+        reduce_seed_type = [$reduce_seed_ty:ty],
+        reduce_partial_type = [$reduce_partial_ty:ty],
+        chunking = [$($chunking:tt)+],
+        output = [$($reduce_out_ty:tt)+],
+        => $($rest:tt)+
+    ) => {
+        compile_error!("ai_map_reduce!: reduce role requires `uses at_least_once(ChatCompletion) via <chat binding> with <EffectResilience>`")
+    };
+    (
+        @reduce_output
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        map_row = [$($map_row:tt)*],
+        map_role = [$($map_role:tt)+],
+        reduce_seed_type = [$reduce_seed_ty:ty],
+        reduce_partial_type = [$reduce_partial_ty:ty],
+        chunking = [$($chunking:tt)+],
+        output = [$($reduce_out_ty:tt)*],
+        $token:tt $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_ai_map_reduce_uses_contract!(
+            @reduce_output
+            name = $name,
+            seed_type = [$seed_ty],
+            out_type = [$out_ty],
+            item_type = [$item_ty],
+            partial_type = [$($partial_ty)+],
+            map_row = [$($map_row)*],
+            map_role = [$($map_role)+],
+            reduce_seed_type = [$reduce_seed_ty],
+            reduce_partial_type = [$reduce_partial_ty],
+            chunking = [$($chunking)+],
+            output = [$($reduce_out_ty)* $token],
+            $($rest)+
+        )
+    };
+
+    (
+        @reduce_effect
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        map_row = [$($map_row:tt)*],
+        map_role = [$($map_role:tt)+],
+        reduce_seed_type = [$reduce_seed_ty:ty],
+        reduce_partial_type = [$reduce_partial_ty:ty],
+        reduce_out_type = [$($reduce_out_ty:tt)+],
+        chunking = [$($chunking:tt)+],
+        row = [$($row:tt)*],
+        => $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_single_effect_uses_gate!(effects = [$($row)*], then = [
+            $crate::__obzenflow_ai_map_reduce_uses_contract!(
+                @reduce_role
+                name = $name,
+                seed_type = [$seed_ty],
+                out_type = [$out_ty],
+                item_type = [$item_ty],
+                partial_type = [$($partial_ty)+],
+                map_row = [$($map_row)*],
+                map_role = [$($map_role)+],
+                reduce_seed_type = [$reduce_seed_ty],
+                reduce_partial_type = [$reduce_partial_ty],
+                reduce_out_type = [$($reduce_out_ty)+],
+                finalise_row = [$($row)*],
+                chunking = [$($chunking)+],
+                role = [],
+                remaining = [$($rest)+]
+            )
+        ])
+    };
+    (
+        @reduce_effect
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        map_row = [$($map_row:tt)*],
+        map_role = [$($map_role:tt)+],
+        reduce_seed_type = [$reduce_seed_ty:ty],
+        reduce_partial_type = [$reduce_partial_ty:ty],
+        reduce_out_type = [$($reduce_out_ty:tt)+],
+        chunking = [$($chunking:tt)+],
+        row = [$($row:tt)*],
+        $token:tt $($rest:tt)+
+    ) => {
+        $crate::__obzenflow_ai_map_reduce_uses_contract!(
+            @reduce_effect
+            name = $name,
+            seed_type = [$seed_ty],
+            out_type = [$out_ty],
+            item_type = [$item_ty],
+            partial_type = [$($partial_ty)+],
+            map_row = [$($map_row)*],
+            map_role = [$($map_role)+],
+            reduce_seed_type = [$reduce_seed_ty],
+            reduce_partial_type = [$reduce_partial_ty],
+            reduce_out_type = [$($reduce_out_ty)+],
+            chunking = [$($chunking)+],
+            row = [$($row)* $token],
+            $($rest)+
+        )
+    };
+
+    (
+        @reduce_role
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        map_row = [$($map_row:tt)*],
+        map_role = [$($map_role:tt)+],
+        reduce_seed_type = [$reduce_seed_ty:ty],
+        reduce_partial_type = [$reduce_partial_ty:ty],
+        reduce_out_type = [$($reduce_out_ty:tt)+],
+        finalise_row = [$($finalise_row:tt)*],
+        chunking = [$($chunking:tt)+],
+        role = [$($finalise_role:tt)*],
+        remaining = [$token:tt $($rest:tt)*]
+    ) => {
+        $crate::__obzenflow_ai_map_reduce_uses_contract!(
+            @reduce_role
+            name = $name,
+            seed_type = [$seed_ty],
+            out_type = [$out_ty],
+            item_type = [$item_ty],
+            partial_type = [$($partial_ty)+],
+            map_row = [$($map_row)*],
+            map_role = [$($map_role)+],
+            reduce_seed_type = [$reduce_seed_ty],
+            reduce_partial_type = [$reduce_partial_ty],
+            reduce_out_type = [$($reduce_out_ty)+],
+            finalise_row = [$($finalise_row)*],
+            chunking = [$($chunking)+],
+            role = [$($finalise_role)* $token],
+            remaining = [$($rest)*]
+        )
+    };
+    (
+        @reduce_role
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$($partial_ty:tt)+],
+        map_row = [$($map_row:tt)*],
+        map_role = [$($map_role:tt)+],
+        reduce_seed_type = [$reduce_seed_ty:ty],
+        reduce_partial_type = [$reduce_partial_ty:ty],
+        reduce_out_type = [$($reduce_out_ty:tt)+],
+        finalise_row = [$($finalise_row:tt)*],
+        chunking = [$($chunking:tt)+],
+        role = [$($finalise_role:tt)+],
+        remaining = []
+    ) => {
+        $crate::__obzenflow_ai_map_reduce_uses_contract!(
+            @lower
+            name = $name,
+            seed_type = [$seed_ty],
+            out_type = [$out_ty],
+            item_type = [$item_ty],
+            partial_type = [$($partial_ty)+],
+            map_row = [$($map_row)*],
+            map_role = [$($map_role)+],
+            reduce_seed_type = [$reduce_seed_ty],
+            reduce_partial_type = [$reduce_partial_ty],
+            reduce_out_type = [$($reduce_out_ty)+],
+            finalise_row = [$($finalise_row)*],
+            finalise_role = [$($finalise_role)+],
+            chunking = [$($chunking)+]
+        )
+    };
+
+    (
+        @lower
+        name = $name:literal,
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$partial_ty:ty],
+        map_row = [$($map_row:tt)*],
+        map_role = [$map_role_head:ident $(:: $map_role_tail:ident)* $(,)?],
+        reduce_seed_type = [$reduce_seed_ty:ty],
+        reduce_partial_type = [$reduce_partial_ty:ty],
+        reduce_out_type = [$reduce_out_ty:ty],
+        finalise_row = [$($finalise_row:tt)*],
+        finalise_role = [$finalise_role_head:ident $(:: $finalise_role_tail:ident)* $(,)?],
+        chunking = [$($chunking:tt)+]
     ) => {
         $crate::__obzenflow_ai_map_reduce_build!(
             name = $name,
-            seed_type = ($($seed_ty)+),
+            seed_type = ($seed_ty),
             item_type = ($item_ty),
             partial_type = ($partial_ty),
             out_type = ($out_ty),
@@ -4232,28 +5303,32 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
         )
     };
     (
+        @lower
         name = $name:literal,
-        seed = ($($seed_ty:tt)+),
-        -> $out_ty:ty => {
-            map: [$item_ty:ty] -> { $($map_row:tt)* } $partial_ty:ty => $map_role:expr,
-            reduce: ($reduce_seed_ty:ty, [$reduce_partial_ty:ty])
-                -> { $($finalise_row:tt)* } $reduce_out_ty:ty => $finalise_role_head:ident $(:: $finalise_role_tail:ident)*
-                $(,)?
-        },
-        chunking: by_budget { $($chunking:tt)+ }
-        $(,)?
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$partial_ty:ty],
+        map_row = [$($map_row:tt)*],
+        map_role = [$map_role:expr $(,)?],
+        reduce_seed_type = [$reduce_seed_ty:ty],
+        reduce_partial_type = [$reduce_partial_ty:ty],
+        reduce_out_type = [$reduce_out_ty:ty],
+        finalise_row = [$($finalise_row:tt)*],
+        finalise_role = [$finalise_role_head:ident $(:: $finalise_role_tail:ident)* $(,)?],
+        chunking = [$($chunking:tt)+]
     ) => {
-        $crate::__obzenflow_ai_effect_row_syntax_then!(
-            surface = "ai_map_reduce!",
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat_then surface = "ai_map_reduce!",
             row = { $($map_row)* },
             then = {
-                $crate::__obzenflow_ai_effect_row_syntax_then!(
-                    surface = "ai_map_reduce!",
+                $crate::__obzenflow_effect_entries!(
+                    @generated_chat_then surface = "ai_map_reduce!",
                     row = { $($finalise_row)* },
                     then = {
                         $crate::__obzenflow_handler_path_diagnostic!(
                             "ai_map_reduce! map role",
-                            "let map_role = MyMapRole::new(...); result = ai_map_reduce!(Seed -> Out => { map: [Item] -> { ... } Partial => map_role, ... }, chunking: ...);"
+                            "let map_role = MyMapRole::new(...); use `map: [Item] -> Partial uses Effect => map_role`"
                         )
                     }
                 )
@@ -4261,28 +5336,32 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
         )
     };
     (
+        @lower
         name = $name:literal,
-        seed = ($($seed_ty:tt)+),
-        -> $out_ty:ty => {
-            map: [$item_ty:ty] -> { $($map_row:tt)* } $partial_ty:ty => $map_role_head:ident $(:: $map_role_tail:ident)*,
-            reduce: ($reduce_seed_ty:ty, [$reduce_partial_ty:ty])
-                -> { $($finalise_row:tt)* } $reduce_out_ty:ty => $finalise_role:expr
-                $(,)?
-        },
-        chunking: by_budget { $($chunking:tt)+ }
-        $(,)?
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$partial_ty:ty],
+        map_row = [$($map_row:tt)*],
+        map_role = [$map_role_head:ident $(:: $map_role_tail:ident)* $(,)?],
+        reduce_seed_type = [$reduce_seed_ty:ty],
+        reduce_partial_type = [$reduce_partial_ty:ty],
+        reduce_out_type = [$reduce_out_ty:ty],
+        finalise_row = [$($finalise_row:tt)*],
+        finalise_role = [$finalise_role:expr $(,)?],
+        chunking = [$($chunking:tt)+]
     ) => {
-        $crate::__obzenflow_ai_effect_row_syntax_then!(
-            surface = "ai_map_reduce!",
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat_then surface = "ai_map_reduce!",
             row = { $($map_row)* },
             then = {
-                $crate::__obzenflow_ai_effect_row_syntax_then!(
-                    surface = "ai_map_reduce!",
+                $crate::__obzenflow_effect_entries!(
+                    @generated_chat_then surface = "ai_map_reduce!",
                     row = { $($finalise_row)* },
                     then = {
                         $crate::__obzenflow_handler_path_diagnostic!(
                             "ai_map_reduce! reduce role",
-                            "let reduce_role = MyReduceRole::new(...); result = ai_map_reduce!(Seed -> Out => { ..., reduce: (Seed, [Partial]) -> { ... } Out => reduce_role }, chunking: ...);"
+                            "let reduce_role = MyReduceRole::new(...); use `reduce: (Seed, [Partial]) -> Out uses Effect => reduce_role`"
                         )
                     }
                 )
@@ -4290,23 +5369,27 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
         )
     };
     (
+        @lower
         name = $name:literal,
-        seed = ($($seed_ty:tt)+),
-        -> $out_ty:ty => {
-            map: [$item_ty:ty] -> { $($map_row:tt)* } $partial_ty:ty => $map_role:expr,
-            reduce: ($reduce_seed_ty:ty, [$reduce_partial_ty:ty])
-                -> { $($finalise_row:tt)* } $reduce_out_ty:ty => $finalise_role:expr
-                $(,)?
-        },
-        chunking: by_budget { $($chunking:tt)+ }
-        $(,)?
+        seed_type = [$seed_ty:ty],
+        out_type = [$out_ty:ty],
+        item_type = [$item_ty:ty],
+        partial_type = [$partial_ty:ty],
+        map_row = [$($map_row:tt)*],
+        map_role = [$map_role:expr $(,)?],
+        reduce_seed_type = [$reduce_seed_ty:ty],
+        reduce_partial_type = [$reduce_partial_ty:ty],
+        reduce_out_type = [$reduce_out_ty:ty],
+        finalise_row = [$($finalise_row:tt)*],
+        finalise_role = [$finalise_role:expr $(,)?],
+        chunking = [$($chunking:tt)+]
     ) => {
-        $crate::__obzenflow_ai_effect_row_syntax_then!(
-            surface = "ai_map_reduce!",
+        $crate::__obzenflow_effect_entries!(
+            @generated_chat_then surface = "ai_map_reduce!",
             row = { $($map_row)* },
             then = {
-                $crate::__obzenflow_ai_effect_row_syntax_then!(
-                    surface = "ai_map_reduce!",
+                $crate::__obzenflow_effect_entries!(
+                    @generated_chat_then surface = "ai_map_reduce!",
                     row = { $($finalise_row)* },
                     then = {
                         $crate::__obzenflow_handler_path_diagnostic!(
@@ -4318,6 +5401,11 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
             }
         )
     };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_ai_map_reduce_generated_contract {
     (
         name = $name:literal,
         seed = ($($seed_ty:tt)+),
@@ -4327,8 +5415,31 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
         $(,)?
     ) => {
         compile_error!(
-            "ai_map_reduce!: `effects: { ... }` was replaced by role-local effect rows"
+            "ai_map_reduce!: `effects: { ... }` was replaced by role-local `uses` clauses"
         )
+    };
+    (
+        name = $name:literal,
+        seed = ($($seed_ty:tt)+),
+        -> $out_ty:ty => { $($roles:tt)* },
+        chunking: by_budget { $($chunking:tt)+ }
+        $(,)?
+    ) => {
+        $crate::__obzenflow_ai_map_reduce_uses_contract!(
+            @map
+            name = $name,
+            seed_type = [$($seed_ty)+],
+            out_type = [$out_ty],
+            chunking = [$($chunking)+],
+            roles = [$($roles)*]
+        )
+    };
+    (
+        name = $name:literal,
+        seed = (),
+        -> $($rest:tt)*
+    ) => {
+        compile_error!("ai_map_reduce!: expected a seed type before `->`")
     };
     (
         name = $name:literal,
@@ -4336,8 +5447,8 @@ macro_rules! __obzenflow_ai_map_reduce_generated_contract {
         -> $($rest:tt)+
     ) => {
         compile_error!(
-            "ai_map_reduce!: expected role-local `-> { at_least_once(ChatCompletion) \
-             via <chat binding> with <EffectResilience> }` rows on map and reduce"
+            "ai_map_reduce!: expected role-local `Output uses at_least_once(ChatCompletion) \
+             via <chat binding> with <EffectResilience> => role` clauses on map and reduce"
         )
     };
     (

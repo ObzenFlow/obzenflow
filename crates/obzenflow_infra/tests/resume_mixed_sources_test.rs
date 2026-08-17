@@ -191,6 +191,7 @@ impl Effect for CountingEffect {
     const EFFECT_TYPE: &'static str = "resume_mixed.counting";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = EffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -313,8 +314,7 @@ fn build_flow(
                 inf = infinite_source!(ChannelTick => infinite_handler);
                 merge = transform!(ChannelTick -> Merged => merge_handler);
                 effectful = effectful_transform!(
-                    Merged -> { MixedOutput, EffectValue } => effectful_handler,
-                    effects: [CountingEffect],
+                    Merged -> { MixedOutput, EffectValue } uses CountingEffect => effectful_handler,
                     observers: []
                 );
                 collect = sink!(MixedOutput => collect_handler);

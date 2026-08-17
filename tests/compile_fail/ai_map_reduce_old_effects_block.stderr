@@ -1,4 +1,4 @@
-error: ai_map_reduce!: `effects: { ... }` was replaced by role-local effect rows
+error: ai_map_reduce!: `effects: { ... }` was replaced by role-local `uses` clauses
   --> tests/compile_fail/ai_map_reduce_old_effects_block.rs:8:13
    |
  8 |       let _ = ai_map_reduce!(

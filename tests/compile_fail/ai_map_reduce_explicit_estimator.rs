@@ -7,12 +7,8 @@ use obzenflow_dsl::ai_map_reduce;
 fn main() {
     let _ = ai_map_reduce!(
         Seed -> Out => {
-            map: [Item] ->{
-                at_least_once(ChatCompletion) via chat with policy
-            } Partial => map_role,
-            reduce: (Seed, [Partial]) ->{
-                at_least_once(ChatCompletion) via chat with policy
-            } Out => finalise_role,
+            map: [Item] -> Partial uses at_least_once(ChatCompletion) via chat with policy => map_role,
+            reduce: (Seed, [Partial]) -> Out uses at_least_once(ChatCompletion) via chat with policy => finalise_role,
         },
         chunking: by_budget {
             estimator: estimator,

@@ -178,7 +178,12 @@ impl std::error::Error for HandlerError {}
 
 impl From<crate::effects::EffectError> for HandlerError {
     fn from(error: crate::effects::EffectError) -> Self {
-        Self::Other(error.to_string())
+        match error {
+            crate::effects::EffectError::BindingAuthority { fault } => {
+                Self::Fatal(fault.stage_fatal())
+            }
+            error => Self::Other(error.to_string()),
+        }
     }
 }
 

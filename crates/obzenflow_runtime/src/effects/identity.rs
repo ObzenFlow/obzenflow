@@ -9,16 +9,18 @@ pub(super) fn descriptor_for_effect<E>(
     stage_logic_version: String,
     effect_type: &'static str,
     schema_version: u32,
+    binding: obzenflow_core::EffectBindingIdentity,
 ) -> Result<EffectDescriptor, EffectError>
 where
     E: Effect,
 {
-    Ok(EffectDescriptor::new(
+    Ok(EffectDescriptor::with_binding(
         effect_type,
         effect.label(),
         schema_version,
         stage_logic_version,
         hash_json_value(&effect.canonical_input())?,
+        binding,
     ))
 }
 

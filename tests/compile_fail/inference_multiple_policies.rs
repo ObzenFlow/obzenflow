@@ -9,13 +9,13 @@ mod support;
 use support::*;
 
 fn main() {
-    let chat = contract();
+    let chat = binding();
     let role = InferenceRole;
     let first = obzenflow_adapters::middleware::control::ai_resilience();
     let second = obzenflow_adapters::middleware::control::ai_resilience();
     let _ = inference!(
-        Input ->{
-            at_least_once(ChatCompletion) via chat with { first, second }
-        } Output => role
+        Input -> Output
+            uses at_least_once(ChatCompletion) via chat with { first, second }
+            => role
     );
 }

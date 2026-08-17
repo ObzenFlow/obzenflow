@@ -156,6 +156,7 @@ impl Effect for RetryOnceEffect {
     const EFFECT_TYPE: &'static str = "cb_composition.retry_once";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = CompEffectValue;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -298,8 +299,7 @@ fn build_retry_flow(
                 inputs = source!(CompInput => source_handler with [source_breaker]);
                 fan_out = transform!(CompInput -> CompInput => fan_out_handler);
                 effectful = effectful_transform!(
-                    CompInput -> { CompOutput, CompEffectValue } => effectful_handler,
-                    effects: [RetryOnceEffect with effect_resilience],
+                    CompInput -> { CompOutput, CompEffectValue } uses RetryOnceEffect with effect_resilience => effectful_handler,
                     observers: []
                 );
                 collector = sink!(CompOutput => collector_handler with [sink_breaker]);

@@ -182,6 +182,7 @@ impl Effect for AuthorizeEffect {
     const EFFECT_TYPE: &'static str = "replay_verification.authorize";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = AuthGrant;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -307,12 +308,10 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
                 orders = source!(OrderPlaced => orders_handler);
                 validate = effectful_transform!(
                     OrderPlaced -> { ValidatedOrder, OrderCancelled } => validate_handler,
-                    effects: [],
                     observers: []
                 );
                 authorize = effectful_transform!(
-                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } => authorize_handler,
-                    effects: [AuthorizeEffect],
+                    ValidatedOrder -> { OrderAuthorized, AuthorizationUnavailable, OrderCancelled, AuthGrant } uses AuthorizeEffect => authorize_handler,
                     observers: []
                 );
                 paid_orders = sink!(OrderAuthorized => paid_orders_handler);

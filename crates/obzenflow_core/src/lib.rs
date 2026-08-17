@@ -9,6 +9,7 @@ pub mod build_info;
 pub mod composite;
 pub mod config;
 pub mod contracts;
+pub mod effect_binding;
 pub mod error;
 pub mod event;
 pub mod http_client;
@@ -20,6 +21,10 @@ pub mod time;
 pub mod web;
 
 // Re-export key types for convenience
+pub use effect_binding::{
+    BindingEvidenceDigest, BindingEvidenceError, BoundedBindingEvidence, EffectBindingIdentity,
+    MAX_BINDING_EVIDENCE_BYTES,
+};
 pub use error::Result;
 pub use event::chain_event::ChainEvent;
 pub use event::context::runtime_context;

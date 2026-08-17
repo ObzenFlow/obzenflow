@@ -8,11 +8,15 @@ use super::support::*;
 use crate::middleware::{EffectResilience, RateLimiter, RateLimiterBuilder};
 use obzenflow_core::event::EventEnvelope;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader};
-use obzenflow_core::{FlowId, JournalId, JournalOwner, JournalWriterId, TypedPayload};
+use obzenflow_core::{
+    BoundedBindingEvidence, FlowId, JournalId, JournalOwner, JournalWriterId, TypedPayload,
+};
 use obzenflow_runtime::backpressure::BackpressureWriter;
 use obzenflow_runtime::effects::{
-    Effect, EffectCommitHandle, EffectContext, EffectDeclaration, EffectInvocationContext,
-    EffectPortRegistry, Effects, TransactionalEffectPort,
+    transactional_effect_port_slot, Effect, EffectBindingEvidence, EffectBindingUse,
+    EffectCommitHandle, EffectContext, EffectDeclaration, EffectInvocationContext,
+    EffectPortRegistry, EffectPortSlotSet, EffectRegistrationBuilder, Effects,
+    LogicalEffectBindingName, Named, NamedEffect, TransactionalEffectPort,
 };
 use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::feed_plan::StageOutputContract;
@@ -142,13 +146,27 @@ impl TypedPayload for TransactionProbeOutput {
 }
 
 #[derive(Clone, Debug)]
-struct TransactionProbe;
+struct TransactionProbe {
+    binding: EffectBindingUse<Self>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TransactionProbeEvidence;
+
+impl EffectBindingEvidence for TransactionProbeEvidence {
+    const SCHEMA_VERSION: u32 = 1;
+
+    fn canonical_bytes(&self) -> BoundedBindingEvidence {
+        BoundedBindingEvidence::try_new(b"transaction-probe".to_vec()).unwrap()
+    }
+}
 
 #[async_trait]
 impl Effect for TransactionProbe {
     const EFFECT_TYPE: &'static str = "effect.retry";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Transactional;
+    type BindingMode = Named<TransactionProbeEvidence>;
 
     type Outcome = TransactionProbeOutput;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -163,6 +181,18 @@ impl Effect for TransactionProbe {
 
     async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         panic!("transaction probe must execute through its transactional port")
+    }
+}
+
+impl NamedEffect for TransactionProbe {
+    type BindingEvidence = TransactionProbeEvidence;
+
+    fn binding_use(&self) -> &EffectBindingUse<Self> {
+        &self.binding
+    }
+
+    fn required_slots() -> EffectPortSlotSet {
+        EffectPortSlotSet::single(transactional_effect_port_slot::<Self>())
     }
 }
 
@@ -210,7 +240,7 @@ fn effect_context(
     calls: Arc<AtomicUsize>,
     trace: Arc<Mutex<Vec<String>>>,
     mode: TransactionProbeMode,
-) -> EffectInvocationContext {
+) -> (EffectInvocationContext, EffectBindingUse<TransactionProbe>) {
     let writer_id = WriterId::from(stage_id);
     let parent = EventEnvelope::new(
         JournalWriterId::new(),
@@ -220,15 +250,23 @@ fn effect_context(
             json!(TransactionProbeInput),
         ),
     );
+    let (binding, registration) = EffectRegistrationBuilder::<TransactionProbe>::new(
+        LogicalEffectBindingName::new("tx").unwrap(),
+        TransactionProbeEvidence,
+    )
+    .bind_eager(
+        transactional_effect_port_slot::<TransactionProbe>(),
+        Arc::new(TransactionProbePort { calls, trace, mode })
+            as Arc<dyn TransactionalEffectPort<TransactionProbe>>,
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+    let invocation = binding.invocation();
     let mut effect_ports = EffectPortRegistry::new();
-    effect_ports
-        .insert::<dyn TransactionalEffectPort<TransactionProbe>>(
-            "tx",
-            Arc::new(TransactionProbePort { calls, trace, mode }),
-        )
-        .expect("transaction probe port registration is unique");
+    effect_ports.install(registration).unwrap();
 
-    EffectInvocationContext {
+    let context = EffectInvocationContext {
         flow_id: FlowId::new(),
         stage_id,
         stage_key: "single_use_effect_boundary".to_string(),
@@ -249,19 +287,19 @@ fn effect_context(
         effect_history: None,
         runtime_execution: RuntimeExecution::new(RuntimeMode::Live, None),
         effect_ports,
-        effect_declarations: vec![EffectDeclaration::transactional_effect::<TransactionProbe>(
-            "tx",
-        )],
+        effect_declarations: vec![EffectDeclaration::transactional(&binding)],
         output_contract: StageOutputContract::empty(),
         backpressure_writer: BackpressureWriter::disabled(),
         emit_enabled: false,
         effect_boundary: None,
-    }
+    };
+    (context, invocation)
 }
 
 #[derive(Clone, Debug)]
 struct TransactionProbeHandler {
     terminal_error: Arc<Mutex<Option<EffectError>>>,
+    binding: EffectBindingUse<TransactionProbe>,
 }
 
 #[async_trait]
@@ -275,7 +313,12 @@ impl EffectfulTransformHandler for TransactionProbeHandler {
         _input: Self::Input,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
-        match fx.perform(TransactionProbe).await {
+        match fx
+            .perform(TransactionProbe {
+                binding: self.binding.clone(),
+            })
+            .await
+        {
             Ok(_) => Ok(fx.complete()?),
             Err(error) => {
                 *self.terminal_error.lock().unwrap() = Some(error);
@@ -310,12 +353,13 @@ async fn invoke_with_boundary_mode(
     trace: Arc<Mutex<Vec<String>>>,
     mode: TransactionProbeMode,
 ) -> EffectError {
-    let context = effect_context(stage_id, calls, trace, mode);
+    let (context, binding) = effect_context(stage_id, calls, trace, mode);
     let input = context.parent.event.clone();
     let terminal_error = Arc::new(Mutex::new(None));
     let adapter = EffectfulTransformHandlerAdapter::new(
         TransactionProbeHandler {
             terminal_error: terminal_error.clone(),
+            binding,
         },
         Arc::new(boundary),
     );

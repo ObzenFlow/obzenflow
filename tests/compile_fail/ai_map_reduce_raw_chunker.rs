@@ -27,13 +27,24 @@ impl TransformHandler for RawChunker {
 }
 
 fn main() {
+    let chat = binding();
+    let map_effect_row = obzenflow_dsl::__obzenflow_effect_entries!(
+        @generated_chat surface = "ai_map_reduce!",
+        row = {
+            at_least_once(ChatCompletion) via chat with
+                obzenflow_adapters::middleware::control::ai_resilience()
+        }
+    );
+    let finalise_effect_row = obzenflow_dsl::__obzenflow_effect_entries!(
+        @generated_chat surface = "ai_map_reduce!",
+        row = {
+            at_least_once(ChatCompletion) via chat with
+                obzenflow_adapters::middleware::control::ai_resilience()
+        }
+    );
     let _ = generated_map_reduce::<Seed, Item, Partial, Output, _, _>(
         "raw-chunker",
         (RawChunker, MapRole, FinaliseRole),
-        (contract(), contract()),
-        (
-            obzenflow_adapters::middleware::control::ai_resilience(),
-            obzenflow_adapters::middleware::control::ai_resilience(),
-        ),
+        (map_effect_row, finalise_effect_row),
     );
 }

@@ -19,12 +19,18 @@ mod tests {
     use crate::dsl::composition::{FlowMember, IntoFlowMember};
     use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
     use crate::dsl::typing::TypeHint;
+    use obzenflow_adapters::ai::{
+        ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, CHAT_CLIENT,
+    };
     use obzenflow_core::ai::{
         AiFinaliseRole, AiInferenceRole, AiMapReduceChunkFailed, AiMapReducePlanningManifest,
-        AiMapReduceTaggedPartial, AiMapRole, AiRoleLogicFailure, ChatBindingContract,
-        ChatCompletionReply, ChatMessage, ChatParams, ChatRequestSpec, ChatTarget,
-        HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenEstimatorFallbackReason,
-        TokenEstimatorResolutionInfo,
+        AiMapReduceTaggedPartial, AiMapRole, AiRoleLogicFailure, ChatCompletionReply, ChatMessage,
+        ChatParams, ChatRequestSpec, ChatTarget, HeuristicTokenEstimator, Many,
+        ResolvedTokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
+    };
+    use obzenflow_runtime::effects::{
+        EffectBinding, EffectPortResolutionError, EffectRegistrationBuilder,
+        LogicalEffectBindingName,
     };
 
     #[derive(Debug, Clone)]
@@ -166,12 +172,27 @@ mod tests {
         )
     }
 
-    fn test_chat_contract(target_model: &str, estimator_model: &str) -> ChatBindingContract {
-        ChatBindingContract::from_resolved(
+    fn test_chat_binding(
+        target_model: &str,
+        estimator_model: &str,
+    ) -> EffectBinding<ChatCompletion> {
+        let evidence = ChatBindingEvidence::new(
             ChatTarget::new("ollama", target_model),
             test_estimator(estimator_model),
         )
-        .expect("test chat target and estimator models agree")
+        .expect("test chat target and estimator models agree");
+        EffectRegistrationBuilder::<ChatCompletion>::new(
+            LogicalEffectBindingName::new("chat").unwrap(),
+            evidence,
+        )
+        .bind_deferred_with_metadata(
+            CHAT_CLIENT,
+            Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
+        )
+        .unwrap()
+        .finish()
+        .unwrap()
+        .0
     }
 
     fn mk_transform(name: &str) -> Box<dyn StageDescriptor> {
@@ -184,19 +205,19 @@ mod tests {
     }
 
     fn generated_digest() -> Box<dyn crate::dsl::composition::CompositeDescriptor> {
-        let chat = test_chat_contract("test-model", "test-model");
+        let chat = test_chat_binding("test-model", "test-model");
         crate::ai_map_reduce!(
             TestSeed -> TestOut => {
-                map: [TestItem] ->{
-                    at_least_once(ChatCompletion)
+                map: [TestItem] -> TestPartial
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } TestPartial => TestMapRole,
-                reduce: (TestSeed, [TestPartial]) ->{
-                    at_least_once(ChatCompletion)
+                    => TestMapRole,
+                reduce: (TestSeed, [TestPartial]) -> TestOut
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } TestOut => TestFinaliseRole,
+                    => TestFinaliseRole,
             },
             chunking: by_budget {
                 items: |seed: &TestSeed| seed.items.clone(),
@@ -210,13 +231,13 @@ mod tests {
 
     #[test]
     fn inference_lowers_to_one_generated_transform_with_the_exact_three_row_plan() {
-        let chat = test_chat_contract("test-model", "test-model");
+        let chat = test_chat_binding("test-model", "test-model");
         let mut inference = crate::inference!(
-            TestSeed ->{
-                at_least_once(ChatCompletion)
+            TestSeed -> TestOut
+                uses at_least_once(ChatCompletion)
                     via chat
                     with obzenflow_adapters::middleware::control::ai_resilience()
-            } TestOut => TestInferenceRole
+                => TestInferenceRole
         );
         inference.set_name("brief".to_string());
 
@@ -230,7 +251,10 @@ mod tests {
 
         let declarations = inference.effect_declarations();
         assert_eq!(declarations.len(), 1);
-        assert_eq!(declarations[0].effect_type, "obzenflow.ai.chat_completion");
+        assert_eq!(
+            declarations[0].effect_type(),
+            "obzenflow.ai.chat_completion"
+        );
         let policies = inference.effect_policy_attachments();
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0].effect_type, "obzenflow.ai.chat_completion");
@@ -353,19 +377,19 @@ mod tests {
 
     #[test]
     fn ai_map_reduce_effect_protocol_syntax_lowers_fixed_generated_roles() {
-        let chat = test_chat_contract("test-model", "test-model");
+        let chat = test_chat_binding("test-model", "test-model");
         let digest = crate::ai_map_reduce!(
             TestSeed -> TestOut => {
-                map: [TestItem] ->{
-                    at_least_once(ChatCompletion)
+                map: [TestItem] -> TestPartial
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } TestPartial => TestMapRole,
-                reduce: (TestSeed, [TestPartial]) ->{
-                    at_least_once(ChatCompletion)
+                    => TestMapRole,
+                reduce: (TestSeed, [TestPartial]) -> TestOut
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } TestOut => TestFinaliseRole,
+                    => TestFinaliseRole,
             },
             chunking: by_budget {
                 items: |seed: &TestSeed| seed.items.clone(),
@@ -391,29 +415,32 @@ mod tests {
                 .expect("generated effectful role");
             let declarations = descriptor.effect_declarations();
             assert_eq!(declarations.len(), 1);
-            assert_eq!(declarations[0].effect_type, "obzenflow.ai.chat_completion");
+            assert_eq!(
+                declarations[0].effect_type(),
+                "obzenflow.ai.chat_completion"
+            );
         }
     }
 
     #[test]
     fn ai_map_reduce_rejects_generated_roles_without_effect_resilience() {
-        let chat = test_chat_contract("test-model", "test-model");
+        let chat = test_chat_binding("test-model", "test-model");
         let digest = crate::ai_map_reduce!(
             TestSeed -> TestOut => {
-                map: [TestItem] ->{
-                    at_least_once(ChatCompletion)
+                map: [TestItem] -> TestPartial
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with Box::new(
                             obzenflow_adapters::middleware::RateLimiterFactory::new(1.0)
                         )
-                } TestPartial => TestMapRole,
-                reduce: (TestSeed, [TestPartial]) ->{
-                    at_least_once(ChatCompletion)
+                    => TestMapRole,
+                reduce: (TestSeed, [TestPartial]) -> TestOut
+                    uses at_least_once(ChatCompletion)
                         via chat
                         with Box::new(
                             obzenflow_adapters::middleware::RateLimiterFactory::new(1.0)
                         )
-                } TestOut => TestFinaliseRole,
+                    => TestFinaliseRole,
             },
             chunking: by_budget {
                 items: |seed: &TestSeed| seed.items.clone(),
@@ -441,7 +468,7 @@ mod tests {
 
     #[test]
     fn ai_map_reduce_rejects_an_estimator_for_a_different_target_model() {
-        let error = ChatBindingContract::from_resolved(
+        let error = ChatBindingEvidence::new(
             ChatTarget::new("ollama", "test-model"),
             test_estimator("different-model"),
         )
@@ -449,34 +476,34 @@ mod tests {
 
         assert!(matches!(
             error,
-            obzenflow_core::ai::ChatBindingContractError::EstimatorModelMismatch {
-                ref target_model,
-                ref estimator_model,
-            } if target_model == "test-model" && estimator_model == "different-model"
+            ChatBindingEvidenceBuildError::EstimatorModelMismatch
         ));
     }
 
     #[test]
     fn ai_map_reduce_rejects_equal_but_separately_constructed_chat_contracts() {
-        let map_chat = test_chat_contract("test-model", "test-model");
-        let finalise_chat = test_chat_contract("test-model", "test-model");
-        assert_eq!(map_chat.target(), finalise_chat.target());
+        let map_chat = test_chat_binding("test-model", "test-model");
+        let finalise_chat = test_chat_binding("test-model", "test-model");
+        assert_eq!(
+            map_chat.evidence().target(),
+            finalise_chat.evidence().target()
+        );
         assert!(
-            !map_chat.shares_construction_origin(&finalise_chat),
+            !map_chat.shares_construction_family(&finalise_chat),
             "the witness needs equal metadata from distinct construction decisions"
         );
         let digest = crate::ai_map_reduce!(
             TestSeed -> TestOut => {
-                map: [TestItem] ->{
-                    at_least_once(ChatCompletion)
+                map: [TestItem] -> TestPartial
+                    uses at_least_once(ChatCompletion)
                         via map_chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } TestPartial => TestMapRole,
-                reduce: (TestSeed, [TestPartial]) ->{
-                    at_least_once(ChatCompletion)
+                    => TestMapRole,
+                reduce: (TestSeed, [TestPartial]) -> TestOut
+                    uses at_least_once(ChatCompletion)
                         via finalise_chat
                         with obzenflow_adapters::middleware::control::ai_resilience()
-                } TestOut => TestFinaliseRole,
+                    => TestFinaliseRole,
             },
             chunking: by_budget {
                 items: |seed: &TestSeed| seed.items.clone(),
@@ -497,8 +524,8 @@ mod tests {
             error,
             crate::dsl::FlowBuildError::BindingConfiguration { binding, detail }
                 if binding == "chat"
-                    && detail.contains("must be clones of one ChatBindingContract")
-                    && detail.contains("equal target metadata does not prove")
+                    && detail.contains("must be clones of one EffectBinding<ChatCompletion>")
+                    && detail.contains("equal evidence does not prove")
         ));
     }
 

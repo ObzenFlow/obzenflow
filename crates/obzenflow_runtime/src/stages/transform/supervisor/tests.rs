@@ -6,13 +6,15 @@
 
 use super::*;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry, DirectFactAdmission};
-use crate::effects::EffectPortRegistry;
+use crate::effects::{
+    BindingAuthorityFault, BindingMismatchKind, EffectPortRegistry, LogicalEffectBindingName,
+};
 use crate::feed_plan::StageOutputContract;
 use crate::id_conversions::StageIdExt;
 use crate::pipeline::config::CycleGuardConfig;
 use crate::stages::common::control_strategies::JonestownSignalStrategy;
 use crate::stages::common::cycle_guard::CycleGuard;
-use crate::stages::common::handler_error::HandlerError;
+use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::common::handlers::{TransformHandler, TypedTransformHandlerAdapter};
 use crate::stages::resources_builder::SubscriptionFactory;
 use crate::stages::transform::fsm::{
@@ -25,7 +27,9 @@ use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::event::{
+    ChainEventFactory, StageFatalCode, StageFatalReason, StageFatalRecorded, SystemEvent,
+};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -313,6 +317,22 @@ struct FilterHandler;
 impl TransformHandler for FilterHandler {
     fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(Vec::new())
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BindingFatalHandler {
+    fatal: StageFatal,
+}
+
+#[async_trait]
+impl TransformHandler for BindingFatalHandler {
+    fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        Err(HandlerError::Fatal(self.fatal.clone()))
     }
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
@@ -709,6 +729,86 @@ async fn typed_try_map_failure_has_identical_running_and_draining_credit_contrac
             1,
             "the failed input is acknowledged after its error parent commits"
         );
+    }
+}
+
+#[tokio::test]
+async fn binding_fatal_records_once_and_redacted_in_running_and_draining() {
+    const AUTHORITY_CANARY: &str = "credential-canary://user:secret@provider.example";
+
+    for draining in [false, true] {
+        let fault = BindingAuthorityFault::binding_mismatch(
+            "https://credential-canary.example",
+            Some(LogicalEffectBindingName::new("chat").unwrap()),
+            BindingMismatchKind::Evidence,
+        );
+        let fatal = fault.stage_fatal();
+        assert!(!fatal.detail.contains(AUTHORITY_CANARY));
+        assert!(!fatal.detail.contains("credential-canary"));
+        let (mut supervisor, mut ctx, registry, s, t, _k, upstream_journal, _data_journal) =
+            build_transform_harness(
+                |_| BindingFatalHandler {
+                    fatal: fatal.clone(),
+                },
+                1,
+                1,
+            )
+            .await;
+        TransformHandler::install_writer_id(&mut ctx.handler, WriterId::from(t));
+
+        let upstream_writer = registry.writer(s);
+        upstream_writer.reserve(1).expect("seed reserve").commit(1);
+        upstream_journal
+            .append(
+                ChainEventFactory::data_event(
+                    WriterId::from(s),
+                    "test.binding_fatal_input",
+                    json!({ "value": 1 }),
+                ),
+                None,
+            )
+            .await
+            .expect("append binding-fatal input");
+
+        let directive = if draining {
+            supervisor
+                .dispatch_state(&TransformState::Draining, &mut ctx)
+                .await
+                .expect("dispatch binding fatal while draining")
+        } else {
+            supervisor
+                .dispatch_state(&TransformState::Running, &mut ctx)
+                .await
+                .expect("dispatch binding fatal while running")
+        };
+        assert!(
+            matches!(
+                directive,
+                EventLoopDirective::Transition(TransformEvent::Error(_))
+            ),
+            "draining={draining}, directive={directive:?}"
+        );
+
+        let error_events = ctx
+            .error_journal
+            .read_causally_ordered()
+            .await
+            .expect("read binding-fatal error journal");
+        let fatals = error_events
+            .iter()
+            .filter_map(|envelope| StageFatalRecorded::try_from_event(&envelope.event).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(fatals.len(), 1, "draining={draining}");
+        assert_eq!(fatals[0].code, StageFatalCode::Configuration);
+        assert_eq!(
+            fatals[0].reason,
+            StageFatalReason::EffectPortBindingMismatch
+        );
+        assert_eq!(fatals[0].input_position, Some(1));
+        assert!(fatals[0].detail.contains("invalid_effect_type"));
+        let serialized = serde_json::to_string(&error_events).expect("fatal events serialize");
+        assert!(!serialized.contains(AUTHORITY_CANARY));
+        assert!(!serialized.contains("credential-canary"));
     }
 }
 

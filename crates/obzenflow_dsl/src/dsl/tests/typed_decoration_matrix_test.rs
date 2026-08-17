@@ -11,9 +11,12 @@
 mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-    use obzenflow_core::{ChainEvent, TypedPayload};
+    use obzenflow_core::{BoundedBindingEvidence, ChainEvent, TypedPayload};
     use obzenflow_runtime::effects::{
-        Effect, EffectContext, EffectError, EffectSafety, Effects, StageCompletion,
+        transactional_effect_port_slot, Effect, EffectBinding, EffectBindingEvidence,
+        EffectBindingUse, EffectContext, EffectError, EffectPortResolutionError, EffectPortSlotSet,
+        EffectRegistrationBuilder, EffectSafety, Effects, LogicalEffectBindingName, Named,
+        NamedEffect, StageCompletion,
     };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -273,13 +276,27 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
-    struct TxEffect;
+    struct TxEffect {
+        binding: EffectBindingUse<Self>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct TxEvidence;
+
+    impl EffectBindingEvidence for TxEvidence {
+        const SCHEMA_VERSION: u32 = 1;
+
+        fn canonical_bytes(&self) -> BoundedBindingEvidence {
+            BoundedBindingEvidence::try_new(b"typed-decoration-tx".to_vec()).unwrap()
+        }
+    }
 
     #[async_trait]
     impl Effect for TxEffect {
         const EFFECT_TYPE: &'static str = "test.tx_effect";
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::Transactional;
+        type BindingMode = Named<TxEvidence>;
 
         type Outcome = Out;
         type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -295,6 +312,33 @@ mod tests {
         async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
             Ok(Out)
         }
+    }
+
+    impl NamedEffect for TxEffect {
+        type BindingEvidence = TxEvidence;
+
+        fn binding_use(&self) -> &EffectBindingUse<Self> {
+            &self.binding
+        }
+
+        fn required_slots() -> EffectPortSlotSet {
+            EffectPortSlotSet::single(transactional_effect_port_slot::<Self>())
+        }
+    }
+
+    fn tx_binding() -> EffectBinding<TxEffect> {
+        EffectRegistrationBuilder::<TxEffect>::new(
+            LogicalEffectBindingName::new("tx").unwrap(),
+            TxEvidence,
+        )
+        .bind_deferred(
+            transactional_effect_port_slot::<TxEffect>(),
+            std::sync::Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
+        )
+        .unwrap()
+        .finish()
+        .unwrap()
+        .0
     }
 
     #[test]
@@ -339,7 +383,6 @@ mod tests {
         let _ = crate::effectful_transform!(
             name: "effectful_transform",
             In -> Out => effectful_transform,
-            effects: [],
             observers: [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
@@ -353,7 +396,6 @@ mod tests {
         let _ = crate::effectful_stateful!(
             name: "effectful_stateful",
             In -> Out => effectful_stateful,
-            effects: [],
             observers: [],
             backpressure: crate::dsl::backpressure_clause::enforced(1)
         );
@@ -476,35 +518,33 @@ mod tests {
     // ── effectful_transform! ──────────────────────────────────────────
     #[test]
     fn effectful_transform_typed_bare() {
-        let _ = crate::effectful_transform!(In -> Out => FxTr, effects: [], observers: []);
+        let _ = crate::effectful_transform!(In -> Out => FxTr, observers: []);
     }
     #[test]
     fn effectful_transform_typed_mw() {
-        let _ = crate::effectful_transform!(In -> Out => FxTr, effects: [], observers: []);
+        let _ = crate::effectful_transform!(In -> Out => FxTr, observers: []);
     }
     #[test]
     fn effectful_transform_typed_name() {
-        let _ =
-            crate::effectful_transform!(name: "t", In -> Out => FxTr, effects: [], observers: []);
+        let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr, observers: []);
     }
     #[test]
     fn effectful_transform_typed_name_mw() {
-        let _ =
-            crate::effectful_transform!(name: "t", In -> Out => FxTr, effects: [], observers: []);
+        let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr, observers: []);
     }
     #[test]
     fn effectful_transform_transactional_effect_clause_declares_executor() {
+        let tx = tx_binding();
         let descriptor = crate::effectful_transform!(
-            In -> Out => TxFxTr,
-            effects: [transactional(TxEffect, "tx")],
+            In -> Out uses transactional(TxEffect) via tx => TxFxTr,
             observers: []
         );
 
         let declarations = descriptor.effect_declarations();
         assert_eq!(declarations.len(), 1);
-        assert_eq!(declarations[0].effect_type, TxEffect::EFFECT_TYPE);
-        assert_eq!(declarations[0].safety, EffectSafety::Transactional);
-        assert_eq!(declarations[0].transactional_executor, Some("tx"));
+        assert_eq!(declarations[0].effect_type(), TxEffect::EFFECT_TYPE);
+        assert_eq!(declarations[0].safety(), EffectSafety::Transactional);
+        assert_eq!(tx.logical_name().as_str(), "tx");
     }
 
     // The effect-manifest muncher cross-check lives in
@@ -532,21 +572,19 @@ mod tests {
     // ── effectful_stateful! ─────────────────────────────────────────────────
     #[test]
     fn effectful_stateful_typed_bare() {
-        let _ = crate::effectful_stateful!(In -> Out => FxSt, effects: [], observers: []);
+        let _ = crate::effectful_stateful!(In -> Out => FxSt, observers: []);
     }
     #[test]
     fn effectful_stateful_typed_mw() {
-        let _ = crate::effectful_stateful!(In -> Out => FxSt, effects: [], observers: []);
+        let _ = crate::effectful_stateful!(In -> Out => FxSt, observers: []);
     }
     #[test]
     fn effectful_stateful_typed_name() {
-        let _ =
-            crate::effectful_stateful!(name: "s", In -> Out => FxSt, effects: [], observers: []);
+        let _ = crate::effectful_stateful!(name: "s", In -> Out => FxSt, observers: []);
     }
     #[test]
     fn effectful_stateful_typed_name_mw() {
-        let _ =
-            crate::effectful_stateful!(name: "s", In -> Out => FxSt, effects: [], observers: []);
+        let _ = crate::effectful_stateful!(name: "s", In -> Out => FxSt, observers: []);
     }
 
     // ── sink! ───────────────────────────────────────────────────────────────

@@ -15,15 +15,15 @@ use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_tr
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_adapters::middleware::{CircuitBreaker, RateLimiterBuilder};
 use obzenflow_core::ai::{
-    AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply, ChatMessage,
-    ChatParams, ChatRequestSpec, ChatResponse, ChatTarget, Many, CHAT_CLIENT_PORT,
+    AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatCompletionReply, ChatMessage, ChatParams,
+    ChatRequestSpec, ChatResponse, ChatTarget, Many,
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::error::FlowBuildError;
 use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectPortRegistry, EffectPortResolver};
+use obzenflow_runtime::effects::EffectPortRegistry;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -321,14 +321,14 @@ fn resolve_hn_group_budget(budget_override: Option<TokenCount>, target: &ChatTar
 
 pub(crate) struct HnFlowOptions {
     pub journal_base: std::path::PathBuf,
-    pub chat_resolver_override: Option<EffectPortResolver<dyn ChatClient>>,
+    pub chat_binding_override: Option<ChatEffectBinding>,
 }
 
 impl Default for HnFlowOptions {
     fn default() -> Self {
         Self {
             journal_base: std::path::PathBuf::from("target/hn-ai-digest-logs"),
-            chat_resolver_override: None,
+            chat_binding_override: None,
         }
     }
 }
@@ -347,7 +347,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
         } = inputs;
         let HnFlowOptions {
             journal_base,
-            chat_resolver_override,
+            chat_binding_override,
         } = options;
 
         // The mock server binds an ephemeral loopback port for each process.
@@ -360,13 +360,17 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
         };
 
         let ai_models = runtime_config.ai_models();
-        let (chat, chat_registration) = ChatEffectBinding::from_config(&ai_models)
-            .map_err(|error| FlowBuildError::BindingConfiguration {
-                binding: "chat".to_string(),
-                detail: error.to_string(),
-            })?
-            .into_parts();
-        let chat_target = chat.target().clone();
+        let mut effect_ports = EffectPortRegistry::new();
+        let chat = match chat_binding_override {
+            Some(binding) => binding.install_into(&mut effect_ports),
+            None => ChatEffectBinding::from_config(&ai_models)
+                .and_then(|binding| binding.install_into(&mut effect_ports)),
+        }
+        .map_err(|error| FlowBuildError::BindingConfiguration {
+            binding: "chat".to_string(),
+            detail: error.to_string(),
+        })?;
+        let chat_target = chat.evidence().target().clone();
         let budget_per_group = resolve_hn_group_budget(budget_per_group_override, &chat_target);
         let system_prompt: SystemPrompt = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply."
             .into();
@@ -381,21 +385,11 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
             base_url: base_url_for_summary,
             ai_provider: chat_target.provider.to_string(),
             ai_model: chat_target.model.clone(),
-            token_estimator: chat.estimator().source(),
+            token_estimator: chat.evidence().estimator().source(),
             budget_per_group,
             interests,
             chat_prompt_system: system_prompt,
         });
-        let effect_ports = if let Some(resolver) = chat_resolver_override {
-            EffectPortRegistry::new().with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)
-        } else {
-            chat_registration.install_into(EffectPortRegistry::new())
-        }
-        .map_err(|error| FlowBuildError::BindingConfiguration {
-            binding: "chat".to_string(),
-            detail: error.to_string(),
-        })?;
-
         let decoder = hn_story_decoder(base_url, max_stories);
         let http_source_config = http_pull_config()
             .map_err(|error| {
@@ -453,17 +447,17 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 // - reduce's `[HnDigestGroupSummary]` is collected in chunk-index order.
                 digest = ai_map_reduce!(
                     HnTopStories -> HnDigestSummary => {
-                        map: [FormattedStory] -> {
-                            at_least_once(ChatCompletion)
-                                via chat
-                                with ai_resilience()
-                        } HnDigestGroupSummary => map_role,
+                        map: [FormattedStory] -> HnDigestGroupSummary
+                        uses at_least_once(ChatCompletion)
+                            via chat
+                            with ai_resilience()
+                        => map_role,
 
-                        reduce: (HnTopStories, [HnDigestGroupSummary]) -> {
-                            at_least_once(ChatCompletion)
-                                via chat
-                                with ai_resilience()
-                        } HnDigestSummary => finalise_role,
+                        reduce: (HnTopStories, [HnDigestGroupSummary]) -> HnDigestSummary
+                        uses at_least_once(ChatCompletion)
+                            via chat
+                            with ai_resilience()
+                        => finalise_role,
                     },
                     chunking: by_budget {
                         items: |seed: &HnTopStories| seed.stories.clone(),

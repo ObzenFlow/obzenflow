@@ -10,8 +10,11 @@ use obzenflow_core::ai::{
     EmbeddingResponse, EmbeddingTarget, LlmHashes, LlmObservability, EMBEDDING_CLIENT_PORT,
 };
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
+use obzenflow_core::BoundedBindingEvidence;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectPortRequirement, EffectSafety, RecordedReply,
+    Effect, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError,
+    EffectPortMetadataContext, EffectPortSlot, EffectPortSlotSet, EffectSafety, Named, NamedEffect,
+    RecordedReply,
 };
 
 const MAX_CANONICALIZATION_DETAIL_BYTES: usize = 512;
@@ -25,14 +28,72 @@ pub enum EmbeddingGenerationBuildError {
         component: CanonicalizationComponent,
         detail: String,
     },
+    #[error("embedding request target does not match the selected effect binding")]
+    BindingTargetMismatch,
 }
+
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+pub enum EmbeddingBindingEvidenceBuildError {
+    #[error("embedding binding evidence could not be canonicalised")]
+    CanonicalizationFailed,
+    #[error("embedding binding evidence exceeds the framework byte bound")]
+    EvidenceTooLarge,
+}
+
+#[derive(Clone)]
+pub struct EmbeddingBindingEvidence {
+    target: EmbeddingTarget,
+    canonical: BoundedBindingEvidence,
+}
+
+impl EmbeddingBindingEvidence {
+    pub fn new(target: EmbeddingTarget) -> Result<Self, EmbeddingBindingEvidenceBuildError> {
+        let canonical = serde_json::to_vec(&target)
+            .map_err(|_| EmbeddingBindingEvidenceBuildError::CanonicalizationFailed)?;
+        let canonical = BoundedBindingEvidence::try_new(canonical)
+            .map_err(|_| EmbeddingBindingEvidenceBuildError::EvidenceTooLarge)?;
+        Ok(Self { target, canonical })
+    }
+
+    pub fn target(&self) -> &EmbeddingTarget {
+        &self.target
+    }
+}
+
+impl PartialEq for EmbeddingBindingEvidence {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical == other.canonical
+    }
+}
+
+impl Eq for EmbeddingBindingEvidence {}
+
+impl std::fmt::Debug for EmbeddingBindingEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EmbeddingBindingEvidence")
+            .field("evidence", &"<not disclosed>")
+            .finish()
+    }
+}
+
+impl EffectBindingEvidence for EmbeddingBindingEvidence {
+    const SCHEMA_VERSION: u32 = 1;
+
+    fn canonical_bytes(&self) -> BoundedBindingEvidence {
+        self.canonical.clone()
+    }
+}
+
+pub const EMBEDDING_CLIENT: EffectPortSlot<dyn EmbeddingClient, EmbeddingTarget> =
+    EffectPortSlot::new(EMBEDDING_CLIENT_PORT);
 
 /// Replay-safe embedding generation through the sealed embedding port.
 #[derive(Clone)]
 pub struct EmbeddingGeneration {
     label: String,
     request: EmbeddingRequest,
-    binding_target: EmbeddingTarget,
+    binding: EffectBindingUse<Self>,
     hashes: LlmHashes,
 }
 
@@ -41,7 +102,7 @@ impl std::fmt::Debug for EmbeddingGeneration {
         formatter
             .debug_struct("EmbeddingGeneration")
             .field("label", &self.label)
-            .field("target", &self.binding_target)
+            .field("binding", &self.binding)
             .field("hashes", &self.hashes)
             .finish_non_exhaustive()
     }
@@ -51,10 +112,15 @@ impl EmbeddingGeneration {
     pub fn new(
         label: impl Into<String>,
         request: EmbeddingRequest,
-        binding_target: EmbeddingTarget,
+        binding: EffectBindingUse<Self>,
     ) -> Result<Self, EmbeddingGenerationBuildError> {
         if request.inputs.is_empty() {
             return Err(EmbeddingGenerationBuildError::EmptyInputs);
+        }
+        if request.provider != binding.evidence().target().provider
+            || request.model != binding.evidence().target().model
+        {
+            return Err(EmbeddingGenerationBuildError::BindingTargetMismatch);
         }
         let prompt_hash = prompt_hash_for_embedding_inputs(&request.inputs)
             .map_err(|error| canonicalization_error(CanonicalizationComponent::Prompt, error))?;
@@ -65,7 +131,7 @@ impl EmbeddingGeneration {
         Ok(Self {
             label: label.into(),
             request,
-            binding_target,
+            binding,
             hashes: LlmHashes::new(prompt_hash, params_hash),
         })
     }
@@ -84,6 +150,7 @@ impl Effect for EmbeddingGeneration {
     const EFFECT_TYPE: &'static str = "obzenflow.ai.embedding_generation";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentAtLeastOnce;
+    type BindingMode = Named<EmbeddingBindingEvidence>;
 
     type Outcome = EmbeddingGenerationReply;
     type OutcomeSemantics = RecordedReply;
@@ -94,26 +161,15 @@ impl Effect for EmbeddingGeneration {
 
     fn canonical_input(&self) -> serde_json::Value {
         serde_json::json!({
-            "binding_target": &self.binding_target,
+            "binding_target": self.binding.evidence().target(),
             "request": &self.request,
         })
     }
 
-    fn required_ports() -> Vec<EffectPortRequirement> {
-        vec![EffectPortRequirement::of::<dyn EmbeddingClient>(
-            EMBEDDING_CLIENT_PORT,
-        )]
-    }
-
-    fn validate_port_bindings(&self, ctx: &EffectContext) -> Result<(), EffectError> {
-        let client = ctx.port::<dyn EmbeddingClient>(EMBEDDING_CLIENT_PORT)?;
-        let observed = client.target();
-        if &self.binding_target != observed {
-            return Err(EffectError::EffectPortBindingMismatch {
-                port: EMBEDDING_CLIENT_PORT.to_string(),
-                expected: self.binding_target.to_string(),
-                observed: observed.to_string(),
-            });
+    fn validate_port_metadata(&self, ctx: &EffectPortMetadataContext) -> Result<(), EffectError> {
+        let observed = ctx.metadata(EMBEDDING_CLIENT)?;
+        if self.binding.evidence().target() != observed.as_ref() {
+            return Err(EffectError::target_invariant_violation(EMBEDDING_CLIENT));
         }
         Ok(())
     }
@@ -122,9 +178,9 @@ impl Effect for EmbeddingGeneration {
         &self,
         ctx: &mut EffectContext,
     ) -> Result<EmbeddingGenerationReply, EffectError> {
-        let client = ctx.port::<dyn EmbeddingClient>(EMBEDDING_CLIENT_PORT)?;
+        let client = ctx.port(EMBEDDING_CLIENT)?;
         let response = client.embed(self.request.clone()).await.map_err(|error| {
-            ai_client_error_to_effect_error(error, EMBEDDING_CLIENT_PORT, "embedding_client")
+            ai_client_error_to_effect_error(error, EMBEDDING_CLIENT, "embedding_client")
         })?;
         let response = validate_response(&self.request, response)?;
 
@@ -139,6 +195,18 @@ impl Effect for EmbeddingGeneration {
             response,
             observability,
         })
+    }
+}
+
+impl NamedEffect for EmbeddingGeneration {
+    type BindingEvidence = EmbeddingBindingEvidence;
+
+    fn binding_use(&self) -> &EffectBindingUse<Self> {
+        &self.binding
+    }
+
+    fn required_slots() -> EffectPortSlotSet {
+        EffectPortSlotSet::single(EMBEDDING_CLIENT)
     }
 }
 
@@ -218,6 +286,11 @@ mod tests {
     use obzenflow_core::ai::{
         embedding_binding_fingerprint, AiProvider, EmbeddingParams, EmbeddingTarget,
     };
+    use obzenflow_runtime::effects::{
+        EffectBinding, EffectPortResolutionError, EffectRegistrationBuilder,
+        LogicalEffectBindingName,
+    };
+    use std::sync::Arc;
 
     fn target() -> EmbeddingTarget {
         let provider = AiProvider::new("ollama");
@@ -235,6 +308,21 @@ mod tests {
             inputs: vec!["one".to_string(), "two".to_string()],
             params: EmbeddingParams { dimensions },
         }
+    }
+
+    fn binding() -> EffectBinding<EmbeddingGeneration> {
+        EffectRegistrationBuilder::<EmbeddingGeneration>::new(
+            LogicalEffectBindingName::new("embedding").unwrap(),
+            EmbeddingBindingEvidence::new(target()).unwrap(),
+        )
+        .bind_deferred_with_metadata(
+            EMBEDDING_CLIENT,
+            Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
+        )
+        .unwrap()
+        .finish()
+        .unwrap()
+        .0
     }
 
     #[test]
@@ -265,9 +353,13 @@ mod tests {
 
     #[test]
     fn canonical_input_contains_target_and_request() {
-        let effect =
-            EmbeddingGeneration::new("standalone.embedding_generation", request(None), target())
-                .unwrap();
+        let binding = binding();
+        let effect = EmbeddingGeneration::new(
+            "standalone.embedding_generation",
+            request(None),
+            binding.invocation(),
+        )
+        .unwrap();
         let input = effect.canonical_input();
         assert!(input.get("binding_target").is_some());
         assert!(input.get("request").is_some());
@@ -275,8 +367,9 @@ mod tests {
 
     #[test]
     fn durable_effect_contract_matches_the_locked_release_surface() {
+        let binding = binding();
         let declaration =
-            obzenflow_runtime::effects::EffectDeclaration::at_least_once::<EmbeddingGeneration>();
+            obzenflow_runtime::effects::EffectDeclaration::named_at_least_once(&binding);
 
         assert_eq!(
             EmbeddingGeneration::EFFECT_TYPE,
@@ -288,11 +381,11 @@ mod tests {
             obzenflow_runtime::effects::EffectSafety::NonIdempotentAtLeastOnce
         );
         assert_eq!(
-            declaration.outcome_kind,
+            declaration.outcome_kind(),
             obzenflow_runtime::effects::EffectOutcomeKind::RecordedReply
         );
-        assert!(declaration.public_outcome_fact_types.is_empty());
-        assert_eq!(declaration.required_ports.len(), 1);
-        assert_eq!(declaration.required_ports[0].name, EMBEDDING_CLIENT_PORT);
+        assert!(declaration.public_outcome_fact_types().is_empty());
+        assert_eq!(EmbeddingGeneration::required_slots().len(), 1);
+        assert_eq!(EMBEDDING_CLIENT.label(), EMBEDDING_CLIENT_PORT);
     }
 }

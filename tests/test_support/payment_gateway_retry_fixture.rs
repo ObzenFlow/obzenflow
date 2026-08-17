@@ -141,6 +141,7 @@ impl Effect for ScriptedAuthorizePayment {
     const EFFECT_TYPE: &'static str = "payment.authorize";
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+    type BindingMode = obzenflow_runtime::effects::Portless;
 
     type Outcome = PaymentAuthorized;
     type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
@@ -301,8 +302,7 @@ pub fn build_flow(
                     ValidatedOrder -> {
                         PaymentAuthorized,
                         PaymentAuthorizationUnavailable
-                    } => authorize_payment,
-                    effects: [ScriptedAuthorizePayment with gateway_resilience],
+                    } uses ScriptedAuthorizePayment with gateway_resilience => authorize_payment,
                     observers: []
                 );
                 paid_orders = sink!(PaymentAuthorized => record_authorized);

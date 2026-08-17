@@ -12,8 +12,6 @@ fn main() {
     let role = InferenceRole;
     let policy = obzenflow_adapters::middleware::control::ai_resilience();
     let _ = inference!(
-        Input ->{
-            at_least_once(ChatCompletion) with policy
-        } Output => role
+        Input -> Output uses at_least_once(ChatCompletion) with policy => role
     );
 }

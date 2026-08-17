@@ -8,11 +8,11 @@ use obzenflow_adapters::ai::{ChatCompletion, ChatCompletionBuildError};
 use obzenflow_core::ai::{
     AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceMapInput,
     AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind,
-    ChatBindingContract, ChunkEnvelope,
+    ChunkEnvelope,
 };
-use obzenflow_core::event::{EffectFailureDetail, StageFatalCode, StageFatalReason};
+use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
+use obzenflow_runtime::effects::{EffectBinding, EffectError, Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::{HandlerError, StageFatal};
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use std::fmt;
@@ -25,7 +25,7 @@ type GeneratedFinaliseTypes<Seed, Collected, Out> = fn() -> (Seed, Collected, Ou
 
 pub(super) struct GeneratedAiMapHandler<Item, Partial, Role> {
     role: Arc<Role>,
-    chat_binding: ChatBindingContract,
+    chat_binding: EffectBinding<ChatCompletion>,
     _types: std::marker::PhantomData<fn() -> (Item, Partial)>,
 }
 
@@ -40,7 +40,7 @@ impl<Item, Partial, Role> Clone for GeneratedAiMapHandler<Item, Partial, Role> {
 }
 
 impl<Item, Partial, Role> GeneratedAiMapHandler<Item, Partial, Role> {
-    pub(super) fn new(role: Role, chat_binding: ChatBindingContract) -> Self {
+    pub(super) fn new(role: Role, chat_binding: EffectBinding<ChatCompletion>) -> Self {
         Self {
             role: Arc::new(role),
             chat_binding,
@@ -60,7 +60,7 @@ impl<Item, Partial, Role> fmt::Debug for GeneratedAiMapHandler<Item, Partial, Ro
 
 pub(super) struct GeneratedAiFinaliseHandler<Seed, Collected, Out, Role> {
     role: Arc<Role>,
-    chat_binding: ChatBindingContract,
+    chat_binding: EffectBinding<ChatCompletion>,
     _types: std::marker::PhantomData<GeneratedFinaliseTypes<Seed, Collected, Out>>,
 }
 
@@ -75,7 +75,7 @@ impl<Seed, Collected, Out, Role> Clone for GeneratedAiFinaliseHandler<Seed, Coll
 }
 
 impl<Seed, Collected, Out, Role> GeneratedAiFinaliseHandler<Seed, Collected, Out, Role> {
-    pub(super) fn new(role: Role, chat_binding: ChatBindingContract) -> Self {
+    pub(super) fn new(role: Role, chat_binding: EffectBinding<ChatCompletion>) -> Self {
         Self {
             role: Arc::new(role),
             chat_binding,
@@ -105,54 +105,7 @@ fn fatal(
 
 fn fatal_from_effect(error: EffectError) -> HandlerError {
     match error {
-        EffectError::MissingEffectPort { name, .. } => fatal(
-            StageFatalCode::Configuration,
-            StageFatalReason::EffectPortRegistrationMissing,
-            format!("required effect port '{name}' is not registered"),
-        ),
-        EffectError::EffectPortResolutionFailed { name, message, .. } => fatal(
-            StageFatalCode::Configuration,
-            StageFatalReason::EffectPortResolutionFailed,
-            format!("effect port '{name}' failed to resolve: {message}"),
-        ),
-        EffectError::EffectPortBindingMismatch {
-            port,
-            expected,
-            observed,
-        } => fatal(
-            StageFatalCode::Configuration,
-            StageFatalReason::EffectPortBindingMismatch,
-            format!(
-                "effect port '{port}' binding mismatch: expected {expected}, observed {observed}"
-            ),
-        ),
-        EffectError::EffectPortBindingInvariantViolation {
-            port,
-            expected,
-            observed,
-        } => fatal(
-            StageFatalCode::Configuration,
-            StageFatalReason::EffectPortTargetInvariantViolation,
-            format!(
-                "effect port '{port}' target invariant failed: expected {expected}, observed {observed}"
-            ),
-        ),
-        EffectError::RecordedFailure {
-            detail: Some(detail),
-            ..
-        } => match *detail {
-            EffectFailureDetail::PortBindingInvariantViolation {
-                port,
-                expected,
-                observed,
-            } => fatal(
-                StageFatalCode::Configuration,
-                StageFatalReason::EffectPortTargetInvariantViolation,
-                format!(
-                    "effect port '{port}' target invariant failed: expected {expected}, observed {observed}"
-                ),
-            ),
-        },
+        error @ EffectError::BindingAuthority { .. } => HandlerError::from(error),
         EffectError::Journal(message) => fatal(
             StageFatalCode::Journal,
             StageFatalReason::JournalFailure,
@@ -272,6 +225,10 @@ fn request_canonicalization_failure(error: ChatCompletionBuildError) -> AiMapRed
                 message: detail,
             }
         }
+        ChatCompletionBuildError::BindingTargetMismatch => AiMapReduceRoleFailure::Provider {
+            provider_kind: AiProviderFailureKind::InvalidRequest,
+            message: "chat request target disagrees with its selected binding".to_string(),
+        },
     }
 }
 

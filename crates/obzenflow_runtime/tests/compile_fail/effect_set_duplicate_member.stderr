@@ -1,3 +1,28 @@
+error[E0433]: failed to resolve: unresolved import
+  --> tests/compile_fail/effect_set_duplicate_member.rs:33:31
+   |
+33 |     type BindingMode = crate::effects::Portless;
+   |                               ^^^^^^^ unresolved import
+   |
+help: a trait with a similar name exists
+   |
+33 -     type BindingMode = crate::effects::Portless;
+33 +     type BindingMode = crate::Effect::Portless;
+   |
+help: a similar path exists
+   |
+33 |     type BindingMode = crate::obzenflow_runtime::effects::Portless;
+   |                               +++++++++++++++++++
+help: consider importing this module
+   |
+ 9 + use obzenflow_runtime::effects;
+   |
+help: if you import `effects`, refer to it directly
+   |
+33 -     type BindingMode = crate::effects::Portless;
+33 +     type BindingMode = effects::Portless;
+   |
+
 error[E0080]: evaluation panicked: duplicate member in a declared effect capability set: two members share an effect type; each effect appears exactly once (FLOWIP-120z)
  --> src/effects/effect_set.rs
   |
