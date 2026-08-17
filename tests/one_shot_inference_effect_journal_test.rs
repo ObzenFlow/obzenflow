@@ -40,6 +40,7 @@ use obzenflow_runtime::stages::common::handlers::{
 #[cfg(feature = "test-support")]
 use obzenflow_runtime::testing::BackpressureAckGate;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -577,6 +578,40 @@ async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
         .collect()
 }
 
+async fn all_stage_events(run_dir: &Path) -> Vec<ChainEvent> {
+    let manifest = archive_manifest(run_dir);
+    let stage_keys = manifest["stages"]
+        .as_object()
+        .expect("manifest stages are an object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut events = Vec::new();
+    for stage_key in stage_keys {
+        events.extend(stage_events(run_dir, &stage_key).await);
+    }
+    events
+}
+
+fn assert_distinct_events_have_distinct_admission_sequences(
+    archive_label: &str,
+    events: &[ChainEvent],
+) {
+    let mut event_by_sequence = BTreeMap::new();
+    for event in events {
+        let sequence = event
+            .admission_seq
+            .expect("every stage-journal event has an admission sequence");
+        if let Some(first_event_id) = event_by_sequence.insert(sequence, event.id) {
+            assert_eq!(
+                first_event_id, event.id,
+                "{archive_label} assigns admission sequence {} to distinct events {} and {}",
+                sequence.0, first_event_id, event.id
+            );
+        }
+    }
+}
+
 async fn system_events(run_dir: &Path) -> Vec<SystemEvent> {
     let manifest = archive_manifest(run_dir);
     let relative = manifest["system_journal_file"]
@@ -641,7 +676,7 @@ async fn wait_for_counter(counter: &AtomicUsize, minimum: usize) {
 }
 
 #[tokio::test]
-async fn one_shot_inference_live_and_strict_replay_use_three_rows_and_no_live_replay_authority() {
+async fn one_shot_inference_live_and_replay_closure_use_three_rows_without_live_replay_authority() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
@@ -675,6 +710,10 @@ async fn one_shot_inference_live_and_strict_replay_use_three_rows_and_no_live_re
     assert_eq!(live_calls.load(Ordering::SeqCst), 1);
 
     let live_archive = latest_run_dir(&journal_base);
+    assert_distinct_events_have_distinct_admission_sequences(
+        "live archive",
+        &all_stage_events(&live_archive).await,
+    );
     let manifest = archive_manifest(&live_archive);
     assert_eq!(
         manifest["bounded_direct_fact_admission"],
@@ -770,6 +809,10 @@ async fn one_shot_inference_live_and_strict_replay_use_three_rows_and_no_live_re
     let replay_archive = latest_run_dir(&journal_base);
     let replay_events = stage_events(&replay_archive, "brief").await;
     assert_eq!(durable_inference_ids(&replay_events), live_ids);
+    assert_distinct_events_have_distinct_admission_sequences(
+        "strict replay archive",
+        &all_stage_events(&replay_archive).await,
+    );
 
     let verification = verify_run_dirs(
         &live_archive,
@@ -785,6 +828,37 @@ async fn one_shot_inference_live_and_strict_replay_use_three_rows_and_no_live_re
         0,
         "{}",
         obzenflow_infra::verify::render_verdict(&verification)
+    );
+
+    let replay_of_replay_outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            replay_archive.as_os_str().to_os_string(),
+        ])
+        .run_async(build_flow(
+            journal_base.clone(),
+            replay_of_replay_outputs.clone(),
+            replay_only_chat_registry(),
+            3,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            "",
+        ))
+        .await
+        .expect("strict replay of a replay succeeds with no live authority");
+
+    assert_eq!(
+        *replay_of_replay_outputs
+            .lock()
+            .expect("replay-of-replay outputs"),
+        expected
+    );
+    let replay_of_replay_archive = latest_run_dir(&journal_base);
+    assert_distinct_events_have_distinct_admission_sequences(
+        "replay-of-replay archive",
+        &all_stage_events(&replay_of_replay_archive).await,
     );
 }
 
