@@ -188,6 +188,8 @@ one-item collection, and scalar-role/factory ceremony. The application implement
 same kind of handler trait used by the other stage families:
 
 ```rust,ignore
+use obzenflow::sources;
+
 #[derive(Clone, Debug)]
 struct GenerateBrief;
 

@@ -14,7 +14,8 @@
 
 use anyhow::Result;
 use obzenflow::ai::{ChatEffectBinding, InferenceHandler};
-use obzenflow::typed::{sinks, sources};
+use obzenflow::sources;
+use obzenflow::typed::sinks;
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_core::ai::{ChatCompletionReply, ChatMessage, ChatParams, ChatRequestSpec};
 use obzenflow_core::TypedPayload;

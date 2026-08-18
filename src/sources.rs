@@ -8,6 +8,12 @@
 //! built-in source implementations from [`obzenflow_adapters::sources`] so that
 //! most applications only need `obzenflow` in their dependency list.
 //!
+//! ## In-process sources
+//!
+//! [`once`], [`finite`], [`finite_from_fn`], [`async_finite`], [`infinite`], and
+//! [`async_infinite`] construct source adapters from application-owned values or
+//! producer functions.
+//!
 //! ## CSV sources
 //!
 //! [`CsvSource`] (via [`CsvSourceBuilder`]) reads rows from CSV files on disk.
@@ -24,6 +30,11 @@
 
 /// CSV file source and its row type.
 pub use obzenflow_adapters::sources::{CsvRow, CsvSource, CsvSourceBuilder};
+
+/// In-process source adapters constructed from values and producer functions.
+pub use obzenflow_adapters::sources::{
+    async_finite, async_infinite, finite, finite_from_fn, infinite, once,
+};
 
 /// HTTP pull and poll sources, decoders, and configuration types.
 pub use obzenflow_adapters::sources::{

@@ -7,7 +7,7 @@
 use std::path::Path;
 
 #[test]
-fn scalar_ai_handler_has_one_root_facade() {
+fn authored_adapters_have_owned_root_facades() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let typed_ai = root.join("src/typed/ai.rs");
     assert!(
@@ -23,6 +23,19 @@ fn scalar_ai_handler_has_one_root_facade() {
         "obzenflow::typed::ai must not be reintroduced"
     );
 
+    let typed_sources = root.join("src/typed/sources.rs");
+    assert!(
+        !typed_sources.exists(),
+        "the retired typed source facade must remain absent: {}",
+        typed_sources.display()
+    );
+    assert!(
+        !typed_mod
+            .lines()
+            .any(|line| line.trim() == "pub mod sources;"),
+        "obzenflow::typed::sources must not be reintroduced"
+    );
+
     let ai_facade = std::fs::read_to_string(root.join("src/ai.rs"))
         .expect("AI facade module should be readable");
     assert!(
@@ -33,6 +46,13 @@ fn scalar_ai_handler_has_one_root_facade() {
         !ai_facade.contains("inference_handler"),
         "the retired free inference factory must not return"
     );
+
+    let source_facade = std::fs::read_to_string(root.join("src/sources.rs"))
+        .expect("source facade module should be readable");
+    assert!(
+        source_facade.contains("pub use obzenflow_adapters::sources"),
+        "obzenflow::sources must re-export its constructors from adapters"
+    );
 }
 
 #[test]
@@ -41,6 +61,7 @@ fn removed_registry_plumbing_and_unsafe_shortcuts_do_not_compile() {
     tests.compile_fail("tests/compile_fail/flowip_133e_flow_effect_ports.rs");
     tests.compile_fail("tests/compile_fail/flowip_133e_free_inference_factory_removed.rs");
     tests.compile_fail("tests/compile_fail/flowip_133e_inference_handler_trait_required.rs");
+    tests.compile_fail("tests/compile_fail/flowip_133e_typed_sources_removed.rs");
     tests.compile_fail("tests/compile_fail/flowip_133e_undeclared_chat_operation.rs");
 }
 

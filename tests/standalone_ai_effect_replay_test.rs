@@ -10,7 +10,7 @@ use obzenflow::ai::{
     EmbeddingDimensions, EmbeddingEffectBinding, EmbeddingGeneration, EmbeddingResponse,
     EmbeddingTransformBuilder,
 };
-use obzenflow::typed::sources;
+use obzenflow::sources;
 use obzenflow_adapters::ai::{CHAT_CLIENT, EMBEDDING_CLIENT};
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_core::ai::{

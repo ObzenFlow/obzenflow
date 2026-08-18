@@ -13,7 +13,7 @@ use crate::payment_domain::{
     TrafficPhase,
 };
 use async_trait::async_trait;
-use obzenflow::typed::sources as typed_sources;
+use obzenflow::sources;
 use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, RateLimiter, Retry};
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
@@ -285,7 +285,7 @@ pub fn build_flow(
             .build()
             .expect("gateway resilience witness configuration must be valid");
 
-        let order_feed = typed_sources::finite(orders);
+        let order_feed = sources::finite(orders);
         let authorize_payment = ScriptedGatewayTransform { gateway };
         let record_authorized =
             SinkTyped::with_delivery(discard::<PaymentAuthorized>()).idempotent();

@@ -4,7 +4,7 @@
 
 use super::domain::{Category, OrderEvent, PaymentMethod, Product, Promotion, Sku};
 use super::fixtures;
-use obzenflow::typed::sources;
+use obzenflow::sources;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 
 pub fn categories_source(

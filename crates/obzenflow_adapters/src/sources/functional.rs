@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Typed source helper facades.
+//! In-process source adapters constructed from values and functions.
 
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
@@ -24,7 +24,7 @@ where
     finite(std::iter::once(item))
 }
 
-/// Create a finite typed source from an iterator (convenience wrapper).
+/// Create a finite typed source from an iterator.
 pub fn finite<T, I>(
     iter: I,
 ) -> impl TypedFiniteSourceHandler<Output = T> + SourceTyping<Output = T> + Clone + Debug + 'static
@@ -45,8 +45,6 @@ where
 }
 
 /// Create a finite typed source from a per-item producer.
-///
-/// This is the facade equivalent of `FiniteSourceTyped::from_item_fn(...)`.
 pub fn finite_from_fn<T, F>(
     producer: F,
 ) -> impl TypedFiniteSourceHandler<Output = T> + SourceTyping<Output = T> + Clone + Debug + 'static
@@ -96,7 +94,7 @@ mod tests {
     struct Item(u64);
 
     impl TypedPayload for Item {
-        const EVENT_TYPE: &'static str = "typed.sources.once.item";
+        const EVENT_TYPE: &'static str = "adapters.sources.once.item";
     }
 
     #[test]

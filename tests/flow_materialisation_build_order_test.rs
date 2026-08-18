@@ -6,7 +6,8 @@
 
 #![cfg(feature = "ai")]
 
-use obzenflow::typed::{sinks, sources};
+use obzenflow::sources;
+use obzenflow::typed::sinks;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::ai::ChatEffectBinding;

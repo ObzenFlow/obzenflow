@@ -1,0 +1,14 @@
+error[E0432]: unresolved import `obzenflow::typed::sources`
+ --> tests/compile_fail/flowip_133e_typed_sources_removed.rs:5:5
+  |
+5 | use obzenflow::typed::sources;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^ no `sources` in `typed`
+  |
+help: consider importing one of these modules instead
+  |
+5 - use obzenflow::typed::sources;
+5 + use obzenflow::sources;
+  |
+5 - use obzenflow::typed::sources;
+5 + use obzenflow_adapters::sources;
+  |

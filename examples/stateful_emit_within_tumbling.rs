@@ -16,7 +16,8 @@
 //! not replay inputs, so replay and resume CLI modes are rejected explicitly.
 
 use anyhow::{bail, Result};
-use obzenflow::typed::{sources, stateful as typed_stateful};
+use obzenflow::sources;
+use obzenflow::typed::stateful as typed_stateful;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::{
