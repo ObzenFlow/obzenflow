@@ -30,6 +30,14 @@ help: the following other types implement trait `EffectfulTransformHandler`
    | |     In: TypedPayload + Send + Sync + 'static,
    | |     Out: TypedPayload + Send + Sync + 'static,
    | |______________________________________________^ `EmbeddingTransform<In, Out>`
+   |
+  ::: crates/obzenflow_adapters/src/ai/transforms/inference.rs
+   |
+   | / impl<Input, Out> EffectfulTransformHandler for InferenceHandler<Input, Out>
+   | | where
+   | |     Input: TypedPayload + Clone + Send + Sync + 'static,
+   | |     Out: TypedPayload + Clone + Send + Sync + 'static,
+   | |______________________________________________________^ `InferenceHandler<Input, Out>`
 note: required by a bound in `__obzenflow_assert_effectful_transform_contract`
   --> tests/compile_fail/effectful_transform_raw_handler.rs:46:13
    |
@@ -79,6 +87,14 @@ help: the following other types implement trait `EffectfulTransformHandler`
    | |     In: TypedPayload + Send + Sync + 'static,
    | |     Out: TypedPayload + Send + Sync + 'static,
    | |______________________________________________^ `EmbeddingTransform<In, Out>`
+   |
+  ::: crates/obzenflow_adapters/src/ai/transforms/inference.rs
+   |
+   | / impl<Input, Out> EffectfulTransformHandler for InferenceHandler<Input, Out>
+   | | where
+   | |     Input: TypedPayload + Clone + Send + Sync + 'static,
+   | |     Out: TypedPayload + Clone + Send + Sync + 'static,
+   | |______________________________________________________^ `InferenceHandler<Input, Out>`
 note: required by a bound in `EffectfulTransformDescriptor::<H>::new`
   --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
    |
@@ -121,6 +137,14 @@ help: the following other types implement trait `EffectfulTransformHandler`
    | |     In: TypedPayload + Send + Sync + 'static,
    | |     Out: TypedPayload + Send + Sync + 'static,
    | |______________________________________________^ `EmbeddingTransform<In, Out>`
+   |
+  ::: crates/obzenflow_adapters/src/ai/transforms/inference.rs
+   |
+   | / impl<Input, Out> EffectfulTransformHandler for InferenceHandler<Input, Out>
+   | | where
+   | |     Input: TypedPayload + Clone + Send + Sync + 'static,
+   | |     Out: TypedPayload + Clone + Send + Sync + 'static,
+   | |______________________________________________________^ `InferenceHandler<Input, Out>`
 note: required by a bound in `EffectfulTransformDescriptor`
   --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
    |
@@ -160,6 +184,14 @@ help: the following other types implement trait `EffectfulTransformHandler`
    | |     In: TypedPayload + Send + Sync + 'static,
    | |     Out: TypedPayload + Send + Sync + 'static,
    | |______________________________________________^ `EmbeddingTransform<In, Out>`
+   |
+  ::: crates/obzenflow_adapters/src/ai/transforms/inference.rs
+   |
+   | / impl<Input, Out> EffectfulTransformHandler for InferenceHandler<Input, Out>
+   | | where
+   | |     Input: TypedPayload + Clone + Send + Sync + 'static,
+   | |     Out: TypedPayload + Clone + Send + Sync + 'static,
+   | |______________________________________________________^ `InferenceHandler<Input, Out>`
 note: required by a bound in `EffectfulTransformDescriptor`
   --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
    |
@@ -199,6 +231,14 @@ help: the following other types implement trait `EffectfulTransformHandler`
    | |     In: TypedPayload + Send + Sync + 'static,
    | |     Out: TypedPayload + Send + Sync + 'static,
    | |______________________________________________^ `EmbeddingTransform<In, Out>`
+   |
+  ::: crates/obzenflow_adapters/src/ai/transforms/inference.rs
+   |
+   | / impl<Input, Out> EffectfulTransformHandler for InferenceHandler<Input, Out>
+   | | where
+   | |     Input: TypedPayload + Clone + Send + Sync + 'static,
+   | |     Out: TypedPayload + Clone + Send + Sync + 'static,
+   | |______________________________________________________^ `InferenceHandler<Input, Out>`
 note: required by a bound in `EffectfulTransformDescriptor`
   --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
    |

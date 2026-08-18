@@ -10,8 +10,8 @@ use support::*;
 
 fn main() {
     let chat = binding();
-    let role = InferenceRole;
+    let handler = inference_handler();
     let _ = inference!(
-        Input -> Output uses at_least_once(ChatCompletion) via chat with retry(3) => role
+        Input -> Output uses at_least_once(ChatCompletion) via chat with retry(3) => handler
     );
 }

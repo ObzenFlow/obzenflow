@@ -5,7 +5,7 @@ error: an effect's 'with' takes one policy expression; write 'with <policy>'; br
    |  _____________^
 17 | |         Input -> Output
 18 | |             uses at_least_once(ChatCompletion) via chat with { first, second }
-19 | |             => role
+19 | |             => handler
 20 | |     );
    | |_____^
    |

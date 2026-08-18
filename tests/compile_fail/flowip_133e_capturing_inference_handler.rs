@@ -20,7 +20,7 @@ fn interpret(
 
 fn main() {
     let prompt = String::from("captured prompt");
-    let _role = ai::inference_role(
+    let _handler = ai::inference_handler(
         move |_input: &Input| {
             let _ = prompt.len();
             Ok(ChatRequestSpec {

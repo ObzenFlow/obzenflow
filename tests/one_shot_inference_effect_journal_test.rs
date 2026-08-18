@@ -5,7 +5,9 @@
 //! FLOWIP-120j checked journal witness for scalar `inference!`.
 
 use async_trait::async_trait;
-use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, ChatEffects, CHAT_CLIENT};
+use obzenflow_adapters::ai::{
+    ChatBindingEvidence, ChatCompletion, ChatEffects, InferenceHandler, CHAT_CLIENT,
+};
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_adapters::middleware::{MiddlewareFactory, RateLimiterFactory};
 use obzenflow_core::ai::{
@@ -64,7 +66,8 @@ fn one_shot_witness_uses_the_locked_materializer_surface() {
         "FlowDefinition::materialize(move |runtime_config| {",
         "let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;",
         "let evidence = sources::once(input);",
-        "let brief = ai::inference_role(prepare_brief, interpret_brief);",
+        "let generate_brief = ai::inference_handler(prepare_brief, interpret_brief);",
+        "=> generate_brief",
         "via chat",
     ] {
         assert!(
@@ -79,6 +82,7 @@ fn one_shot_witness_uses_the_locked_materializer_surface() {
         "effect_ports,",
         "install_into",
         "struct BriefRole",
+        "inference_role(",
         "sources::finite([input])",
         "std::env",
         "EffectPortResolver",
@@ -424,7 +428,7 @@ fn build_functional_flow(
     let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
         let evidence = obzenflow::typed::sources::once(ReducedEvidence { value: 7 });
-        let brief = obzenflow::typed::ai::inference_role(
+        let generate_brief = obzenflow::typed::ai::inference_handler(
             prepare_functional_brief,
             interpret_functional_brief,
         );
@@ -440,7 +444,7 @@ fn build_functional_flow(
                         uses at_least_once(ChatCompletion)
                             via chat
                             with ai_resilience()
-                        => brief
+                        => generate_brief
                 );
                 collected = sink!(DecisionBrief => collected);
             },
@@ -501,7 +505,7 @@ fn build_shared_domain_operation_flow(
     let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
         let evidence = obzenflow::typed::sources::once(ReducedEvidence { value: 7 });
-        let brief = obzenflow::typed::ai::inference_role(
+        let generate_brief = obzenflow::typed::ai::inference_handler(
             prepare_functional_brief,
             interpret_functional_brief,
         );
@@ -518,7 +522,7 @@ fn build_shared_domain_operation_flow(
                         uses at_least_once(ChatCompletion)
                             via chat
                             with ai_resilience()
-                        => brief
+                        => generate_brief
                 );
                 reviewed = effectful_transform!(
                     DecisionBrief -> DecisionBrief
@@ -554,6 +558,7 @@ where
     let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
         let evidence_handler = obzenflow::typed::sources::finite(evidence_inputs);
+        let generate_brief = InferenceHandler::from_role(brief_role);
         let collected_handler = CollectBrief { outputs };
 
         Ok(flow! {
@@ -567,7 +572,7 @@ where
                         uses at_least_once(ChatCompletion)
                             via chat
                             with brief_policy
-                        => brief_role
+                        => generate_brief
                 );
                 collected = sink!(DecisionBrief => collected_handler);
             },
@@ -590,11 +595,11 @@ fn build_credit_flow(
 ) -> FlowDefinition {
     let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
-        let brief_role = BriefRole {
+        let generate_brief = InferenceHandler::from_role(BriefRole {
             prepare_calls,
             interpret_calls,
             prompt_suffix: "",
-        };
+        });
         let credit_evidence = obzenflow::typed::sources::finite([
             ReducedEvidence { value: 7 },
             ReducedEvidence { value: 8 },
@@ -612,7 +617,7 @@ fn build_credit_flow(
                         uses at_least_once(ChatCompletion)
                             via chat
                             with ai_resilience()
-                        => brief_role
+                        => generate_brief
                 );
                 credit_collected = sink!(DecisionBrief => credit_collected);
             },
@@ -635,11 +640,11 @@ fn build_fan_out_flow(
 ) -> FlowDefinition {
     let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
-        let brief_role = BriefRole {
+        let generate_brief = InferenceHandler::from_role(BriefRole {
             prepare_calls,
             interpret_calls: Arc::new(AtomicUsize::new(0)),
             prompt_suffix: "",
-        };
+        });
         let fan_out_evidence = obzenflow::typed::sources::finite([
             ReducedEvidence { value: 7 },
             ReducedEvidence { value: 8 },
@@ -662,7 +667,7 @@ fn build_fan_out_flow(
                         uses at_least_once(ChatCompletion)
                             via chat
                             with ai_resilience()
-                        => brief_role
+                        => generate_brief
                 );
                 fast_collected = sink!(DecisionBrief => fast_collected);
                 slow_collected = sink!(DecisionBrief => slow_collected);

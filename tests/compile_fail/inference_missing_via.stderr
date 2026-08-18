@@ -3,7 +3,7 @@ error: inference!: expected `at_least_once(ChatCompletion) via <chat binding> wi
    |
 14 |       let _ = inference!(
    |  _____________^
-15 | |         Input -> Output uses at_least_once(ChatCompletion) with policy => role
+15 | |         Input -> Output uses at_least_once(ChatCompletion) with policy => handler
 16 | |     );
    | |_____^
    |

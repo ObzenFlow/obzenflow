@@ -20,7 +20,8 @@ mod tests {
     use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
     use crate::dsl::typing::TypeHint;
     use obzenflow_adapters::ai::{
-        ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, CHAT_CLIENT,
+        ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, InferenceHandler,
+        CHAT_CLIENT,
     };
     use obzenflow_core::ai::{
         AiFinaliseRole, AiInferenceRole, AiMapReduceChunkFailed, AiMapReducePlanningManifest,
@@ -231,12 +232,13 @@ mod tests {
     #[test]
     fn inference_lowers_to_one_generated_transform_with_the_exact_three_row_plan() {
         let chat = test_chat_binding("test-model", "test-model");
+        let inference_handler = InferenceHandler::from_role(TestInferenceRole);
         let mut inference = crate::inference!(
             TestSeed -> TestOut
                 uses at_least_once(ChatCompletion)
                     via chat
                     with obzenflow_adapters::middleware::control::ai_resilience()
-                => TestInferenceRole
+                => inference_handler
         );
         inference.set_name("brief".to_string());
 

@@ -48,8 +48,8 @@ fn build_flow() -> FlowDefinition {
 FlowApplication::run(build_flow()).await?;
 ```
 
-Supported handler and AI-role slots take a local name or identifier-only qualified
-path. Construct builder-owned handlers and sink adapters inside the deferred
+Supported handler and composite-role slots take a local name or identifier-only
+qualified path. Construct builder-owned handlers and sink adapters inside the deferred
 materialiser immediately above `flow!`; calls, closures, builder chains, and struct
 literals are rejected in the slots. Async-source poll timeout is handler
 configuration exposed through `poll_timeout()`, not stage syntax.
@@ -71,9 +71,13 @@ brief = inference!(
     uses at_least_once(ChatCompletion)
         via chat
         with ai_resilience()
-    => brief_role
+    => generate_brief
 );
 ```
+
+`generate_brief` is an adapter-owned `InferenceHandler`, normally constructed with
+`ai::inference_handler(prepare_brief, interpret_brief)`. The value to the right of the
+arrow is therefore a handler, as it is for the other stage macros.
 
 Use `ai_map_reduce!` when the input must be token-budgeted, fanned out, collected, and finalised. Its map and reduce roles use the same trailing `uses` clause shown above. The lexical `via chat` operand is an `EffectBinding<ChatCompletion>`, not a registry name; normal configuration obtains it directly with `ChatEffectBinding::from_config(...)`, and the flow builder collects its private binding package.
 

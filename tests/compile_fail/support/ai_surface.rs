@@ -3,7 +3,9 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, CHAT_CLIENT};
+use obzenflow_adapters::ai::{
+    ChatBindingEvidence, ChatCompletion, InferenceHandler, CHAT_CLIENT,
+};
 use obzenflow_core::ai::{
     AiClientError, AiFinaliseRole, AiInferenceRole, AiMapRole, AiRoleLogicFailure, ChatClient,
     ChatCompletionReply, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse, ChatTarget,
@@ -63,6 +65,10 @@ impl AiInferenceRole<Input, Output> for InferenceRole {
     ) -> Result<Output, AiRoleLogicFailure> {
         Ok(Output)
     }
+}
+
+pub fn inference_handler() -> InferenceHandler<Input, Output> {
+    InferenceHandler::from_role(InferenceRole)
 }
 
 pub struct MapRole;

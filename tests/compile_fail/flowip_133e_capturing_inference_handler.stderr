@@ -1,8 +1,8 @@
 error[E0308]: mismatched types
-  --> tests/compile_fail/flowip_133e_capturing_inference_role.rs:24:9
+  --> tests/compile_fail/flowip_133e_capturing_inference_handler.rs:24:9
    |
-23 |       let _role = ai::inference_role(
-   |                   ------------------ arguments to this function are incorrect
+23 |       let _handler = ai::inference_handler(
+   |                      --------------------- arguments to this function are incorrect
 24 | /         move |_input: &Input| {
 25 | |             let _ = prompt.len();
 26 | |             Ok(ChatRequestSpec {
@@ -13,14 +13,14 @@ error[E0308]: mismatched types
    | |_________^ expected fn pointer, found closure
    |
    = note: expected fn pointer `for<'a> fn(&'a Input) -> Result<ChatRequestSpec, AiRoleLogicFailure>`
-                 found closure `{closure@$DIR/tests/compile_fail/flowip_133e_capturing_inference_role.rs:24:9: 24:30}`
+                 found closure `{closure@$DIR/tests/compile_fail/flowip_133e_capturing_inference_handler.rs:24:9: 24:30}`
 note: closures can only be coerced to `fn` types if they do not capture any variables
-  --> tests/compile_fail/flowip_133e_capturing_inference_role.rs:25:21
+  --> tests/compile_fail/flowip_133e_capturing_inference_handler.rs:25:21
    |
 25 |             let _ = prompt.len();
    |                     ^^^^^^ `prompt` captured here
 note: function defined here
-  --> src/typed/ai.rs
+  --> crates/obzenflow_adapters/src/ai/transforms/inference.rs
    |
-   | pub fn inference_role<Input, Out>(
-   |        ^^^^^^^^^^^^^^
+   | pub fn inference_handler<Input, Out>(
+   |        ^^^^^^^^^^^^^^^^^

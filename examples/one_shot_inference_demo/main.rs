@@ -83,7 +83,7 @@ fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowD
     FlowDefinition::materialize(move |runtime_config| {
         let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;
         let evidence = sources::once(input);
-        let brief = ai::inference_role(prepare_brief, interpret_brief);
+        let generate_brief = ai::inference_handler(prepare_brief, interpret_brief);
         let display = sinks::console(|brief: &DecisionBrief| {
             format!("{}\n\n{}", brief.question, brief.recommendation.trim())
         });
@@ -98,7 +98,7 @@ fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowD
                     uses at_least_once(ChatCompletion)
                         via chat
                         with ai_resilience()
-                    => brief
+                    => generate_brief
                 );
                 display = sink!(DecisionBrief => display);
             },

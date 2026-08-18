@@ -189,13 +189,13 @@ one-item collection, and unit-role ceremony:
 ```rust,ignore
 let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;
 let evidence = sources::once(input);
-let brief = ai::inference_role(prepare_brief, interpret_brief);
+let generate_brief = ai::inference_handler(prepare_brief, interpret_brief);
 
 ReducedEvidence -> DecisionBrief
 uses at_least_once(ChatCompletion)
     via chat
     with ai_resilience()
-=> brief
+=> generate_brief
 ```
 
 ### Hacker News digest

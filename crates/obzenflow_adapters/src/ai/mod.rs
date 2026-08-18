@@ -24,4 +24,4 @@ pub use operations::{
     ChatBindingMetadata, ChatEffects, ChatOperationError, EmbeddingBindingMetadata,
     EmbeddingEffects, EmbeddingOperationError,
 };
-pub use transforms::{ChatTransform, EmbeddingTransform};
+pub use transforms::{inference_handler, ChatTransform, EmbeddingTransform, InferenceHandler};

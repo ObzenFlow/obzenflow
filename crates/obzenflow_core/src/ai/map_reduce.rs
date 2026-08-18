@@ -231,10 +231,12 @@ pub trait AiFinaliseRole<Seed, Collected, Out>: Send + Sync + 'static {
     ) -> Result<Out, AiRoleLogicFailure>;
 }
 
-/// User-authored scalar inference role.
+/// User-authored scalar inference logic.
 ///
-/// The generated adapter retains the exact target-free request across the
-/// effect call and supplies it again during deterministic interpretation.
+/// The adapter-owned scalar inference handler retains the exact target-free
+/// request across the effect call and supplies it again during deterministic
+/// interpretation. Normal stage authoring passes that concrete handler, not a
+/// raw role, to the right-hand side of `inference!`.
 pub trait AiInferenceRole<Input, Out>: Send + Sync + 'static {
     const LOGIC_VERSION: &'static str = "1";
 

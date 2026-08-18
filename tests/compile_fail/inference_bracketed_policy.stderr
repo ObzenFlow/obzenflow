@@ -3,7 +3,7 @@ error: an effect's 'with' takes one policy expression; write 'with <policy>'; br
    |
 15 |       let _ = inference!(
    |  _____________^
-16 | |         Input -> Output uses at_least_once(ChatCompletion) via chat with [policy] => role
+16 | |         Input -> Output uses at_least_once(ChatCompletion) via chat with [policy] => handler
 17 | |     );
    | |_____^
    |

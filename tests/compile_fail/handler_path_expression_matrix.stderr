@@ -78,7 +78,7 @@ error: sink!: the handler slot takes a name, not an expression. Bind the handler
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let role = MyRole::new(...); answer = inference!(Input -> Output uses Effect => role);
+error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = ai::inference_handler(prepare, interpret); answer = inference!(Input -> Output uses Effect => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:70:5
    |
 70 |     reject_in_every_slot!(make());
@@ -182,7 +182,7 @@ error: sink!: the handler slot takes a name, not an expression. Bind the handler
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let role = MyRole::new(...); answer = inference!(Input -> Output uses Effect => role);
+error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = ai::inference_handler(prepare, interpret); answer = inference!(Input -> Output uses Effect => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:71:5
    |
 71 |     reject_in_every_slot!(Handler::new());
@@ -286,7 +286,7 @@ error: sink!: the handler slot takes a name, not an expression. Bind the handler
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let role = MyRole::new(...); answer = inference!(Input -> Output uses Effect => role);
+error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = ai::inference_handler(prepare, interpret); answer = inference!(Input -> Output uses Effect => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:72:5
    |
 72 |     reject_in_every_slot!(Handler::builder().build());
@@ -390,7 +390,7 @@ error: sink!: the handler slot takes a name, not an expression. Bind the handler
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let role = MyRole::new(...); answer = inference!(Input -> Output uses Effect => role);
+error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = ai::inference_handler(prepare, interpret); answer = inference!(Input -> Output uses Effect => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:73:5
    |
 73 |     reject_in_every_slot!(|| Handler { marker: () });
@@ -494,7 +494,7 @@ error: sink!: the handler slot takes a name, not an expression. Bind the handler
    |
    = note: this error originates in the macro `$crate::__obzenflow_handler_path_diagnostic` which comes from the expansion of the macro `reject_in_every_slot` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let role = MyRole::new(...); answer = inference!(Input -> Output uses Effect => role);
+error: inference!: the handler slot takes a name, not an expression. Bind the handler inside the materialiser immediately above the inner flow, then pass the name. Example: let handler = ai::inference_handler(prepare, interpret); answer = inference!(Input -> Output uses Effect => handler);
   --> tests/compile_fail/handler_path_expression_matrix.rs:74:5
    |
 74 |     reject_in_every_slot!(Handler { marker: () });

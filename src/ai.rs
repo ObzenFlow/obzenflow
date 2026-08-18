@@ -31,10 +31,10 @@
 //! the recorded reply before consulting that live authority.
 
 pub use obzenflow_adapters::ai::{
-    ChatBindingMetadata, ChatCompletion, ChatCompletionBuildError, ChatEffects, ChatOperationError,
-    ChatTransform, ChatTransformBuilder, EmbeddingBindingMetadata, EmbeddingEffects,
-    EmbeddingGeneration, EmbeddingGenerationBuildError, EmbeddingOperationError,
-    EmbeddingTransform, EmbeddingTransformBuilder,
+    inference_handler, ChatBindingMetadata, ChatCompletion, ChatCompletionBuildError, ChatEffects,
+    ChatOperationError, ChatTransform, ChatTransformBuilder, EmbeddingBindingMetadata,
+    EmbeddingEffects, EmbeddingGeneration, EmbeddingGenerationBuildError, EmbeddingOperationError,
+    EmbeddingTransform, EmbeddingTransformBuilder, InferenceHandler,
 };
 
 pub use obzenflow_core::ai::{
