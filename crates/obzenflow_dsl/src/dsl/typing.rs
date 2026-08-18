@@ -1784,6 +1784,10 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.effect_declarations()
     }
 
+    fn validate_effect_configuration_before_collection(&self) -> Result<(), String> {
+        self.inner.validate_effect_configuration_before_collection()
+    }
+
     fn direct_fact_plan(
         &self,
     ) -> Option<&obzenflow_runtime::stages::resources_builder::DirectFactPlan> {
@@ -2886,6 +2890,10 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
         self.inner.effect_declarations()
+    }
+
+    fn validate_effect_configuration_before_collection(&self) -> Result<(), String> {
+        self.inner.validate_effect_configuration_before_collection()
     }
 
     fn direct_fact_plan(

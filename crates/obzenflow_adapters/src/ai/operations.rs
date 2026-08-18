@@ -145,3 +145,43 @@ impl EmbeddingBindingMetadata for EffectBinding<EmbeddingGeneration> {
         self.evidence().target()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
+
+    #[test]
+    fn chat_and_embedding_build_failures_are_handler_validation_errors() {
+        let chat: HandlerError =
+            ChatOperationError::Build(ChatCompletionBuildError::BindingTargetMismatch).into();
+        assert!(
+            matches!(chat, HandlerError::Validation(message) if message.contains("does not match"))
+        );
+
+        let embedding: HandlerError =
+            EmbeddingOperationError::Build(EmbeddingGenerationBuildError::EmptyInputs).into();
+        assert!(
+            matches!(embedding, HandlerError::Validation(message) if message.contains("at least one input"))
+        );
+    }
+
+    #[test]
+    fn chat_and_embedding_effect_failures_retain_the_shared_public_classification() {
+        fn provider_failure() -> EffectError {
+            EffectError::DependencyFailed {
+                failure_source: EffectFailureSource::new("fixture_ai_client"),
+                code: EffectFailureCode::new("remote"),
+                message: "provider unavailable".to_string(),
+                retry: RetryDisposition::NotRetryable,
+            }
+        }
+
+        let chat: HandlerError = ChatOperationError::Effect(provider_failure()).into();
+        let embedding: HandlerError = EmbeddingOperationError::Effect(provider_failure()).into();
+        assert!(matches!(chat, HandlerError::Remote(message) if message == "provider unavailable"));
+        assert!(
+            matches!(embedding, HandlerError::Remote(message) if message == "provider unavailable")
+        );
+    }
+}

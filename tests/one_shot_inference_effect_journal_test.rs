@@ -5,7 +5,7 @@
 //! FLOWIP-120j checked journal witness for scalar `inference!`.
 
 use async_trait::async_trait;
-use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, CHAT_CLIENT};
+use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, ChatEffects, CHAT_CLIENT};
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_adapters::middleware::{MiddlewareFactory, RateLimiterFactory};
 use obzenflow_core::ai::{
@@ -25,17 +25,19 @@ use obzenflow_dsl::dsl::backpressure_clause::{
     enforced as enforced_backpressure, off as backpressure_off, track_only as track_backpressure,
     BackpressureClause,
 };
-use obzenflow_dsl::{flow, inference, sink, source, FlowDefinition};
+use obzenflow_dsl::{effectful_transform, flow, inference, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::{
-    EffectBinding, EffectPortResolverWithMetadata, EffectRegistrationBuilder,
-    LogicalEffectBindingName, ResolvedEffectPort, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
+    EffectBinding, EffectPortResolverWithMetadata, EffectRegistrationBuilder, Effects,
+    LogicalEffectBindingName, ResolvedEffectPort, SinkRedeliverySafety, StageCompletion,
+    EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
+    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
+    SinkWriteReport,
 };
 #[cfg(feature = "test-support")]
 use obzenflow_runtime::testing::BackpressureAckGate;
@@ -450,6 +452,93 @@ fn build_functional_flow(
     })
 }
 
+#[derive(Clone, Debug)]
+struct HandwrittenBriefReview;
+
+#[async_trait]
+impl EffectfulTransformHandler for HandwrittenBriefReview {
+    type Input = DecisionBrief;
+    type Output = obzenflow_core::stage_fact_set![DecisionBrief];
+    type AllowedEffects = obzenflow_runtime::effect_set![ChatCompletion];
+
+    async fn process(
+        &self,
+        input: Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+        let reply = fx
+            .chat_completion(
+                "handwritten.brief_review",
+                ChatRequestSpec {
+                    messages: vec![ChatMessage::user(format!(
+                        "review decision {}: {}",
+                        input.value, input.answer
+                    ))],
+                    params: ChatParams::default(),
+                    tools: Vec::new(),
+                    response_format: None,
+                },
+            )
+            .await?;
+        fx.emit(DecisionBrief {
+            value: input.value,
+            answer: format!("{} / {}", input.answer, reply.response.text),
+        })
+        .await?;
+        Ok(fx.complete()?)
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "handwritten-brief-review-v1"
+    }
+}
+
+fn build_shared_domain_operation_flow(
+    journal_base: PathBuf,
+    outputs: Arc<Mutex<Vec<DecisionBrief>>>,
+    chat_authority: ChatAuthority,
+) -> FlowDefinition {
+    let chat = chat_authority;
+    FlowDefinition::materialize(move |_runtime_config| {
+        let evidence = obzenflow::typed::sources::once(ReducedEvidence { value: 7 });
+        let brief = obzenflow::typed::ai::inference_role(
+            prepare_functional_brief,
+            interpret_functional_brief,
+        );
+        let reviewed = HandwrittenBriefReview;
+        let collected = CollectBrief { outputs };
+
+        Ok(flow! {
+            name: "shared_generated_and_handwritten_chat_operation",
+            journals: disk_journals(journal_base),
+            stages: {
+                evidence = source!(ReducedEvidence => evidence);
+                brief = inference!(
+                    ReducedEvidence -> DecisionBrief
+                        uses at_least_once(ChatCompletion)
+                            via chat
+                            with ai_resilience()
+                        => brief
+                );
+                reviewed = effectful_transform!(
+                    DecisionBrief -> DecisionBrief
+                    uses at_least_once(ChatCompletion)
+                        via chat
+                        with ai_resilience()
+                    => reviewed,
+                    observers: [],
+                );
+                collected = sink!(DecisionBrief => collected);
+            },
+            topology: {
+                evidence |> brief;
+                brief |> reviewed;
+                reviewed |> collected;
+            }
+        })
+    })
+}
+
 fn build_flow_for_role<Role>(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DecisionBrief>>>,
@@ -782,6 +871,59 @@ async fn one_shot_functional_facades_run_live_and_strict_replay_without_live_aut
         0,
         "strict replay must not call the provider"
     );
+}
+
+#[tokio::test]
+async fn handwritten_domain_operation_shares_a_binding_with_generated_inference_and_replays() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let live_outputs = Arc::new(Mutex::new(Vec::new()));
+    let live_resolutions = Arc::new(AtomicUsize::new(0));
+    let live_calls = Arc::new(AtomicUsize::new(0));
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_shared_domain_operation_flow(
+            journal_base.clone(),
+            live_outputs.clone(),
+            live_chat_registry(live_resolutions.clone(), live_calls.clone()),
+        ))
+        .await
+        .expect("generated and handwritten chat consumers run live");
+
+    let expected = vec![DecisionBrief {
+        value: 7,
+        answer: "ship the scalar path / ship the scalar path".to_string(),
+    }];
+    assert_eq!(*live_outputs.lock().expect("live output lock"), expected);
+    assert_eq!(live_resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(live_calls.load(Ordering::SeqCst), 2);
+
+    let archive = latest_run_dir(&journal_base);
+    let replay_outputs = Arc::new(Mutex::new(Vec::new()));
+    let replay_resolutions = Arc::new(AtomicUsize::new(0));
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            archive.as_os_str().to_os_string(),
+            OsString::from("--verify"),
+        ])
+        .run_async(build_shared_domain_operation_flow(
+            journal_base,
+            replay_outputs.clone(),
+            live_chat_registry(replay_resolutions.clone(), replay_calls.clone()),
+        ))
+        .await
+        .expect("strict replay rehydrates both domain-operation replies");
+
+    assert_eq!(
+        *replay_outputs.lock().expect("replay output lock"),
+        expected
+    );
+    assert_eq!(replay_resolutions.load(Ordering::SeqCst), 0);
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1163,19 +1305,20 @@ async fn inference_fan_out_acquires_once_against_the_slowest_edge() {
 }
 
 #[tokio::test]
-async fn inference_rejects_a_non_resilience_policy_before_role_or_port_resolution() {
+async fn invalid_inference_policy_leaves_its_binding_package_retryable() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let prepare_calls = Arc::new(AtomicUsize::new(0));
     let interpret_calls = Arc::new(AtomicUsize::new(0));
     let resolutions = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
 
+    let chat = live_chat_registry(resolutions.clone(), calls.clone());
     let result = FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow_for_role(
-            temp.path().join("journals"),
+            temp.path().join("invalid-journals"),
             Arc::new(Mutex::new(Vec::new())),
-            live_chat_registry(resolutions.clone(), calls.clone()),
+            chat.clone(),
             enforced_backpressure(3).stall_timeout_ms(5_000),
             vec![ReducedEvidence { value: 7 }],
             BriefRole {
@@ -1200,6 +1343,37 @@ async fn inference_rejects_a_non_resilience_policy_before_role_or_port_resolutio
     assert_eq!(interpret_calls.load(Ordering::SeqCst), 0);
     assert_eq!(resolutions.load(Ordering::SeqCst), 0);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let corrected_outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_flow_for_role(
+            temp.path().join("corrected-journals"),
+            corrected_outputs.clone(),
+            chat,
+            enforced_backpressure(3).stall_timeout_ms(5_000),
+            vec![ReducedEvidence { value: 7 }],
+            BriefRole {
+                prepare_calls: prepare_calls.clone(),
+                interpret_calls: interpret_calls.clone(),
+                prompt_suffix: "",
+            },
+            ai_resilience(),
+        ))
+        .await
+        .expect("the retained binding clone remains collectable after validation fails");
+
+    assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(interpret_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *corrected_outputs.lock().expect("corrected output lock"),
+        vec![DecisionBrief {
+            value: 7,
+            answer: "ship the scalar path".to_string(),
+        }]
+    );
 }
 
 #[tokio::test]

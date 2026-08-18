@@ -872,12 +872,10 @@ where
         // transferring its package recipes into the one run-local registry.
         let mut authored_effect_declarations = Vec::new();
         for descriptor in descriptors.values() {
+            descriptor
+                .validate_effect_configuration_before_collection()
+                .map_err(FlowBuildError::StageResourcesFailed)?;
             let declarations = descriptor.effect_declarations();
-            crate::dsl::stage_descriptor::validate_authored_effect_declarations(
-                descriptor.name(),
-                &declarations,
-            )
-            .map_err(FlowBuildError::StageResourcesFailed)?;
             authored_effect_declarations.extend(declarations);
         }
         let effect_ports = EffectPortRegistry::collect_from_declarations(

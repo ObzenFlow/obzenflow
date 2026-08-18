@@ -32,6 +32,7 @@ enum MapperFailure {
     None,
     BeforeEffect,
     AfterEffect,
+    EmptyEmbeddingInputs,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -206,7 +207,13 @@ fn handlers(
         .logic_version("gap-proof-embedding-v1")
         .dimensions(embedding_dimensions)
         .build_typed::<TicketSummarised, TicketEmbedded>(
-            |ticket| Ok(vec![ticket.summary.clone()]),
+            move |ticket| {
+                if mapper_failure == MapperFailure::EmptyEmbeddingInputs {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![ticket.summary.clone()])
+                }
+            },
             |ticket, response| {
                 Ok(TicketEmbedded {
                     id: ticket.id,
@@ -921,6 +928,52 @@ async fn deterministic_mapper_failures_round_trip_on_their_distinct_error_routes
             live_errors
         );
     }
+}
+
+#[tokio::test]
+async fn empty_embedding_inputs_fail_validation_before_resolver_attempt_or_effect_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let journal_base = temp.path().join("journals");
+    let counters = AuthorityCounters::default();
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(finite_flow(
+            journal_base.clone(),
+            vec![TicketRaised {
+                id: 1,
+                description: "empty embedding request".to_string(),
+            }],
+            Arc::new(Mutex::new(Vec::new())),
+            successful_authority(counters.clone()),
+            MapperFailure::EmptyEmbeddingInputs,
+            MapperCounters::default(),
+            EmbeddingDimensions::try_from(3).unwrap(),
+        ))
+        .await
+        .expect("operation construction failures follow the deterministic handler-error route");
+
+    assert_eq!(counters.chat_resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(counters.chat_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(counters.embedding_resolutions.load(Ordering::SeqCst), 0);
+    assert_eq!(counters.embedding_calls.load(Ordering::SeqCst), 0);
+
+    let archive = latest_run_dir(&journal_base);
+    let embedding_events = stage_events(&archive, "embedding").await;
+    assert_eq!(
+        embedding_events
+            .iter()
+            .filter(|event| EffectAttemptStarted::event_type_matches(&event.event_type()))
+            .count(),
+        0
+    );
+    assert!(embedding_events
+        .iter()
+        .all(|event| event.event_type() != EFFECT_RECORD_EVENT_TYPE));
+    let errors = stage_processing_errors(&archive, "embedding").await;
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].0, Some(ErrorKind::Validation));
+    assert!(errors[0].1.contains("requires at least one input"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

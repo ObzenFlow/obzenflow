@@ -578,6 +578,19 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
         Vec::new()
     }
 
+    /// Validate every static effect declaration and inline policy decision
+    /// before the flow builder consumes any pending registration package.
+    ///
+    /// Package collection is a single-use ownership transfer, so a descriptor
+    /// must not defer a fallible declaration check until `create_handle`.
+    fn validate_effect_configuration_before_collection(&self) -> Result<(), String> {
+        validate_pre_collection_effect_configuration(
+            self.name(),
+            &self.effect_declarations(),
+            self.effect_policy_attachments(),
+        )
+    }
+
     /// Descriptor-owned exact-input proof for generated bounded direct facts.
     #[doc(hidden)]
     fn direct_fact_plan(
@@ -1424,6 +1437,36 @@ fn validate_effect_policy_attachments(
     Ok(())
 }
 
+fn validate_pre_collection_effect_configuration(
+    stage_name: &str,
+    effect_declarations: &[EffectDeclaration],
+    attachments: &[EffectPolicyAttachment],
+) -> Result<(), String> {
+    validate_authored_effect_declarations(stage_name, effect_declarations)?;
+    validate_effect_policy_attachments(stage_name, effect_declarations, attachments)?;
+
+    let inline_policy_declarations = attachments
+        .iter()
+        .map(|attachment| attachment.factory.declaration())
+        .collect::<Vec<_>>();
+    for effect in effect_declarations {
+        let declarations = attachments
+            .iter()
+            .zip(&inline_policy_declarations)
+            .filter(|(attachment, _)| attachment.effect_type == effect.effect_type())
+            .map(|(_, declaration)| declaration.clone())
+            .collect::<Vec<_>>();
+        obzenflow_adapters::middleware::validate_effect_control_composition(
+            stage_name,
+            effect.effect_type(),
+            &declarations,
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
 /// Descriptor for replay-safe effectful async transform stages.
 pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> {
     name: String,
@@ -1559,6 +1602,29 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
         self.effects.clone()
+    }
+
+    fn validate_effect_configuration_before_collection(&self) -> Result<(), String> {
+        validate_pre_collection_effect_configuration(
+            &self.name,
+            &self.effects,
+            &self.effect_policies,
+        )?;
+        if let Some(surface) = self.generated_surface {
+            crate::dsl::ai_effect::require_generated_chat_resilience(
+                surface,
+                self.generated_owner_kind,
+                &self.name,
+                self.effect_policies
+                    .iter()
+                    .filter(|attachment| {
+                        attachment.effect_type
+                            == <obzenflow_adapters::ai::ChatCompletion as obzenflow_runtime::effects::Effect>::EFFECT_TYPE
+                    })
+                    .map(|attachment| attachment.factory.as_ref()),
+            )?;
+        }
+        Ok(())
     }
 
     fn direct_fact_plan(
