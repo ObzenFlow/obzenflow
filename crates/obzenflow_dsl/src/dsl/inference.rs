@@ -7,15 +7,17 @@
 use super::ai_effect::GeneratedChatEffectRow;
 use super::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
 use super::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
-use obzenflow_adapters::ai::InferenceHandler;
+use obzenflow_adapters::ai::InferenceHandlerAdapter;
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::stages::InferenceHandler;
+use std::fmt::Debug;
 use std::num::NonZeroU64;
 
 /// Macro-only constructor for the scalar AI leaf.
 #[doc(hidden)]
 pub fn generated_inference<Input, Out>(
     name: impl Into<String>,
-    handler: InferenceHandler<Input, Out>,
+    handler: impl InferenceHandler<Input = Input, Output = Out> + Clone + Debug + 'static,
     effect_row: GeneratedChatEffectRow,
 ) -> Box<dyn StageDescriptor>
 where
@@ -32,7 +34,7 @@ where
         "inference!",
         "stage",
         name,
-        handler,
+        InferenceHandlerAdapter::new(handler),
         declarations,
         policy_attachments,
         direct_bound,

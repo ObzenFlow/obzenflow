@@ -3,19 +3,19 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_adapters::ai::{
-    ChatBindingEvidence, ChatCompletion, InferenceHandler, CHAT_CLIENT,
-};
+use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, CHAT_CLIENT};
 use obzenflow_core::ai::{
-    AiClientError, AiFinaliseRole, AiInferenceRole, AiMapRole, AiRoleLogicFailure, ChatClient,
-    ChatCompletionReply, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse, ChatTarget,
-    ChunkInfo, HeuristicTokenEstimator, Many, ResolvedTokenEstimator,
-    TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
+    AiClientError, AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply,
+    ChatParams, ChatRequest, ChatRequestSpec, ChatResponse, ChatTarget, ChunkInfo,
+    HeuristicTokenEstimator, Many, ResolvedTokenEstimator, TokenEstimatorFallbackReason,
+    TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::{
     EffectBinding, EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort,
 };
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::InferenceHandler;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -50,10 +50,14 @@ impl TypedPayload for Output {
     const EVENT_TYPE: &'static str = "trybuild.ai.output";
 }
 
-pub struct InferenceRole;
+#[derive(Clone, Debug)]
+pub struct TestInferenceHandler;
 
-impl AiInferenceRole<Input, Output> for InferenceRole {
-    fn prepare(&self, _input: &Input) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+impl InferenceHandler for TestInferenceHandler {
+    type Input = Input;
+    type Output = Output;
+
+    fn prepare(&self, _input: &Input) -> Result<ChatRequestSpec, HandlerError> {
         Ok(spec())
     }
 
@@ -62,13 +66,9 @@ impl AiInferenceRole<Input, Output> for InferenceRole {
         _input: Input,
         _request: ChatRequestSpec,
         _reply: ChatCompletionReply,
-    ) -> Result<Output, AiRoleLogicFailure> {
+    ) -> Result<Output, HandlerError> {
         Ok(Output)
     }
-}
-
-pub fn inference_handler() -> InferenceHandler<Input, Output> {
-    InferenceHandler::from_role(InferenceRole)
 }
 
 pub struct MapRole;

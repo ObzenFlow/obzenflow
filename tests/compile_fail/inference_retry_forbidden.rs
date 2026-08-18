@@ -10,7 +10,7 @@ use support::*;
 
 fn main() {
     let chat = binding();
-    let handler = inference_handler();
+    let handler = TestInferenceHandler;
     let _ = inference!(
         Input -> Output uses at_least_once(ChatCompletion) via chat with retry(3) => handler
     );

@@ -75,13 +75,18 @@ brief = inference!(
 );
 ```
 
-`generate_brief` is an adapter-owned `InferenceHandler`, normally constructed with
-`ai::inference_handler(prepare_brief, interpret_brief)`. The value to the right of the
-arrow is therefore a handler, as it is for the other stage macros.
+`generate_brief` is a user-owned type implementing the runtime `InferenceHandler`
+trait. Its `Input` and `Output` associated types witness the arrow, while its
+`prepare` and `interpret` methods provide the scalar inference hooks. The value to the
+right of the arrow is therefore an ordinary stage handler, as it is for the other stage
+macros. A hidden adapter performs the declared chat effect between those two hooks.
 
 Use `ai_map_reduce!` when the input must be token-budgeted, fanned out, collected, and finalised. Its map and reduce roles use the same trailing `uses` clause shown above. The lexical `via chat` operand is an `EffectBinding<ChatCompletion>`, not a registry name; normal configuration obtains it directly with `ChatEffectBinding::from_config(...)`, and the flow builder collects its private binding package.
 
-AI roles prepare a target-free `ChatRequestSpec`. The generated handler retains that exact value, binds the configured target only at the effect boundary, records `ChatCompletionReply` as framework replay evidence, and passes the retained spec plus reply to interpretation. The reply is not a selectable stage output.
+Inference handlers and map-reduce roles prepare a target-free `ChatRequestSpec`. The
+framework retains that exact value, binds the configured target only at the effect
+boundary, records `ChatCompletionReply` as framework replay evidence, and passes the
+retained spec plus reply to interpretation. The reply is not a selectable stage output.
 
 ## License
 

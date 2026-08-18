@@ -4,6 +4,7 @@
 
 //! Handler-related components organized by type
 
+pub mod inference;
 pub(crate) mod join;
 pub mod observer;
 pub mod resource_managed;
@@ -13,6 +14,7 @@ pub mod stateful;
 pub mod transform;
 
 // Re-export all handler traits for convenience
+pub use inference::InferenceHandler;
 pub(crate) use join::UnifiedJoinHandler;
 pub use join::{JoinReferenceView, TypedJoinHandler};
 pub use observer::ObserverHandler;

@@ -20,11 +20,10 @@ mod tests {
     use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
     use crate::dsl::typing::TypeHint;
     use obzenflow_adapters::ai::{
-        ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, InferenceHandler,
-        CHAT_CLIENT,
+        ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, CHAT_CLIENT,
     };
     use obzenflow_core::ai::{
-        AiFinaliseRole, AiInferenceRole, AiMapReduceChunkFailed, AiMapReducePlanningManifest,
+        AiFinaliseRole, AiMapReduceChunkFailed, AiMapReducePlanningManifest,
         AiMapReduceTaggedPartial, AiMapRole, AiRoleLogicFailure, ChatCompletionReply, ChatMessage,
         ChatParams, ChatRequestSpec, ChatTarget, HeuristicTokenEstimator, Many,
         ResolvedTokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
@@ -83,10 +82,14 @@ mod tests {
 
     struct TestMapRole;
 
-    struct TestInferenceRole;
+    #[derive(Clone, Debug)]
+    struct TestInferenceHandler;
 
-    impl AiInferenceRole<TestSeed, TestOut> for TestInferenceRole {
-        fn prepare(&self, _input: &TestSeed) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+    impl obzenflow_runtime::stages::InferenceHandler for TestInferenceHandler {
+        type Input = TestSeed;
+        type Output = TestOut;
+
+        fn prepare(&self, _input: &TestSeed) -> Result<ChatRequestSpec, HandlerError> {
             Ok(ChatRequestSpec {
                 messages: vec![ChatMessage::user("one shot")],
                 params: ChatParams::default(),
@@ -100,7 +103,7 @@ mod tests {
             _input: TestSeed,
             _request: ChatRequestSpec,
             _reply: ChatCompletionReply,
-        ) -> Result<TestOut, AiRoleLogicFailure> {
+        ) -> Result<TestOut, HandlerError> {
             Ok(TestOut)
         }
     }
@@ -232,7 +235,7 @@ mod tests {
     #[test]
     fn inference_lowers_to_one_generated_transform_with_the_exact_three_row_plan() {
         let chat = test_chat_binding("test-model", "test-model");
-        let inference_handler = InferenceHandler::from_role(TestInferenceRole);
+        let inference_handler = TestInferenceHandler;
         let mut inference = crate::inference!(
             TestSeed -> TestOut
                 uses at_least_once(ChatCompletion)

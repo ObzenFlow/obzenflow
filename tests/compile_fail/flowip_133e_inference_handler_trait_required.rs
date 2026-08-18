@@ -8,13 +8,16 @@ use obzenflow_dsl::inference;
 mod support;
 use support::*;
 
+#[derive(Clone, Debug)]
+struct LooksLikeAHandler;
+
 fn main() {
     let chat = binding();
     let policy = obzenflow_adapters::middleware::control::ai_resilience();
-    let role = InferenceRole;
+    let handler = LooksLikeAHandler;
     let _ = inference!(
         Input -> Output
         uses at_least_once(ChatCompletion) via chat with policy
-        => role
+        => handler
     );
 }

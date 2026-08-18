@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! One-shot AI inference with a replay-safe, target-free role.
+//! One-shot AI inference with a replay-safe, target-free handler.
 //!
 //! Run:
 //! `cargo run -p obzenflow --example one_shot_inference_demo --features ai -- \
@@ -13,16 +13,15 @@
 //! without resolving credentials or contacting the provider.
 
 use anyhow::Result;
-use obzenflow::ai::ChatEffectBinding;
-use obzenflow::typed::{ai, sinks, sources};
+use obzenflow::ai::{ChatEffectBinding, InferenceHandler};
+use obzenflow::typed::{sinks, sources};
 use obzenflow_adapters::middleware::control::ai_resilience;
-use obzenflow_core::ai::{
-    AiRoleLogicFailure, ChatCompletionReply, ChatMessage, ChatParams, ChatRequestSpec,
-};
+use obzenflow_core::ai::{ChatCompletionReply, ChatMessage, ChatParams, ChatRequestSpec};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, inference, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -46,44 +45,53 @@ impl TypedPayload for DecisionBrief {
     const EVENT_TYPE: &'static str = "demo.one_shot.decision_brief";
 }
 
-fn prepare_brief(input: &ReducedEvidence) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
-    Ok(ChatRequestSpec {
-        messages: vec![
-            ChatMessage::system(
-                "Produce one concise recommendation using only the supplied evidence.",
-            ),
-            ChatMessage::user(format!(
-                "Question: {}\nEvidence:\n- {}",
-                input.question,
-                input.evidence.join("\n- ")
-            )),
-        ],
-        params: ChatParams {
-            temperature: Some(0.1),
-            max_tokens: Some(240),
-            ..ChatParams::default()
-        },
-        tools: Vec::new(),
-        response_format: None,
-    })
-}
+#[derive(Clone, Debug)]
+struct GenerateBrief;
 
-fn interpret_brief(
-    input: ReducedEvidence,
-    _request: ChatRequestSpec,
-    reply: ChatCompletionReply,
-) -> Result<DecisionBrief, AiRoleLogicFailure> {
-    Ok(DecisionBrief {
-        question: input.question,
-        recommendation: reply.response.text,
-    })
+impl InferenceHandler for GenerateBrief {
+    type Input = ReducedEvidence;
+    type Output = DecisionBrief;
+
+    fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, HandlerError> {
+        Ok(ChatRequestSpec {
+            messages: vec![
+                ChatMessage::system(
+                    "Produce one concise recommendation using only the supplied evidence.",
+                ),
+                ChatMessage::user(format!(
+                    "Question: {}\nEvidence:\n- {}",
+                    input.question,
+                    input.evidence.join("\n- ")
+                )),
+            ],
+            params: ChatParams {
+                temperature: Some(0.1),
+                max_tokens: Some(240),
+                ..ChatParams::default()
+            },
+            tools: Vec::new(),
+            response_format: None,
+        })
+    }
+
+    fn interpret(
+        &self,
+        input: ReducedEvidence,
+        _request: ChatRequestSpec,
+        reply: ChatCompletionReply,
+    ) -> Result<DecisionBrief, HandlerError> {
+        Ok(DecisionBrief {
+            question: input.question,
+            recommendation: reply.response.text,
+        })
+    }
 }
 
 fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |runtime_config| {
         let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;
         let evidence = sources::once(input);
-        let generate_brief = ai::inference_handler(prepare_brief, interpret_brief);
+        let generate_brief = GenerateBrief;
         let display = sinks::console(|brief: &DecisionBrief| {
             format!("{}\n\n{}", brief.question, brief.recommendation.trim())
         });

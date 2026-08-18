@@ -40,11 +40,10 @@ pub use hashing::{
     LLM_HASH_VERSION_SHA256_V1,
 };
 pub use map_reduce::{
-    AiFinaliseRole, AiInferenceRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed,
-    AiMapReduceJobFailed, AiMapReduceMapInput, AiMapReducePlanningFailed,
-    AiMapReducePlanningFailure, AiMapReducePlanningManifest, AiMapReduceReduceInput,
-    AiMapReduceRoleFailure, AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind,
-    AiRoleLogicFailure, Many,
+    AiFinaliseRole, AiMapReduceChunkFailed, AiMapReduceFinaliseFailed, AiMapReduceJobFailed,
+    AiMapReduceMapInput, AiMapReducePlanningFailed, AiMapReducePlanningFailure,
+    AiMapReducePlanningManifest, AiMapReduceReduceInput, AiMapReduceRoleFailure,
+    AiMapReduceTaggedPartial, AiMapRole, AiProviderFailureKind, AiRoleLogicFailure, Many,
 };
 pub use model_profile::{ChatModelProfile, ContextWindowSource};
 pub use observability::{

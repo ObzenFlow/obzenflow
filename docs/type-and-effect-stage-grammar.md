@@ -184,12 +184,34 @@ uses AuthorizePayment
 ### One-shot inference
 
 The one-shot example keeps its `via chat` capability while removing registry,
-one-item collection, and unit-role ceremony:
+one-item collection, and scalar-role/factory ceremony. The application implements the
+same kind of handler trait used by the other stage families:
 
 ```rust,ignore
+#[derive(Clone, Debug)]
+struct GenerateBrief;
+
+impl InferenceHandler for GenerateBrief {
+    type Input = ReducedEvidence;
+    type Output = DecisionBrief;
+
+    fn prepare(&self, input: &Self::Input) -> Result<ChatRequestSpec, HandlerError> {
+        // Build the target-free request.
+    }
+
+    fn interpret(
+        &self,
+        input: Self::Input,
+        request: ChatRequestSpec,
+        reply: ChatCompletionReply,
+    ) -> Result<Self::Output, HandlerError> {
+        // Turn the recorded reply into the declared output.
+    }
+}
+
 let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;
 let evidence = sources::once(input);
-let generate_brief = ai::inference_handler(prepare_brief, interpret_brief);
+let generate_brief = GenerateBrief;
 
 ReducedEvidence -> DecisionBrief
 uses at_least_once(ChatCompletion)

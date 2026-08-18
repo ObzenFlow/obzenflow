@@ -9,4 +9,5 @@ mod inference;
 pub use chat::ChatTransform;
 pub(crate) use chat::ChatTransformSettings;
 pub use embedding::EmbeddingTransform;
-pub use inference::{inference_handler, InferenceHandler};
+#[doc(hidden)]
+pub use inference::InferenceHandlerAdapter;

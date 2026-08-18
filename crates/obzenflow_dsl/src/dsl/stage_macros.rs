@@ -4599,7 +4599,7 @@ macro_rules! __obzenflow_inference_contract {
             then = {
                 $crate::__obzenflow_handler_path_diagnostic!(
                     "inference!",
-                    "let handler = ai::inference_handler(prepare, interpret); answer = inference!(Input -> Output uses Effect => handler);"
+                    "implement InferenceHandler for a handler type, bind a value immediately above the flow, then pass that name: let handler = MyInferenceHandler; answer = inference!(Input -> Output uses Effect => handler);"
                 )
             }
         )

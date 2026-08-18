@@ -10,7 +10,7 @@ use support::*;
 
 fn main() {
     let chat = binding();
-    let handler = inference_handler();
+    let handler = TestInferenceHandler;
     let first = obzenflow_adapters::middleware::control::ai_resilience();
     let second = obzenflow_adapters::middleware::control::ai_resilience();
     let _ = inference!(

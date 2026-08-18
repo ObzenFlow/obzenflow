@@ -5,16 +5,13 @@
 //! FLOWIP-120j checked journal witness for scalar `inference!`.
 
 use async_trait::async_trait;
-use obzenflow_adapters::ai::{
-    ChatBindingEvidence, ChatCompletion, ChatEffects, InferenceHandler, CHAT_CLIENT,
-};
+use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, ChatEffects, CHAT_CLIENT};
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_adapters::middleware::{MiddlewareFactory, RateLimiterFactory};
 use obzenflow_core::ai::{
-    AiClientError, AiInferenceRole, AiRoleLogicFailure, ChatClient, ChatCompletionReply,
-    ChatMessage, ChatParams, ChatRequest, ChatRequestSpec, ChatResponse, ChatTarget,
-    HeuristicTokenEstimator, ResolvedTokenEstimator, TokenEstimatorFallbackReason,
-    TokenEstimatorResolutionInfo,
+    AiClientError, ChatClient, ChatCompletionReply, ChatMessage, ChatParams, ChatRequest,
+    ChatRequestSpec, ChatResponse, ChatTarget, HeuristicTokenEstimator, ResolvedTokenEstimator,
+    TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{
@@ -38,8 +35,8 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport,
+    EffectfulTransformHandler, InferenceHandler, InlineSink, SinkDescription, SinkTerminalOutcome,
+    SinkWriteContext, SinkWriteReport,
 };
 #[cfg(feature = "test-support")]
 use obzenflow_runtime::testing::BackpressureAckGate;
@@ -64,9 +61,11 @@ fn one_shot_witness_uses_the_locked_materializer_surface() {
 
     for required in [
         "FlowDefinition::materialize(move |runtime_config| {",
+        "use obzenflow::ai::{ChatEffectBinding, InferenceHandler};",
         "let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;",
         "let evidence = sources::once(input);",
-        "let generate_brief = ai::inference_handler(prepare_brief, interpret_brief);",
+        "impl InferenceHandler for GenerateBrief {",
+        "let generate_brief = GenerateBrief;",
         "=> generate_brief",
         "via chat",
     ] {
@@ -82,7 +81,11 @@ fn one_shot_witness_uses_the_locked_materializer_surface() {
         "effect_ports,",
         "install_into",
         "struct BriefRole",
+        "AiInferenceRole",
+        "inference_handler(",
         "inference_role(",
+        "obzenflow::typed::{ai",
+        "obzenflow::typed::ai",
         "sources::finite([input])",
         "std::env",
         "EffectPortResolver",
@@ -120,14 +123,18 @@ impl TypedPayload for DecisionBrief {
     const EVENT_TYPE: &'static str = "flowip_120j.decision_brief";
 }
 
-struct BriefRole {
+#[derive(Clone, Debug)]
+struct BriefHandler {
     prepare_calls: Arc<AtomicUsize>,
     interpret_calls: Arc<AtomicUsize>,
     prompt_suffix: &'static str,
 }
 
-impl AiInferenceRole<ReducedEvidence, DecisionBrief> for BriefRole {
-    fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+impl InferenceHandler for BriefHandler {
+    type Input = ReducedEvidence;
+    type Output = DecisionBrief;
+
+    fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, HandlerError> {
         self.prepare_calls.fetch_add(1, Ordering::SeqCst);
         Ok(ChatRequestSpec {
             messages: vec![ChatMessage::user(format!(
@@ -145,7 +152,7 @@ impl AiInferenceRole<ReducedEvidence, DecisionBrief> for BriefRole {
         input: ReducedEvidence,
         request: ChatRequestSpec,
         reply: ChatCompletionReply,
-    ) -> Result<DecisionBrief, AiRoleLogicFailure> {
+    ) -> Result<DecisionBrief, HandlerError> {
         self.interpret_calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(
             request.messages,
@@ -162,41 +169,50 @@ impl AiInferenceRole<ReducedEvidence, DecisionBrief> for BriefRole {
     }
 }
 
-fn prepare_functional_brief(
-    input: &ReducedEvidence,
-) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
-    Ok(ChatRequestSpec {
-        messages: vec![ChatMessage::user(format!("decide {}", input.value))],
-        params: ChatParams::default(),
-        tools: Vec::new(),
-        response_format: None,
-    })
+#[derive(Clone, Debug)]
+struct FunctionalBriefHandler;
+
+impl InferenceHandler for FunctionalBriefHandler {
+    type Input = ReducedEvidence;
+    type Output = DecisionBrief;
+
+    fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, HandlerError> {
+        Ok(ChatRequestSpec {
+            messages: vec![ChatMessage::user(format!("decide {}", input.value))],
+            params: ChatParams::default(),
+            tools: Vec::new(),
+            response_format: None,
+        })
+    }
+
+    fn interpret(
+        &self,
+        input: ReducedEvidence,
+        request: ChatRequestSpec,
+        reply: ChatCompletionReply,
+    ) -> Result<DecisionBrief, HandlerError> {
+        assert_eq!(
+            request.messages,
+            vec![ChatMessage::user(format!("decide {}", input.value))],
+            "the inference adapter forwards the exact retained request"
+        );
+        Ok(DecisionBrief {
+            value: input.value,
+            answer: reply.response.text,
+        })
+    }
 }
 
-fn interpret_functional_brief(
-    input: ReducedEvidence,
-    request: ChatRequestSpec,
-    reply: ChatCompletionReply,
-) -> Result<DecisionBrief, AiRoleLogicFailure> {
-    assert_eq!(
-        request.messages,
-        vec![ChatMessage::user(format!("decide {}", input.value))],
-        "the functional adapter forwards the exact retained request"
-    );
-    Ok(DecisionBrief {
-        value: input.value,
-        answer: reply.response.text,
-    })
+#[derive(Clone, Debug)]
+struct BriefHandlerV2 {
+    inner: BriefHandler,
 }
 
-struct BriefRoleV2 {
-    inner: BriefRole,
-}
+impl InferenceHandler for BriefHandlerV2 {
+    type Input = ReducedEvidence;
+    type Output = DecisionBrief;
 
-impl AiInferenceRole<ReducedEvidence, DecisionBrief> for BriefRoleV2 {
-    const LOGIC_VERSION: &'static str = "2";
-
-    fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+    fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, HandlerError> {
         self.inner.prepare(input)
     }
 
@@ -205,12 +221,16 @@ impl AiInferenceRole<ReducedEvidence, DecisionBrief> for BriefRoleV2 {
         input: ReducedEvidence,
         request: ChatRequestSpec,
         reply: ChatCompletionReply,
-    ) -> Result<DecisionBrief, AiRoleLogicFailure> {
+    ) -> Result<DecisionBrief, HandlerError> {
         self.inner.interpret(input, request, reply)
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "2"
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct InterpretationCutGate {
     released: Arc<(Mutex<bool>, Condvar)>,
 }
@@ -231,13 +251,17 @@ impl InterpretationCutGate {
     }
 }
 
-struct GatedBriefRole {
-    inner: BriefRole,
+#[derive(Clone, Debug)]
+struct GatedBriefHandler {
+    inner: BriefHandler,
     gate: InterpretationCutGate,
 }
 
-impl AiInferenceRole<ReducedEvidence, DecisionBrief> for GatedBriefRole {
-    fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+impl InferenceHandler for GatedBriefHandler {
+    type Input = ReducedEvidence;
+    type Output = DecisionBrief;
+
+    fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, HandlerError> {
         self.inner.prepare(input)
     }
 
@@ -246,7 +270,7 @@ impl AiInferenceRole<ReducedEvidence, DecisionBrief> for GatedBriefRole {
         input: ReducedEvidence,
         request: ChatRequestSpec,
         reply: ChatCompletionReply,
-    ) -> Result<DecisionBrief, AiRoleLogicFailure> {
+    ) -> Result<DecisionBrief, HandlerError> {
         self.gate.park_after_reply();
         self.inner.interpret(input, request, reply)
     }
@@ -404,23 +428,23 @@ fn build_flow(
     interpret_calls: Arc<AtomicUsize>,
     prompt_suffix: &'static str,
 ) -> FlowDefinition {
-    let brief_role = BriefRole {
+    let brief_handler = BriefHandler {
         prepare_calls,
         interpret_calls,
         prompt_suffix,
     };
-    build_flow_for_role(
+    build_flow_for_handler(
         journal_base,
         outputs,
         chat_authority,
         enforced_backpressure(backpressure_window).stall_timeout_ms(5_000),
         vec![ReducedEvidence { value: 7 }],
-        brief_role,
+        brief_handler,
         ai_resilience(),
     )
 }
 
-fn build_functional_flow(
+fn build_user_handler_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DecisionBrief>>>,
     chat_authority: ChatAuthority,
@@ -428,14 +452,11 @@ fn build_functional_flow(
     let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
         let evidence = obzenflow::typed::sources::once(ReducedEvidence { value: 7 });
-        let generate_brief = obzenflow::typed::ai::inference_handler(
-            prepare_functional_brief,
-            interpret_functional_brief,
-        );
+        let generate_brief = FunctionalBriefHandler;
         let collected = CollectBrief { outputs };
 
         Ok(flow! {
-            name: "one_shot_functional_facades",
+            name: "one_shot_inference_handler",
             journals: disk_journals(journal_base),
             stages: {
                 evidence = source!(ReducedEvidence => evidence);
@@ -505,10 +526,7 @@ fn build_shared_domain_operation_flow(
     let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
         let evidence = obzenflow::typed::sources::once(ReducedEvidence { value: 7 });
-        let generate_brief = obzenflow::typed::ai::inference_handler(
-            prepare_functional_brief,
-            interpret_functional_brief,
-        );
+        let generate_brief = FunctionalBriefHandler;
         let reviewed = HandwrittenBriefReview;
         let collected = CollectBrief { outputs };
 
@@ -543,22 +561,25 @@ fn build_shared_domain_operation_flow(
     })
 }
 
-fn build_flow_for_role<Role>(
+fn build_flow_for_handler<H>(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DecisionBrief>>>,
     chat_authority: ChatAuthority,
     backpressure: BackpressureClause,
     evidence_inputs: Vec<ReducedEvidence>,
-    brief_role: Role,
+    brief_handler: H,
     brief_policy: Box<dyn MiddlewareFactory>,
 ) -> FlowDefinition
 where
-    Role: AiInferenceRole<ReducedEvidence, DecisionBrief>,
+    H: InferenceHandler<Input = ReducedEvidence, Output = DecisionBrief>
+        + Clone
+        + std::fmt::Debug
+        + 'static,
 {
     let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
         let evidence_handler = obzenflow::typed::sources::finite(evidence_inputs);
-        let generate_brief = InferenceHandler::from_role(brief_role);
+        let generate_brief = brief_handler;
         let collected_handler = CollectBrief { outputs };
 
         Ok(flow! {
@@ -595,11 +616,11 @@ fn build_credit_flow(
 ) -> FlowDefinition {
     let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
-        let generate_brief = InferenceHandler::from_role(BriefRole {
+        let generate_brief = BriefHandler {
             prepare_calls,
             interpret_calls,
             prompt_suffix: "",
-        });
+        };
         let credit_evidence = obzenflow::typed::sources::finite([
             ReducedEvidence { value: 7 },
             ReducedEvidence { value: 8 },
@@ -640,11 +661,11 @@ fn build_fan_out_flow(
 ) -> FlowDefinition {
     let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
-        let generate_brief = InferenceHandler::from_role(BriefRole {
+        let generate_brief = BriefHandler {
             prepare_calls,
             interpret_calls: Arc::new(AtomicUsize::new(0)),
             prompt_suffix: "",
-        });
+        };
         let fan_out_evidence = obzenflow::typed::sources::finite([
             ReducedEvidence { value: 7 },
             ReducedEvidence { value: 8 },
@@ -821,7 +842,7 @@ async fn wait_for_counter(counter: &AtomicUsize, minimum: usize) {
 }
 
 #[tokio::test]
-async fn one_shot_functional_facades_run_live_and_strict_replay_without_live_authority() {
+async fn user_owned_inference_handler_runs_live_and_strict_replay_without_live_authority() {
     let temp = tempfile::tempdir().expect("temporary journal root");
     let journal_base = temp.path().join("journals");
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
@@ -830,13 +851,13 @@ async fn one_shot_functional_facades_run_live_and_strict_replay_without_live_aut
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_functional_flow(
+        .run_async(build_user_handler_flow(
             journal_base.clone(),
             live_outputs.clone(),
             live_chat_registry(live_resolutions.clone(), live_calls.clone()),
         ))
         .await
-        .expect("the functional one-shot facades run live");
+        .expect("the user-owned inference handler runs live");
 
     let expected = vec![DecisionBrief {
         value: 7,
@@ -857,13 +878,13 @@ async fn one_shot_functional_facades_run_live_and_strict_replay_without_live_aut
             archive.as_os_str().to_os_string(),
             OsString::from("--verify"),
         ])
-        .run_async(build_functional_flow(
+        .run_async(build_user_handler_flow(
             journal_base,
             replay_outputs.clone(),
             live_chat_registry(replay_resolutions.clone(), replay_calls.clone()),
         ))
         .await
-        .expect("strict replay uses the recorded functional-role reply");
+        .expect("strict replay uses the recorded inference-handler reply");
 
     assert_eq!(*replay_outputs.lock().expect("replay outputs"), expected);
     assert_eq!(
@@ -1119,7 +1140,7 @@ async fn one_shot_inference_live_and_replay_closure_use_three_rows_without_live_
 }
 
 #[tokio::test]
-async fn inference_windows_one_and_two_fail_before_role_or_port_resolution() {
+async fn inference_windows_one_and_two_fail_before_handler_or_port_resolution() {
     for window in [1_u64, 2] {
         let temp = tempfile::tempdir().expect("temporary journal root");
         let prepare_calls = Arc::new(AtomicUsize::new(0));
@@ -1320,13 +1341,13 @@ async fn invalid_inference_policy_leaves_its_binding_package_retryable() {
     let chat = live_chat_registry(resolutions.clone(), calls.clone());
     let result = FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_flow_for_role(
+        .run_async(build_flow_for_handler(
             temp.path().join("invalid-journals"),
             Arc::new(Mutex::new(Vec::new())),
             chat.clone(),
             enforced_backpressure(3).stall_timeout_ms(5_000),
             vec![ReducedEvidence { value: 7 }],
-            BriefRole {
+            BriefHandler {
                 prepare_calls: prepare_calls.clone(),
                 interpret_calls: interpret_calls.clone(),
                 prompt_suffix: "",
@@ -1352,13 +1373,13 @@ async fn invalid_inference_policy_leaves_its_binding_package_retryable() {
     let corrected_outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_flow_for_role(
+        .run_async(build_flow_for_handler(
             temp.path().join("corrected-journals"),
             corrected_outputs.clone(),
             chat,
             enforced_backpressure(3).stall_timeout_ms(5_000),
             vec![ReducedEvidence { value: 7 }],
-            BriefRole {
+            BriefHandler {
                 prepare_calls: prepare_calls.clone(),
                 interpret_calls: interpret_calls.clone(),
                 prompt_suffix: "",
@@ -1391,13 +1412,13 @@ async fn inference_track_and_off_modes_remain_nonblocking_and_locally_bounded() 
 
         FlowApplication::builder()
             .with_cli_args(["obzenflow"])
-            .run_async(build_flow_for_role(
+            .run_async(build_flow_for_handler(
                 journal_base.clone(),
                 outputs.clone(),
                 live_chat_registry(Arc::new(AtomicUsize::new(0)), calls.clone()),
                 backpressure,
                 vec![ReducedEvidence { value: 7 }],
-                BriefRole {
+                BriefHandler {
                     prepare_calls: Arc::new(AtomicUsize::new(0)),
                     interpret_calls: Arc::new(AtomicUsize::new(0)),
                     prompt_suffix: "",
@@ -1494,7 +1515,7 @@ fn reply_cut_child_process() {
         .block_on(
             FlowApplication::builder()
                 .with_cli_args(["obzenflow"])
-                .run_async(build_flow_for_role(
+                .run_async(build_flow_for_handler(
                     journal_base,
                     Arc::new(Mutex::new(Vec::new())),
                     live_chat_registry(
@@ -1503,8 +1524,8 @@ fn reply_cut_child_process() {
                     ),
                     enforced_backpressure(3).stall_timeout_ms(5_000),
                     vec![ReducedEvidence { value: 7 }],
-                    GatedBriefRole {
-                        inner: BriefRole {
+                    GatedBriefHandler {
+                        inner: BriefHandler {
                             prepare_calls: Arc::new(AtomicUsize::new(0)),
                             interpret_calls: Arc::new(AtomicUsize::new(0)),
                             prompt_suffix: "",
@@ -1716,14 +1737,14 @@ async fn changed_inference_logic_version_is_replay_divergence_with_identical_req
             OsString::from("--replay-from"),
             live_archive.as_os_str().to_os_string(),
         ])
-        .run_async(build_flow_for_role(
+        .run_async(build_flow_for_handler(
             journal_base.clone(),
             Arc::new(Mutex::new(Vec::new())),
             live_chat_registry(replay_resolutions.clone(), replay_calls.clone()),
             enforced_backpressure(3).stall_timeout_ms(5_000),
             vec![ReducedEvidence { value: 7 }],
-            BriefRoleV2 {
-                inner: BriefRole {
+            BriefHandlerV2 {
+                inner: BriefHandler {
                     prepare_calls: replay_prepare_calls.clone(),
                     interpret_calls: Arc::new(AtomicUsize::new(0)),
                     prompt_suffix: "",
@@ -1757,7 +1778,7 @@ async fn changed_inference_logic_version_is_replay_divergence_with_identical_req
     assert_eq!(
         replay_prepare_calls.load(Ordering::SeqCst),
         1,
-        "the version-two role prepares the same request bytes before descriptor comparison"
+        "the version-two handler prepares the same request bytes before descriptor comparison"
     );
     assert_eq!(replay_resolutions.load(Ordering::SeqCst), 0);
     assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
