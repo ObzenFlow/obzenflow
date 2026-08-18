@@ -169,15 +169,13 @@ fn empty_authority() -> AiAuthority {
 }
 
 fn handlers(
-    chat: EffectBinding<ChatCompletion>,
-    embedding: EffectBinding<EmbeddingGeneration>,
     mapper_failure: MapperFailure,
     mapper_counters: MapperCounters,
     embedding_dimensions: EmbeddingDimensions,
 ) -> GapHandlerBuildResult {
     let request_calls = mapper_counters.request;
     let response_calls = mapper_counters.response;
-    let chat = ChatTransformBuilder::from_binding(chat)
+    let chat = ChatTransformBuilder::new()
         .logic_version("gap-proof-chat-v1")
         .system("Summarise support tickets concisely.")
         .build_typed::<TicketRaised, TicketSummarised>(
@@ -204,7 +202,7 @@ fn handlers(
             },
         )
         .map_err(|error| Box::new(binding_error("chat_handler", error)))?;
-    let embedding = EmbeddingTransformBuilder::from_binding(embedding)
+    let embedding = EmbeddingTransformBuilder::new()
         .logic_version("gap-proof-embedding-v1")
         .dimensions(embedding_dimensions)
         .build_typed::<TicketSummarised, TicketEmbedded>(
@@ -232,10 +230,7 @@ fn finite_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let chat = authority.chat.clone();
         let embedding = authority.embedding.clone();
-        let effect_ports = authority.effect_ports.clone();
         let (chat_handler, embedding_handler) = handlers(
-            chat.clone(),
-            embedding.clone(),
             mapper_failure,
             mapper_counters.clone(),
             embedding_dimensions,
@@ -249,8 +244,6 @@ fn finite_flow(
         Ok(flow! {
             name: "standalone_ai_gap_proof",
             journals: disk_journals(journal_base.clone()),
-            effect_ports: effect_ports.clone(),
-
             stages: {
                 input = source!(TicketRaised => input);
                 chat = effectful_transform!(
@@ -323,10 +316,7 @@ fn resumable_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let chat = authority.chat.clone();
         let embedding = authority.embedding.clone();
-        let effect_ports = authority.effect_ports.clone();
         let (chat_handler, embedding_handler) = handlers(
-            chat.clone(),
-            embedding.clone(),
             MapperFailure::None,
             MapperCounters::default(),
             EmbeddingDimensions::try_from(3).unwrap(),
@@ -340,8 +330,6 @@ fn resumable_flow(
         Ok(flow! {
             name: "standalone_ai_resume_tail",
             journals: disk_journals(journal_base.clone()),
-            effect_ports: effect_ports.clone(),
-
             stages: {
                 input = infinite_source!(TicketRaised => input);
                 chat = effectful_transform!(
@@ -406,10 +394,7 @@ fn control_interleaving_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let chat = authority.chat.clone();
         let embedding = authority.embedding.clone();
-        let effect_ports = authority.effect_ports.clone();
         let (chat_handler, embedding_handler) = handlers(
-            chat.clone(),
-            embedding.clone(),
             MapperFailure::None,
             mapper_counters.clone(),
             EmbeddingDimensions::try_from(3).unwrap(),
@@ -423,8 +408,6 @@ fn control_interleaving_flow(
         Ok(flow! {
             name: "standalone_ai_control_interleaving",
             journals: disk_journals(journal_base.clone()),
-            effect_ports: effect_ports.clone(),
-
             stages: {
                 input = source!(TicketRaised => input);
                 chat = effectful_transform!(

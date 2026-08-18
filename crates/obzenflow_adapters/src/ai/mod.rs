@@ -10,6 +10,7 @@
 mod builders;
 pub mod effects;
 pub mod error_mapping;
+mod operations;
 pub mod transforms;
 
 pub use builders::{ChatTransformBuilder, EmbeddingTransformBuilder};
@@ -19,4 +20,8 @@ pub use effects::{
     EmbeddingGenerationBuildError, CHAT_CLIENT, EMBEDDING_CLIENT,
 };
 pub use error_mapping::effect_error_to_handler_error;
+pub use operations::{
+    ChatBindingMetadata, ChatEffects, ChatOperationError, EmbeddingBindingMetadata,
+    EmbeddingEffects, EmbeddingOperationError,
+};
 pub use transforms::{ChatTransform, EmbeddingTransform};

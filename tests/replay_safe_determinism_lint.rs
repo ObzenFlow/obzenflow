@@ -9,6 +9,7 @@ const SURFACE_MARKERS: &[&str] = &[
     "impl EffectfulTransformHandler",
     "impl EffectfulStatefulHandler",
     "impl AiInferenceRole",
+    "inference_role(",
     "impl AiMapRole",
     "impl AiFinaliseRole",
     "effectful_transform!",

@@ -13,7 +13,6 @@ use obzenflow_infra::ai::ChatEffectBinding;
 use obzenflow_infra::application::{ApplicationError, FlowApplication};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::bootstrap_config;
-use obzenflow_runtime::effects::EffectPortRegistry;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -87,16 +86,16 @@ fn materialised_failure_probe(
         assert_eq!(bootstrap.shutdown_timeout, Duration::from_secs(marker));
         assert!(!bootstrap.metrics.enabled);
 
-        let mut effect_ports = EffectPortRegistry::new();
-        ChatEffectBinding::from_config(&runtime_config.ai_models())
-            .and_then(|binding| binding.install_into(&mut effect_ports))
-            .map_err(|error| FlowBuildError::BindingConfiguration {
-                binding: "chat".to_string(),
-                detail: error.to_string(),
+        let _chat =
+            ChatEffectBinding::from_config(&runtime_config.ai_models()).map_err(|error| {
+                FlowBuildError::BindingConfiguration {
+                    binding: "chat".to_string(),
+                    detail: error.to_string(),
+                }
             })?;
 
         if matches!(kind, FailureKind::GenericAfterRegistration) {
-            // Registration is deliberately deferred: reaching this sentinel proves
+            // Client resolution is deliberately deferred: reaching this sentinel proves
             // that neither secret lookup nor client construction ran eagerly.
             return Err(FlowBuildError::StageResourcesFailed(
                 GENERIC_FAILURE_SENTINEL.to_string(),
@@ -109,8 +108,6 @@ fn materialised_failure_probe(
         Ok(flow! {
             name: "flowip_133b_build_order_probe",
             journals: disk_journals(journal_base),
-            effect_ports,
-
             stages: {
                 input = source!(ProbeEvent => input);
                 output = sink!(ProbeEvent => output);

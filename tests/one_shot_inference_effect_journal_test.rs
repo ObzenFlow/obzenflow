@@ -30,7 +30,7 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::{
-    EffectBinding, EffectPortRegistry, EffectPortResolverWithMetadata, EffectRegistrationBuilder,
+    EffectBinding, EffectPortResolverWithMetadata, EffectRegistrationBuilder,
     LogicalEffectBindingName, ResolvedEffectPort, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -60,12 +60,10 @@ fn one_shot_witness_uses_the_locked_materializer_surface() {
 
     for required in [
         "FlowDefinition::materialize(move |runtime_config| {",
-        "let ai_models = runtime_config.ai_models();",
-        "ChatEffectBinding::from_config(&ai_models)",
-        "binding.install_into(&mut effect_ports)",
-        "let evidence_source = sources::finite([input]);",
-        "let brief_role = BriefRole;",
-        "effect_ports,",
+        "let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;",
+        "let evidence = sources::once(input);",
+        "let brief = ai::inference_role(prepare_brief, interpret_brief);",
+        "via chat",
     ] {
         assert!(
             source.contains(required),
@@ -76,6 +74,10 @@ fn one_shot_witness_uses_the_locked_materializer_surface() {
     for forbidden in [
         "bindings:",
         "effect_ports: effect_ports,",
+        "effect_ports,",
+        "install_into",
+        "struct BriefRole",
+        "sources::finite([input])",
         "std::env",
         "EffectPortResolver",
         "EffectRegistrationBuilder",
@@ -152,6 +154,33 @@ impl AiInferenceRole<ReducedEvidence, DecisionBrief> for BriefRole {
             answer: reply.response.text,
         })
     }
+}
+
+fn prepare_functional_brief(
+    input: &ReducedEvidence,
+) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+    Ok(ChatRequestSpec {
+        messages: vec![ChatMessage::user(format!("decide {}", input.value))],
+        params: ChatParams::default(),
+        tools: Vec::new(),
+        response_format: None,
+    })
+}
+
+fn interpret_functional_brief(
+    input: ReducedEvidence,
+    request: ChatRequestSpec,
+    reply: ChatCompletionReply,
+) -> Result<DecisionBrief, AiRoleLogicFailure> {
+    assert_eq!(
+        request.messages,
+        vec![ChatMessage::user(format!("decide {}", input.value))],
+        "the functional adapter forwards the exact retained request"
+    );
+    Ok(DecisionBrief {
+        value: input.value,
+        answer: reply.response.text,
+    })
 }
 
 struct BriefRoleV2 {
@@ -307,7 +336,7 @@ fn evidence() -> ChatBindingEvidence {
     ChatBindingEvidence::new(target(), estimator()).expect("chat binding evidence")
 }
 
-type ChatAuthority = (EffectBinding<ChatCompletion>, EffectPortRegistry);
+type ChatAuthority = EffectBinding<ChatCompletion>;
 
 fn live_chat_registry(resolutions: Arc<AtomicUsize>, calls: Arc<AtomicUsize>) -> ChatAuthority {
     let resolver: EffectPortResolverWithMetadata<dyn ChatClient, ChatTarget> =
@@ -320,21 +349,18 @@ fn live_chat_registry(resolutions: Arc<AtomicUsize>, calls: Arc<AtomicUsize>) ->
             let metadata = Arc::new(client.target().clone());
             Ok(ResolvedEffectPort::new(client, metadata))
         });
-    let (binding, registration) = EffectRegistrationBuilder::<ChatCompletion>::new(
+    EffectRegistrationBuilder::<ChatCompletion>::new(
         LogicalEffectBindingName::new("chat").unwrap(),
         evidence(),
     )
     .bind_deferred_with_metadata(CHAT_CLIENT, resolver)
     .unwrap()
     .finish()
-    .unwrap();
-    let mut registry = EffectPortRegistry::new();
-    registry.install(registration).unwrap();
-    (binding, registry)
+    .unwrap()
 }
 
 fn eager_chat_registry(client: Arc<dyn ChatClient>) -> ChatAuthority {
-    let (binding, registration) = EffectRegistrationBuilder::<ChatCompletion>::new(
+    EffectRegistrationBuilder::<ChatCompletion>::new(
         LogicalEffectBindingName::new("chat").unwrap(),
         evidence(),
     )
@@ -344,14 +370,11 @@ fn eager_chat_registry(client: Arc<dyn ChatClient>) -> ChatAuthority {
     )
     .unwrap()
     .finish()
-    .unwrap();
-    let mut registry = EffectPortRegistry::new();
-    registry.install(registration).unwrap();
-    (binding, registry)
+    .unwrap()
 }
 
 fn replay_only_chat_registry() -> ChatAuthority {
-    let (binding, registration) = EffectRegistrationBuilder::<ChatCompletion>::new(
+    EffectRegistrationBuilder::<ChatCompletion>::new(
         LogicalEffectBindingName::new("chat").unwrap(),
         evidence(),
     )
@@ -363,9 +386,7 @@ fn replay_only_chat_registry() -> ChatAuthority {
     )
     .unwrap()
     .finish()
-    .unwrap();
-    drop(registration);
-    (binding, EffectPortRegistry::new())
+    .unwrap()
 }
 
 fn build_flow(
@@ -393,6 +414,42 @@ fn build_flow(
     )
 }
 
+fn build_functional_flow(
+    journal_base: PathBuf,
+    outputs: Arc<Mutex<Vec<DecisionBrief>>>,
+    chat_authority: ChatAuthority,
+) -> FlowDefinition {
+    let chat = chat_authority;
+    FlowDefinition::materialize(move |_runtime_config| {
+        let evidence = obzenflow::typed::sources::once(ReducedEvidence { value: 7 });
+        let brief = obzenflow::typed::ai::inference_role(
+            prepare_functional_brief,
+            interpret_functional_brief,
+        );
+        let collected = CollectBrief { outputs };
+
+        Ok(flow! {
+            name: "one_shot_functional_facades",
+            journals: disk_journals(journal_base),
+            stages: {
+                evidence = source!(ReducedEvidence => evidence);
+                brief = inference!(
+                    ReducedEvidence -> DecisionBrief
+                        uses at_least_once(ChatCompletion)
+                            via chat
+                            with ai_resilience()
+                        => brief
+                );
+                collected = sink!(DecisionBrief => collected);
+            },
+            topology: {
+                evidence |> brief;
+                brief |> collected;
+            }
+        })
+    })
+}
+
 fn build_flow_for_role<Role>(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<DecisionBrief>>>,
@@ -405,7 +462,7 @@ fn build_flow_for_role<Role>(
 where
     Role: AiInferenceRole<ReducedEvidence, DecisionBrief>,
 {
-    let (chat, effect_ports) = chat_authority;
+    let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
         let evidence_handler = obzenflow::typed::sources::finite(evidence_inputs);
         let collected_handler = CollectBrief { outputs };
@@ -414,8 +471,6 @@ where
             name: "one_shot_inference_effect_journal",
             journals: disk_journals(journal_base),
             backpressure: backpressure,
-            effect_ports,
-
             stages: {
                 evidence = source!(ReducedEvidence => evidence_handler);
                 brief = inference!(
@@ -444,7 +499,7 @@ fn build_credit_flow(
     prepare_calls: Arc<AtomicUsize>,
     interpret_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
-    let (chat, effect_ports) = chat_authority;
+    let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
         let brief_role = BriefRole {
             prepare_calls,
@@ -461,8 +516,6 @@ fn build_credit_flow(
             name: "one_shot_inference_credit_retirement",
             journals: disk_journals(journal_base),
             backpressure: enforced_backpressure(3).stall_timeout_ms(5_000),
-            effect_ports,
-
             stages: {
                 credit_evidence = source!(ReducedEvidence => credit_evidence);
                 credit_brief = inference!(
@@ -491,7 +544,7 @@ fn build_fan_out_flow(
     chat_authority: ChatAuthority,
     prepare_calls: Arc<AtomicUsize>,
 ) -> FlowDefinition {
-    let (chat, effect_ports) = chat_authority;
+    let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
         let brief_role = BriefRole {
             prepare_calls,
@@ -513,8 +566,6 @@ fn build_fan_out_flow(
             name: "one_shot_inference_fan_out",
             journals: disk_journals(journal_base),
             backpressure: enforced_backpressure(3).stall_timeout_ms(5_000),
-            effect_ports,
-
             stages: {
                 fan_out_evidence = source!(ReducedEvidence => fan_out_evidence);
                 fan_out_brief = inference!(
@@ -673,6 +724,64 @@ async fn wait_for_counter(counter: &AtomicUsize, minimum: usize) {
         tokio::task::yield_now().await;
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+#[tokio::test]
+async fn one_shot_functional_facades_run_live_and_strict_replay_without_live_authority() {
+    let temp = tempfile::tempdir().expect("temporary journal root");
+    let journal_base = temp.path().join("journals");
+    let live_outputs = Arc::new(Mutex::new(Vec::new()));
+    let live_resolutions = Arc::new(AtomicUsize::new(0));
+    let live_calls = Arc::new(AtomicUsize::new(0));
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_functional_flow(
+            journal_base.clone(),
+            live_outputs.clone(),
+            live_chat_registry(live_resolutions.clone(), live_calls.clone()),
+        ))
+        .await
+        .expect("the functional one-shot facades run live");
+
+    let expected = vec![DecisionBrief {
+        value: 7,
+        answer: "ship the scalar path".to_string(),
+    }];
+    assert_eq!(*live_outputs.lock().expect("live outputs"), expected);
+    assert_eq!(live_resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+
+    let archive = latest_run_dir(&journal_base);
+    let replay_outputs = Arc::new(Mutex::new(Vec::new()));
+    let replay_resolutions = Arc::new(AtomicUsize::new(0));
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            archive.as_os_str().to_os_string(),
+            OsString::from("--verify"),
+        ])
+        .run_async(build_functional_flow(
+            journal_base,
+            replay_outputs.clone(),
+            live_chat_registry(replay_resolutions.clone(), replay_calls.clone()),
+        ))
+        .await
+        .expect("strict replay uses the recorded functional-role reply");
+
+    assert_eq!(*replay_outputs.lock().expect("replay outputs"), expected);
+    assert_eq!(
+        replay_resolutions.load(Ordering::SeqCst),
+        0,
+        "strict replay must not resolve the fresh binding package"
+    );
+    assert_eq!(
+        replay_calls.load(Ordering::SeqCst),
+        0,
+        "strict replay must not call the provider"
+    );
 }
 
 #[tokio::test]

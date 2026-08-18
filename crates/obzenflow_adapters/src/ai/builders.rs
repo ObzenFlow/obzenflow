@@ -3,13 +3,12 @@
 // https://obzenflow.dev
 
 use super::transforms::ChatTransformSettings;
-use super::{ChatCompletion, ChatTransform, EmbeddingGeneration, EmbeddingTransform};
+use super::{ChatTransform, EmbeddingTransform};
 use obzenflow_core::ai::{
     ChatParams, ChatResponse, ChatResponseFormat, EmbeddingDimensions, EmbeddingParams,
     EmbeddingResponse, ToolDefinition,
 };
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::EffectBinding;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde_json::Value;
 use std::sync::Arc;
@@ -17,7 +16,6 @@ use std::sync::Arc;
 /// Deterministic typed builder for one standalone chat effect per input.
 #[derive(Clone)]
 pub struct ChatTransformBuilder {
-    binding: EffectBinding<ChatCompletion>,
     logic_version: Option<String>,
     system: Option<String>,
     params: ChatParams,
@@ -26,10 +24,8 @@ pub struct ChatTransformBuilder {
 }
 
 impl ChatTransformBuilder {
-    /// Begin from credential-free binding evidence. This is the sole constructor.
-    pub fn from_binding(binding: EffectBinding<ChatCompletion>) -> Self {
+    pub fn new() -> Self {
         Self {
-            binding,
             logic_version: None,
             system: None,
             params: ChatParams::default(),
@@ -100,7 +96,6 @@ impl ChatTransformBuilder {
             "ChatTransformBuilder::build_typed: missing required logic_version",
         )?;
         Ok(ChatTransform::from_parts(
-            self.binding,
             ChatTransformSettings {
                 system: self.system,
                 params: self.params,
@@ -117,16 +112,13 @@ impl ChatTransformBuilder {
 /// Deterministic typed builder for one standalone embedding effect per input.
 #[derive(Clone)]
 pub struct EmbeddingTransformBuilder {
-    binding: EffectBinding<EmbeddingGeneration>,
     logic_version: Option<String>,
     dimensions: Option<EmbeddingDimensions>,
 }
 
 impl EmbeddingTransformBuilder {
-    /// Begin from credential-free binding evidence. This is the sole constructor.
-    pub fn from_binding(binding: EffectBinding<EmbeddingGeneration>) -> Self {
+    pub fn new() -> Self {
         Self {
-            binding,
             logic_version: None,
             dimensions: None,
         }
@@ -159,7 +151,6 @@ impl EmbeddingTransformBuilder {
             "EmbeddingTransformBuilder::build_typed: missing required logic_version",
         )?;
         Ok(EmbeddingTransform::from_parts(
-            self.binding,
             EmbeddingParams {
                 dimensions: self.dimensions,
             },
@@ -182,12 +173,6 @@ fn required_logic_version(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::{ChatBindingEvidence, EmbeddingBindingEvidence, CHAT_CLIENT, EMBEDDING_CLIENT};
-    use obzenflow_core::ai::{
-        embedding_binding_fingerprint, AiProvider, ChatTarget, EmbeddingTarget,
-        HeuristicTokenEstimator, ResolvedTokenEstimator, TokenEstimatorFallbackReason,
-        TokenEstimatorResolutionInfo,
-    };
 
     #[derive(Debug, serde::Serialize, serde::Deserialize)]
     struct Input;
@@ -201,62 +186,9 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.standalone_builder.output";
     }
 
-    use obzenflow_runtime::effects::{
-        EffectPortResolutionError, EffectRegistrationBuilder, LogicalEffectBindingName,
-    };
-
-    fn chat_binding() -> EffectBinding<ChatCompletion> {
-        let evidence = ChatBindingEvidence::new(
-            ChatTarget::new("fixture", "model"),
-            ResolvedTokenEstimator::new(
-                Arc::new(HeuristicTokenEstimator::default()),
-                TokenEstimatorResolutionInfo::heuristic(
-                    "model",
-                    TokenEstimatorFallbackReason::ExplicitHeuristic,
-                    None,
-                ),
-            ),
-        )
-        .unwrap();
-        EffectRegistrationBuilder::<ChatCompletion>::new(
-            LogicalEffectBindingName::new("chat").unwrap(),
-            evidence,
-        )
-        .bind_deferred_with_metadata(
-            CHAT_CLIENT,
-            Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
-        )
-        .unwrap()
-        .finish()
-        .unwrap()
-        .0
-    }
-
-    fn embedding_binding() -> EffectBinding<EmbeddingGeneration> {
-        let provider = AiProvider::new("fixture");
-        let evidence = EmbeddingBindingEvidence::new(EmbeddingTarget::new(
-            provider.clone(),
-            "model",
-            embedding_binding_fingerprint(&provider, "model", "http://fixture.invalid"),
-        ))
-        .unwrap();
-        EffectRegistrationBuilder::<EmbeddingGeneration>::new(
-            LogicalEffectBindingName::new("embedding").unwrap(),
-            evidence,
-        )
-        .bind_deferred_with_metadata(
-            EMBEDDING_CLIENT,
-            Arc::new(|| Err(EffectPortResolutionError::ClientConstructionFailed)),
-        )
-        .unwrap()
-        .finish()
-        .unwrap()
-        .0
-    }
-
     #[test]
     fn chat_logic_version_is_required_with_the_locked_diagnostic() {
-        let error = ChatTransformBuilder::from_binding(chat_binding())
+        let error = ChatTransformBuilder::new()
             .build_typed::<Input, Output>(|_| Ok("prompt".into()), |_, _| Ok(Output))
             .unwrap_err();
         assert!(matches!(
@@ -268,7 +200,7 @@ mod tests {
 
     #[test]
     fn embedding_logic_version_is_required_with_the_locked_diagnostic() {
-        let error = EmbeddingTransformBuilder::from_binding(embedding_binding())
+        let error = EmbeddingTransformBuilder::new()
             .build_typed::<Input, Output>(|_| Ok(vec!["input".into()]), |_, _| Ok(Output))
             .unwrap_err();
         assert!(matches!(

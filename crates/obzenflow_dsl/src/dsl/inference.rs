@@ -4,16 +4,14 @@
 
 //! Generated scalar AI inference leaf.
 
-use super::ai_effect::{
-    invoke_generated_chat, GeneratedChatEffectRow, GeneratedChatInvocationError,
-};
+use super::ai_effect::GeneratedChatEffectRow;
 use super::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
 use super::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
 use async_trait::async_trait;
-use obzenflow_adapters::ai::{effect_error_to_handler_error, ChatCompletion};
+use obzenflow_adapters::ai::{effect_error_to_handler_error, ChatCompletion, ChatEffects};
 use obzenflow_core::ai::AiInferenceRole;
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{EffectBinding, Effects, StageCompletion};
+use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use std::fmt;
@@ -25,7 +23,6 @@ pub(crate) const INFERENCE_CHAT_COMPLETION_LABEL: &str = "inference.chat_complet
 
 struct GeneratedInferenceHandler<Input, Out, Role> {
     role: Arc<Role>,
-    chat_binding: EffectBinding<ChatCompletion>,
     _types: PhantomData<fn() -> (Input, Out)>,
 }
 
@@ -33,7 +30,6 @@ impl<Input, Out, Role> Clone for GeneratedInferenceHandler<Input, Out, Role> {
     fn clone(&self) -> Self {
         Self {
             role: self.role.clone(),
-            chat_binding: self.chat_binding.clone(),
             _types: PhantomData,
         }
     }
@@ -43,7 +39,6 @@ impl<Input, Out, Role> fmt::Debug for GeneratedInferenceHandler<Input, Out, Role
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GeneratedInferenceHandler")
-            .field("chat_binding", &self.chat_binding)
             .finish_non_exhaustive()
     }
 }
@@ -68,19 +63,10 @@ where
             .role
             .prepare(&input)
             .map_err(|error| HandlerError::Domain(format!("{error:?}")))?;
-        let reply = invoke_generated_chat(
-            fx,
-            &self.chat_binding,
-            &request,
-            INFERENCE_CHAT_COMPLETION_LABEL,
-        )
-        .await
-        .map_err(|error| match error {
-            GeneratedChatInvocationError::Build(error) => {
-                HandlerError::Validation(error.to_string())
-            }
-            GeneratedChatInvocationError::Effect(error) => effect_error_to_handler_error(error),
-        })?;
+        let reply = fx
+            .chat_completion(INFERENCE_CHAT_COMPLETION_LABEL, request.clone())
+            .await
+            .map_err(HandlerError::from)?;
         let output = self
             .role
             .interpret(input, request, reply)
@@ -109,13 +95,12 @@ where
     Role: AiInferenceRole<Input, Out>,
 {
     let GeneratedChatEffectRow {
-        binding: chat_binding,
+        binding: _,
         declarations,
         policy_attachments,
     } = effect_row;
     let handler = GeneratedInferenceHandler::<Input, Out, Role> {
         role: Arc::new(role),
-        chat_binding,
         _types: PhantomData,
     };
     let direct_bound = NonZeroU64::MIN.saturating_add(2);

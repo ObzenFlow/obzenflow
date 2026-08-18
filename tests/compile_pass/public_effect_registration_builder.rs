@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use obzenflow_core::BoundedBindingEvidence;
 use obzenflow_runtime::effects::{
     Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse, EffectContext, EffectError,
-    EffectPortRegistry, EffectPortResolutionError, EffectPortResolver, EffectPortSlot,
-    EffectPortSlotSet, EffectRegistration, EffectRegistrationBuilder, EffectSafety,
-    LogicalEffectBindingName, Named, NamedEffect, RecordedReply,
+    EffectPortResolutionError, EffectPortResolver, EffectPortSlot, EffectPortSlotSet,
+    EffectRegistrationBuilder, EffectSafety, LogicalEffectBindingName, Named, NamedEffect,
+    RecordedReply,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -80,7 +80,7 @@ impl NamedEffect for LocalEffect {
     }
 }
 
-fn application_local_provider() -> (EffectBinding<LocalEffect>, EffectRegistration<LocalEffect>) {
+fn application_local_provider() -> EffectBinding<LocalEffect> {
     EffectRegistrationBuilder::<LocalEffect>::new(
         LogicalEffectBindingName::new("local").unwrap(),
         LocalEvidence,
@@ -91,7 +91,7 @@ fn application_local_provider() -> (EffectBinding<LocalEffect>, EffectRegistrati
     .unwrap()
 }
 
-fn outward_facade() -> (EffectBinding<LocalEffect>, EffectRegistration<LocalEffect>) {
+fn outward_facade() -> EffectBinding<LocalEffect> {
     let resolver: EffectPortResolver<dyn LocalClient> = Arc::new(|| {
         Ok::<Arc<dyn LocalClient>, EffectPortResolutionError>(Arc::new(FakeClient))
     });
@@ -105,7 +105,7 @@ fn outward_facade() -> (EffectBinding<LocalEffect>, EffectRegistration<LocalEffe
     .unwrap()
 }
 
-fn test_fixture() -> (EffectBinding<LocalEffect>, EffectRegistration<LocalEffect>) {
+fn test_fixture() -> EffectBinding<LocalEffect> {
     EffectRegistrationBuilder::<LocalEffect>::new(
         LogicalEffectBindingName::new("fixture").unwrap(),
         LocalEvidence,
@@ -117,12 +117,10 @@ fn test_fixture() -> (EffectBinding<LocalEffect>, EffectRegistration<LocalEffect
 }
 
 fn main() {
-    for (_binding, registration) in [
+    let bindings = [
         application_local_provider(),
         outward_facade(),
         test_fixture(),
-    ] {
-        let mut registry = EffectPortRegistry::new();
-        registry.install(registration).unwrap();
-    }
+    ];
+    assert_eq!(bindings.len(), 3);
 }

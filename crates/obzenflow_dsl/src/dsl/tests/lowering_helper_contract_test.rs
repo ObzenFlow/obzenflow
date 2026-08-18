@@ -145,7 +145,6 @@ mod tests {
         .unwrap()
         .finish()
         .unwrap()
-        .0
     }
 
     /// FLOWIP-120z: the type-level manifest muncher and the value-level entry

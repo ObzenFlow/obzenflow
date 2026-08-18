@@ -14,18 +14,15 @@
 
 use anyhow::Result;
 use obzenflow::ai::ChatEffectBinding;
-use obzenflow::typed::{sinks, sources};
+use obzenflow::typed::{ai, sinks, sources};
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_core::ai::{
-    AiInferenceRole, AiRoleLogicFailure, ChatCompletionReply, ChatMessage, ChatParams,
-    ChatRequestSpec,
+    AiRoleLogicFailure, ChatCompletionReply, ChatMessage, ChatParams, ChatRequestSpec,
 };
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::dsl::error::FlowBuildError;
 use obzenflow_dsl::{flow, inference, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::EffectPortRegistry;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -49,75 +46,61 @@ impl TypedPayload for DecisionBrief {
     const EVENT_TYPE: &'static str = "demo.one_shot.decision_brief";
 }
 
-struct BriefRole;
+fn prepare_brief(input: &ReducedEvidence) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+    Ok(ChatRequestSpec {
+        messages: vec![
+            ChatMessage::system(
+                "Produce one concise recommendation using only the supplied evidence.",
+            ),
+            ChatMessage::user(format!(
+                "Question: {}\nEvidence:\n- {}",
+                input.question,
+                input.evidence.join("\n- ")
+            )),
+        ],
+        params: ChatParams {
+            temperature: Some(0.1),
+            max_tokens: Some(240),
+            ..ChatParams::default()
+        },
+        tools: Vec::new(),
+        response_format: None,
+    })
+}
 
-impl AiInferenceRole<ReducedEvidence, DecisionBrief> for BriefRole {
-    fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
-        Ok(ChatRequestSpec {
-            messages: vec![
-                ChatMessage::system(
-                    "Produce one concise recommendation using only the supplied evidence.",
-                ),
-                ChatMessage::user(format!(
-                    "Question: {}\nEvidence:\n- {}",
-                    input.question,
-                    input.evidence.join("\n- ")
-                )),
-            ],
-            params: ChatParams {
-                temperature: Some(0.1),
-                max_tokens: Some(240),
-                ..ChatParams::default()
-            },
-            tools: Vec::new(),
-            response_format: None,
-        })
-    }
-
-    fn interpret(
-        &self,
-        input: ReducedEvidence,
-        _request: ChatRequestSpec,
-        reply: ChatCompletionReply,
-    ) -> Result<DecisionBrief, AiRoleLogicFailure> {
-        Ok(DecisionBrief {
-            question: input.question,
-            recommendation: reply.response.text,
-        })
-    }
+fn interpret_brief(
+    input: ReducedEvidence,
+    _request: ChatRequestSpec,
+    reply: ChatCompletionReply,
+) -> Result<DecisionBrief, AiRoleLogicFailure> {
+    Ok(DecisionBrief {
+        question: input.question,
+        recommendation: reply.response.text,
+    })
 }
 
 fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |runtime_config| {
-        let ai_models = runtime_config.ai_models();
-        let mut effect_ports = EffectPortRegistry::new();
-        let chat = ChatEffectBinding::from_config(&ai_models)
-            .and_then(|binding| binding.install_into(&mut effect_ports))
-            .map_err(|error| FlowBuildError::BindingConfiguration {
-                binding: "chat".to_string(),
-                detail: error.to_string(),
-            })?;
-        let evidence_source = sources::finite([input]);
-        let brief_role = BriefRole;
-        let display_brief = sinks::console(|brief: &DecisionBrief| {
+        let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;
+        let evidence = sources::once(input);
+        let brief = ai::inference_role(prepare_brief, interpret_brief);
+        let display = sinks::console(|brief: &DecisionBrief| {
             format!("{}\n\n{}", brief.question, brief.recommendation.trim())
         });
 
         Ok(flow! {
             name: "one_shot_inference_demo",
             journals: disk_journals(journal_path),
-            effect_ports,
-
             stages: {
-                evidence = source!(ReducedEvidence => evidence_source);
+                evidence = source!(ReducedEvidence => evidence);
                 brief = inference!(
                     ReducedEvidence -> DecisionBrief
                     uses at_least_once(ChatCompletion)
                         via chat
                         with ai_resilience()
-                    => brief_role
+                    => brief
                 );
-                display = sink!(DecisionBrief => display_brief);
+                display = sink!(DecisionBrief => display);
             },
 
             topology: {

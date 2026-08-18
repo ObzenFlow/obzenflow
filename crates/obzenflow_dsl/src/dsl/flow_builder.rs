@@ -13,7 +13,7 @@ use crate::dsl::stage_descriptor::StageDescriptor;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::{Journal, JournalError};
 use obzenflow_core::{FlowId, StageId};
-use obzenflow_runtime::effects::EffectPortRegistry;
+use obzenflow_runtime::effects::{EffectPortRegistry, EffectRegistrationCollectionError};
 use obzenflow_runtime::journal::FlowJournalFactory;
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;
@@ -64,7 +64,6 @@ pub async fn build_flow<J, P>(
     stages: HashMap<String, Box<dyn StageDescriptor>>,
     connections: Vec<(String, String, EdgeKind)>,
     lowering_artifacts: LoweringArtifacts,
-    effect_ports: EffectPortRegistry,
     build_ctx: FlowBuildContext,
     flow_backpressure_clause: Option<BackpressureClause>,
 ) -> Result<FlowBuildOutput, crate::FlowBuildFailure>
@@ -868,6 +867,50 @@ where
         topology
             .validate_composite_boundaries()
             .map_err(FlowBuildError::TopologyValidationFailed)?;
+
+        // FLOWIP-133e: validate every authored declaration before atomically
+        // transferring its package recipes into the one run-local registry.
+        let mut authored_effect_declarations = Vec::new();
+        for descriptor in descriptors.values() {
+            let declarations = descriptor.effect_declarations();
+            crate::dsl::stage_descriptor::validate_authored_effect_declarations(
+                descriptor.name(),
+                &declarations,
+            )
+            .map_err(FlowBuildError::StageResourcesFailed)?;
+            authored_effect_declarations.extend(declarations);
+        }
+        let effect_ports = EffectPortRegistry::collect_from_declarations(
+            authored_effect_declarations.iter(),
+        )
+        .map_err(|error| match error {
+            EffectRegistrationCollectionError::DistinctBindings {
+                binding,
+                effect_type,
+            } => FlowBuildError::DistinctEffectBindings {
+                flow_name,
+                effect_type,
+                binding: binding.to_string(),
+            },
+            EffectRegistrationCollectionError::AlreadyCollected {
+                binding,
+                effect_type,
+            } => FlowBuildError::EffectBindingPackageUnavailable {
+                flow_name,
+                effect_type,
+                binding: binding.to_string(),
+                detail: "the package was already collected",
+            },
+            EffectRegistrationCollectionError::MissingPackage {
+                binding,
+                effect_type,
+            } => FlowBuildError::EffectBindingPackageUnavailable {
+                flow_name,
+                effect_type,
+                binding: binding.to_string(),
+                detail: "the authored declaration has no pending package",
+            },
+        })?;
 
         // Create services
         use obzenflow_runtime::pipeline::config::StageConfig;

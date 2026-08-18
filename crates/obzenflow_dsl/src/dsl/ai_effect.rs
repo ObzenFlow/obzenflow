@@ -4,14 +4,9 @@
 
 //! Shared generated-chat invocation seam for the AI authoring facades.
 
-use obzenflow_adapters::ai::{ChatCompletion, ChatCompletionBuildError};
+use obzenflow_adapters::ai::ChatCompletion;
 use obzenflow_adapters::middleware::MiddlewareFactory;
-use obzenflow_core::ai::{ChatCompletionReply, ChatRequestSpec};
-use obzenflow_core::StageFactSet;
-use obzenflow_runtime::effects::{
-    AllowedEffectsAllowEffect, EffectBinding, EffectDeclaration, EffectOutcomeFitsOutput,
-    EffectSet, Effects,
-};
+use obzenflow_runtime::effects::{EffectBinding, EffectDeclaration};
 
 use super::stage_descriptor::EffectPolicyAttachment;
 
@@ -25,12 +20,6 @@ pub struct GeneratedChatEffectRow {
     pub binding: EffectBinding<ChatCompletion>,
     pub declarations: Vec<EffectDeclaration>,
     pub policy_attachments: Vec<EffectPolicyAttachment>,
-}
-
-#[derive(Debug)]
-pub(crate) enum GeneratedChatInvocationError {
-    Build(ChatCompletionBuildError),
-    Effect(obzenflow_runtime::effects::EffectError),
 }
 
 /// Macro type-checking seam for the lexical `via` operand.
@@ -110,29 +99,4 @@ pub(crate) fn require_generated_chat_resilience<'a>(
          (found {resilience_count} EffectResilience policies across {} attachments)",
         declarations.len()
     ))
-}
-
-/// Bind the target-free spec, construct the one concrete effect, and cross
-/// the existing effect runtime exactly once.
-///
-/// Scalar inference, map, and finalise deliberately share this function so
-/// request identity and live-call authority cannot drift by workload shape.
-pub(crate) async fn invoke_generated_chat<Output, AllowedEffects, EffectAt, OutcomeProof>(
-    fx: &mut Effects<Output, AllowedEffects>,
-    binding: &EffectBinding<ChatCompletion>,
-    request: &ChatRequestSpec,
-    label: &'static str,
-) -> Result<ChatCompletionReply, GeneratedChatInvocationError>
-where
-    Output: StageFactSet,
-    AllowedEffects: EffectSet,
-    ChatCompletion: AllowedEffectsAllowEffect<AllowedEffects, EffectAt>
-        + EffectOutcomeFitsOutput<Output, OutcomeProof>,
-{
-    let bound_request = request.bind_target(binding.evidence().target());
-    let effect = ChatCompletion::new(label, bound_request, binding.invocation())
-        .map_err(GeneratedChatInvocationError::Build)?;
-    fx.perform(effect)
-        .await
-        .map_err(GeneratedChatInvocationError::Effect)
 }

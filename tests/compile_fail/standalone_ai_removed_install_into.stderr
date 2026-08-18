@@ -1,0 +1,11 @@
+error[E0599]: no method named `install_into` found for struct `EffectBinding<E>` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_install_into.rs:11:21
+   |
+11 |     let _ = binding.install_into(&mut registry);
+   |                     ^^^^^^^^^^^^
+   |
+help: there is a method `try_into` with a similar name, but with different arguments
+  --> $RUST/core/src/convert/mod.rs
+   |
+   |     fn try_into(self) -> Result<T, Self::Error>;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

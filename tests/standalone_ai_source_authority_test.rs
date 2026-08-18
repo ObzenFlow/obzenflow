@@ -58,8 +58,12 @@ fn standalone_handlers_and_builders_have_no_direct_provider_call_authority() {
         }
         if source.contains("EffectfulTransformHandler for") {
             assert!(
-                source.contains(".perform(effect)"),
-                "standalone handler {relative} must cross the typed effect facade"
+                source.contains(".chat_completion(") || source.contains(".generate_embedding("),
+                "standalone handler {relative} must use its domain-named effect operation"
+            );
+            assert!(
+                !source.contains(".perform("),
+                "standalone handler {relative} must not reconstruct a raw effect invocation"
             );
         }
     }

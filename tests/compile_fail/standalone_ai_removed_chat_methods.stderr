@@ -1,14 +1,14 @@
-error[E0599]: no function or associated item named `new` found for struct `ChatTransformBuilder` in the current scope
-  --> tests/compile_fail/standalone_ai_removed_chat_methods.rs:19:35
+error[E0599]: no function or associated item named `from_binding` found for struct `ChatTransformBuilder` in the current scope
+  --> tests/compile_fail/standalone_ai_removed_chat_methods.rs:15:27
    |
-19 |     let _ = ChatTransformBuilder::new();
-   |                                   ^^^ function or associated item not found in `ChatTransformBuilder`
+15 |     ChatTransformBuilder::from_binding(support::binding())
+   |                           ^^^^^^^^^^^^ function or associated item not found in `ChatTransformBuilder`
    |
-note: if you're trying to build a new `ChatTransformBuilder`, consider using `ChatTransformBuilder::from_binding` which returns `ChatTransformBuilder`
+note: if you're trying to build a new `ChatTransformBuilder`, consider using `ChatTransformBuilder::new` which returns `ChatTransformBuilder`
   --> crates/obzenflow_adapters/src/ai/builders.rs
    |
-   |     pub fn from_binding(binding: EffectBinding<ChatCompletion>) -> Self {
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     pub fn new() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^
 
 error[E0277]: the trait bound `ChatTransformBuilder: std::default::Default` is not satisfied
   --> tests/compile_fail/standalone_ai_removed_chat_methods.rs:20:35

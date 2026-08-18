@@ -138,7 +138,7 @@ pub fn binding() -> EffectBinding<ChatCompletion> {
         ),
     )
     .expect("trybuild chat target and estimator models agree");
-    let (binding, registration) = EffectRegistrationBuilder::<ChatCompletion>::new(
+    EffectRegistrationBuilder::<ChatCompletion>::new(
         LogicalEffectBindingName::new("trybuild_chat").unwrap(),
         evidence,
     )
@@ -153,9 +153,7 @@ pub fn binding() -> EffectBinding<ChatCompletion> {
     )
     .unwrap()
     .finish()
-    .unwrap();
-    drop(registration);
-    binding
+    .unwrap()
 }
 
 fn spec() -> ChatRequestSpec {

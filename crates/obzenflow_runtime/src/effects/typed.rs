@@ -5,8 +5,8 @@
 //! Compiler-checked effectful stage authoring facade (FLOWIP-120z).
 
 use super::{
-    assert_distinct_effect_set, Effect, EffectError, EffectInvocationContext, EffectSet,
-    EffectsCore, StageCompletion,
+    assert_distinct_effect_set, Effect, EffectBindingUse, EffectError, EffectInvocationContext,
+    EffectSet, EffectsCore, NamedEffect, StageCompletion,
 };
 use obzenflow_core::{
     assert_distinct_stage_fact_set, ChainEvent, Member, StageFactSet, SubsetOf, TypedPayload,
@@ -114,6 +114,15 @@ where
     #[must_use]
     pub fn is_replaying(&self) -> bool {
         self.core.is_replaying()
+    }
+
+    /// Runtime-owned integration SPI for an exact declaration-scoped projection.
+    #[doc(hidden)]
+    pub fn project_named_effect<E, At>(&mut self) -> Result<EffectBindingUse<E>, EffectError>
+    where
+        E: NamedEffect + AllowedEffectsAllowEffect<AllowedEffects, At>,
+    {
+        self.core.project_named_effect::<E>()
     }
 
     /// Author one flat output fact declared by `Output`.

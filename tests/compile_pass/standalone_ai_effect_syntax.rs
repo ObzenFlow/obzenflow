@@ -12,7 +12,6 @@ use obzenflow_core::config::SecretRef;
 use obzenflow_core::http_client::Url;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::effectful_transform;
-use obzenflow_runtime::effects::EffectPortRegistry;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -60,12 +59,8 @@ fn main() {
     )
     .unwrap();
 
-    let mut effect_ports = EffectPortRegistry::new();
-    let chat = ChatEffectBinding::ollama("model", None)
-        .unwrap()
-        .install_into(&mut effect_ports)
-        .unwrap();
-    let chat_handler = ChatTransformBuilder::from_binding(chat.clone())
+    let chat = ChatEffectBinding::ollama("model", None).unwrap();
+    let chat_handler = ChatTransformBuilder::new()
         .logic_version("chat-v1")
         .system("Be concise")
         .temperature(0.2)
@@ -93,11 +88,8 @@ fn main() {
         observers: [],
     );
 
-    let embedding = EmbeddingEffectBinding::ollama("embedding-model", None)
-        .unwrap()
-        .install_into(&mut effect_ports)
-        .unwrap();
-    let embedding_handler = EmbeddingTransformBuilder::from_binding(embedding.clone())
+    let embedding = EmbeddingEffectBinding::ollama("embedding-model", None).unwrap();
+    let embedding_handler = EmbeddingTransformBuilder::new()
         .logic_version("embedding-v1")
         .dimensions(EmbeddingDimensions::try_from(3).unwrap())
         .build_typed::<ChatOutput, EmbeddingOutput>(

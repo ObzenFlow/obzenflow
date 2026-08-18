@@ -320,6 +320,14 @@ where
 }
 
 impl EffectDeclaration {
+    /// Produce the declaration form retained by stage resources after package collection.
+    #[doc(hidden)]
+    pub fn runtime_projection(&self) -> Self {
+        let mut declaration = self.clone();
+        declaration.binding = declaration.binding.runtime_projection();
+        declaration
+    }
+
     pub fn of<E>() -> Self
     where
         E: Effect<BindingMode = Portless>,

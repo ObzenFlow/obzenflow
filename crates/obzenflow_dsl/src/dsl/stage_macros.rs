@@ -4733,7 +4733,9 @@ macro_rules! __obzenflow_ai_map_reduce_build {
         let __chunker = $crate::__obzenflow_ai_map_reduce_chunker_by_budget!(
             seed_type = ($($seed_ty)+),
             item_type = ($item_ty),
-            estimator: __map_effect_row.binding.evidence().estimator().estimator(),
+            estimator: ::obzenflow_adapters::ai::ChatBindingMetadata::estimator(
+                &__map_effect_row.binding
+            ).estimator(),
             $($chunking)+
         );
         let _: ::core::marker::PhantomData<$($seed_ty)+> =

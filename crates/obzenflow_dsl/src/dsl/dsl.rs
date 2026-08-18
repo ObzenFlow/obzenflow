@@ -95,33 +95,29 @@ macro_rules! parse_topology_with_joins {
     };
 }
 
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_effect_ports_or_default {
-    () => {
-        ::obzenflow_runtime::effects::EffectPortRegistry::new()
-    };
-    (expression $effect_ports:expr) => {
-        $effect_ports
-    };
-    (shorthand effect_ports, $effect_ports:ident) => {
-        $effect_ports
-    };
-    (shorthand $unexpected:ident, $_effect_ports:ident) => {
-        compile_error!(concat!(
-            "flow!: expected the effect-port shorthand `effect_ports,`, found `",
-            stringify!($unexpected),
-            ",`"
-        ))
-    };
-}
-
 /// Declare an ObzenFlow pipeline as a single expression.
 ///
-/// The optional sections are name, flow-level backpressure, and effect ports.
+/// The optional sections are name and flow-level backpressure.
 /// Middleware is declared on individual stages only (FLOWIP-115r).
 #[macro_export]
 macro_rules! flow {
+    {
+        name: $flow_name:literal,
+        journals: $journals:expr,
+        $(backpressure: $flow_bp:expr,)?
+        effect_ports $($rest:tt)*
+    } => {{
+        compile_error!("flow! has no effect_ports slot; named registrations are collected from lexical via bindings (FLOWIP-133e)");
+    }};
+
+    {
+        journals: $journals:expr,
+        $(backpressure: $flow_bp:expr,)?
+        effect_ports $($rest:tt)*
+    } => {{
+        compile_error!("flow! has no effect_ports slot; named registrations are collected from lexical via bindings (FLOWIP-133e)");
+    }};
+
     // FLOWIP-115r: keep a deliberate diagnostic for both empty and non-empty
     // uses of the removed key. These arms precede all surviving grammar.
     {
@@ -145,72 +141,11 @@ macro_rules! flow {
         );
     }};
 
-    // Effect-port shorthand with backpressure and an explicit name.
-    {
-        name: $flow_name:literal,
-        journals: $journals:expr,
-        backpressure: $flow_bp:expr,
-        $effect_ports_keyword:ident,
-
-        stages: {
-            $($stage_name:ident = $descriptor:expr;)*
-        },
-
-        topology: {
-            $($edge:tt)*
-        }
-    } => {{
-        $crate::flow! {
-            name: $flow_name,
-            journals: $journals,
-            backpressure: $flow_bp,
-            effect_ports: $crate::__obzenflow_effect_ports_or_default!(
-                shorthand $effect_ports_keyword, $effect_ports_keyword
-            ),
-            stages: {
-                $($stage_name = $descriptor;)*
-            },
-            topology: {
-                $($edge)*
-            }
-        }
-    }};
-
-    // Effect-port shorthand with an explicit name.
-    {
-        name: $flow_name:literal,
-        journals: $journals:expr,
-        $effect_ports_keyword:ident,
-
-        stages: {
-            $($stage_name:ident = $descriptor:expr;)*
-        },
-
-        topology: {
-            $($edge:tt)*
-        }
-    } => {{
-        $crate::flow! {
-            name: $flow_name,
-            journals: $journals,
-            effect_ports: $crate::__obzenflow_effect_ports_or_default!(
-                shorthand $effect_ports_keyword, $effect_ports_keyword
-            ),
-            stages: {
-                $($stage_name = $descriptor;)*
-            },
-            topology: {
-                $($edge)*
-            }
-        }
-    }};
-
     // Canonical named form.
     {
         name: $flow_name:literal,
         journals: $journals:expr,
         $(backpressure: $flow_bp:expr,)?
-        $(effect_ports: $effect_ports:expr,)?
 
         stages: {
             $($stage_name:ident = $descriptor:expr;)*
@@ -255,9 +190,6 @@ macro_rules! flow {
                 // Preserve the pre-substrate validation boundary: these
                 // expressions run only after composite lowering succeeds.
                 let journals = $journals;
-                let effect_ports = $crate::__obzenflow_effect_ports_or_default!(
-                    $(expression $effect_ports)?
-                );
                 #[allow(unused_mut)]
                 let mut flow_backpressure_clause = None;
                 $(
@@ -270,7 +202,6 @@ macro_rules! flow {
                     stages,
                     connections,
                     lowering_artifacts,
-                    effect_ports,
                     __build_ctx,
                     flow_backpressure_clause,
                 )
@@ -280,65 +211,10 @@ macro_rules! flow {
         )
     }};
 
-    // Effect-port shorthand with backpressure and the default name.
-    {
-        journals: $journals:expr,
-        backpressure: $flow_bp:expr,
-        $effect_ports_keyword:ident,
-
-        stages: {
-            $($stage_name:ident = $descriptor:expr;)*
-        },
-
-        topology: {
-            $($edge:tt)*
-        }
-    } => {{
-        $crate::flow! {
-            name: "default",
-            journals: $journals,
-            backpressure: $flow_bp,
-            $effect_ports_keyword,
-            stages: {
-                $($stage_name = $descriptor;)*
-            },
-            topology: {
-                $($edge)*
-            }
-        }
-    }};
-
-    // Effect-port shorthand with the default name.
-    {
-        journals: $journals:expr,
-        $effect_ports_keyword:ident,
-
-        stages: {
-            $($stage_name:ident = $descriptor:expr;)*
-        },
-
-        topology: {
-            $($edge:tt)*
-        }
-    } => {{
-        $crate::flow! {
-            name: "default",
-            journals: $journals,
-            $effect_ports_keyword,
-            stages: {
-                $($stage_name = $descriptor;)*
-            },
-            topology: {
-                $($edge)*
-            }
-        }
-    }};
-
     // Canonical default-name form.
     {
         journals: $journals:expr,
         $(backpressure: $flow_bp:expr,)?
-        $(effect_ports: $effect_ports:expr,)?
 
         stages: {
             $($stage_name:ident = $descriptor:expr;)*
@@ -352,7 +228,6 @@ macro_rules! flow {
             name: "default",
             journals: $journals,
             $(backpressure: $flow_bp,)?
-            $(effect_ports: $effect_ports,)?
             stages: {
                 $($stage_name = $descriptor;)*
             },
@@ -397,6 +272,23 @@ macro_rules! test_flow {
     {
         name: $flow_name:literal,
         journals: $journals:expr,
+        $(backpressure: $flow_bp:expr,)?
+        effect_ports $($rest:tt)*
+    } => {{
+        compile_error!("test_flow! has no effect_ports slot; named registrations are collected from lexical via bindings (FLOWIP-133e)");
+    }};
+
+    {
+        journals: $journals:expr,
+        $(backpressure: $flow_bp:expr,)?
+        effect_ports $($rest:tt)*
+    } => {{
+        compile_error!("test_flow! has no effect_ports slot; named registrations are collected from lexical via bindings (FLOWIP-133e)");
+    }};
+
+    {
+        name: $flow_name:literal,
+        journals: $journals:expr,
         middleware: [$($removed_middleware:tt)*],
         $($rest:tt)*
     } => {{
@@ -413,66 +305,6 @@ macro_rules! test_flow {
         compile_error!(
             "test_flow! has no middleware slot; declare middleware on the stage where it applies (FLOWIP-115r)"
         );
-    }};
-
-    // Effect-port shorthand with backpressure and an explicit name.
-    {
-        name: $flow_name:literal,
-        journals: $journals:expr,
-        backpressure: $flow_bp:expr,
-        $effect_ports_keyword:ident,
-
-        stages: {
-            $($stage_name:ident = $descriptor:expr;)*
-        },
-
-        topology: {
-            $($edge:tt)*
-        }
-    } => {{
-        $crate::test_flow! {
-            name: $flow_name,
-            journals: $journals,
-            backpressure: $flow_bp,
-            effect_ports: $crate::__obzenflow_effect_ports_or_default!(
-                shorthand $effect_ports_keyword, $effect_ports_keyword
-            ),
-            stages: {
-                $($stage_name = $descriptor;)*
-            },
-            topology: {
-                $($edge)*
-            }
-        }
-    }};
-
-    // Effect-port shorthand with an explicit name.
-    {
-        name: $flow_name:literal,
-        journals: $journals:expr,
-        $effect_ports_keyword:ident,
-
-        stages: {
-            $($stage_name:ident = $descriptor:expr;)*
-        },
-
-        topology: {
-            $($edge:tt)*
-        }
-    } => {{
-        $crate::test_flow! {
-            name: $flow_name,
-            journals: $journals,
-            effect_ports: $crate::__obzenflow_effect_ports_or_default!(
-                shorthand $effect_ports_keyword, $effect_ports_keyword
-            ),
-            stages: {
-                $($stage_name = $descriptor;)*
-            },
-            topology: {
-                $($edge)*
-            }
-        }
     }};
 
     // Canonical named form.
@@ -480,7 +312,6 @@ macro_rules! test_flow {
         name: $flow_name:literal,
         journals: $journals:expr,
         $(backpressure: $flow_bp:expr,)?
-        $(effect_ports: $effect_ports:expr,)?
 
         stages: {
             $($stage_name:ident = $descriptor:expr;)*
@@ -524,9 +355,6 @@ macro_rules! test_flow {
                 $crate::dsl::composites::lower_composites(members, &mut connections)?;
 
             let journals = $journals;
-            let effect_ports = $crate::__obzenflow_effect_ports_or_default!(
-                $(expression $effect_ports)?
-            );
             #[allow(unused_mut)]
             let mut flow_backpressure_clause = None;
             $(
@@ -539,7 +367,6 @@ macro_rules! test_flow {
                 stages,
                 connections,
                 lowering_artifacts,
-                effect_ports,
                 __build_ctx,
                 flow_backpressure_clause,
             )
@@ -548,65 +375,10 @@ macro_rules! test_flow {
         }
     }};
 
-    // Effect-port shorthand with backpressure and the default name.
-    {
-        journals: $journals:expr,
-        backpressure: $flow_bp:expr,
-        $effect_ports_keyword:ident,
-
-        stages: {
-            $($stage_name:ident = $descriptor:expr;)*
-        },
-
-        topology: {
-            $($edge:tt)*
-        }
-    } => {{
-        $crate::test_flow! {
-            name: "default",
-            journals: $journals,
-            backpressure: $flow_bp,
-            $effect_ports_keyword,
-            stages: {
-                $($stage_name = $descriptor;)*
-            },
-            topology: {
-                $($edge)*
-            }
-        }
-    }};
-
-    // Effect-port shorthand with the default name.
-    {
-        journals: $journals:expr,
-        $effect_ports_keyword:ident,
-
-        stages: {
-            $($stage_name:ident = $descriptor:expr;)*
-        },
-
-        topology: {
-            $($edge:tt)*
-        }
-    } => {{
-        $crate::test_flow! {
-            name: "default",
-            journals: $journals,
-            $effect_ports_keyword,
-            stages: {
-                $($stage_name = $descriptor;)*
-            },
-            topology: {
-                $($edge)*
-            }
-        }
-    }};
-
     // Canonical default-name form.
     {
         journals: $journals:expr,
         $(backpressure: $flow_bp:expr,)?
-        $(effect_ports: $effect_ports:expr,)?
 
         stages: {
             $($stage_name:ident = $descriptor:expr;)*
@@ -620,7 +392,6 @@ macro_rules! test_flow {
             name: "default",
             journals: $journals,
             $(backpressure: $flow_bp,)?
-            $(effect_ports: $effect_ports,)?
             stages: {
                 $($stage_name = $descriptor;)*
             },

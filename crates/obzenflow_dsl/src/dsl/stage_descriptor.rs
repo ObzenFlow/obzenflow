@@ -593,6 +593,28 @@ fn validate_effect_declarations(
     effect_ports: &EffectPortRegistry,
     port_registration_policy: obzenflow_runtime::execution::EffectPortRegistrationPolicy,
 ) -> Result<(), String> {
+    validate_authored_effect_declarations(stage_name, declarations)?;
+
+    if matches!(
+        port_registration_policy,
+        obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required
+    ) {
+        for declaration in declarations {
+            effect_ports
+                .validate_required_registration(declaration)
+                .map_err(|fault| {
+                    format!("Effectful stage '{stage_name}' cannot materialise: {fault}")
+                })?;
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_authored_effect_declarations(
+    stage_name: &str,
+    declarations: &[EffectDeclaration],
+) -> Result<(), String> {
     let mut effect_types = std::collections::HashSet::new();
 
     for declaration in declarations {
@@ -632,19 +654,6 @@ fn validate_effect_declarations(
                 "Effectful stage '{stage_name}' declares paid non-idempotent effect '{}' without explicit at_least_once(...) acknowledgement",
                 declaration.effect_type()
             ));
-        }
-    }
-
-    if matches!(
-        port_registration_policy,
-        obzenflow_runtime::execution::EffectPortRegistrationPolicy::Required
-    ) {
-        for declaration in declarations {
-            effect_ports
-                .validate_required_registration(declaration)
-                .map_err(|fault| {
-                    format!("Effectful stage '{stage_name}' cannot materialise: {fault}")
-                })?;
         }
     }
 
@@ -1604,7 +1613,11 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 )
                 .map_err(|message| format!("{surface}: {message}"))?;
         }
-        let effect_declarations = self.effects.clone();
+        let effect_declarations = self
+            .effects
+            .iter()
+            .map(EffectDeclaration::runtime_projection)
+            .collect::<Vec<_>>();
         validate_effect_declarations(
             &self.name,
             &effect_declarations,
@@ -2327,7 +2340,11 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         mut resources: StageResources,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
-        let effect_declarations = self.effects.clone();
+        let effect_declarations = self
+            .effects
+            .iter()
+            .map(EffectDeclaration::runtime_projection)
+            .collect::<Vec<_>>();
         validate_effect_declarations(
             &self.name,
             &effect_declarations,
@@ -2885,7 +2902,7 @@ mod tests {
             LogicalEffectBindingName::new(format!("safety_{CLASS}")).unwrap(),
             SafetyBindingEvidence,
         );
-        let (binding, registration) = if CLASS == 3 {
+        if CLASS == 3 {
             builder
                 .bind_eager(
                     transactional_effect_port_slot::<NamedSafetyEffect<CLASS>>(),
@@ -2897,9 +2914,7 @@ mod tests {
                 .unwrap()
         } else {
             builder.finish().unwrap()
-        };
-        drop(registration);
-        binding
+        }
     }
 
     #[test]

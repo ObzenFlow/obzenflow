@@ -154,7 +154,6 @@ pub fn zero_slot_binding() -> EffectBinding<ZeroSlotNamedEffect> {
     )
     .finish()
     .unwrap()
-    .0
 }
 
 pub fn other_zero_slot_binding() -> EffectBinding<OtherZeroSlotNamedEffect> {
@@ -164,7 +163,6 @@ pub fn other_zero_slot_binding() -> EffectBinding<OtherZeroSlotNamedEffect> {
     )
     .finish()
     .unwrap()
-    .0
 }
 
 #[derive(Clone, Debug)]

@@ -1203,10 +1203,7 @@ struct TransactionalCountingPort {
 
 fn transactional_counting_binding(
     port: Arc<dyn TransactionalEffectPort<TransactionalCountingEffect>>,
-) -> (
-    EffectBinding<TransactionalCountingEffect>,
-    EffectRegistration<TransactionalCountingEffect>,
-) {
+) -> EffectBinding<TransactionalCountingEffect> {
     EffectRegistrationBuilder::<TransactionalCountingEffect>::new(
         LogicalEffectBindingName::new("tx").unwrap(),
         TransactionalCountingEvidence,
@@ -1220,12 +1217,7 @@ fn transactional_counting_binding(
     .unwrap()
 }
 
-fn zero_slot_named_binding(
-    evidence: u64,
-) -> (
-    EffectBinding<ZeroSlotNamedEffect>,
-    EffectRegistration<ZeroSlotNamedEffect>,
-) {
+fn zero_slot_named_binding(evidence: u64) -> EffectBinding<ZeroSlotNamedEffect> {
     EffectRegistrationBuilder::<ZeroSlotNamedEffect>::new(
         LogicalEffectBindingName::new("zero_slot").unwrap(),
         VersionedBindingEvidence(evidence),
@@ -1238,10 +1230,7 @@ fn deferred_named_affine_binding(
     evidence: u64,
     resolver_calls: Arc<AtomicUsize>,
     port_calls: Arc<AtomicUsize>,
-) -> (
-    EffectBinding<NamedAffineCountingEffect>,
-    EffectRegistration<NamedAffineCountingEffect>,
-) {
+) -> EffectBinding<NamedAffineCountingEffect> {
     let resolver: EffectPortResolver<dyn NamedAffinePort> = Arc::new(move || {
         resolver_calls.fetch_add(1, Ordering::SeqCst);
         Ok(Arc::new(CountingNamedAffinePort {
@@ -1258,12 +1247,9 @@ fn deferred_named_affine_binding(
     .unwrap()
 }
 
-fn registry_with_transactional_counting(
-    registration: EffectRegistration<TransactionalCountingEffect>,
-) -> EffectPortRegistry {
-    let mut registry = EffectPortRegistry::new();
-    registry.install(registration).unwrap();
-    registry
+fn registry_with_binding<E: NamedEffect>(binding: &EffectBinding<E>) -> EffectPortRegistry {
+    let declaration = EffectDeclaration::named(binding);
+    EffectPortRegistry::collect_from_declarations([&declaration]).unwrap()
 }
 
 #[async_trait]
@@ -1975,13 +1961,12 @@ async fn generated_resume_withheld_credit_precedes_named_port_resolution() {
         JournalOwner::stage(stage_id),
         "effect-outcome:v1:",
     ));
-    let (archived_binding, archived_registration) = deferred_named_affine_binding(
+    let archived_binding = deferred_named_affine_binding(
         41,
         Arc::new(AtomicUsize::new(0)),
         Arc::new(AtomicUsize::new(0)),
     );
-    let mut archived_registry = EffectPortRegistry::new();
-    archived_registry.install(archived_registration).unwrap();
+    let archived_registry = registry_with_binding(&archived_binding);
     let mut archived = EffectsCore::new(named_affine_invocation_context_with_mode(
         archived_journal.clone(),
         parent.clone(),
@@ -2007,10 +1992,8 @@ async fn generated_resume_withheld_credit_precedes_named_port_resolution() {
         let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
         let resolver_calls = Arc::new(AtomicUsize::new(0));
         let port_calls = Arc::new(AtomicUsize::new(0));
-        let (binding, registration) =
-            deferred_named_affine_binding(41, resolver_calls.clone(), port_calls.clone());
-        let mut registry = EffectPortRegistry::new();
-        registry.install(registration).unwrap();
+        let binding = deferred_named_affine_binding(41, resolver_calls.clone(), port_calls.clone());
+        let registry = registry_with_binding(&binding);
         let admission = crate::backpressure::DirectFactAdmission::new(
             obzenflow_core::EventType::from("test.named-affine-resume"),
             NonZeroU64::new(3).expect("non-zero direct-fact bound"),
@@ -2968,11 +2951,9 @@ async fn run_caught_binding_fault_adapter(
     );
     let parent = EventEnvelope::new(JournalWriterId::new(), input);
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let (declared_binding, declared_registration) = zero_slot_named_binding(7);
-    let (invocation_binding, invocation_registration) = zero_slot_named_binding(7);
-    drop(invocation_registration);
-    let mut registry = EffectPortRegistry::new();
-    registry.install(declared_registration).unwrap();
+    let declared_binding = zero_slot_named_binding(7);
+    let invocation_binding = zero_slot_named_binding(7);
+    let registry = registry_with_binding(&declared_binding);
     let mut context = zero_slot_named_invocation_context_with_mode(
         journal.clone(),
         parent.clone(),
@@ -3045,11 +3026,9 @@ async fn run_stateful_binding_fault_adapter(
     );
     let parent = EventEnvelope::new(JournalWriterId::new(), input.clone());
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let (declared_binding, declared_registration) = zero_slot_named_binding(7);
-    let (invocation_binding, invocation_registration) = zero_slot_named_binding(7);
-    drop(invocation_registration);
-    let mut registry = EffectPortRegistry::new();
-    registry.install(declared_registration).unwrap();
+    let declared_binding = zero_slot_named_binding(7);
+    let invocation_binding = zero_slot_named_binding(7);
+    let registry = registry_with_binding(&declared_binding);
     let mut context = zero_slot_named_invocation_context_with_mode(
         journal.clone(),
         parent,
@@ -4076,12 +4055,11 @@ async fn transactional_effect_uses_registered_port_and_commits_once() {
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
-    let (binding, registration) =
-        transactional_counting_binding(Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }));
-    let ports = registry_with_transactional_counting(registration);
+    let binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        calls: transactional_calls.clone(),
+        commit: true,
+    }));
+    let ports = registry_with_binding(&binding);
     let mut effects = EffectsCore::new(transactional_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -4114,11 +4092,10 @@ async fn transactional_effect_live_return_comes_from_committed_record_not_port_r
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let port_calls = Arc::new(AtomicUsize::new(0));
-    let (binding, registration) =
-        transactional_counting_binding(Arc::new(DivergentTransactionalPort {
-            calls: port_calls.clone(),
-        }));
-    let ports = registry_with_transactional_counting(registration);
+    let binding = transactional_counting_binding(Arc::new(DivergentTransactionalPort {
+        calls: port_calls.clone(),
+    }));
+    let ports = registry_with_binding(&binding);
     let mut live = EffectsCore::new(transactional_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -4184,12 +4161,11 @@ async fn transactional_effect_replay_does_not_require_port_or_execute() {
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
-    let (binding, registration) =
-        transactional_counting_binding(Arc::new(TransactionalCountingPort {
-            calls: transactional_calls,
-            commit: true,
-        }));
-    let ports = registry_with_transactional_counting(registration);
+    let binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        calls: transactional_calls,
+        commit: true,
+    }));
+    let ports = registry_with_binding(&binding);
     let mut live = EffectsCore::new(transactional_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -4239,12 +4215,11 @@ async fn transactional_effect_missing_commit_fails() {
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
-    let (binding, registration) =
-        transactional_counting_binding(Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: false,
-        }));
-    let ports = registry_with_transactional_counting(registration);
+    let binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        calls: transactional_calls.clone(),
+        commit: false,
+    }));
+    let ports = registry_with_binding(&binding);
     let mut effects = EffectsCore::new(transactional_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -4277,12 +4252,10 @@ async fn transactional_effect_missing_port_fails_before_execute() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
-    let (binding, registration) =
-        transactional_counting_binding(Arc::new(TransactionalCountingPort {
-            calls: Arc::new(AtomicUsize::new(0)),
-            commit: true,
-        }));
-    drop(registration);
+    let binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        calls: Arc::new(AtomicUsize::new(0)),
+        commit: true,
+    }));
     let mut effects = EffectsCore::new(transactional_invocation_context_with_mode(
         journal,
         parent_envelope(WriterId::from(stage_id)),
@@ -4319,17 +4292,14 @@ async fn named_binding_family_mismatch_latches_before_cursor_or_io() {
     let invocation_port_calls = Arc::new(AtomicUsize::new(0));
     let normal_calls = Arc::new(AtomicUsize::new(0));
 
-    let (declared_binding, declared_registration) =
-        transactional_counting_binding(Arc::new(TransactionalCountingPort {
-            calls: declared_port_calls.clone(),
-            commit: true,
-        }));
-    let (invocation_binding, invocation_registration) =
-        transactional_counting_binding(Arc::new(TransactionalCountingPort {
-            calls: invocation_port_calls.clone(),
-            commit: true,
-        }));
-    drop(invocation_registration);
+    let declared_binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        calls: declared_port_calls.clone(),
+        commit: true,
+    }));
+    let invocation_binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        calls: invocation_port_calls.clone(),
+        commit: true,
+    }));
 
     // Both constructions have the same public name and evidence, but each
     // builder mints a distinct, opaque construction-family token. A binding
@@ -4340,7 +4310,7 @@ async fn named_binding_family_mismatch_latches_before_cursor_or_io() {
         "durable descriptor identity is evidence-based, not process-family-based"
     );
 
-    let ports = registry_with_transactional_counting(declared_registration);
+    let ports = registry_with_binding(&declared_binding);
     let mut effects = EffectsCore::new(transactional_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -4436,19 +4406,60 @@ async fn named_binding_family_mismatch_latches_before_cursor_or_io() {
     assert_eq!(invocation_port_calls.load(Ordering::SeqCst), 0);
 }
 
+#[test]
+fn missing_domain_projection_latches_binding_authority_before_cursor_or_io() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut effects = EffectsCore::new(invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    ));
+
+    let fault = match effects
+        .project_named_effect::<ZeroSlotNamedEffect>()
+        .expect_err("a domain projection requires its exact stage declaration")
+    {
+        EffectError::BindingAuthority { fault } => fault,
+        other => panic!("expected a binding-authority fault, got {other:?}"),
+    };
+    assert_eq!(fault.mismatch_kind(), Some(BindingMismatchKind::Mode));
+    assert_eq!(
+        effects.next_effect_ordinal_for_test(),
+        EffectOrdinal::new(0),
+        "projection authority is checked before reserving an effect cursor"
+    );
+    assert!(journal.events().is_empty());
+
+    let latched = match effects
+        .ensure_authoring_open()
+        .expect_err("projection failure terminally closes the invocation")
+    {
+        EffectError::BindingAuthority { fault } => fault,
+        other => panic!("expected the latched binding-authority fault, got {other:?}"),
+    };
+    assert_eq!(latched, fault);
+    assert_eq!(
+        effects
+            .binding_fault_fatal()
+            .expect("the projection fault maps to a stage fatal")
+            .reason,
+        obzenflow_core::event::StageFatalReason::EffectPortBindingMismatch
+    );
+}
+
 #[tokio::test]
 async fn binding_mismatches_leave_terminal_and_in_doubt_archives_untouched() {
     let stage_id = StageId::new();
     let parent = parent_envelope(WriterId::from(stage_id));
 
     let completed_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let (completed_binding, completed_registration) = deferred_named_affine_binding(
+    let completed_binding = deferred_named_affine_binding(
         71,
         Arc::new(AtomicUsize::new(0)),
         Arc::new(AtomicUsize::new(0)),
     );
-    let mut completed_registry = EffectPortRegistry::new();
-    completed_registry.install(completed_registration).unwrap();
+    let completed_registry = registry_with_binding(&completed_binding);
     let mut completed = EffectsCore::new(named_affine_invocation_context_with_mode(
         completed_journal.clone(),
         parent.clone(),
@@ -4470,13 +4481,12 @@ async fn binding_mismatches_leave_terminal_and_in_doubt_archives_untouched() {
         JournalOwner::stage(stage_id),
         "effect-outcome:v1:",
     ));
-    let (in_doubt_binding, in_doubt_registration) = deferred_named_affine_binding(
+    let in_doubt_binding = deferred_named_affine_binding(
         71,
         Arc::new(AtomicUsize::new(0)),
         Arc::new(AtomicUsize::new(0)),
     );
-    let mut in_doubt_registry = EffectPortRegistry::new();
-    in_doubt_registry.install(in_doubt_registration).unwrap();
+    let in_doubt_registry = registry_with_binding(&in_doubt_binding);
     let mut in_doubt = EffectsCore::new(named_affine_invocation_context_with_mode(
         in_doubt_journal.clone(),
         parent.clone(),
@@ -4507,17 +4517,15 @@ async fn binding_mismatches_leave_terminal_and_in_doubt_archives_untouched() {
             let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
             let resolver_calls = Arc::new(AtomicUsize::new(0));
             let port_calls = Arc::new(AtomicUsize::new(0));
-            let (declared_binding, declared_registration) =
+            let declared_binding =
                 deferred_named_affine_binding(71, resolver_calls.clone(), port_calls.clone());
-            drop(declared_registration);
             let invocation = match mismatch {
                 BindingMismatchKind::ConstructionFamily => {
-                    let (other_binding, other_registration) = deferred_named_affine_binding(
+                    let other_binding = deferred_named_affine_binding(
                         71,
                         Arc::new(AtomicUsize::new(0)),
                         Arc::new(AtomicUsize::new(0)),
                     );
-                    drop(other_registration);
                     other_binding.invocation()
                 }
                 BindingMismatchKind::Evidence => {
@@ -4570,17 +4578,13 @@ async fn binding_mismatches_leave_terminal_and_in_doubt_archives_untouched() {
 async fn concurrent_fan_out_shares_resolver_verdict_but_not_fatal_latches() {
     let resolver_calls = Arc::new(AtomicUsize::new(0));
     let port_calls = Arc::new(AtomicUsize::new(0));
-    let (binding, registration) =
-        deferred_named_affine_binding(81, resolver_calls.clone(), port_calls.clone());
-    let mut registry = EffectPortRegistry::new();
-    registry.install(registration).unwrap();
-    let run_registry = registry.into_run_registry();
-    let (mismatched_binding, mismatched_registration) = deferred_named_affine_binding(
+    let binding = deferred_named_affine_binding(81, resolver_calls.clone(), port_calls.clone());
+    let run_registry = registry_with_binding(&binding).into_run_registry();
+    let mismatched_binding = deferred_named_affine_binding(
         81,
         Arc::new(AtomicUsize::new(0)),
         Arc::new(AtomicUsize::new(0)),
     );
-    drop(mismatched_registration);
 
     let shared_flow = FlowId::new();
     let shared_stage = StageId::new();
@@ -4669,9 +4673,8 @@ async fn rebuilt_named_binding_replays_by_evidence_and_changed_evidence_rejects(
     let stage_id = StageId::new();
     let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let live_calls = Arc::new(AtomicUsize::new(0));
-    let (live_binding, live_registration) = zero_slot_named_binding(7);
-    let mut live_registry = EffectPortRegistry::new();
-    live_registry.install(live_registration).unwrap();
+    let live_binding = zero_slot_named_binding(7);
+    let live_registry = registry_with_binding(&live_binding);
     let mut live = EffectsCore::new(zero_slot_named_invocation_context_with_mode(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -4707,8 +4710,7 @@ async fn rebuilt_named_binding_replays_by_evidence_and_changed_evidence_rejects(
     // family. Equal versioned evidence must nevertheless reproduce the
     // descriptor and authorise strict replay without a registration.
     let replay_calls = Arc::new(AtomicUsize::new(0));
-    let (rebuilt_binding, rebuilt_registration) = zero_slot_named_binding(7);
-    drop(rebuilt_registration);
+    let rebuilt_binding = zero_slot_named_binding(7);
     assert!(!live_binding.shares_construction_family(&rebuilt_binding));
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
     let mut replay = EffectsCore::new(zero_slot_named_invocation_context_with_mode(
@@ -4734,8 +4736,7 @@ async fn rebuilt_named_binding_replays_by_evidence_and_changed_evidence_rejects(
     // invocation still share their new family, so rejection is a replay
     // descriptor mismatch, before any live authority can be consulted.
     let changed_calls = Arc::new(AtomicUsize::new(0));
-    let (changed_binding, changed_registration) = zero_slot_named_binding(8);
-    drop(changed_registration);
+    let changed_binding = zero_slot_named_binding(8);
     let changed_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
     let mut changed_replay = EffectsCore::new(zero_slot_named_invocation_context_with_mode(
         changed_journal.clone(),
@@ -6397,12 +6398,11 @@ async fn transactional_boundary_executes_and_commits_the_single_use_operation_on
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let boundary_consults = Arc::new(AtomicUsize::new(0));
-    let (binding, registration) =
-        transactional_counting_binding(Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }));
-    let ports = registry_with_transactional_counting(registration);
+    let binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        calls: transactional_calls.clone(),
+        commit: true,
+    }));
+    let ports = registry_with_binding(&binding);
     let mut ctx = transactional_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -6444,11 +6444,10 @@ async fn transactional_boundary_committed_failure_overrides_port_return_and_repl
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let port_calls = Arc::new(AtomicUsize::new(0));
     let live_boundary_consults = Arc::new(AtomicUsize::new(0));
-    let (binding, registration) =
-        transactional_counting_binding(Arc::new(CommittedFailureTransactionalPort {
-            calls: port_calls.clone(),
-        }));
-    let ports = registry_with_transactional_counting(registration);
+    let binding = transactional_counting_binding(Arc::new(CommittedFailureTransactionalPort {
+        calls: port_calls.clone(),
+    }));
+    let ports = registry_with_binding(&binding);
     let mut live_ctx = transactional_invocation_context_with_mode(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -6523,12 +6522,11 @@ async fn transactional_boundary_foreign_abort_cannot_reclassify_a_committed_oper
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
-    let (binding, registration) =
-        transactional_counting_binding(Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }));
-    let ports = registry_with_transactional_counting(registration);
+    let binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        calls: transactional_calls.clone(),
+        commit: true,
+    }));
+    let ports = registry_with_binding(&binding);
     let mut ctx = transactional_invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -6567,12 +6565,11 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
     let foreign_calls = Arc::new(AtomicUsize::new(0));
-    let (binding, registration) =
-        transactional_counting_binding(Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }));
-    let ports = registry_with_transactional_counting(registration);
+    let binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        calls: transactional_calls.clone(),
+        commit: true,
+    }));
+    let ports = registry_with_binding(&binding);
     let mut live_ctx = transactional_invocation_context_with_mode(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -6641,12 +6638,11 @@ async fn transactional_boundary_abort_records_failure_and_replays() {
     let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
     let transactional_calls = Arc::new(AtomicUsize::new(0));
-    let (binding, registration) =
-        transactional_counting_binding(Arc::new(TransactionalCountingPort {
-            calls: transactional_calls.clone(),
-            commit: true,
-        }));
-    let ports = registry_with_transactional_counting(registration);
+    let binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        calls: transactional_calls.clone(),
+        commit: true,
+    }));
+    let ports = registry_with_binding(&binding);
     let mut live_ctx = transactional_invocation_context_with_mode(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
@@ -6725,11 +6721,10 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
     let writer_id = WriterId::from(stage_id);
     let flow_id = FlowId::new();
     let parent = parent_envelope(writer_id);
-    let (binding, registration) =
-        transactional_counting_binding(Arc::new(TransactionalCountingPort {
-            calls: Arc::new(AtomicUsize::new(0)),
-            commit: true,
-        }));
+    let binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        calls: Arc::new(AtomicUsize::new(0)),
+        commit: true,
+    }));
 
     let make_ctx = |journal: Arc<MemoryJournal<ChainEvent>>,
                     boundary: Option<Arc<dyn EffectBoundary>>,
@@ -6766,7 +6761,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
 
     // Run A: aborted transactional effect, then a counting effect.
     let journal_a = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let ports_a = registry_with_transactional_counting(registration);
+    let ports_a = registry_with_binding(&binding);
     let mut effects_a = EffectsCore::new(make_ctx(
         journal_a.clone(),
         Some(Arc::new(TransactionalOnlyAbortBoundary)),

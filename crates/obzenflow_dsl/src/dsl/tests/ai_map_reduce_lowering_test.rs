@@ -192,7 +192,6 @@ mod tests {
         .unwrap()
         .finish()
         .unwrap()
-        .0
     }
 
     fn mk_transform(name: &str) -> Box<dyn StageDescriptor> {

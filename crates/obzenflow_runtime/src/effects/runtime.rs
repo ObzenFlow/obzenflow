@@ -170,6 +170,35 @@ impl EffectsCore {
         EffectError::BindingAuthority { fault: first }
     }
 
+    pub(crate) fn project_named_effect<E: NamedEffect>(
+        &mut self,
+    ) -> Result<EffectBindingUse<E>, EffectError> {
+        self.gate_authoring()?;
+        let declaration = match self.ctx.effect_declaration(E::EFFECT_TYPE) {
+            Ok(declaration) => declaration,
+            Err(_) => {
+                let fault = BindingAuthorityFault::binding_mismatch(
+                    E::EFFECT_TYPE,
+                    None,
+                    BindingMismatchKind::Mode,
+                );
+                return Err(self.latch_binding_fault(fault));
+            }
+        };
+        let logical_name = declaration.binding().logical_name().cloned();
+        match declaration.binding().typed_projection::<E>() {
+            Some(projection) => Ok(projection),
+            None => {
+                let fault = BindingAuthorityFault::binding_mismatch(
+                    E::EFFECT_TYPE,
+                    logical_name,
+                    BindingMismatchKind::Mode,
+                );
+                Err(self.latch_binding_fault(fault))
+            }
+        }
+    }
+
     pub(crate) fn binding_fault_fatal(
         &self,
     ) -> Option<crate::stages::common::handler_error::StageFatal> {

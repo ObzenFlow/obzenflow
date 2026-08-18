@@ -8,7 +8,8 @@ use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
 use anyhow::Result;
 use obzenflow::ai::{
-    ChatEffectBinding, ChunkInfo, EstimateSource, Prompt, SystemPrompt, TokenCount, UserPrompt,
+    ChatBindingMetadata, ChatCompletion, ChatEffectBinding, ChunkInfo, EstimateSource, Prompt,
+    SystemPrompt, TokenCount, UserPrompt,
 };
 use obzenflow::sources::{http_pull_config, HttpPullSource};
 use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_transforms};
@@ -23,7 +24,7 @@ use obzenflow_dsl::dsl::error::FlowBuildError;
 use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::EffectPortRegistry;
+use obzenflow_runtime::effects::EffectBinding;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -321,7 +322,7 @@ fn resolve_hn_group_budget(budget_override: Option<TokenCount>, target: &ChatTar
 
 pub(crate) struct HnFlowOptions {
     pub journal_base: std::path::PathBuf,
-    pub chat_binding_override: Option<ChatEffectBinding>,
+    pub chat_binding_override: Option<EffectBinding<ChatCompletion>>,
 }
 
 impl Default for HnFlowOptions {
@@ -359,18 +360,11 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
             base_url.to_string()
         };
 
-        let ai_models = runtime_config.ai_models();
-        let mut effect_ports = EffectPortRegistry::new();
         let chat = match chat_binding_override {
-            Some(binding) => binding.install_into(&mut effect_ports),
-            None => ChatEffectBinding::from_config(&ai_models)
-                .and_then(|binding| binding.install_into(&mut effect_ports)),
-        }
-        .map_err(|error| FlowBuildError::BindingConfiguration {
-            binding: "chat".to_string(),
-            detail: error.to_string(),
-        })?;
-        let chat_target = chat.evidence().target().clone();
+            Some(binding) => binding,
+            None => ChatEffectBinding::from_config(&runtime_config.ai_models())?,
+        };
+        let chat_target = chat.target().clone();
         let budget_per_group = resolve_hn_group_budget(budget_per_group_override, &chat_target);
         let system_prompt: SystemPrompt = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply."
             .into();
@@ -385,7 +379,7 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
             base_url: base_url_for_summary,
             ai_provider: chat_target.provider.to_string(),
             ai_model: chat_target.model.clone(),
-            token_estimator: chat.evidence().estimator().source(),
+            token_estimator: chat.estimator().source(),
             budget_per_group,
             interests,
             chat_prompt_system: system_prompt,
@@ -427,7 +421,6 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
         Ok(flow! {
             name: "hn_ai_digest_demo",
             journals: disk_journals(journal_base),
-            effect_ports,
 
             stages: {
                 // Source-boundary policies (FLOWIP-115a): the breaker protects
