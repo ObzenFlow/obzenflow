@@ -6,14 +6,14 @@
 //!
 //! Examples: Aggregators, windowing operations, session tracking
 
-use crate::effects::{EffectInvocationContext, Effects};
+use crate::effects::{EffectBoundary, EffectInvocationContext, Effects};
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handler_error::StageFatal;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::{TypedFact, TypedPayload};
 use obzenflow_core::{ChainEvent, EventEnvelope, OneFactStageOutput, WriterId};
-use std::time::Duration;
+use std::{fmt, sync::Arc, time::Duration};
 
 #[derive(Clone, Copy)]
 pub struct StatefulOutputContext<'a> {
@@ -444,8 +444,44 @@ pub trait EffectfulStatefulHandler: Send + Sync {
 }
 
 #[doc(hidden)]
-#[derive(Clone, Debug)]
-pub struct EffectfulStatefulHandlerAdapter<H>(pub H);
+#[derive(Clone)]
+pub struct EffectfulStatefulHandlerAdapter<H> {
+    handler: H,
+    effect_boundary: Arc<dyn EffectBoundary>,
+}
+
+impl<H> EffectfulStatefulHandlerAdapter<H> {
+    pub fn new(handler: H, effect_boundary: Arc<dyn EffectBoundary>) -> Self {
+        Self {
+            handler,
+            effect_boundary,
+        }
+    }
+
+    fn install_required_effect_boundary(
+        &self,
+        slot: &mut Option<Arc<dyn EffectBoundary>>,
+    ) -> Result<(), HandlerError> {
+        if slot.is_some() {
+            return Err(HandlerError::ContractViolation(
+                "effectful stateful handler received an unexpected pre-installed effect boundary"
+                    .to_string(),
+            ));
+        }
+        *slot = Some(self.effect_boundary.clone());
+        Ok(())
+    }
+}
+
+impl<H: fmt::Debug> fmt::Debug for EffectfulStatefulHandlerAdapter<H> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EffectfulStatefulHandlerAdapter")
+            .field("handler", &self.handler)
+            .field("effect_boundary", &"<required>")
+            .finish()
+    }
+}
 
 #[async_trait]
 impl<H> UnifiedStatefulHandler for EffectfulStatefulHandlerAdapter<H>
@@ -463,17 +499,18 @@ where
     ) -> std::result::Result<(), HandlerError> {
         let input = H::Input::try_from_event(&event)
             .map_err(|e| HandlerError::Deserialization(e.to_string()))?;
-        let effect_context = effect_context.ok_or_else(|| {
+        let mut effect_context = effect_context.ok_or_else(|| {
             HandlerError::Other(
                 "effectful stateful handler invoked without effect context".to_string(),
             )
         })?;
+        self.install_required_effect_boundary(&mut effect_context.effect_boundary)?;
         let mut fx = Effects::<H::Output, H::AllowedEffects>::new(effect_context);
-        let decide_result = self.0.decide(state, &input, &mut fx).await;
+        let decide_result = self.handler.decide(state, &input, &mut fx).await;
         let mut draft = state.clone();
         for fact_event in fx.drain_committed_facts() {
             let fact = decode_effectful_stateful_fact::<H::Output>(&fact_event)?;
-            self.0.apply(&mut draft, fact).map_err(|source| {
+            self.handler.apply(&mut draft, fact).map_err(|source| {
                 HandlerError::ContractViolation(format!(
                     "effectful_stateful_apply: `apply` rejected committed event `{}` of type \
                      `{}`: {source}",
@@ -502,7 +539,7 @@ where
     }
 
     fn initial_state(&self) -> Self::State {
-        self.0.initial_state()
+        self.handler.initial_state()
     }
 
     fn create_events(
@@ -554,7 +591,7 @@ where
     }
 
     fn stage_logic_version(&self) -> &str {
-        self.0.stage_logic_version()
+        self.handler.stage_logic_version()
     }
 }
 
@@ -584,6 +621,33 @@ mod tests {
     use super::*;
     use obzenflow_core::event::ChainEventContent;
     use serde::{Deserialize, Serialize};
+
+    #[derive(Debug)]
+    struct TestAllowAllEffectBoundary;
+
+    #[async_trait]
+    impl EffectBoundary for TestAllowAllEffectBoundary {
+        async fn around_repeatable_effect(
+            &self,
+            _identity: &crate::effects::EffectIdentity,
+            _event: &ChainEvent,
+            mut operation: crate::effects::RepeatableEffectOperation,
+        ) -> crate::effects::EffectBoundaryReport {
+            crate::effects::EffectBoundaryReport {
+                outcome: crate::effects::EffectBoundaryOutcome::Executed(operation.execute().await),
+                control_events: Vec::new(),
+            }
+        }
+
+        async fn around_single_use_effect(
+            &self,
+            _identity: &crate::effects::EffectIdentity,
+            _event: &ChainEvent,
+            operation: crate::effects::SingleUseEffectOperation,
+        ) -> crate::effects::SingleUseEffectBoundaryReport {
+            operation.execute().await.into_report(Vec::new())
+        }
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     struct FirstOutput {
@@ -689,10 +753,44 @@ mod tests {
     /// effectful stages.
     #[test]
     fn effectful_stateful_adapter_reports_no_emission_surface() {
-        let adapter = EffectfulStatefulHandlerAdapter(DecideOnly);
+        let adapter =
+            EffectfulStatefulHandlerAdapter::new(DecideOnly, Arc::new(TestAllowAllEffectBoundary));
         let mut state = adapter.initial_state();
 
         assert_eq!(UnifiedStatefulHandler::emit_interval_hint(&adapter), None);
         assert!(!UnifiedStatefulHandler::should_emit(&adapter, &mut state));
+    }
+
+    #[test]
+    fn effectful_stateful_adapter_installs_exactly_its_required_boundary() {
+        let required: Arc<dyn EffectBoundary> = Arc::new(TestAllowAllEffectBoundary);
+        let adapter = EffectfulStatefulHandlerAdapter::new(DecideOnly, required.clone());
+        let mut slot = None;
+
+        adapter
+            .install_required_effect_boundary(&mut slot)
+            .expect("empty invocation slot accepts the adapter-owned boundary");
+
+        let installed = slot.expect("required boundary must be installed");
+        assert!(Arc::ptr_eq(&installed, &required));
+    }
+
+    #[test]
+    fn effectful_stateful_adapter_rejects_a_second_boundary_authority() {
+        let required: Arc<dyn EffectBoundary> = Arc::new(TestAllowAllEffectBoundary);
+        let unexpected: Arc<dyn EffectBoundary> = Arc::new(TestAllowAllEffectBoundary);
+        let adapter = EffectfulStatefulHandlerAdapter::new(DecideOnly, required);
+        let mut slot = Some(unexpected.clone());
+
+        let error = adapter
+            .install_required_effect_boundary(&mut slot)
+            .expect_err("a pre-installed boundary must fail closed");
+
+        assert!(error.is_contract_violation());
+        assert!(error.to_string().contains("unexpected pre-installed"));
+        assert!(Arc::ptr_eq(
+            slot.as_ref().expect("unexpected boundary remains visible"),
+            &unexpected,
+        ));
     }
 }

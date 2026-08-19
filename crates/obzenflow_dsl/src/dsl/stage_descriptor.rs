@@ -436,9 +436,6 @@ pub enum PolicyGuardSurface {
     PureSync,
     /// Effectful stages: per-effect policy placement (FLOWIP-120c phase 3).
     Effectful,
-    /// Effectful stateful stages do not install the stateful effect boundary
-    /// until FLOWIP-120l, so policy declarations must reject for now.
-    EffectfulStatefulPendingBoundary,
     /// Sources are live I/O units; policy middleware attaches legitimately.
     Source,
     /// Sink delivery placement is deferred until FLOWIP-095g.
@@ -1467,6 +1464,75 @@ fn validate_pre_collection_effect_configuration(
     Ok(())
 }
 
+fn materialize_effect_boundary(
+    stage_name: &str,
+    stage_type: StageType,
+    config: &StageConfig,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+    effect_declarations: &[EffectDeclaration],
+    effect_policies: &[EffectPolicyAttachment],
+) -> Result<Arc<dyn EffectBoundary>, String> {
+    let inline_policy_declarations: Vec<MiddlewareDeclaration> = effect_policies
+        .iter()
+        .map(|attachment| attachment.factory.declaration())
+        .collect();
+
+    // Validate the complete per-effect set before materialising any factory.
+    for effect in effect_declarations {
+        let declarations = effect_policies
+            .iter()
+            .zip(&inline_policy_declarations)
+            .filter(|(attachment, _)| attachment.effect_type == effect.effect_type())
+            .map(|(_, declaration)| declaration.clone())
+            .collect::<Vec<_>>();
+        obzenflow_adapters::middleware::validate_effect_control_composition(
+            stage_name,
+            effect.effect_type(),
+            &declarations,
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    let mut effect_chains: std::collections::HashMap<
+        &'static str,
+        Vec<obzenflow_adapters::middleware::EffectPolicyAttachment>,
+    > = std::collections::HashMap::new();
+
+    for (attachment, declaration) in effect_policies.iter().zip(&inline_policy_declarations) {
+        let effect_declaration = effect_declarations
+            .iter()
+            .find(|effect| effect.effect_type() == attachment.effect_type)
+            .ok_or_else(|| {
+                format!(
+                    "Effectful stage '{stage_name}' attaches policy middleware to undeclared effect '{}'",
+                    attachment.effect_type
+                )
+            })?;
+        let policy = crate::dsl::binder::bind_effect_policy(
+            crate::dsl::binder::DeclaredMiddlewareFactory::new(
+                attachment.factory.as_ref(),
+                declaration,
+            ),
+            config,
+            stage_type,
+            control_middleware,
+            effect_declaration,
+            MiddlewareDeclarationIndex::effect_with(),
+        )?;
+        effect_chains
+            .entry(attachment.effect_type)
+            .or_default()
+            .push(policy);
+    }
+
+    let effect_policy_chains = effect_chains
+        .into_iter()
+        .map(|(effect_type, chain)| (effect_type, Arc::new(chain)))
+        .collect();
+
+    Ok(Arc::new(PerEffectPolicyBoundary::new(effect_policy_chains)))
+}
+
 /// Descriptor for replay-safe effectful async transform stages.
 pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> {
     name: String,
@@ -1761,70 +1827,14 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             }
         }
 
-        let inline_policy_declarations: Vec<MiddlewareDeclaration> = self
-            .effect_policies
-            .iter()
-            .map(|attachment| attachment.factory.declaration())
-            .collect();
-
-        // Validate before materialising any factory.
-        for effect in &effect_declarations {
-            let declarations = self
-                .effect_policies
-                .iter()
-                .zip(&inline_policy_declarations)
-                .filter(|(attachment, _)| attachment.effect_type == effect.effect_type())
-                .map(|(_, declaration)| declaration.clone())
-                .collect::<Vec<_>>();
-            obzenflow_adapters::middleware::validate_effect_control_composition(
-                &self.name,
-                effect.effect_type(),
-                &declarations,
-            )
-            .map_err(|error| error.to_string())?;
-        }
-
-        let mut effect_chains: std::collections::HashMap<
-            &'static str,
-            Vec<obzenflow_adapters::middleware::EffectPolicyAttachment>,
-        > = std::collections::HashMap::new();
-
-        for (attachment, declaration) in
-            self.effect_policies.iter().zip(&inline_policy_declarations)
-        {
-            let effect_declaration = effect_declarations
-                .iter()
-                .find(|effect| effect.effect_type() == attachment.effect_type)
-                .ok_or_else(|| {
-                    format!(
-                        "Effectful stage '{}' attaches policy middleware to undeclared effect '{}'",
-                        self.name, attachment.effect_type
-                    )
-                })?;
-            let policy = crate::dsl::binder::bind_effect_policy(
-                crate::dsl::binder::DeclaredMiddlewareFactory::new(
-                    attachment.factory.as_ref(),
-                    declaration,
-                ),
-                &config,
-                StageType::Transform,
-                &control_middleware,
-                effect_declaration,
-                MiddlewareDeclarationIndex::effect_with(),
-            )?;
-            effect_chains
-                .entry(attachment.effect_type)
-                .or_default()
-                .push(policy);
-        }
-
-        let effect_policy_chains: std::collections::HashMap<
-            &'static str,
-            Arc<Vec<obzenflow_adapters::middleware::EffectPolicyAttachment>>,
-        > = effect_chains
-            .into_iter()
-            .map(|(effect_type, chain)| (effect_type, Arc::new(chain)))
-            .collect();
+        let effect_boundary = materialize_effect_boundary(
+            &self.name,
+            StageType::Transform,
+            &config,
+            &control_middleware,
+            &effect_declarations,
+            &self.effect_policies,
+        )?;
 
         let placement = plan_positioned_stage_observers(
             &config,
@@ -1858,8 +1868,6 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         transform_config.control_strategy = Some(control_strategy);
         transform_config.cycle_guard = config.cycle_guard;
 
-        let effect_boundary: Arc<dyn EffectBoundary> =
-            Arc::new(PerEffectPolicyBoundary::new(effect_policy_chains));
         let mut effectful_handler =
             EffectfulTransformHandlerAdapter::new(self.handler, effect_boundary);
         if let Some(event_type) = self.pass_through_event_type {
@@ -2317,6 +2325,8 @@ pub struct EffectfulStatefulDescriptor<H: EffectfulStatefulHandler + 'static> {
     pub name: String,
     pub handler: H,
     effects: Vec<EffectDeclaration>,
+    /// Per-effect policy attachments from the canonical `uses` clause.
+    effect_policies: Vec<EffectPolicyAttachment>,
     pub observers: Vec<Box<dyn MiddlewareFactory>>,
     pub backpressure: Option<BackpressureClause>,
 }
@@ -2329,6 +2339,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             name: name.into(),
             handler,
             effects: Vec::new(),
+            effect_policies: Vec::new(),
             observers: Vec::new(),
             backpressure: None,
         }
@@ -2340,7 +2351,18 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
     }
 
     pub fn with_effect_declarations(mut self, effects: Vec<EffectDeclaration>) -> Self {
-        self.effects = canonicalize_effect_row(effects, Vec::new()).0;
+        (self.effects, self.effect_policies) =
+            canonicalize_effect_row(effects, std::mem::take(&mut self.effect_policies));
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_effect_row(
+        mut self,
+        effects: Vec<EffectDeclaration>,
+        effect_policies: Vec<EffectPolicyAttachment>,
+    ) -> Self {
+        (self.effects, self.effect_policies) = canonicalize_effect_row(effects, effect_policies);
         self
     }
 
@@ -2377,16 +2399,20 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         true
     }
 
-    fn policy_guard_surface(&self) -> PolicyGuardSurface {
-        PolicyGuardSurface::EffectfulStatefulPendingBoundary
-    }
-
     fn stage_logic_version(&self) -> String {
         self.handler.stage_logic_version().to_string()
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
         self.effects.clone()
+    }
+
+    fn validate_effect_configuration_before_collection(&self) -> Result<(), String> {
+        validate_pre_collection_effect_configuration(
+            &self.name,
+            &self.effects,
+            &self.effect_policies,
+        )
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -2398,6 +2424,10 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 
     fn stage_middleware_factories(&self) -> Vec<&dyn MiddlewareFactory> {
         self.observers.iter().map(Box::as_ref).collect()
+    }
+
+    fn effect_policy_attachments(&self) -> &[EffectPolicyAttachment] {
+        &self.effect_policies
     }
 
     async fn create_handle(
@@ -2418,6 +2448,11 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             resources
                 .runtime_execution
                 .effect_port_registration_policy(),
+        )?;
+        validate_effect_policy_attachments(
+            &self.name,
+            &effect_declarations,
+            &self.effect_policies,
         )?;
         resources.effect_declarations = effect_declarations.clone();
 
@@ -2465,6 +2500,15 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             }
         }
 
+        let effect_boundary = materialize_effect_boundary(
+            &self.name,
+            StageType::Stateful,
+            &config,
+            &control_middleware,
+            &effect_declarations,
+            &self.effect_policies,
+        )?;
+
         let placement = plan_positioned_stage_observers(
             &config,
             StageType::Stateful,
@@ -2497,7 +2541,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         stateful_config.control_strategy = Some(control_strategy);
 
         let handle = StatefulBuilder::new(
-            EffectfulStatefulHandlerAdapter(self.handler),
+            EffectfulStatefulHandlerAdapter::new(self.handler, effect_boundary),
             stateful_config,
             resources,
         )

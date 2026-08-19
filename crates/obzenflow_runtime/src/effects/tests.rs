@@ -23,11 +23,138 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+#[derive(Debug)]
+struct TestAllowAllEffectBoundary;
+
+#[async_trait]
+impl EffectBoundary for TestAllowAllEffectBoundary {
+    async fn around_repeatable_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        mut operation: RepeatableEffectOperation,
+    ) -> EffectBoundaryReport {
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Executed(operation.execute().await),
+            control_events: Vec::new(),
+        }
+    }
+
+    async fn around_single_use_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        operation.execute().await.into_report(Vec::new())
+    }
+}
+
+fn test_allow_all_effect_boundary() -> Arc<dyn EffectBoundary> {
+    Arc::new(TestAllowAllEffectBoundary)
+}
+
+#[derive(Debug, Default)]
+struct BoundaryEntryCounts {
+    repeatable: AtomicUsize,
+    single_use: AtomicUsize,
+    affine: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct RecordingEntryPointBoundary {
+    counts: Arc<BoundaryEntryCounts>,
+}
+
+#[async_trait]
+impl EffectBoundary for RecordingEntryPointBoundary {
+    async fn around_repeatable_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        mut operation: RepeatableEffectOperation,
+    ) -> EffectBoundaryReport {
+        self.counts.repeatable.fetch_add(1, Ordering::SeqCst);
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Executed(operation.execute().await),
+            control_events: Vec::new(),
+        }
+    }
+
+    async fn around_single_use_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        self.counts.single_use.fetch_add(1, Ordering::SeqCst);
+        operation.execute().await.into_report(Vec::new())
+    }
+
+    async fn around_affine_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: AffineEffectOperation,
+    ) -> AffineEffectBoundaryReport {
+        self.counts.affine.fetch_add(1, Ordering::SeqCst);
+        operation.execute().await.into_report(Vec::new())
+    }
+}
+
+fn recording_entry_point_boundary() -> (Arc<dyn EffectBoundary>, Arc<BoundaryEntryCounts>) {
+    let counts = Arc::new(BoundaryEntryCounts::default());
+    (
+        Arc::new(RecordingEntryPointBoundary {
+            counts: counts.clone(),
+        }),
+        counts,
+    )
+}
+
+#[derive(Debug)]
+struct CountingAbortBoundary {
+    consults: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EffectBoundary for CountingAbortBoundary {
+    async fn around_repeatable_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _operation: RepeatableEffectOperation,
+    ) -> EffectBoundaryReport {
+        self.consults.fetch_add(1, Ordering::SeqCst);
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Aborted(EffectAbortReason {
+                cause: EffectFailureCause {
+                    source: "circuit_breaker".into(),
+                    code: "circuit_open".into(),
+                },
+                message: "reserve path is open".to_string(),
+                retry: RetryDisposition::Retryable,
+            }),
+            control_events: Vec::new(),
+        }
+    }
+
+    async fn around_single_use_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        operation.execute().await.into_report(Vec::new())
+    }
+}
+
 struct MemoryJournal<T: JournalEvent> {
     id: JournalId,
     owner: Option<JournalOwner>,
     events: Mutex<Vec<EventEnvelope<T>>>,
     fail_group_prefixes: Mutex<Vec<String>>,
+    fail_event_types: Mutex<Vec<String>>,
 }
 
 impl<T: JournalEvent> MemoryJournal<T> {
@@ -37,6 +164,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
             owner: Some(owner),
             events: Mutex::new(Vec::new()),
             fail_group_prefixes: Mutex::new(Vec::new()),
+            fail_event_types: Mutex::new(Vec::new()),
         }
     }
 
@@ -46,6 +174,17 @@ impl<T: JournalEvent> MemoryJournal<T> {
             owner: Some(owner),
             events: Mutex::new(Vec::new()),
             fail_group_prefixes: Mutex::new(vec![prefix.into()]),
+            fail_event_types: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn failing_event(owner: JournalOwner, event_type: impl Into<String>) -> Self {
+        Self {
+            id: JournalId::new(),
+            owner: Some(owner),
+            events: Mutex::new(Vec::new()),
+            fail_group_prefixes: Mutex::new(Vec::new()),
+            fail_event_types: Mutex::new(vec![event_type.into()]),
         }
     }
 
@@ -89,6 +228,21 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         event: T,
         _parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError> {
+        let mut failures = self
+            .fail_event_types
+            .lock()
+            .expect("event failures lock poisoned");
+        if failures
+            .first()
+            .is_some_and(|event_type| event_type == event.event_type_name())
+        {
+            let event_type = failures.remove(0);
+            return Err(JournalError::Implementation {
+                message: format!("injected append failure for '{event_type}'"),
+                source: "test journal rejected event type".into(),
+            });
+        }
+        drop(failures);
         let envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
         self.events
             .lock()
@@ -638,6 +792,88 @@ impl Effect for AffineCountingEffect {
 }
 
 #[derive(Clone, Debug)]
+struct RepeatableBoundaryStateful {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl crate::stages::common::handlers::EffectfulStatefulHandler for RepeatableBoundaryStateful {
+    type State = Vec<u64>;
+    type Input = FirstOutput;
+    type Output = CountingOutput;
+    type AllowedEffects = crate::effect_set![CountingEffect];
+
+    fn initial_state(&self) -> Self::State {
+        Vec::new()
+    }
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
+    {
+        fx.perform(CountingEffect {
+            value: input.value,
+            label: "stateful-repeatable",
+            calls: self.calls.clone(),
+        })
+        .await?;
+        Ok(fx.complete()?)
+    }
+
+    fn apply(
+        &mut self,
+        state: &mut Self::State,
+        fact: Self::Output,
+    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+        state.push(fact.value);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AffineBoundaryStateful {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl crate::stages::common::handlers::EffectfulStatefulHandler for AffineBoundaryStateful {
+    type State = Vec<u64>;
+    type Input = FirstOutput;
+    type Output = CountingOutput;
+    type AllowedEffects = crate::effect_set![AffineCountingEffect];
+
+    fn initial_state(&self) -> Self::State {
+        Vec::new()
+    }
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        _input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
+    {
+        fx.perform(AffineCountingEffect {
+            calls: self.calls.clone(),
+        })
+        .await?;
+        Ok(fx.complete()?)
+    }
+
+    fn apply(
+        &mut self,
+        state: &mut Self::State,
+        fact: Self::Output,
+    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+        state.push(fact.value);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
 struct InvariantAffineEffect {
     calls: Arc<AtomicUsize>,
 }
@@ -751,6 +987,49 @@ impl NamedEffect for TransactionalCountingEffect {
 
     fn required_slots() -> EffectPortSlotSet {
         EffectPortSlotSet::single(transactional_effect_port_slot::<Self>())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TransactionalBoundaryStateful {
+    normal_calls: Arc<AtomicUsize>,
+    binding: EffectBindingUse<TransactionalCountingEffect>,
+}
+
+#[async_trait]
+impl crate::stages::common::handlers::EffectfulStatefulHandler for TransactionalBoundaryStateful {
+    type State = Vec<u64>;
+    type Input = FirstOutput;
+    type Output = CountingOutput;
+    type AllowedEffects = crate::effect_set![TransactionalCountingEffect];
+
+    fn initial_state(&self) -> Self::State {
+        Vec::new()
+    }
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
+    {
+        fx.perform(TransactionalCountingEffect {
+            value: input.value,
+            normal_calls: self.normal_calls.clone(),
+            binding: self.binding.clone(),
+        })
+        .await?;
+        Ok(fx.complete()?)
+    }
+
+    fn apply(
+        &mut self,
+        state: &mut Self::State,
+        fact: Self::Output,
+    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+        state.push(fact.value);
+        Ok(())
     }
 }
 
@@ -895,6 +1174,73 @@ struct MultiFactOutcome {
 enum OrderedStatefulOutput {
     First(FirstOutput),
     Second(SecondOutput),
+}
+
+#[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+enum PolicyTranslationOutput {
+    Reserved(CountingOutput),
+    Failed(SecondOutput),
+}
+
+#[derive(Clone, Debug)]
+struct PolicyTranslationStateful {
+    effect_calls: Arc<AtomicUsize>,
+}
+
+fn is_test_policy_rejection(error: &EffectError) -> bool {
+    error.failure_cause().is_some_and(|cause| {
+        cause.source.as_str() == "circuit_breaker" && cause.code.as_str() == "circuit_open"
+    })
+}
+
+#[async_trait]
+impl crate::stages::common::handlers::EffectfulStatefulHandler for PolicyTranslationStateful {
+    type State = Vec<u64>;
+    type Input = FirstOutput;
+    type Output = PolicyTranslationOutput;
+    type AllowedEffects = crate::effect_set![CountingEffect];
+
+    fn initial_state(&self) -> Self::State {
+        Vec::new()
+    }
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
+    {
+        match fx
+            .perform(CountingEffect {
+                value: input.value,
+                label: "policy-translation",
+                calls: self.effect_calls.clone(),
+            })
+            .await
+        {
+            Ok(_) => Ok(fx.complete()?),
+            Err(error) if is_test_policy_rejection(&error) => {
+                fx.emit(SecondOutput {
+                    value: format!("reservation-failed:{}", input.value),
+                })
+                .await?;
+                Ok(fx.complete()?)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn apply(
+        &mut self,
+        state: &mut Self::State,
+        fact: Self::Output,
+    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+        if let PolicyTranslationOutput::Reserved(reserved) = fact {
+            state.push(reserved.value);
+        }
+        Ok(())
+    }
 }
 
 // `OneFactStageOutput` is an open, law-bearing marker. This deliberately false
@@ -2310,7 +2656,10 @@ async fn effectful_stateful_folds_committed_facts_before_returning_decide_error(
         output_descriptor_for::<SecondOutput>(),
     ]);
 
-    let mut adapter = EffectfulStatefulHandlerAdapter(EmitThenErrorStateful);
+    let mut adapter = EffectfulStatefulHandlerAdapter::new(
+        EmitThenErrorStateful,
+        test_allow_all_effect_boundary(),
+    );
     let mut state = Vec::new();
 
     let error = adapter
@@ -2368,10 +2717,13 @@ async fn effectful_stateful_decide_error_without_commit_leaves_state_unchanged()
     effect_context.emit_enabled = true;
     effect_context.output_contract = output_contract_for::<FirstOutput>();
 
-    let mut adapter = EffectfulStatefulHandlerAdapter(SingleFactErrorStateful {
-        emit: false,
-        fail_apply: false,
-    });
+    let mut adapter = EffectfulStatefulHandlerAdapter::new(
+        SingleFactErrorStateful {
+            emit: false,
+            fail_apply: false,
+        },
+        test_allow_all_effect_boundary(),
+    );
     let mut state = vec![7];
 
     let error = adapter
@@ -2394,6 +2746,370 @@ async fn effectful_stateful_decide_error_without_commit_leaves_state_unchanged()
 }
 
 #[tokio::test]
+async fn effectful_stateful_adapter_preserves_all_three_effect_safety_entry_points() {
+    use crate::stages::common::handlers::{
+        EffectfulStatefulHandlerAdapter, UnifiedStatefulHandler,
+    };
+
+    let make_input = |stage_id: StageId| {
+        ChainEventFactory::data_event(
+            WriterId::from(stage_id),
+            FirstOutput::versioned_event_type(),
+            json!({ "value": 7 }),
+        )
+    };
+
+    let repeatable_stage = StageId::new();
+    let repeatable_input = make_input(repeatable_stage);
+    let repeatable_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(repeatable_stage)));
+    let mut repeatable_context = invocation_context(
+        repeatable_journal,
+        EventEnvelope::new(JournalWriterId::new(), repeatable_input.clone()),
+        None,
+    );
+    repeatable_context.emit_enabled = true;
+    repeatable_context.output_contract = output_contract_for::<CountingOutput>();
+    let repeatable_calls = Arc::new(AtomicUsize::new(0));
+    let (repeatable_boundary, repeatable_entries) = recording_entry_point_boundary();
+    let mut repeatable = EffectfulStatefulHandlerAdapter::new(
+        RepeatableBoundaryStateful {
+            calls: repeatable_calls.clone(),
+        },
+        repeatable_boundary,
+    );
+    let mut repeatable_state = Vec::new();
+    repeatable
+        .accumulate(
+            &mut repeatable_state,
+            repeatable_input,
+            Some(repeatable_context),
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        )
+        .await
+        .expect("repeatable stateful effect succeeds");
+    assert_eq!(repeatable_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(repeatable_state, vec![8]);
+    assert_eq!(repeatable_entries.repeatable.load(Ordering::SeqCst), 1);
+    assert_eq!(repeatable_entries.single_use.load(Ordering::SeqCst), 0);
+    assert_eq!(repeatable_entries.affine.load(Ordering::SeqCst), 0);
+
+    let transactional_stage = StageId::new();
+    let transactional_input = make_input(transactional_stage);
+    let transactional_journal =
+        Arc::new(MemoryJournal::new(JournalOwner::stage(transactional_stage)));
+    let transactional_calls = Arc::new(AtomicUsize::new(0));
+    let normal_calls = Arc::new(AtomicUsize::new(0));
+    let binding = transactional_counting_binding(Arc::new(TransactionalCountingPort {
+        calls: transactional_calls.clone(),
+        commit: true,
+    }));
+    let ports = registry_with_binding(&binding);
+    let mut transactional_context = transactional_invocation_context_with_mode(
+        transactional_journal,
+        EventEnvelope::new(JournalWriterId::new(), transactional_input.clone()),
+        None,
+        EffectRuntimeMode::Live,
+        ports,
+        &binding,
+    );
+    transactional_context.emit_enabled = true;
+    transactional_context.output_contract = output_contract_for::<CountingOutput>();
+    let (transactional_boundary, transactional_entries) = recording_entry_point_boundary();
+    let mut transactional = EffectfulStatefulHandlerAdapter::new(
+        TransactionalBoundaryStateful {
+            normal_calls: normal_calls.clone(),
+            binding: binding.invocation(),
+        },
+        transactional_boundary,
+    );
+    let mut transactional_state = Vec::new();
+    transactional
+        .accumulate(
+            &mut transactional_state,
+            transactional_input,
+            Some(transactional_context),
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        )
+        .await
+        .expect("transactional stateful effect succeeds");
+    assert_eq!(transactional_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(transactional_state, vec![1_007]);
+    assert_eq!(transactional_entries.repeatable.load(Ordering::SeqCst), 0);
+    assert_eq!(transactional_entries.single_use.load(Ordering::SeqCst), 1);
+    assert_eq!(transactional_entries.affine.load(Ordering::SeqCst), 0);
+
+    let affine_stage = StageId::new();
+    let affine_input = make_input(affine_stage);
+    let affine_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(affine_stage)));
+    let mut affine_context = invocation_context(
+        affine_journal,
+        EventEnvelope::new(JournalWriterId::new(), affine_input.clone()),
+        None,
+    );
+    affine_context.emit_enabled = true;
+    affine_context.output_contract = output_contract_for::<CountingOutput>();
+    let affine_calls = Arc::new(AtomicUsize::new(0));
+    let (affine_boundary, affine_entries) = recording_entry_point_boundary();
+    let mut affine = EffectfulStatefulHandlerAdapter::new(
+        AffineBoundaryStateful {
+            calls: affine_calls.clone(),
+        },
+        affine_boundary,
+    );
+    let mut affine_state = Vec::new();
+    affine
+        .accumulate(
+            &mut affine_state,
+            affine_input,
+            Some(affine_context),
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        )
+        .await
+        .expect("affine stateful effect succeeds");
+    assert_eq!(affine_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(affine_state, vec![1]);
+    assert_eq!(affine_entries.repeatable.load(Ordering::SeqCst), 0);
+    assert_eq!(affine_entries.single_use.load(Ordering::SeqCst), 0);
+    assert_eq!(affine_entries.affine.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn effectful_stateful_resume_suppresses_catch_up_and_guards_a_live_miss() {
+    use crate::stages::common::handlers::{
+        EffectfulStatefulHandlerAdapter, UnifiedStatefulHandler,
+    };
+
+    let stage_id = StageId::new();
+    let input = ChainEventFactory::data_event(
+        WriterId::from(stage_id),
+        FirstOutput::versioned_event_type(),
+        json!({ "value": 9 }),
+    );
+
+    let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut live_context = invocation_context(
+        live_journal.clone(),
+        EventEnvelope::new(JournalWriterId::new(), input.clone()),
+        None,
+    );
+    live_context.emit_enabled = true;
+    live_context.output_contract = output_contract_for::<CountingOutput>();
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let (live_boundary, live_entries) = recording_entry_point_boundary();
+    let mut live = EffectfulStatefulHandlerAdapter::new(
+        RepeatableBoundaryStateful {
+            calls: live_calls.clone(),
+        },
+        live_boundary,
+    );
+    let mut live_state = Vec::new();
+    live.accumulate(
+        &mut live_state,
+        input.clone(),
+        Some(live_context),
+        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+    )
+    .await
+    .expect("live stateful effect succeeds");
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(live_entries.repeatable.load(Ordering::SeqCst), 1);
+
+    let records = effect_records(&live_journal);
+    let recorded_flow_id = records[0].cursor.recorded_flow_id.clone();
+    let history = Arc::new(
+        EffectHistory::from_records(recorded_flow_id, records)
+            .expect("live stateful effect history indexes"),
+    );
+    let catch_up_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let mut catch_up_context = invocation_context_with_mode(
+        catch_up_journal,
+        EventEnvelope::new(JournalWriterId::new(), input.clone()),
+        Some(history),
+        EffectRuntimeMode::ResumeIncomplete,
+        EffectPortRegistry::new(),
+    );
+    catch_up_context.emit_enabled = true;
+    catch_up_context.output_contract = output_contract_for::<CountingOutput>();
+    let catch_up_calls = Arc::new(AtomicUsize::new(0));
+    let (catch_up_boundary, catch_up_entries) = recording_entry_point_boundary();
+    let mut catch_up = EffectfulStatefulHandlerAdapter::new(
+        RepeatableBoundaryStateful {
+            calls: catch_up_calls.clone(),
+        },
+        catch_up_boundary,
+    );
+    let mut catch_up_state = Vec::new();
+    catch_up
+        .accumulate(
+            &mut catch_up_state,
+            input.clone(),
+            Some(catch_up_context),
+            obzenflow_core::MiddlewareExecutionScope::ResumeHandler,
+        )
+        .await
+        .expect("resume catch-up reuses the recorded effect");
+    assert_eq!(catch_up_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(catch_up_entries.repeatable.load(Ordering::SeqCst), 0);
+    assert_eq!(catch_up_state, live_state);
+
+    let miss_history = Arc::new(
+        EffectHistory::from_records("archived_flow", Vec::new())
+            .expect("empty resume history indexes"),
+    );
+    let miss_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let mut miss_context = invocation_context_with_mode(
+        miss_journal,
+        EventEnvelope::new(JournalWriterId::new(), input.clone()),
+        Some(miss_history),
+        EffectRuntimeMode::ResumeIncomplete,
+        EffectPortRegistry::new(),
+    );
+    miss_context.emit_enabled = true;
+    miss_context.output_contract = output_contract_for::<CountingOutput>();
+    let miss_calls = Arc::new(AtomicUsize::new(0));
+    let (miss_boundary, miss_entries) = recording_entry_point_boundary();
+    let mut miss = EffectfulStatefulHandlerAdapter::new(
+        RepeatableBoundaryStateful {
+            calls: miss_calls.clone(),
+        },
+        miss_boundary,
+    );
+    let mut miss_state = Vec::new();
+    miss.accumulate(
+        &mut miss_state,
+        input,
+        Some(miss_context),
+        obzenflow_core::MiddlewareExecutionScope::ResumeHandler,
+    )
+    .await
+    .expect("resume live miss executes through the boundary");
+    assert_eq!(miss_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(miss_entries.repeatable.load(Ordering::SeqCst), 1);
+    assert_eq!(miss_state, vec![10]);
+}
+
+#[tokio::test]
+async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_reexecuting() {
+    use crate::stages::common::handlers::{
+        EffectfulStatefulHandlerAdapter, UnifiedStatefulHandler,
+    };
+
+    let stage_id = StageId::new();
+    let input = ChainEventFactory::data_event(
+        WriterId::from(stage_id),
+        FirstOutput::versioned_event_type(),
+        json!({ "value": 11 }),
+    );
+    let failing_journal = Arc::new(MemoryJournal::failing_event(
+        JournalOwner::stage(stage_id),
+        "data",
+    ));
+    let mut live_context = invocation_context(
+        failing_journal.clone(),
+        EventEnvelope::new(JournalWriterId::new(), input.clone()),
+        None,
+    );
+    live_context.emit_enabled = true;
+    live_context.output_contract = output_contract_for_many(vec![
+        output_descriptor_for::<CountingOutput>(),
+        output_descriptor_for::<SecondOutput>(),
+    ]);
+    let live_effect_calls = Arc::new(AtomicUsize::new(0));
+    let live_consults = Arc::new(AtomicUsize::new(0));
+    let mut live = EffectfulStatefulHandlerAdapter::new(
+        PolicyTranslationStateful {
+            effect_calls: live_effect_calls.clone(),
+        },
+        Arc::new(CountingAbortBoundary {
+            consults: live_consults.clone(),
+        }),
+    );
+    let mut live_state = Vec::new();
+    let error = live
+        .accumulate(
+            &mut live_state,
+            input.clone(),
+            Some(live_context),
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        )
+        .await
+        .expect_err("the domain-fact append failure leaves the input unsettled");
+    assert!(matches!(
+        error,
+        crate::stages::common::handler_error::HandlerError::Other(_)
+            | crate::stages::common::handler_error::HandlerError::Fatal(_)
+    ));
+    assert_eq!(live_consults.load(Ordering::SeqCst), 1);
+    assert_eq!(live_effect_calls.load(Ordering::SeqCst), 0);
+    assert!(live_state.is_empty());
+
+    let records = effect_records(&failing_journal);
+    assert_eq!(records.len(), 1, "the failed effect remains durable");
+    assert!(matches!(
+        records[0].outcome,
+        EffectOutcomePayload::Failed { .. }
+    ));
+    assert_eq!(
+        failing_journal
+            .events()
+            .iter()
+            .filter(|event| event.event.event_type() == SecondOutput::versioned_event_type())
+            .count(),
+        0
+    );
+
+    let recorded_flow_id = records[0].cursor.recorded_flow_id.clone();
+    let history = Arc::new(
+        EffectHistory::from_records(recorded_flow_id, records).expect("recorded rejection indexes"),
+    );
+    let resume_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let mut resume_context = invocation_context_with_mode(
+        resume_journal.clone(),
+        EventEnvelope::new(JournalWriterId::new(), input.clone()),
+        Some(history),
+        EffectRuntimeMode::ResumeIncomplete,
+        EffectPortRegistry::new(),
+    );
+    resume_context.emit_enabled = true;
+    resume_context.output_contract = output_contract_for_many(vec![
+        output_descriptor_for::<CountingOutput>(),
+        output_descriptor_for::<SecondOutput>(),
+    ]);
+    let resume_effect_calls = Arc::new(AtomicUsize::new(0));
+    let resume_consults = Arc::new(AtomicUsize::new(0));
+    let mut resume = EffectfulStatefulHandlerAdapter::new(
+        PolicyTranslationStateful {
+            effect_calls: resume_effect_calls.clone(),
+        },
+        Arc::new(CountingAbortBoundary {
+            consults: resume_consults.clone(),
+        }),
+    );
+    let mut resume_state = Vec::new();
+    resume
+        .accumulate(
+            &mut resume_state,
+            input,
+            Some(resume_context),
+            obzenflow_core::MiddlewareExecutionScope::ResumeHandler,
+        )
+        .await
+        .expect("resume reuses the rejection and commits the domain fact");
+    assert_eq!(resume_consults.load(Ordering::SeqCst), 0);
+    assert_eq!(resume_effect_calls.load(Ordering::SeqCst), 0);
+    assert!(resume_state.is_empty());
+    assert_eq!(
+        resume_journal
+            .events()
+            .iter()
+            .filter(|event| event.event.event_type() == SecondOutput::versioned_event_type())
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn effectful_stateful_apply_error_takes_precedence_and_discards_draft() {
     use crate::stages::common::handlers::{
         EffectfulStatefulHandlerAdapter, UnifiedStatefulHandler,
@@ -2412,10 +3128,13 @@ async fn effectful_stateful_apply_error_takes_precedence_and_discards_draft() {
     effect_context.emit_enabled = true;
     effect_context.output_contract = output_contract_for::<FirstOutput>();
 
-    let mut adapter = EffectfulStatefulHandlerAdapter(SingleFactErrorStateful {
-        emit: true,
-        fail_apply: true,
-    });
+    let mut adapter = EffectfulStatefulHandlerAdapter::new(
+        SingleFactErrorStateful {
+            emit: true,
+            fail_apply: true,
+        },
+        test_allow_all_effect_boundary(),
+    );
     let mut state = vec![7];
 
     let error = adapter
@@ -2464,7 +3183,10 @@ async fn effectful_stateful_second_apply_error_discards_the_whole_ordered_draft(
         output_descriptor_for::<SecondOutput>(),
     ]);
 
-    let mut adapter = EffectfulStatefulHandlerAdapter(SecondFactApplyErrorStateful);
+    let mut adapter = EffectfulStatefulHandlerAdapter::new(
+        SecondFactApplyErrorStateful,
+        test_allow_all_effect_boundary(),
+    );
     let mut state = vec!["installed".to_string()];
 
     let error = adapter
@@ -2527,9 +3249,12 @@ async fn false_one_fact_assertion_takes_precedence_over_decide_error() {
     ]);
 
     let apply_calls = Arc::new(AtomicUsize::new(0));
-    let mut adapter = EffectfulStatefulHandlerAdapter(DishonestProductStateful {
-        apply_calls: apply_calls.clone(),
-    });
+    let mut adapter = EffectfulStatefulHandlerAdapter::new(
+        DishonestProductStateful {
+            apply_calls: apply_calls.clone(),
+        },
+        test_allow_all_effect_boundary(),
+    );
     let mut state = 0;
 
     let error = adapter
@@ -3041,14 +3766,17 @@ async fn run_stateful_binding_fault_adapter(
     let valid_calls = Arc::new(AtomicUsize::new(0));
     let mismatched_calls = Arc::new(AtomicUsize::new(0));
     let apply_calls = Arc::new(AtomicUsize::new(0));
-    let mut adapter = EffectfulStatefulHandlerAdapter(FoldThenCatchBindingFault {
-        invocation_binding,
-        valid_calls: valid_calls.clone(),
-        mismatched_calls: mismatched_calls.clone(),
-        apply_calls: apply_calls.clone(),
-        reject_fold,
-        settlement,
-    });
+    let mut adapter = EffectfulStatefulHandlerAdapter::new(
+        FoldThenCatchBindingFault {
+            invocation_binding,
+            valid_calls: valid_calls.clone(),
+            mismatched_calls: mismatched_calls.clone(),
+            apply_calls: apply_calls.clone(),
+            reject_fold,
+            settlement,
+        },
+        test_allow_all_effect_boundary(),
+    );
     let mut state = 0;
     let result = UnifiedStatefulHandler::accumulate(
         &mut adapter,

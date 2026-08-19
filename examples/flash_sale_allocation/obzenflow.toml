@@ -1,0 +1,8 @@
+# Backpressure remains operator-owned. The topology and effect policy stay in
+# Rust; this file configures only the runtime transport envelope.
+
+[runtime.backpressure.flow]
+mode = "enforce"
+window = 64
+stall_timeout_ms = 30000
+

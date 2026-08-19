@@ -3490,9 +3490,8 @@ macro_rules! __obzenflow_effectful_stateful_untyped {
         $crate::__obzenflow_effect_entries!(
             @entry __obzenflow_effects, __obzenflow_attachments, [], $($effects)*
         );
-        debug_assert!(__obzenflow_attachments.is_empty());
         let mut __desc = EffectfulStatefulDescriptor::new($name, $handler)
-            .with_effect_declarations(__obzenflow_effects)
+            .with_effect_row(__obzenflow_effects, __obzenflow_attachments)
             $(.with_observer($mw))*;
         {
             #[allow(unused_mut)]
@@ -3506,36 +3505,12 @@ macro_rules! __obzenflow_effectful_stateful_untyped {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_stateful_effect_policy_gate {
-    (effects = [$($effects:tt)*], then = [$($then:tt)*]) => {
-        $crate::__obzenflow_stateful_effect_policy_gate!(
-            @scan
-            then = [
-                $crate::__obzenflow_effect_duplicate_gate!(
-                    effects = [$($effects)*],
-                    then = [$($then)*]
-                )
-            ],
-            $($effects)*
-        )
-    };
-    (@scan then = [$($then:tt)*],) => { $($then)* };
-    (@scan then = [$($then:tt)*], with $($rest:tt)*) => {
-        compile_error!("effectful_stateful!: effect policies require FLOWIP-120l stateful boundary binding; remove the `with` policy or complete FLOWIP-120l")
-    };
-    (@scan then = [$($then:tt)*], $next:tt $($rest:tt)*) => {
-        $crate::__obzenflow_stateful_effect_policy_gate!(@scan then = [$($then)*], $($rest)*)
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
 macro_rules! __obzenflow_effectful_stateful_row_contract {
     (name = $name:literal, input = [$($in:tt)+], effects = [], $($rest:tt)*) => {
         compile_error!("empty effect sets are not a purity marker; write `Input -> Output => handler`")
     };
     (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = { $first:ty $(, $member:ty)* $(,)? } => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_stateful_effect_policy_gate!(effects = [$($effects)+], then = [
+        $crate::__obzenflow_effect_duplicate_gate!(effects = [$($effects)+], then = [
             $crate::__obzenflow_effectful_stateful_typed!(
                 input = exact($($in)+),
                 output = $first,
@@ -3559,7 +3534,7 @@ macro_rules! __obzenflow_effectful_stateful_row_contract {
         )
     };
     (name = $name:literal, input = [$($in:tt)+], effects = [$($effects:tt)+], output = $out:ty => $handler_head:ident $(:: $handler_tail:ident)*, observers: [$($observer:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_stateful_effect_policy_gate!(effects = [$($effects)+], then = [
+        $crate::__obzenflow_effect_duplicate_gate!(effects = [$($effects)+], then = [
             $crate::__obzenflow_effectful_stateful_typed!(
                 input = exact($($in)+),
                 output = $out,

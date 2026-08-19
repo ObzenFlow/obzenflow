@@ -488,7 +488,7 @@ fn eof_and_boundary_rejection_cannot_schedule_idle_delay() {
 }
 
 #[test]
-fn effectful_stateful_keeps_only_its_existing_typed_lowerer() {
+fn effectful_stateful_keeps_only_its_existing_typed_lowerer_and_adapter_boundary() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let descriptor =
         fs::read_to_string(root.join("crates/obzenflow_dsl/src/dsl/stage_descriptor.rs"))
@@ -497,8 +497,12 @@ fn effectful_stateful_keeps_only_its_existing_typed_lowerer() {
         fs::read_to_string(root.join("crates/obzenflow_runtime/src/stages/stateful/config.rs"))
             .expect("read stateful config");
 
-    assert!(descriptor.contains("EffectfulStatefulHandlerAdapter(self.handler)"));
-    assert!(descriptor.contains("EffectfulStatefulPendingBoundary"));
+    assert!(
+        descriptor.contains("EffectfulStatefulHandlerAdapter::new(self.handler, effect_boundary)")
+    );
+    assert!(descriptor.contains("materialize_effect_boundary("));
+    assert!(descriptor.contains("StageType::Stateful"));
+    assert!(!descriptor.contains("EffectfulStatefulPendingBoundary"));
     assert!(
         !stateful_config.contains("effect_boundary"),
         "FLOWIP-120l must not be pre-implemented as a StatefulConfig carrier"
@@ -522,6 +526,23 @@ fn effectful_stateful_keeps_only_its_existing_typed_lowerer() {
                 source_path.display()
             );
         }
+    }
+
+    for relative in [
+        "crates/obzenflow_runtime/src/stages/stateful/supervisor/running.rs",
+        "crates/obzenflow_runtime/src/stages/stateful/supervisor/draining.rs",
+    ] {
+        let source = fs::read_to_string(root.join(relative)).expect("read stateful supervisor");
+        assert!(
+            source.contains("effect_boundary: None"),
+            "{relative} must leave boundary authority for the effectful-stateful adapter"
+        );
+        assert!(
+            source.contains(
+                ".accumulate(&mut ctx.current_state, event.clone(), effect_context, scope)"
+            ),
+            "{relative} must enter the same adapter-owned accumulation path"
+        );
     }
 }
 

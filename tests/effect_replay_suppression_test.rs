@@ -27,9 +27,10 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
     is_framework_effect_event_type, transactional_effect_port_slot, Effect, EffectBinding,
     EffectBindingEvidence, EffectBindingUse, EffectCommitHandle, EffectContext, EffectCursor,
-    EffectError, EffectPortResolver, EffectPortSlot, EffectPortSlotSet, EffectRecord,
-    EffectRegistrationBuilder, EffectSafety, Effects, IdempotencyKey, LogicalEffectBindingName,
-    Named, NamedEffect, SinkRedeliverySafety, TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
+    EffectError, EffectOutcomePayload, EffectPortResolver, EffectPortSlot, EffectPortSlotSet,
+    EffectRecord, EffectRegistrationBuilder, EffectSafety, Effects, IdempotencyKey,
+    LogicalEffectBindingName, Named, NamedEffect, SinkRedeliverySafety, TransactionalEffectPort,
+    EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -512,6 +513,156 @@ impl EffectfulStatefulHandler for ReplayStateful {
 
     fn stage_logic_version(&self) -> &str {
         "effect-replay-stateful-v1"
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct PolicyReserved {
+    request_id: u64,
+}
+
+impl TypedPayload for PolicyReserved {
+    const EVENT_TYPE: &'static str = "effect_replay.policy_reserved";
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ReservationFailed {
+    request_id: u64,
+}
+
+impl TypedPayload for ReservationFailed {
+    const EVENT_TYPE: &'static str = "effect_replay.reservation_failed";
+}
+
+#[derive(Clone, Debug)]
+struct SlowReserveEffect {
+    request_id: u64,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Effect for SlowReserveEffect {
+    const EFFECT_TYPE: &'static str = "effect_replay.slow_reserve";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+    type BindingMode = obzenflow_runtime::effects::Portless;
+    type Outcome = PolicyReserved;
+    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
+
+    fn label(&self) -> &str {
+        "slow_reserve"
+    }
+
+    fn canonical_input(&self) -> serde_json::Value {
+        json!({ "request_id": self.request_id })
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        Ok(PolicyReserved {
+            request_id: self.request_id,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct PolicyStatefulState {
+    allocated: Vec<u64>,
+}
+
+#[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+enum PolicyStatefulFact {
+    Reserved(PolicyReserved),
+    Failed(ReservationFailed),
+}
+
+#[derive(Clone, Debug)]
+struct PolicyStateful {
+    calls: Arc<AtomicUsize>,
+}
+
+fn is_circuit_breaker_rejection(error: &EffectError) -> bool {
+    error.failure_cause().is_some_and(|cause| {
+        cause.source.as_str() == "circuit_breaker"
+            && matches!(cause.code.as_str(), "circuit_open" | "probe_in_progress")
+    })
+}
+
+#[async_trait]
+impl EffectfulStatefulHandler for PolicyStateful {
+    type State = PolicyStatefulState;
+    type Input = ReplayInput;
+    type Output = PolicyStatefulFact;
+    type AllowedEffects = obzenflow_runtime::effect_set![SlowReserveEffect];
+
+    fn initial_state(&self) -> Self::State {
+        PolicyStatefulState::default()
+    }
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        input: &ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        match fx
+            .perform(SlowReserveEffect {
+                request_id: input.value,
+                calls: self.calls.clone(),
+            })
+            .await
+        {
+            Ok(_) => Ok(fx.complete()?),
+            Err(error) if is_circuit_breaker_rejection(&error) => {
+                fx.emit(ReservationFailed {
+                    request_id: input.value,
+                })
+                .await?;
+                Ok(fx.complete()?)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
+        if let PolicyStatefulFact::Reserved(reserved) = fact {
+            state.allocated.push(reserved.request_id);
+        }
+        Ok(())
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "effect-replay-policy-stateful-v1"
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ReservationFailureSink {
+    failures: Arc<Mutex<Vec<ReservationFailed>>>,
+}
+
+#[async_trait]
+impl InlineSink for ReservationFailureSink {
+    type Input = ReservationFailed;
+
+    fn describe(&self) -> SinkDescription {
+        SinkDescription::unspecified().with_redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+    }
+
+    async fn write(
+        &mut self,
+        failure: ReservationFailed,
+        _context: SinkWriteContext,
+    ) -> Result<SinkWriteReport, HandlerError> {
+        self.failures
+            .lock()
+            .expect("reservation failures lock poisoned")
+            .push(failure);
+        Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+            DeliveryMethod::Custom("Memory".to_string()),
+            None,
+        )))
     }
 }
 
@@ -1165,6 +1316,56 @@ fn build_stateful_flow(
             topology: {
                 inputs |> effectful;
                 effectful |> collector;
+            }
+        })
+    })
+}
+
+fn build_policy_stateful_flow(
+    journal_base: PathBuf,
+    calls: Arc<AtomicUsize>,
+    failures: Arc<Mutex<Vec<ReservationFailed>>>,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let reserve_resilience = EffectResilience::with_breaker(
+            CircuitBreaker::builder()
+                .count_window(1)
+                .minimum_calls(1)
+                .slow_call_duration(Duration::from_millis(1))
+                .slow_call_rate_threshold(1.0)
+                .open_for(Duration::from_secs(60))
+                .probes(1)
+                .build()
+                .expect("stateful policy breaker configuration"),
+        )
+        .build()
+        .expect("stateful policy resilience configuration");
+        let inputs_handler = ReplaySource::new();
+        let allocator = PolicyStateful { calls };
+        let failure_sink = ReservationFailureSink { failures };
+
+        Ok(flow! {
+            name: "effect_replay_policy_stateful",
+            journals: disk_journals(journal_base),
+
+            stages: {
+                inputs = source!(ReplayInput => inputs_handler);
+                allocate = effectful_stateful!(
+                    ReplayInput -> { PolicyReserved, ReservationFailed }
+                    uses SlowReserveEffect
+                        with reserve_resilience
+                    => allocator,
+                    observers: []
+                );
+                reservation_failures = sink!(
+                    ReservationFailed => failure_sink,
+                    delivery: idempotent
+                );
+            },
+
+            topology: {
+                inputs |> allocate;
+                allocate |> reservation_failures;
             }
         })
     })
@@ -2582,6 +2783,137 @@ async fn strict_effectful_stateful_replay_suppresses_effect_execution() {
             .expect("outputs lock poisoned")
             .clone(),
         live_domain_outputs
+    );
+}
+
+#[test]
+fn stateful_domain_translation_classifies_live_and_replayed_policy_rejection_only() {
+    let cause = obzenflow_core::event::EffectFailureCause {
+        source: obzenflow_core::event::EffectFailureSource::new("circuit_breaker"),
+        code: obzenflow_core::event::EffectFailureCode::new("circuit_open"),
+    };
+    let live = EffectError::BoundaryRejected {
+        rejected_by: cause.source.clone(),
+        code: cause.code.clone(),
+        message: "open".to_string(),
+        retry: obzenflow_core::event::RetryDisposition::Retryable,
+    };
+    let replayed = EffectError::RecordedFailure {
+        error_type: "boundary_rejected".into(),
+        error_message: "open".to_string(),
+        retry: obzenflow_core::event::RetryDisposition::Retryable,
+        cause: Some(cause),
+        detail: None,
+    };
+
+    assert!(is_circuit_breaker_rejection(&live));
+    assert!(is_circuit_breaker_rejection(&replayed));
+    assert!(!is_circuit_breaker_rejection(&EffectError::Timeout(
+        "warehouse timeout".to_string()
+    )));
+    assert!(!is_circuit_breaker_rejection(
+        &EffectError::RecordedFailure {
+            error_type: "timeout".into(),
+            error_message: "warehouse timeout".to_string(),
+            retry: obzenflow_core::event::RetryDisposition::Retryable,
+            cause: None,
+            detail: None,
+        }
+    ));
+}
+
+#[tokio::test]
+async fn effectful_stateful_policy_rejection_authors_flat_domain_fact_live_and_replay() {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let live_failures = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_policy_stateful_flow(
+            journal_base.clone(),
+            live_calls.clone(),
+            live_failures.clone(),
+        ))
+        .await
+        .expect("live policy-protected stateful flow should complete");
+
+    assert_eq!(
+        live_calls.load(Ordering::SeqCst),
+        1,
+        "the first slow success opens the breaker and later calls are rejected"
+    );
+    let live_domain_failures = live_failures
+        .lock()
+        .expect("live reservation failures lock poisoned")
+        .clone();
+    assert_eq!(
+        live_domain_failures,
+        vec![
+            ReservationFailed { request_id: 2 },
+            ReservationFailed { request_id: 3 },
+        ]
+    );
+
+    let archive_dir = latest_run_dir(&journal_base);
+    let allocation_events = read_stage_events(&archive_dir, "allocate").await;
+    let failed_effect_records = allocation_events
+        .iter()
+        .filter_map(|event| match &event.content {
+            ChainEventContent::Data {
+                event_type,
+                payload,
+            } if event_type == EFFECT_RECORD_EVENT_TYPE => {
+                serde_json::from_value::<EffectRecord>(payload.clone()).ok()
+            }
+            _ => None,
+        })
+        .filter(|record| {
+            matches!(
+                &record.outcome,
+                EffectOutcomePayload::Failed {
+                    cause: Some(cause),
+                    ..
+                } if cause.source.as_str() == "circuit_breaker"
+                    && cause.code.as_str() == "circuit_open"
+            )
+        })
+        .count();
+    assert_eq!(failed_effect_records, 2);
+    assert_eq!(
+        allocation_events
+            .iter()
+            .filter(|event| event.event_type() == ReservationFailed::versioned_event_type())
+            .count(),
+        2,
+        "policy rejection must be accompanied by one flat domain fact"
+    );
+
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_failures = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            archive_dir.as_os_str().to_os_string(),
+        ])
+        .run_async(build_policy_stateful_flow(
+            journal_base,
+            replay_calls.clone(),
+            replay_failures.clone(),
+        ))
+        .await
+        .expect("strict replay should reconstruct policy-protected stateful decisions");
+
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        replay_failures
+            .lock()
+            .expect("replay reservation failures lock poisoned")
+            .clone(),
+        live_domain_failures
     );
 }
 
