@@ -7,18 +7,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn rust_sources_under(path: &Path, output: &mut Vec<PathBuf>) {
-    if !path.is_dir() {
+fn rust_sources_under(path: &Path, excluded_root: &Path, output: &mut Vec<PathBuf>) {
+    if path == excluded_root || !path.is_dir() {
         return;
     }
 
     for entry in fs::read_dir(path).expect("read root source directory") {
         let path = entry.expect("read root source entry").path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|name| name == "bin") {
-                continue;
-            }
-            rust_sources_under(&path, output);
+            rust_sources_under(&path, excluded_root, output);
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             output.push(path);
         }
@@ -71,7 +68,8 @@ fn root_library_source_contains_only_facade_items() {
     );
 
     let mut sources = Vec::new();
-    rust_sources_under(&root.join("src"), &mut sources);
+    let source_root = root.join("src");
+    rust_sources_under(&source_root, &source_root.join("bin"), &mut sources);
     sources.sort();
 
     let mut violations = Vec::new();

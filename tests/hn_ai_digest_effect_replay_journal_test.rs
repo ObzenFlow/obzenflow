@@ -1779,12 +1779,6 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     let live_chunk = stage_envelopes(&live_archive, "digest__chunk").await;
     let live_map = stage_envelopes(&live_archive, "digest__map").await;
     let live_finalise = stage_envelopes(&live_archive, "digest__finalize").await;
-    let live_digest_summary = stage_envelopes(&live_archive, "digest_summary").await;
-    let live_delivery_receipts = stable_delivery_receipts(&live_finalise, &live_digest_summary);
-    assert!(
-        !live_delivery_receipts.is_empty(),
-        "the production digest summary must journal at least one stable delivery receipt"
-    );
     let manifests = live_chunk
         .iter()
         .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.event))
@@ -2557,6 +2551,12 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let live_chunk = stage_envelopes(&live_archive, "digest__chunk").await;
     let live_map = stage_envelopes(&live_archive, "digest__map").await;
     let live_finalise = stage_envelopes(&live_archive, "digest__finalize").await;
+    let live_digest_summary = stage_envelopes(&live_archive, "digest_summary").await;
+    let live_delivery_receipts = stable_delivery_receipts(&live_finalise, &live_digest_summary);
+    assert!(
+        !live_delivery_receipts.is_empty(),
+        "the production digest summary must journal at least one stable delivery receipt"
+    );
     let manifests = live_chunk
         .iter()
         .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.event))
