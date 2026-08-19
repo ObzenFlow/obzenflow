@@ -6,7 +6,9 @@ use obzenflow::ai::ChatEffectBinding;
 use obzenflow_runtime::effects::EffectPortRegistry;
 
 fn main() {
-    let mut registry = EffectPortRegistry::new();
+    let _registry = EffectPortRegistry::new();
     let binding = ChatEffectBinding::ollama("model", None).unwrap();
-    let _ = binding.install_into(&mut registry);
+    // Field-style lookup avoids a rust-src-dependent fuzzy `TryInto` suggestion.
+    // Reintroducing an `install_into` method changes this diagnostic and fails the fixture.
+    let _ = binding.install_into;
 }
