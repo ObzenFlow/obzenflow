@@ -39,9 +39,14 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::domain::{CancelIgnored, ReservationFailed, SoldOut, StockReleased, StockReserved};
+    use super::domain::{
+        AllocationInput, CancelIgnored, OrderId, OrderPlaced, ReservationFailed, Sku, SoldOut,
+        StockReleased, StockReserved,
+    };
+    use super::warehouse::{WarehouseConfig, WarehouseTestFault};
     use super::{flow, warehouse};
-    use obzenflow_core::event::{ChainEvent, ChainEventContent};
+    use obzenflow_core::event::status::processing_status::ProcessingStatus;
+    use obzenflow_core::event::{ChainEvent, ChainEventContent, StageFatalRecorded};
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::Journal;
     use obzenflow_core::{StageId, TypedPayload};
@@ -73,9 +78,9 @@ mod tests {
         .expect("manifest parses")
     }
 
-    async fn allocation_events(run_dir: &Path) -> Vec<ChainEvent> {
+    async fn allocation_journal_events(run_dir: &Path, manifest_field: &str) -> Vec<ChainEvent> {
         let manifest = archive_manifest(run_dir);
-        let journal_file = manifest["stages"]["allocate_stock"]["data_journal_file"]
+        let journal_file = manifest["stages"]["allocate_stock"][manifest_field]
             .as_str()
             .expect("allocator data journal");
         let journal = DiskJournal::<ChainEvent>::with_owner(
@@ -92,6 +97,14 @@ mod tests {
             .collect()
     }
 
+    async fn allocation_events(run_dir: &Path) -> Vec<ChainEvent> {
+        allocation_journal_events(run_dir, "data_journal_file").await
+    }
+
+    async fn allocation_error_events(run_dir: &Path) -> Vec<ChainEvent> {
+        allocation_journal_events(run_dir, "error_journal_file").await
+    }
+
     fn count<T: TypedPayload>(events: &[ChainEvent]) -> usize {
         events
             .iter()
@@ -99,27 +112,93 @@ mod tests {
             .count()
     }
 
+    async fn run_with_config(
+        journal_root: PathBuf,
+        replay_from: Option<&Path>,
+        verify: bool,
+        inputs: Vec<AllocationInput>,
+        warehouse_config: WarehouseConfig,
+        stats: Arc<warehouse::WarehouseStats>,
+    ) -> Result<(), String> {
+        let mut args = vec![OsString::from("flash_sale_allocation")];
+        if let Some(archive) = replay_from {
+            args.push(OsString::from("--replay-from"));
+            args.push(archive.as_os_str().to_os_string());
+            if verify {
+                args.push(OsString::from("--verify"));
+            }
+        }
+        FlowApplication::builder()
+            .with_log_level(super::LogLevel::Error)
+            .with_cli_args(args)
+            .run_async(flow::assemble_flow(
+                inputs,
+                warehouse_config,
+                stats,
+                journal_root,
+            ))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     async fn run(
         journal_root: PathBuf,
         replay_from: Option<&Path>,
         stats: Arc<warehouse::WarehouseStats>,
     ) {
-        let mut args = vec![OsString::from("flash_sale_allocation")];
-        if let Some(archive) = replay_from {
-            args.push(OsString::from("--replay-from"));
-            args.push(archive.as_os_str().to_os_string());
-            args.push(OsString::from("--verify"));
-        }
-        FlowApplication::builder()
-            .with_cli_args(args)
-            .run_async(flow::assemble_flow(
-                flow::scripted_inputs(),
-                warehouse::WarehouseConfig::default(),
-                stats,
-                journal_root,
-            ))
+        run_with_config(
+            journal_root,
+            replay_from,
+            true,
+            flow::scripted_inputs(),
+            WarehouseConfig::default(),
+            stats,
+        )
+        .await
+        .expect("allocation flow completes");
+    }
+
+    fn one_order() -> Vec<AllocationInput> {
+        vec![AllocationInput::OrderPlaced(OrderPlaced {
+            order_id: OrderId::from("failure-order"),
+            sku: Sku::from("flash-sku"),
+        })]
+    }
+
+    async fn propagated_failure_messages(run_dir: &Path) -> Vec<String> {
+        let mut messages = Vec::new();
+        for event in allocation_events(run_dir)
             .await
-            .expect("allocation flow completes");
+            .into_iter()
+            .chain(allocation_error_events(run_dir).await)
+        {
+            if let ProcessingStatus::Error { message, .. } = &event.processing_info.status {
+                messages.push(message.clone());
+            }
+            if let Some(fatal) = StageFatalRecorded::from_event(&event) {
+                messages.push(fatal.detail);
+            }
+        }
+        messages
+    }
+
+    async fn assert_propagated_without_reservation_failure(
+        run_dir: &Path,
+        expected_fragment: &str,
+    ) {
+        let events = allocation_events(run_dir).await;
+        assert_eq!(
+            count::<ReservationFailed>(&events),
+            0,
+            "non-policy failures must not become ReservationFailed"
+        );
+        let messages = propagated_failure_messages(run_dir).await;
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains(expected_fragment)),
+            "expected propagated failure containing {expected_fragment:?}, got {messages:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -200,5 +279,124 @@ mod tests {
         let replay_events = allocation_events(&candidate).await;
         assert_eq!(count::<ReservationFailed>(&replay_events), 2);
         assert_eq!(count::<StockReleased>(&replay_events), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn allocator_propagates_non_policy_failures_live_and_replay() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        for (label, config, live_fragment) in [
+            (
+                "dependency",
+                WarehouseConfig {
+                    reserve_latency: std::time::Duration::ZERO,
+                    reserve_unavailable: true,
+                    ..WarehouseConfig::default()
+                },
+                "warehouse unavailable",
+            ),
+            (
+                "validation",
+                WarehouseConfig {
+                    reserve_latency: std::time::Duration::ZERO,
+                    reserve_test_fault: Some(WarehouseTestFault::Validation),
+                    ..WarehouseConfig::default()
+                },
+                "invalid reservation input",
+            ),
+            (
+                "domain",
+                WarehouseConfig {
+                    reserve_latency: std::time::Duration::ZERO,
+                    reserve_test_fault: Some(WarehouseTestFault::Domain),
+                    ..WarehouseConfig::default()
+                },
+                "refused the reservation",
+            ),
+            (
+                "provenance",
+                WarehouseConfig {
+                    reserve_latency: std::time::Duration::ZERO,
+                    reserve_test_fault: Some(WarehouseTestFault::Provenance),
+                    ..WarehouseConfig::default()
+                },
+                "effect provenance mismatch",
+            ),
+            (
+                "journal",
+                WarehouseConfig {
+                    reserve_latency: std::time::Duration::ZERO,
+                    reserve_test_fault: Some(WarehouseTestFault::Journal),
+                    ..WarehouseConfig::default()
+                },
+                "effect journal write failed",
+            ),
+        ] {
+            let journal_root = temp.path().join(label);
+            let live_stats = Arc::new(warehouse::WarehouseStats::default());
+            run_with_config(
+                journal_root.clone(),
+                None,
+                false,
+                one_order(),
+                config.clone(),
+                live_stats.clone(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{label} live flow should settle its error: {error}"));
+            assert_eq!(live_stats.reserve_calls(), 1);
+
+            let baseline = latest_run_dir(&journal_root);
+            assert_propagated_without_reservation_failure(&baseline, live_fragment).await;
+
+            let replay_stats = Arc::new(warehouse::WarehouseStats::default());
+            run_with_config(
+                journal_root.clone(),
+                Some(&baseline),
+                false,
+                one_order(),
+                config,
+                replay_stats.clone(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{label} replay should settle its error: {error}"));
+            assert_eq!(
+                replay_stats.reserve_calls(),
+                0,
+                "{label} replay must use the recorded failure"
+            );
+
+            let replay = latest_run_dir(&journal_root);
+            assert_ne!(replay, baseline);
+            assert_propagated_without_reservation_failure(&replay, "recorded effect failure").await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn allocator_propagates_binding_resolution_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let binding_root = temp.path().join("binding");
+        let binding_stats = Arc::new(warehouse::WarehouseStats::default());
+        let binding_result = run_with_config(
+            binding_root.clone(),
+            None,
+            false,
+            one_order(),
+            WarehouseConfig {
+                reserve_latency: std::time::Duration::ZERO,
+                reserve_test_fault: Some(WarehouseTestFault::BindingResolution),
+                ..WarehouseConfig::default()
+            },
+            binding_stats.clone(),
+        )
+        .await;
+        assert!(
+            binding_result.is_err(),
+            "binding authority failure must fail the stage"
+        );
+        assert_eq!(binding_stats.reserve_calls(), 0);
+        let binding_run = latest_run_dir(&binding_root);
+        assert_propagated_without_reservation_failure(&binding_run, "failed to resolve").await;
     }
 }

@@ -14,6 +14,8 @@ use obzenflow_runtime::effects::{
     EffectRegistrationBuilder, EffectSafety, EffectSet, Effects, LogicalEffectBindingName, Named,
     NamedEffect,
 };
+#[cfg(test)]
+use obzenflow_runtime::effects::{EffectPortResolutionError, EffectPortResolver};
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -24,6 +26,8 @@ pub struct WarehouseConfig {
     pub warehouse_id: String,
     pub reserve_latency: Duration,
     pub reserve_unavailable: bool,
+    #[cfg(test)]
+    pub reserve_test_fault: Option<WarehouseTestFault>,
 }
 
 impl Default for WarehouseConfig {
@@ -32,8 +36,20 @@ impl Default for WarehouseConfig {
             warehouse_id: "warehouse-demo".to_string(),
             reserve_latency: Duration::from_millis(20),
             reserve_unavailable: false,
+            #[cfg(test)]
+            reserve_test_fault: None,
         }
     }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WarehouseTestFault {
+    BindingResolution,
+    Provenance,
+    Journal,
+    Validation,
+    Domain,
 }
 
 #[derive(Debug, Default)]
@@ -58,6 +74,18 @@ impl WarehouseStats {
 pub enum WarehousePortError {
     #[error("warehouse unavailable")]
     Unavailable,
+    #[cfg(test)]
+    #[error("warehouse rejected invalid reservation input")]
+    Validation,
+    #[cfg(test)]
+    #[error("warehouse refused the reservation")]
+    Domain,
+    #[cfg(test)]
+    #[error("injected warehouse provenance failure")]
+    Provenance,
+    #[cfg(test)]
+    #[error("injected warehouse journal failure")]
+    Journal,
 }
 
 /// The physical integration port. Capacity is intentionally not implemented
@@ -87,6 +115,18 @@ impl WarehousePort for SimulatedWarehouse {
         tokio::time::sleep(self.config.reserve_latency).await;
         if self.config.reserve_unavailable {
             return Err(WarehousePortError::Unavailable);
+        }
+        #[cfg(test)]
+        match self.config.reserve_test_fault {
+            Some(WarehouseTestFault::Validation) => {
+                return Err(WarehousePortError::Validation);
+            }
+            Some(WarehouseTestFault::Domain) => return Err(WarehousePortError::Domain),
+            Some(WarehouseTestFault::Provenance) => {
+                return Err(WarehousePortError::Provenance);
+            }
+            Some(WarehouseTestFault::Journal) => return Err(WarehousePortError::Journal),
+            Some(WarehouseTestFault::BindingResolution) | None => {}
         }
         Ok(HoldId(format!(
             "{}:{}:{}",
@@ -259,11 +299,21 @@ impl NamedEffect for ReleaseStock {
 }
 
 fn warehouse_error(error: WarehousePortError) -> EffectError {
-    EffectError::DependencyFailed {
-        failure_source: EffectFailureSource::new("warehouse"),
-        code: EffectFailureCode::new("unavailable"),
-        message: error.to_string(),
-        retry: RetryDisposition::Retryable,
+    match error {
+        WarehousePortError::Unavailable => EffectError::DependencyFailed {
+            failure_source: EffectFailureSource::new("warehouse"),
+            code: EffectFailureCode::new("unavailable"),
+            message: error.to_string(),
+            retry: RetryDisposition::Retryable,
+        },
+        #[cfg(test)]
+        WarehousePortError::Validation => EffectError::Validation(error.to_string()),
+        #[cfg(test)]
+        WarehousePortError::Domain => EffectError::Domain(error.to_string()),
+        #[cfg(test)]
+        WarehousePortError::Provenance => EffectError::EffectProvenanceMismatch(error.to_string()),
+        #[cfg(test)]
+        WarehousePortError::Journal => EffectError::Journal(error.to_string()),
     }
 }
 
@@ -298,15 +348,33 @@ impl WarehouseEffectBindings {
         });
         let evidence = WarehouseBindingEvidence::new(&config.warehouse_id);
 
-        let reserve = EffectRegistrationBuilder::<ReserveStock>::new(
+        let reserve_builder = EffectRegistrationBuilder::<ReserveStock>::new(
             LogicalEffectBindingName::new("reserve_warehouse")
                 .expect("static binding name is valid"),
             evidence.clone(),
-        )
-        .bind_eager(WAREHOUSE, warehouse.clone())
-        .map_err(WarehouseBindingsBuildError::Reserve)?
-        .finish()
-        .map_err(WarehouseBindingsBuildError::Reserve)?;
+        );
+        #[cfg(test)]
+        let reserve = if config.reserve_test_fault == Some(WarehouseTestFault::BindingResolution) {
+            let resolver: EffectPortResolver<dyn WarehousePort> =
+                Arc::new(|| Err(EffectPortResolutionError::CredentialUnavailable));
+            reserve_builder
+                .bind_deferred(WAREHOUSE, resolver)
+                .map_err(WarehouseBindingsBuildError::Reserve)?
+                .finish()
+                .map_err(WarehouseBindingsBuildError::Reserve)?
+        } else {
+            reserve_builder
+                .bind_eager(WAREHOUSE, warehouse.clone())
+                .map_err(WarehouseBindingsBuildError::Reserve)?
+                .finish()
+                .map_err(WarehouseBindingsBuildError::Reserve)?
+        };
+        #[cfg(not(test))]
+        let reserve = reserve_builder
+            .bind_eager(WAREHOUSE, warehouse.clone())
+            .map_err(WarehouseBindingsBuildError::Reserve)?
+            .finish()
+            .map_err(WarehouseBindingsBuildError::Reserve)?;
 
         let release = EffectRegistrationBuilder::<ReleaseStock>::new(
             LogicalEffectBindingName::new("release_warehouse")
