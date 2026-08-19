@@ -16,7 +16,7 @@ use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 type ErasedValue = Arc<dyn Any + Send + Sync>;
 
@@ -116,9 +116,19 @@ pub enum EffectBindingBuildError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum EffectPortRegistrationError {
-    #[error("effect registration '{binding}' for '{effect_type}' is already installed")]
-    DuplicateRegistration {
+pub enum EffectRegistrationCollectionError {
+    #[error("distinct bindings were declared for '{effect_type} via {binding}'")]
+    DistinctBindings {
+        binding: LogicalEffectBindingName,
+        effect_type: &'static str,
+    },
+    #[error("binding package for '{effect_type} via {binding}' was already collected")]
+    AlreadyCollected {
+        binding: LogicalEffectBindingName,
+        effect_type: &'static str,
+    },
+    #[error("declaration for '{effect_type} via {binding}' has no pending binding package")]
+    MissingPackage {
         binding: LogicalEffectBindingName,
         effect_type: &'static str,
     },
@@ -150,6 +160,48 @@ struct PendingPort {
     requirement: EffectPortSlotRequirement,
     coordinate: BindingCoordinate,
     recipe: PortRecipe,
+}
+
+enum PendingRegistrationState {
+    Pending(Vec<(BindingCoordinate, PortRecipe)>),
+    Collected,
+}
+
+/// Shared, process-local package carried only by authored declarations.
+pub(super) struct PendingRegistrationPackage {
+    logical_name: LogicalEffectBindingName,
+    effect_type: &'static str,
+    effect_type_id: TypeId,
+    coordinate: BindingCoordinate,
+    state: Mutex<PendingRegistrationState>,
+}
+
+impl PendingRegistrationPackage {
+    fn new<E: NamedEffect>(
+        logical_name: LogicalEffectBindingName,
+        coordinate: BindingCoordinate,
+        entries: Vec<(BindingCoordinate, PortRecipe)>,
+    ) -> Self {
+        Self {
+            logical_name,
+            effect_type: E::EFFECT_TYPE,
+            effect_type_id: TypeId::of::<E>(),
+            coordinate,
+            state: Mutex::new(PendingRegistrationState::Pending(entries)),
+        }
+    }
+}
+
+impl std::fmt::Debug for PendingRegistrationPackage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingRegistrationPackage")
+            .field("effect_type", &self.effect_type)
+            .field("logical_name", &self.logical_name)
+            .field("authority", &"<not disclosed>")
+            .field("recipes", &"<not disclosed>")
+            .finish()
+    }
 }
 
 /// Public type-safe builder shared by integration facades, applications, and fixtures.
@@ -303,9 +355,7 @@ impl<E: NamedEffect> EffectRegistrationBuilder<E> {
         Ok(())
     }
 
-    pub fn finish(
-        mut self,
-    ) -> Result<(EffectBinding<E>, EffectRegistration<E>), EffectBindingBuildError> {
+    pub fn finish(mut self) -> Result<EffectBinding<E>, EffectBindingBuildError> {
         validate_effect_type(E::EFFECT_TYPE)
             .map_err(|_| EffectBindingBuildError::InvalidEffectType)?;
 
@@ -359,24 +409,21 @@ impl<E: NamedEffect> EffectRegistrationBuilder<E> {
             })
             .collect();
         let registration_coordinate = BindingCoordinate::mint();
-        let binding = EffectBinding::from_parts(
+        let package = Arc::new(PendingRegistrationPackage::new::<E>(
             self.logical_name.clone(),
-            self.evidence,
             registration_coordinate,
-            bound_slots,
-        );
-        let registration = EffectRegistration {
-            logical_name: self.logical_name,
-            effect_type: E::EFFECT_TYPE,
-            coordinate: registration_coordinate,
-            entries: self
-                .pending
+            self.pending
                 .into_iter()
                 .map(|pending| (pending.coordinate, pending.recipe))
                 .collect(),
-            _effect: PhantomData,
-        };
-        Ok((binding, registration))
+        ));
+        Ok(EffectBinding::from_parts(
+            self.logical_name,
+            self.evidence,
+            registration_coordinate,
+            bound_slots,
+            package,
+        ))
     }
 }
 
@@ -398,27 +445,7 @@ impl<E: NamedEffect> std::fmt::Debug for EffectRegistrationBuilder<E> {
     }
 }
 
-/// Opaque consuming registration authority.
-pub struct EffectRegistration<E: NamedEffect> {
-    logical_name: LogicalEffectBindingName,
-    effect_type: &'static str,
-    coordinate: BindingCoordinate,
-    entries: Vec<(BindingCoordinate, PortRecipe)>,
-    _effect: PhantomData<fn() -> E>,
-}
-
-impl<E: NamedEffect> std::fmt::Debug for EffectRegistration<E> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("EffectRegistration")
-            .field("effect_type", &self.effect_type)
-            .field("logical_name", &self.logical_name)
-            .field("authority", &"<not disclosed>")
-            .finish()
-    }
-}
-
-/// Flow-owned registry. Its public mutation surface accepts only completed typed registrations.
+/// Flow-owned registry collected atomically from authored declarations.
 #[derive(Clone, Default)]
 pub struct EffectPortRegistry {
     recipes: Arc<HashMap<BindingCoordinate, PortRecipe>>,
@@ -432,28 +459,81 @@ impl EffectPortRegistry {
         Self::default()
     }
 
-    pub fn install<E: NamedEffect>(
-        &mut self,
-        registration: EffectRegistration<E>,
-    ) -> Result<(), EffectPortRegistrationError> {
-        let installation_key = (
-            TypeId::of::<E>(),
-            registration.logical_name.as_str().to_string(),
-        );
-        if self.installed.contains(&installation_key) {
-            return Err(EffectPortRegistrationError::DuplicateRegistration {
-                binding: registration.logical_name,
-                effect_type: registration.effect_type,
-            });
+    /// Collect the complete declaration set as one atomic ownership transfer.
+    #[doc(hidden)]
+    pub fn collect_from_declarations<'a>(
+        declarations: impl IntoIterator<Item = &'a EffectDeclaration>,
+    ) -> Result<Self, EffectRegistrationCollectionError> {
+        let mut by_key: HashMap<
+            (&'static str, String),
+            (BindingCoordinate, Arc<PendingRegistrationPackage>),
+        > = HashMap::new();
+
+        for declaration in declarations {
+            let Some((logical_name, registration, _)) = declaration.binding().named_parts() else {
+                continue;
+            };
+            let package = declaration.binding().pending_package().ok_or_else(|| {
+                EffectRegistrationCollectionError::MissingPackage {
+                    binding: logical_name.clone(),
+                    effect_type: declaration.effect_type(),
+                }
+            })?;
+            let key = (declaration.effect_type(), logical_name.as_str().to_string());
+            if let Some((first_coordinate, _)) = by_key.get(&key) {
+                if *first_coordinate != registration {
+                    return Err(EffectRegistrationCollectionError::DistinctBindings {
+                        binding: logical_name.clone(),
+                        effect_type: declaration.effect_type(),
+                    });
+                }
+                continue;
+            }
+            by_key.insert(key, (registration, Arc::clone(package)));
         }
-        Arc::make_mut(&mut self.installed).insert(installation_key);
-        Arc::make_mut(&mut self.installed_coordinates).insert(registration.coordinate);
-        let recipes = Arc::make_mut(&mut self.recipes);
-        for (coordinate, recipe) in registration.entries {
-            recipes.insert(coordinate, recipe);
+
+        let mut packages = by_key.into_values().collect::<Vec<_>>();
+        packages.sort_by_key(|(coordinate, _)| *coordinate);
+
+        // The ordered mutex guards are the process-local reservation. Holding the
+        // complete set makes the state check and ownership transfer atomic across
+        // concurrent builders without a global registry lock.
+        let mut guards = Vec::with_capacity(packages.len());
+        for (_, package) in &packages {
+            guards.push(
+                package
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
         }
-        self.run_entries = None;
-        Ok(())
+        for ((_, package), state) in packages.iter().zip(guards.iter()) {
+            if matches!(&**state, PendingRegistrationState::Collected) {
+                return Err(EffectRegistrationCollectionError::AlreadyCollected {
+                    binding: package.logical_name.clone(),
+                    effect_type: package.effect_type,
+                });
+            }
+        }
+
+        let mut registry = Self::new();
+        let installed = Arc::make_mut(&mut registry.installed);
+        let installed_coordinates = Arc::make_mut(&mut registry.installed_coordinates);
+        let recipes = Arc::make_mut(&mut registry.recipes);
+        for ((_, package), state) in packages.iter().zip(guards.iter_mut()) {
+            let PendingRegistrationState::Pending(entries) =
+                std::mem::replace(&mut **state, PendingRegistrationState::Collected)
+            else {
+                unreachable!("all package states were checked while reservations were held")
+            };
+            installed.insert((
+                package.effect_type_id,
+                package.logical_name.as_str().to_string(),
+            ));
+            installed_coordinates.insert(package.coordinate);
+            recipes.extend(entries);
+        }
+        Ok(registry)
     }
 
     pub(crate) fn into_run_registry(mut self) -> Self {
@@ -982,17 +1062,30 @@ mod tests {
         LogicalEffectBindingName::new("fixture").unwrap()
     }
 
+    fn collect<E: NamedEffect>(binding: &EffectBinding<E>) -> EffectPortRegistry {
+        let declaration = EffectDeclaration::named(binding);
+        EffectPortRegistry::collect_from_declarations([&declaration]).unwrap()
+    }
+
+    fn bound_binding(logical_name: &str) -> EffectBinding<BoundEffect> {
+        EffectRegistrationBuilder::<BoundEffect>::new(
+            LogicalEffectBindingName::new(logical_name).unwrap(),
+            Evidence,
+        )
+        .bind_eager(PORT, Arc::new(LivePort) as Arc<dyn Port>)
+        .unwrap()
+        .finish()
+        .unwrap()
+    }
+
     #[test]
-    fn exact_slot_builder_returns_one_binding_and_consuming_registration() {
-        let (binding, registration) =
-            EffectRegistrationBuilder::<BoundEffect>::new(name(), Evidence)
-                .bind_eager(PORT, Arc::new(LivePort) as Arc<dyn Port>)
-                .unwrap()
-                .finish()
-                .unwrap();
-        let mut registry = EffectPortRegistry::new();
-        registry.install(registration).unwrap();
-        let registry = registry.into_run_registry();
+    fn exact_slot_builder_returns_one_binding_with_a_collectable_package() {
+        let binding = EffectRegistrationBuilder::<BoundEffect>::new(name(), Evidence)
+            .bind_eager(PORT, Arc::new(LivePort) as Arc<dyn Port>)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let registry = collect(&binding).into_run_registry();
         let declaration = binding.declaration_binding();
         let super::super::binding::EffectDeclarationBinding::Named(named) = declaration else {
             panic!("expected named declaration")
@@ -1001,6 +1094,116 @@ mod tests {
             .scoped_view(named.registration, &named.slots)
             .unwrap();
         assert_eq!(view.get(PORT).unwrap().value(), 7);
+    }
+
+    #[test]
+    fn failed_multi_package_collection_leaves_every_unclaimed_package_retryable() {
+        let already_collected = bound_binding("already_collected");
+        let retryable = bound_binding("retryable");
+        let _first_registry = collect(&already_collected);
+
+        let already_collected_declaration = EffectDeclaration::named(&already_collected);
+        let retryable_declaration = EffectDeclaration::named(&retryable);
+        let error = match EffectPortRegistry::collect_from_declarations([
+            &retryable_declaration,
+            &already_collected_declaration,
+        ]) {
+            Ok(_) => panic!("a set containing a consumed package must fail atomically"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            EffectRegistrationCollectionError::AlreadyCollected { ref binding, .. }
+                if binding.as_str() == "already_collected"
+        ));
+
+        let _retry_registry = collect(&retryable);
+    }
+
+    #[test]
+    fn distinct_same_key_bindings_fail_in_either_order_without_consuming_packages() {
+        let first = bound_binding("duplicate");
+        let second = bound_binding("duplicate");
+        let first_declaration = EffectDeclaration::named(&first);
+        let second_declaration = EffectDeclaration::named(&second);
+
+        let forward = EffectPortRegistry::collect_from_declarations([
+            &first_declaration,
+            &second_declaration,
+        ])
+        .expect_err("distinct bindings for one key must be rejected");
+        let reverse = EffectPortRegistry::collect_from_declarations([
+            &second_declaration,
+            &first_declaration,
+        ])
+        .expect_err("declaration order must not select a binding");
+
+        assert_eq!(forward, reverse);
+        assert!(matches!(
+            forward,
+            EffectRegistrationCollectionError::DistinctBindings { ref binding, .. }
+                if binding.as_str() == "duplicate"
+        ));
+
+        let _first_registry = collect(&first);
+        let _second_registry = collect(&second);
+    }
+
+    #[test]
+    fn overlapping_concurrent_collections_have_one_winner_and_no_partial_loser() {
+        let left_only = bound_binding("left_only");
+        let shared = bound_binding("shared");
+        let right_only = bound_binding("right_only");
+
+        let left_declarations = [
+            EffectDeclaration::named(&left_only),
+            EffectDeclaration::named(&shared),
+        ];
+        let right_declarations = [
+            EffectDeclaration::named(&shared),
+            EffectDeclaration::named(&right_only),
+        ];
+        let left = std::thread::spawn(move || {
+            EffectPortRegistry::collect_from_declarations(left_declarations.iter())
+        });
+        let right = std::thread::spawn(move || {
+            EffectPortRegistry::collect_from_declarations(right_declarations.iter())
+        });
+
+        let left = left.join().expect("left collector does not panic");
+        let right = right.join().expect("right collector does not panic");
+        assert_ne!(left.is_ok(), right.is_ok(), "exactly one overlap may win");
+        if left.is_ok() {
+            assert!(matches!(
+                right,
+                Err(EffectRegistrationCollectionError::AlreadyCollected { .. })
+            ));
+            let _right_only_registry = collect(&right_only);
+        } else {
+            assert!(matches!(
+                left,
+                Err(EffectRegistrationCollectionError::AlreadyCollected { .. })
+            ));
+            let _left_only_registry = collect(&left_only);
+        }
+    }
+
+    #[test]
+    fn runtime_projection_is_inert_and_does_not_consume_the_authored_package() {
+        let binding = bound_binding("projection");
+        let authored = EffectDeclaration::named(&binding);
+        let runtime = authored.runtime_projection();
+        let error = match EffectPortRegistry::collect_from_declarations([&runtime]) {
+            Ok(_) => panic!("runtime declarations cannot carry authoring packages"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            EffectRegistrationCollectionError::MissingPackage { ref binding, .. }
+                if binding.as_str() == "projection"
+        ));
+
+        let _registry = EffectPortRegistry::collect_from_declarations([&authored]).unwrap();
     }
 
     #[test]
@@ -1027,15 +1230,12 @@ mod tests {
                 Err(EffectPortResolutionError::CredentialUnavailable)
             }
         });
-        let (binding, registration) =
-            EffectRegistrationBuilder::<BoundEffect>::new(name(), Evidence)
-                .bind_deferred(PORT, resolver)
-                .unwrap()
-                .finish()
-                .unwrap();
-        let mut registry = EffectPortRegistry::new();
-        registry.install(registration).unwrap();
-        let registry = registry.into_run_registry();
+        let binding = EffectRegistrationBuilder::<BoundEffect>::new(name(), Evidence)
+            .bind_deferred(PORT, resolver)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let registry = collect(&binding).into_run_registry();
         let super::super::binding::EffectDeclarationBinding::Named(named) =
             binding.declaration_binding()
         else {
@@ -1128,17 +1328,14 @@ mod tests {
                 Err(EffectPortResolutionError::ClientConstructionFailed)
             }
         });
-        let (binding, registration) =
-            EffectRegistrationBuilder::<TwoSlotEffect>::new(name(), Evidence)
-                .bind_deferred(PORT, first)
-                .unwrap()
-                .bind_deferred(FALLBACK, second)
-                .unwrap()
-                .finish()
-                .unwrap();
-        let mut registry = EffectPortRegistry::new();
-        registry.install(registration).unwrap();
-        let registry = registry.into_run_registry();
+        let binding = EffectRegistrationBuilder::<TwoSlotEffect>::new(name(), Evidence)
+            .bind_deferred(PORT, first)
+            .unwrap()
+            .bind_deferred(FALLBACK, second)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let registry = collect(&binding).into_run_registry();
         let super::super::binding::EffectDeclarationBinding::Named(named) =
             binding.declaration_binding()
         else {
@@ -1174,15 +1371,12 @@ mod tests {
                 Ok(Arc::new(LivePort) as Arc<dyn Port>)
             }
         });
-        let (binding, registration) =
-            EffectRegistrationBuilder::<BoundEffect>::new(name(), Evidence)
-                .bind_deferred(PORT, resolver)
-                .unwrap()
-                .finish()
-                .unwrap();
-        let mut registry = EffectPortRegistry::new();
-        registry.install(registration).unwrap();
-        let registry = registry.into_run_registry();
+        let binding = EffectRegistrationBuilder::<BoundEffect>::new(name(), Evidence)
+            .bind_deferred(PORT, resolver)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let registry = collect(&binding).into_run_registry();
         let super::super::binding::EffectDeclarationBinding::Named(named) =
             binding.declaration_binding()
         else {
@@ -1233,14 +1427,12 @@ mod tests {
                 Ok(Arc::new(LivePort) as Arc<dyn Port>)
             }
         });
-        let (binding, registration) =
-            EffectRegistrationBuilder::<BoundEffect>::new(name(), Evidence)
-                .bind_deferred(PORT, resolver)
-                .unwrap()
-                .finish()
-                .unwrap();
-        let mut registry = EffectPortRegistry::new();
-        registry.install(registration).unwrap();
+        let binding = EffectRegistrationBuilder::<BoundEffect>::new(name(), Evidence)
+            .bind_deferred(PORT, resolver)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let registry = collect(&binding);
         let registry = registry.into_run_registry();
         let super::super::binding::EffectDeclarationBinding::Named(named) =
             binding.declaration_binding()
@@ -1277,14 +1469,12 @@ mod tests {
                 panic!("resolver-panic-canary")
             }
         });
-        let (binding, registration) =
-            EffectRegistrationBuilder::<BoundEffect>::new(name(), Evidence)
-                .bind_deferred(PORT, resolver)
-                .unwrap()
-                .finish()
-                .unwrap();
-        let mut registry = EffectPortRegistry::new();
-        registry.install(registration).unwrap();
+        let binding = EffectRegistrationBuilder::<BoundEffect>::new(name(), Evidence)
+            .bind_deferred(PORT, resolver)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let registry = collect(&binding);
         let super::super::binding::EffectDeclarationBinding::Named(named) =
             binding.declaration_binding()
         else {
@@ -1313,14 +1503,19 @@ mod tests {
 
     #[test]
     fn authority_debug_surfaces_do_not_disclose_evidence_or_ports() {
-        let (binding, registration) =
-            EffectRegistrationBuilder::<BoundEffect>::new(name(), Evidence)
-                .bind_eager(PORT, Arc::new(LivePort) as Arc<dyn Port>)
-                .unwrap()
-                .finish()
-                .unwrap();
+        let binding = EffectRegistrationBuilder::<BoundEffect>::new(name(), Evidence)
+            .bind_eager(PORT, Arc::new(LivePort) as Arc<dyn Port>)
+            .unwrap()
+            .finish()
+            .unwrap();
         let binding_debug = format!("{binding:?}");
-        let registration_debug = format!("{registration:?}");
+        let registration_debug = format!(
+            "{:?}",
+            binding
+                .declaration_binding()
+                .pending_package()
+                .expect("authored binding carries its pending package")
+        );
         assert!(binding_debug.contains("<not disclosed>"));
         assert!(registration_debug.contains("<not disclosed>"));
         assert!(!registration_debug.contains("LivePort"));
@@ -1344,8 +1539,14 @@ mod tests {
         .bind_eager_with_metadata(CANARY_PORT, resolved)
         .unwrap();
         let builder_debug = format!("{builder:?}");
-        let (binding, registration) = builder.finish().unwrap();
-        let registration_debug = format!("{registration:?}");
+        let binding = builder.finish().unwrap();
+        let registration_debug = format!(
+            "{:?}",
+            binding
+                .declaration_binding()
+                .pending_package()
+                .expect("authored binding carries its pending package")
+        );
         let declaration = EffectDeclaration::named(&binding);
         let declaration_debug = format!("{declaration:?}");
         let durable_identity =
@@ -1357,9 +1558,7 @@ mod tests {
             }
         );
         let binding_debug = format!("{binding:?}");
-        let mut registry = EffectPortRegistry::new();
-        registry.install(registration).unwrap();
-        let run = registry.into_run_registry();
+        let run = collect(&binding).into_run_registry();
         let run_debug = format!("{run:?}");
         let super::super::binding::EffectDeclarationBinding::Named(named) =
             binding.declaration_binding()
@@ -1386,18 +1585,15 @@ mod tests {
         let resolver: EffectPortResolverWithMetadata<dyn Port, CanaryMetadata> = Arc::new(|| {
             panic!("{AUTHORITY_CANARY}");
         });
-        let (panic_binding, panic_registration) =
-            EffectRegistrationBuilder::<CanaryBoundEffect>::new(
-                LogicalEffectBindingName::new("panic_canary").unwrap(),
-                CanaryEvidence,
-            )
-            .bind_deferred_with_metadata(CANARY_PORT, resolver)
-            .unwrap()
-            .finish()
-            .unwrap();
-        let mut panic_registry = EffectPortRegistry::new();
-        panic_registry.install(panic_registration).unwrap();
-        let panic_registry = panic_registry.into_run_registry();
+        let panic_binding = EffectRegistrationBuilder::<CanaryBoundEffect>::new(
+            LogicalEffectBindingName::new("panic_canary").unwrap(),
+            CanaryEvidence,
+        )
+        .bind_deferred_with_metadata(CANARY_PORT, resolver)
+        .unwrap()
+        .finish()
+        .unwrap();
+        let panic_registry = collect(&panic_binding).into_run_registry();
         let super::super::binding::EffectDeclarationBinding::Named(panic_named) =
             panic_binding.declaration_binding()
         else {
@@ -1456,7 +1652,7 @@ mod tests {
                 ))
             }
         });
-        let (binding, registration) = EffectRegistrationBuilder::<CanaryBoundEffect>::new(
+        let binding = EffectRegistrationBuilder::<CanaryBoundEffect>::new(
             LogicalEffectBindingName::new("co_resolved").unwrap(),
             CanaryEvidence,
         )
@@ -1464,9 +1660,7 @@ mod tests {
         .unwrap()
         .finish()
         .unwrap();
-        let mut registry = EffectPortRegistry::new();
-        registry.install(registration).unwrap();
-        let registry = registry.into_run_registry();
+        let registry = collect(&binding).into_run_registry();
         let super::super::binding::EffectDeclarationBinding::Named(named) =
             binding.declaration_binding()
         else {

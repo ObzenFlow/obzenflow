@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Typed source helper facades.
+//! In-process source adapters constructed from values and functions.
 
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
@@ -14,7 +14,17 @@ use serde::Serialize;
 use std::fmt::Debug;
 use std::future::Future;
 
-/// Create a finite typed source from an iterator (convenience wrapper).
+/// Create a finite typed source that emits exactly one item, then EOF.
+pub fn once<T>(
+    item: T,
+) -> impl TypedFiniteSourceHandler<Output = T> + SourceTyping<Output = T> + Clone + Debug + 'static
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+{
+    finite(std::iter::once(item))
+}
+
+/// Create a finite typed source from an iterator.
 pub fn finite<T, I>(
     iter: I,
 ) -> impl TypedFiniteSourceHandler<Output = T> + SourceTyping<Output = T> + Clone + Debug + 'static
@@ -35,8 +45,6 @@ where
 }
 
 /// Create a finite typed source from a per-item producer.
-///
-/// This is the facade equivalent of `FiniteSourceTyped::from_item_fn(...)`.
 pub fn finite_from_fn<T, F>(
     producer: F,
 ) -> impl TypedFiniteSourceHandler<Output = T> + SourceTyping<Output = T> + Clone + Debug + 'static
@@ -75,4 +83,24 @@ where
     Fut: Future<Output = Vec<T>> + Send,
 {
     AsyncInfiniteSourceTyped::new(producer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+    struct Item(u64);
+
+    impl TypedPayload for Item {
+        const EVENT_TYPE: &'static str = "adapters.sources.once.item";
+    }
+
+    #[test]
+    fn once_emits_one_item_then_eof() {
+        let mut source = once(Item(7));
+        assert_eq!(source.next().unwrap(), Some(vec![Item(7)]));
+        assert_eq!(source.next().unwrap(), None);
+    }
 }

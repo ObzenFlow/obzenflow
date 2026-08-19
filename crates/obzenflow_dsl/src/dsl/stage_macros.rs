@@ -20,7 +20,7 @@
 //! effectful_stateful!(In -> Out uses Effect => handler, observers: [])
 //! sink!(In => handler)
 //! join!(catalog CatalogStage: Catalog, Stream -> Out => handler)
-//! inference!(In -> Out uses at_least_once(ChatCompletion) via chat with policy => role)
+//! inference!(In -> Out uses at_least_once(ChatCompletion) via chat with policy => handler)
 //! ai_map_reduce!(Seed -> Out => { /* named roles */ }, chunking: by_budget { /* ... */ })
 //! ```
 //!
@@ -4419,7 +4419,7 @@ macro_rules! __obzenflow_inference_contract {
         -> { $($row:tt)* } $out:ty => $role_head:ident $(:: $role_tail:ident)*
         $($rest:tt)*
     ) => {
-        compile_error!("inference!: arrow-embedded effect rows were removed; write `Input -> Output uses at_least_once(ChatCompletion) via chat with resilience => role`")
+        compile_error!("inference!: arrow-embedded effect rows were removed; write `Input -> Output uses at_least_once(ChatCompletion) via chat with resilience => handler`")
     };
     (
         name = $name:literal,
@@ -4480,7 +4480,7 @@ macro_rules! __obzenflow_inference_contract {
     ) => {
         compile_error!(
             "inference!: expected `Input -> Output uses at_least_once(ChatCompletion) \
-             via <chat binding> with <EffectResilience> => role`"
+             via <chat binding> with <EffectResilience> => handler`"
         )
     };
     (
@@ -4505,7 +4505,7 @@ macro_rules! __obzenflow_inference_contract {
         output = [$($out:tt)*],
         $($rest:tt)*
     ) => {
-        compile_error!("inference!: expected `Input -> Output uses Effect => role`")
+        compile_error!("inference!: expected `Input -> Output uses Effect => handler`")
     };
 
     (
@@ -4552,7 +4552,7 @@ macro_rules! __obzenflow_inference_contract {
         row = [$($row:tt)*],
         $($rest:tt)*
     ) => {
-        compile_error!("inference!: expected `=> role` after the `uses` clause")
+        compile_error!("inference!: expected `=> handler` after the `uses` clause")
     };
 
     (
@@ -4567,7 +4567,7 @@ macro_rules! __obzenflow_inference_contract {
             @generated_chat surface = "inference!",
             row = { $($row)* }
         );
-        $crate::dsl::inference::generated_inference::<$($input)+, $out, _>(
+        $crate::dsl::inference::generated_inference::<$($input)+, $out>(
             $name,
             $role_head $(:: $role_tail)*,
             __chat_effect_row,
@@ -4599,7 +4599,7 @@ macro_rules! __obzenflow_inference_contract {
             then = {
                 $crate::__obzenflow_handler_path_diagnostic!(
                     "inference!",
-                    "let role = MyRole::new(...); answer = inference!(Input -> Output uses Effect => role);"
+                    "implement InferenceHandler for a handler type, bind a value immediately above the flow, then pass that name: let handler = MyInferenceHandler; answer = inference!(Input -> Output uses Effect => handler);"
                 )
             }
         )
@@ -4733,7 +4733,9 @@ macro_rules! __obzenflow_ai_map_reduce_build {
         let __chunker = $crate::__obzenflow_ai_map_reduce_chunker_by_budget!(
             seed_type = ($($seed_ty)+),
             item_type = ($item_ty),
-            estimator: __map_effect_row.binding.evidence().estimator().estimator(),
+            estimator: ::obzenflow_adapters::ai::ChatBindingMetadata::estimator(
+                &__map_effect_row.binding
+            ).estimator(),
             $($chunking)+
         );
         let _: ::core::marker::PhantomData<$($seed_ty)+> =

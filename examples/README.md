@@ -43,7 +43,7 @@ These are the flagship examples and the best place to start. Each one has a comp
   - Code: [`examples/hn_ai_digest_demo/flow.rs`](hn_ai_digest_demo/flow.rs)
 
 - **`one_shot_inference_demo`** — One already-bounded input, one declared model effect, and one typed decision. Use this instead of map-reduce when the bounded context has already reduced the evidence.
-  - Shows: target-free `AiInferenceRole`, the shared `ChatCompletion` capability clause, fixed chat binding, and strict replay without provider access
+  - Shows: a user-owned `InferenceHandler`, the shared `ChatCompletion` capability clause, fixed chat binding, and strict replay without provider access
   - Run: `cargo run -p obzenflow --example one_shot_inference_demo --features ai -- --config examples/one_shot_inference_demo/obzenflow.toml`
   - Replay: add `--replay-from <live-run-dir> --verify` after the config argument
   - Code: [`examples/one_shot_inference_demo/main.rs`](one_shot_inference_demo/main.rs)

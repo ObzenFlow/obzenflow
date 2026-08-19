@@ -3,7 +3,7 @@ error: inference!: paid non-idempotent ChatCompletion requires `at_least_once(Ch
    |
 15 |       let _ = inference!(
    |  _____________^
-16 | |         Input -> Output uses ChatCompletion via chat with policy => role
+16 | |         Input -> Output uses ChatCompletion via chat with policy => handler
 17 | |     );
    | |_____^
    |

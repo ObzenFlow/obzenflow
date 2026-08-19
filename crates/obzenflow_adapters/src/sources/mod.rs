@@ -5,10 +5,12 @@
 //! Adapter sources
 
 pub mod csv;
+mod functional;
 pub mod http;
 pub mod http_pull;
 
 pub use csv::{CsvRow, CsvSource, CsvSourceBuilder};
+pub use functional::{async_finite, async_infinite, finite, finite_from_fn, infinite, once};
 pub use http::{HostedIngressSource, HttpSourceConfig};
 
 pub use http_pull::{

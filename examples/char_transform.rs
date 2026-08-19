@@ -13,7 +13,8 @@
 //! Run with: `cargo run -p obzenflow --example char_transform`
 
 use anyhow::Result;
-use obzenflow::typed::{sinks, sources, stateful as typed_stateful, transforms};
+use obzenflow::sources;
+use obzenflow::typed::{sinks, stateful as typed_stateful, transforms};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;

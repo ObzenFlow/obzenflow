@@ -338,7 +338,6 @@ mod tests {
         .unwrap()
         .finish()
         .unwrap()
-        .0
     }
 
     #[test]

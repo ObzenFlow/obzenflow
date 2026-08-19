@@ -4,10 +4,11 @@
 
 //! Typed effect-binding declarations and invocation projections (FLOWIP-132a).
 
+use super::ports::PendingRegistrationPackage;
 use super::Effect;
 use obzenflow_core::{BindingEvidenceDigest, BoundedBindingEvidence, EffectBindingIdentity};
 use ring::digest::{digest, SHA256};
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -321,7 +322,7 @@ impl BindingFamily {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct BindingCoordinate(u64);
 
 impl BindingCoordinate {
@@ -341,10 +342,10 @@ pub(super) struct BoundEffectPortSlot {
 #[derive(Clone)]
 pub struct EffectBinding<E: NamedEffect> {
     logical_name: LogicalEffectBindingName,
-    family: BindingFamily,
-    evidence: E::BindingEvidence,
+    projection: EffectBindingUse<E>,
     registration: BindingCoordinate,
     slots: Arc<Vec<BoundEffectPortSlot>>,
+    package: Arc<PendingRegistrationPackage>,
     _effect: PhantomData<fn() -> E>,
 }
 
@@ -354,13 +355,19 @@ impl<E: NamedEffect> EffectBinding<E> {
         evidence: E::BindingEvidence,
         registration: BindingCoordinate,
         slots: Vec<BoundEffectPortSlot>,
+        package: Arc<PendingRegistrationPackage>,
     ) -> Self {
-        Self {
-            logical_name,
+        let projection = EffectBindingUse {
             family: BindingFamily::mint(),
             evidence,
+            _effect: PhantomData,
+        };
+        Self {
+            logical_name,
+            projection,
             registration,
             slots: Arc::new(slots),
+            package,
             _effect: PhantomData,
         }
     }
@@ -370,15 +377,11 @@ impl<E: NamedEffect> EffectBinding<E> {
     }
 
     pub fn evidence(&self) -> &E::BindingEvidence {
-        &self.evidence
+        self.projection.evidence()
     }
 
     pub fn invocation(&self) -> EffectBindingUse<E> {
-        EffectBindingUse {
-            family: self.family.clone(),
-            evidence: self.evidence.clone(),
-            _effect: PhantomData,
-        }
+        self.projection.clone()
     }
 
     #[cfg(test)]
@@ -387,7 +390,7 @@ impl<E: NamedEffect> EffectBinding<E> {
         evidence: E::BindingEvidence,
     ) -> EffectBindingUse<E> {
         EffectBindingUse {
-            family: self.family.clone(),
+            family: self.projection.family.clone(),
             evidence,
             _effect: PhantomData,
         }
@@ -395,16 +398,18 @@ impl<E: NamedEffect> EffectBinding<E> {
 
     #[doc(hidden)]
     pub fn shares_construction_family(&self, other: &Self) -> bool {
-        self.family.same_as(&other.family)
+        self.projection.family.same_as(&other.projection.family)
     }
 
     pub(crate) fn declaration_binding(&self) -> EffectDeclarationBinding {
         EffectDeclarationBinding::Named(NamedEffectDeclarationBinding {
             logical_name: self.logical_name.clone(),
-            family: self.family.clone(),
-            identity: binding_identity::<E>(&self.evidence),
+            family: self.projection.family.clone(),
+            identity: binding_identity::<E>(self.projection.evidence()),
+            projection: Arc::new(self.projection.clone()),
             registration: self.registration,
             slots: Arc::clone(&self.slots),
+            package: Some(Arc::clone(&self.package)),
         })
     }
 }
@@ -512,8 +517,10 @@ pub(crate) struct NamedEffectDeclarationBinding {
     pub(crate) logical_name: LogicalEffectBindingName,
     pub(super) family: BindingFamily,
     pub(crate) identity: EffectBindingIdentity,
+    projection: Arc<dyn Any + Send + Sync>,
     pub(super) registration: BindingCoordinate,
     pub(super) slots: Arc<Vec<BoundEffectPortSlot>>,
+    pub(super) package: Option<Arc<PendingRegistrationPackage>>,
 }
 
 impl std::fmt::Debug for EffectDeclarationBinding {
@@ -557,6 +564,31 @@ pub(crate) enum BindingMatchError {
 }
 
 impl EffectDeclarationBinding {
+    pub(super) fn runtime_projection(&self) -> Self {
+        let mut projection = self.clone();
+        if let Self::Named(named) = &mut projection {
+            named.package = None;
+        }
+        projection
+    }
+
+    pub(super) fn typed_projection<E: NamedEffect>(&self) -> Option<EffectBindingUse<E>> {
+        let Self::Named(named) = self else {
+            return None;
+        };
+        named
+            .projection
+            .downcast_ref::<EffectBindingUse<E>>()
+            .cloned()
+    }
+
+    pub(super) fn pending_package(&self) -> Option<&Arc<PendingRegistrationPackage>> {
+        match self {
+            Self::Portless => None,
+            Self::Named(named) => named.package.as_ref(),
+        }
+    }
+
     pub(crate) fn identity(&self) -> EffectBindingIdentity {
         match self {
             Self::Portless => EffectBindingIdentity::Portless,

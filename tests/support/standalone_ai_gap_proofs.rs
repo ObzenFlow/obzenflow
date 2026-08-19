@@ -32,6 +32,7 @@ enum MapperFailure {
     None,
     BeforeEffect,
     AfterEffect,
+    EmptyEmbeddingInputs,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -169,15 +170,13 @@ fn empty_authority() -> AiAuthority {
 }
 
 fn handlers(
-    chat: EffectBinding<ChatCompletion>,
-    embedding: EffectBinding<EmbeddingGeneration>,
     mapper_failure: MapperFailure,
     mapper_counters: MapperCounters,
     embedding_dimensions: EmbeddingDimensions,
 ) -> GapHandlerBuildResult {
     let request_calls = mapper_counters.request;
     let response_calls = mapper_counters.response;
-    let chat = ChatTransformBuilder::from_binding(chat)
+    let chat = ChatTransformBuilder::new()
         .logic_version("gap-proof-chat-v1")
         .system("Summarise support tickets concisely.")
         .build_typed::<TicketRaised, TicketSummarised>(
@@ -204,11 +203,17 @@ fn handlers(
             },
         )
         .map_err(|error| Box::new(binding_error("chat_handler", error)))?;
-    let embedding = EmbeddingTransformBuilder::from_binding(embedding)
+    let embedding = EmbeddingTransformBuilder::new()
         .logic_version("gap-proof-embedding-v1")
         .dimensions(embedding_dimensions)
         .build_typed::<TicketSummarised, TicketEmbedded>(
-            |ticket| Ok(vec![ticket.summary.clone()]),
+            move |ticket| {
+                if mapper_failure == MapperFailure::EmptyEmbeddingInputs {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![ticket.summary.clone()])
+                }
+            },
             |ticket, response| {
                 Ok(TicketEmbedded {
                     id: ticket.id,
@@ -232,10 +237,7 @@ fn finite_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let chat = authority.chat.clone();
         let embedding = authority.embedding.clone();
-        let effect_ports = authority.effect_ports.clone();
         let (chat_handler, embedding_handler) = handlers(
-            chat.clone(),
-            embedding.clone(),
             mapper_failure,
             mapper_counters.clone(),
             embedding_dimensions,
@@ -249,8 +251,6 @@ fn finite_flow(
         Ok(flow! {
             name: "standalone_ai_gap_proof",
             journals: disk_journals(journal_base.clone()),
-            effect_ports: effect_ports.clone(),
-
             stages: {
                 input = source!(TicketRaised => input);
                 chat = effectful_transform!(
@@ -323,10 +323,7 @@ fn resumable_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let chat = authority.chat.clone();
         let embedding = authority.embedding.clone();
-        let effect_ports = authority.effect_ports.clone();
         let (chat_handler, embedding_handler) = handlers(
-            chat.clone(),
-            embedding.clone(),
             MapperFailure::None,
             MapperCounters::default(),
             EmbeddingDimensions::try_from(3).unwrap(),
@@ -340,8 +337,6 @@ fn resumable_flow(
         Ok(flow! {
             name: "standalone_ai_resume_tail",
             journals: disk_journals(journal_base.clone()),
-            effect_ports: effect_ports.clone(),
-
             stages: {
                 input = infinite_source!(TicketRaised => input);
                 chat = effectful_transform!(
@@ -406,10 +401,7 @@ fn control_interleaving_flow(
     FlowDefinition::materialize(move |_runtime_config| {
         let chat = authority.chat.clone();
         let embedding = authority.embedding.clone();
-        let effect_ports = authority.effect_ports.clone();
         let (chat_handler, embedding_handler) = handlers(
-            chat.clone(),
-            embedding.clone(),
             MapperFailure::None,
             mapper_counters.clone(),
             EmbeddingDimensions::try_from(3).unwrap(),
@@ -423,8 +415,6 @@ fn control_interleaving_flow(
         Ok(flow! {
             name: "standalone_ai_control_interleaving",
             journals: disk_journals(journal_base.clone()),
-            effect_ports: effect_ports.clone(),
-
             stages: {
                 input = source!(TicketRaised => input);
                 chat = effectful_transform!(
@@ -938,6 +928,52 @@ async fn deterministic_mapper_failures_round_trip_on_their_distinct_error_routes
             live_errors
         );
     }
+}
+
+#[tokio::test]
+async fn empty_embedding_inputs_fail_validation_before_resolver_attempt_or_effect_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let journal_base = temp.path().join("journals");
+    let counters = AuthorityCounters::default();
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(finite_flow(
+            journal_base.clone(),
+            vec![TicketRaised {
+                id: 1,
+                description: "empty embedding request".to_string(),
+            }],
+            Arc::new(Mutex::new(Vec::new())),
+            successful_authority(counters.clone()),
+            MapperFailure::EmptyEmbeddingInputs,
+            MapperCounters::default(),
+            EmbeddingDimensions::try_from(3).unwrap(),
+        ))
+        .await
+        .expect("operation construction failures follow the deterministic handler-error route");
+
+    assert_eq!(counters.chat_resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(counters.chat_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(counters.embedding_resolutions.load(Ordering::SeqCst), 0);
+    assert_eq!(counters.embedding_calls.load(Ordering::SeqCst), 0);
+
+    let archive = latest_run_dir(&journal_base);
+    let embedding_events = stage_events(&archive, "embedding").await;
+    assert_eq!(
+        embedding_events
+            .iter()
+            .filter(|event| EffectAttemptStarted::event_type_matches(&event.event_type()))
+            .count(),
+        0
+    );
+    assert!(embedding_events
+        .iter()
+        .all(|event| event.event_type() != EFFECT_RECORD_EVENT_TYPE));
+    let errors = stage_processing_errors(&archive, "embedding").await;
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].0, Some(ErrorKind::Validation));
+    assert!(errors[0].1.contains("requires at least one input"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

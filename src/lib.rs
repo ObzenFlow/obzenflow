@@ -36,11 +36,11 @@
 //! Handlers contain the processing logic for each stage. The framework provides
 //! several handler traits, each matching a different stage role.
 //!
-//! **Sources** produce events. [`crate::typed::sources::finite`] is the easiest way
+//! **Sources** produce events. [`crate::sources::finite`] is the easiest way
 //! to emit a `Vec<T>` (or any iterator) of typed payloads:
 //!
 //! ```rust,ignore
-//! use obzenflow::typed::sources;
+//! use obzenflow::sources;
 //!
 //! let readings = vec![
 //!     TemperatureReading { sensor_id: "A1".into(), celsius: 22.5 },
@@ -119,7 +119,7 @@
 //! ```rust,ignore
 //! use anyhow::Result;
 //! use obzenflow_core::TypedPayload;
-//! use obzenflow::typed::{sources, transforms};
+//! use obzenflow::{sources, typed::transforms};
 //! use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 //! use obzenflow_infra::application::FlowApplication;
 //! use obzenflow_infra::journal::disk_journals;

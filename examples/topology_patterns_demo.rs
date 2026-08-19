@@ -28,7 +28,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow::typed::sources;
+use obzenflow::sources;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};

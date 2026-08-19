@@ -4,7 +4,10 @@
 
 mod chat;
 mod embedding;
+mod inference;
 
 pub use chat::ChatTransform;
 pub(crate) use chat::ChatTransformSettings;
 pub use embedding::EmbeddingTransform;
+#[doc(hidden)]
+pub use inference::InferenceHandlerAdapter;

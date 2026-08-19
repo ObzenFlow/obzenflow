@@ -184,12 +184,11 @@ where
         );
 
         let GeneratedChatEffectRow {
-            binding: map_chat_binding,
+            binding: _,
             declarations: map_declarations,
             policy_attachments: map_policy_attachments,
         } = self.map_effect_row;
-        let map_handler =
-            GeneratedAiMapHandler::<Item, Partial, _>::new(self.map_role, map_chat_binding);
+        let map_handler = GeneratedAiMapHandler::<Item, Partial, _>::new(self.map_role);
         let map_descriptor = wrap_typed_descriptor(
             Box::new(EffectfulTransformDescriptor::generated_with_pass_through::<
                 AiMapReduceMapInput<ChunkEnvelope<Item>>,
@@ -241,14 +240,12 @@ where
         );
 
         let GeneratedChatEffectRow {
-            binding: finalise_chat_binding,
+            binding: _,
             declarations: finalise_declarations,
             policy_attachments: finalise_policy_attachments,
         } = self.finalise_effect_row;
-        let finalise_handler = GeneratedAiFinaliseHandler::<Seed, Many<Partial>, Out, _>::new(
-            self.finalise_role,
-            finalise_chat_binding,
-        );
+        let finalise_handler =
+            GeneratedAiFinaliseHandler::<Seed, Many<Partial>, Out, _>::new(self.finalise_role);
         let finalise_descriptor = wrap_typed_descriptor(
             Box::new(EffectfulTransformDescriptor::generated::<
                 AiMapReduceReduceInput<Seed, Many<Partial>>,

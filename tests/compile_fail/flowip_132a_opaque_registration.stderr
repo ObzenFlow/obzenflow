@@ -1,11 +1,8 @@
-error[E0599]: no method named `resolver` found for struct `EffectRegistration<E>` in the current scope
- --> tests/compile_fail/flowip_132a_opaque_registration.rs:8:26
+error[E0432]: unresolved import `obzenflow_runtime::effects::EffectRegistration`
+ --> tests/compile_fail/flowip_132a_opaque_registration.rs:5:34
   |
-8 |     let _ = registration.resolver();
-  |                          ^^^^^^^^ method not found in `EffectRegistration<E>`
-
-error[E0616]: field `entries` of struct `EffectRegistration` is private
- --> tests/compile_fail/flowip_132a_opaque_registration.rs:9:26
-  |
-9 |     let _ = registration.entries;
-  |                          ^^^^^^^ private field
+5 | use obzenflow_runtime::effects::{EffectRegistration, NamedEffect};
+  |                                  ^^^^^^^^^^^^^^^^^^
+  |                                  |
+  |                                  no `EffectRegistration` in `effects`
+  |                                  help: a similar name exists in the module: `EffectDeclaration`

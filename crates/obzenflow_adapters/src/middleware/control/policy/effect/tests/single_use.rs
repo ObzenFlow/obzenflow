@@ -250,7 +250,7 @@ fn effect_context(
             json!(TransactionProbeInput),
         ),
     );
-    let (binding, registration) = EffectRegistrationBuilder::<TransactionProbe>::new(
+    let binding = EffectRegistrationBuilder::<TransactionProbe>::new(
         LogicalEffectBindingName::new("tx").unwrap(),
         TransactionProbeEvidence,
     )
@@ -263,8 +263,9 @@ fn effect_context(
     .finish()
     .unwrap();
     let invocation = binding.invocation();
-    let mut effect_ports = EffectPortRegistry::new();
-    effect_ports.install(registration).unwrap();
+    let authored_declaration = EffectDeclaration::transactional(&binding);
+    let effect_ports =
+        EffectPortRegistry::collect_from_declarations([&authored_declaration]).unwrap();
 
     let context = EffectInvocationContext {
         flow_id: FlowId::new(),
@@ -287,7 +288,7 @@ fn effect_context(
         effect_history: None,
         runtime_execution: RuntimeExecution::new(RuntimeMode::Live, None),
         effect_ports,
-        effect_declarations: vec![EffectDeclaration::transactional(&binding)],
+        effect_declarations: vec![authored_declaration.runtime_projection()],
         output_contract: StageOutputContract::empty(),
         backpressure_writer: BackpressureWriter::disabled(),
         emit_enabled: false,

@@ -48,8 +48,8 @@ fn build_flow() -> FlowDefinition {
 FlowApplication::run(build_flow()).await?;
 ```
 
-Supported handler and AI-role slots take a local name or identifier-only qualified
-path. Construct builder-owned handlers and sink adapters inside the deferred
+Supported handler and composite-role slots take a local name or identifier-only
+qualified path. Construct builder-owned handlers and sink adapters inside the deferred
 materialiser immediately above `flow!`; calls, closures, builder chains, and struct
 literals are rejected in the slots. Async-source poll timeout is handler
 configuration exposed through `poll_timeout()`, not stage syntax.
@@ -71,13 +71,22 @@ brief = inference!(
     uses at_least_once(ChatCompletion)
         via chat
         with ai_resilience()
-    => brief_role
+    => generate_brief
 );
 ```
 
-Use `ai_map_reduce!` when the input must be token-budgeted, fanned out, collected, and finalised. Its map and reduce roles use the same trailing `uses` clause shown above. The lexical `via chat` operand is an `EffectBinding<ChatCompletion>`, not a registry name; normal configuration obtains it with `ChatEffectBinding::from_config(...).install_into(&mut effect_ports)` while the facade owns registration construction.
+`generate_brief` is a user-owned type implementing the runtime `InferenceHandler`
+trait. Its `Input` and `Output` associated types witness the arrow, while its
+`prepare` and `interpret` methods provide the scalar inference hooks. The value to the
+right of the arrow is therefore an ordinary stage handler, as it is for the other stage
+macros. A hidden adapter performs the declared chat effect between those two hooks.
 
-AI roles prepare a target-free `ChatRequestSpec`. The generated handler retains that exact value, binds the configured target only at the effect boundary, records `ChatCompletionReply` as framework replay evidence, and passes the retained spec plus reply to interpretation. The reply is not a selectable stage output.
+Use `ai_map_reduce!` when the input must be token-budgeted, fanned out, collected, and finalised. Its map and reduce roles use the same trailing `uses` clause shown above. The lexical `via chat` operand is an `EffectBinding<ChatCompletion>`, not a registry name; normal configuration obtains it directly with `ChatEffectBinding::from_config(...)`, and the flow builder collects its private binding package.
+
+Inference handlers and map-reduce roles prepare a target-free `ChatRequestSpec`. The
+framework retains that exact value, binds the configured target only at the effect
+boundary, records `ChatCompletionReply` as framework replay evidence, and passes the
+retained spec plus reply to interpretation. The reply is not a selectable stage output.
 
 ## License
 

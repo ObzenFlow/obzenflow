@@ -10,9 +10,9 @@ use support::*;
 
 fn main() {
     let embeddings = false;
-    let role = InferenceRole;
+    let handler = TestInferenceHandler;
     let policy = obzenflow_adapters::middleware::control::ai_resilience();
     let _ = inference!(
-        Input -> Output uses at_least_once(ChatCompletion) via embeddings with policy => role
+        Input -> Output uses at_least_once(ChatCompletion) via embeddings with policy => handler
     );
 }

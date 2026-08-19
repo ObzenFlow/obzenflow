@@ -53,7 +53,7 @@ use super::domain::{
 use super::fixtures;
 use super::gateway::{AuthorizePayment, GatewayTransform};
 use super::validation;
-use obzenflow::typed::sources as typed_sources;
+use obzenflow::sources;
 use obzenflow_adapters::middleware::{
     sink_delivery_observer, CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder,
     Retry,
@@ -152,14 +152,14 @@ pub fn assemble_flow(
             .build()
             .expect("gateway resilience configuration must be valid");
 
-        let web_orders_feed = typed_sources::finite_from_fn(move |index| {
+        let web_orders_feed = sources::finite_from_fn(move |index| {
             let order = scripted_web_orders.get(index).cloned();
             if order.is_some() {
                 demo_jitter("web", index);
             }
             order
         });
-        let store_orders_feed = typed_sources::finite_from_fn(move |index| {
+        let store_orders_feed = sources::finite_from_fn(move |index| {
             let order = scripted_store_orders.get(index).cloned();
             if order.is_some() {
                 demo_jitter("store", index);

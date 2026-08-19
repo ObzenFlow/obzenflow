@@ -7,7 +7,7 @@ error: inference!: expected `at_least_once(ChatCompletion) via <chat binding> wi
 17 | |             uses {
 18 | |                 at_least_once(ChatCompletion) via chat with policy,
 ...  |
-22 | |             => role
+22 | |             => handler
 23 | |     );
    | |_____^
    |

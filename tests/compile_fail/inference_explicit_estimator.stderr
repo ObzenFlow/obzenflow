@@ -5,7 +5,7 @@ error: inference!: expected `at_least_once(ChatCompletion) via <chat binding> wi
    |  _____________^
 17 | |         Input -> Output
 18 | |             uses at_least_once(ChatCompletion) via chat with policy estimator: estimator
-19 | |             => role
+19 | |             => handler
 20 | |     );
    | |_____^
    |

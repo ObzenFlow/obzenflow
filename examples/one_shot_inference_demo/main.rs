@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! One-shot AI inference with a replay-safe, target-free role.
+//! One-shot AI inference with a replay-safe, target-free handler.
 //!
 //! Run:
 //! `cargo run -p obzenflow --example one_shot_inference_demo --features ai -- \
@@ -13,19 +13,16 @@
 //! without resolving credentials or contacting the provider.
 
 use anyhow::Result;
-use obzenflow::ai::ChatEffectBinding;
-use obzenflow::typed::{sinks, sources};
+use obzenflow::ai::{ChatEffectBinding, InferenceHandler};
+use obzenflow::sources;
+use obzenflow::typed::sinks;
 use obzenflow_adapters::middleware::control::ai_resilience;
-use obzenflow_core::ai::{
-    AiInferenceRole, AiRoleLogicFailure, ChatCompletionReply, ChatMessage, ChatParams,
-    ChatRequestSpec,
-};
+use obzenflow_core::ai::{ChatCompletionReply, ChatMessage, ChatParams, ChatRequestSpec};
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::dsl::error::FlowBuildError;
 use obzenflow_dsl::{flow, inference, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::EffectPortRegistry;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -49,10 +46,14 @@ impl TypedPayload for DecisionBrief {
     const EVENT_TYPE: &'static str = "demo.one_shot.decision_brief";
 }
 
-struct BriefRole;
+#[derive(Clone, Debug)]
+struct GenerateBrief;
 
-impl AiInferenceRole<ReducedEvidence, DecisionBrief> for BriefRole {
-    fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, AiRoleLogicFailure> {
+impl InferenceHandler for GenerateBrief {
+    type Input = ReducedEvidence;
+    type Output = DecisionBrief;
+
+    fn prepare(&self, input: &ReducedEvidence) -> Result<ChatRequestSpec, HandlerError> {
         Ok(ChatRequestSpec {
             messages: vec![
                 ChatMessage::system(
@@ -79,7 +80,7 @@ impl AiInferenceRole<ReducedEvidence, DecisionBrief> for BriefRole {
         input: ReducedEvidence,
         _request: ChatRequestSpec,
         reply: ChatCompletionReply,
-    ) -> Result<DecisionBrief, AiRoleLogicFailure> {
+    ) -> Result<DecisionBrief, HandlerError> {
         Ok(DecisionBrief {
             question: input.question,
             recommendation: reply.response.text,
@@ -89,35 +90,26 @@ impl AiInferenceRole<ReducedEvidence, DecisionBrief> for BriefRole {
 
 fn build_flow_definition(input: ReducedEvidence, journal_path: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |runtime_config| {
-        let ai_models = runtime_config.ai_models();
-        let mut effect_ports = EffectPortRegistry::new();
-        let chat = ChatEffectBinding::from_config(&ai_models)
-            .and_then(|binding| binding.install_into(&mut effect_ports))
-            .map_err(|error| FlowBuildError::BindingConfiguration {
-                binding: "chat".to_string(),
-                detail: error.to_string(),
-            })?;
-        let evidence_source = sources::finite([input]);
-        let brief_role = BriefRole;
-        let display_brief = sinks::console(|brief: &DecisionBrief| {
+        let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;
+        let evidence = sources::once(input);
+        let generate_brief = GenerateBrief;
+        let display = sinks::console(|brief: &DecisionBrief| {
             format!("{}\n\n{}", brief.question, brief.recommendation.trim())
         });
 
         Ok(flow! {
             name: "one_shot_inference_demo",
             journals: disk_journals(journal_path),
-            effect_ports,
-
             stages: {
-                evidence = source!(ReducedEvidence => evidence_source);
+                evidence = source!(ReducedEvidence => evidence);
                 brief = inference!(
                     ReducedEvidence -> DecisionBrief
                     uses at_least_once(ChatCompletion)
                         via chat
                         with ai_resilience()
-                    => brief_role
+                    => generate_brief
                 );
-                display = sink!(DecisionBrief => display_brief);
+                display = sink!(DecisionBrief => display);
             },
 
             topology: {

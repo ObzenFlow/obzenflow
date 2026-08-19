@@ -4,7 +4,8 @@
 
 //! FLOWIP-133a host-preflight witnesses for deferred handler construction.
 
-use obzenflow::typed::{sinks, sources};
+use obzenflow::sources;
+use obzenflow::typed::sinks;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{ApplicationError, FlowApplication};

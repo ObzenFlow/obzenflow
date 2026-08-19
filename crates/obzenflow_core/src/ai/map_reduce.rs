@@ -231,23 +231,6 @@ pub trait AiFinaliseRole<Seed, Collected, Out>: Send + Sync + 'static {
     ) -> Result<Out, AiRoleLogicFailure>;
 }
 
-/// User-authored scalar inference role.
-///
-/// The generated adapter retains the exact target-free request across the
-/// effect call and supplies it again during deterministic interpretation.
-pub trait AiInferenceRole<Input, Out>: Send + Sync + 'static {
-    const LOGIC_VERSION: &'static str = "1";
-
-    fn prepare(&self, input: &Input) -> Result<ChatRequestSpec, AiRoleLogicFailure>;
-
-    fn interpret(
-        &self,
-        input: Input,
-        request: ChatRequestSpec,
-        reply: ChatCompletionReply,
-    ) -> Result<Out, AiRoleLogicFailure>;
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AiMapReducePlanningFailure {

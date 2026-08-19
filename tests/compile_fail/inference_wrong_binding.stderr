@@ -3,7 +3,7 @@ error[E0277]: inference!: binding `embeddings` is not an EffectBinding<ChatCompl
    |
 15 |       let _ = inference!(
    |  _____________^
-16 | |         Input -> Output uses at_least_once(ChatCompletion) via embeddings with policy => role
+16 | |         Input -> Output uses at_least_once(ChatCompletion) via embeddings with policy => handler
 17 | |     );
    | |_____^ expected an EffectBinding<ChatCompletion> here
    |

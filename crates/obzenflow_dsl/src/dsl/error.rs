@@ -104,6 +104,25 @@ pub enum FlowBuildError {
     #[error("flow binding '{binding}' configuration failed: {detail}")]
     BindingConfiguration { binding: String, detail: String },
 
+    #[error(
+        "flow `{flow_name}` uses distinct bindings for `{effect_type} via {binding}`; construct `{binding}` once and reuse it"
+    )]
+    DistinctEffectBindings {
+        flow_name: &'static str,
+        effect_type: &'static str,
+        binding: String,
+    },
+
+    #[error(
+        "flow `{flow_name}` cannot collect `{effect_type} via {binding}`: {detail}; construct fresh bindings inside FlowDefinition::materialize"
+    )]
+    EffectBindingPackageUnavailable {
+        flow_name: &'static str,
+        effect_type: &'static str,
+        binding: String,
+        detail: &'static str,
+    },
+
     #[error("Unsupported cycle topology: {0}")]
     UnsupportedCycleTopology(String),
 

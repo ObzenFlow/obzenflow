@@ -6,15 +6,13 @@
 //!
 //! Standalone chat and embedding handlers are ordinary typed effectful
 //! transforms. Their deterministic builders live in the adapters layer;
-//! infrastructure-owned bindings split credential-free request identity from
-//! deferred live provider registration. A materialised flow constructs them in
-//! this order:
+//! infrastructure-owned bindings carry credential-free request identity and a
+//! pending provider package that the flow builder collects from lexical `via`
+//! declarations. A materialised flow constructs them in this order:
 //!
 //! ```ignore
-//! let mut effect_ports = EffectPortRegistry::new();
-//! let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?
-//!     .install_into(&mut effect_ports)?;
-//! let chat_handler = ChatTransformBuilder::from_binding(chat)
+//! let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;
+//! let chat_handler = ChatTransformBuilder::new()
 //!     .logic_version("ticket-summary-v1")
 //!     .system("Summarise the ticket concisely.")
 //!     .build_typed::<TicketRaised, TicketSummarised>(prompt, map_response)?;
@@ -33,10 +31,13 @@
 //! the recorded reply before consulting that live authority.
 
 pub use obzenflow_adapters::ai::{
-    ChatCompletion, ChatCompletionBuildError, ChatTransform, ChatTransformBuilder,
-    EmbeddingGeneration, EmbeddingGenerationBuildError, EmbeddingTransform,
-    EmbeddingTransformBuilder,
+    ChatBindingMetadata, ChatCompletion, ChatCompletionBuildError, ChatEffects, ChatOperationError,
+    ChatTransform, ChatTransformBuilder, EmbeddingBindingMetadata, EmbeddingEffects,
+    EmbeddingGeneration, EmbeddingGenerationBuildError, EmbeddingOperationError,
+    EmbeddingTransform, EmbeddingTransformBuilder,
 };
+
+pub use obzenflow_runtime::stages::InferenceHandler;
 
 pub use obzenflow_core::ai::{
     plan_chat_input_budget, plan_chunks_by_budget, remaining_budget, split_to_budget,

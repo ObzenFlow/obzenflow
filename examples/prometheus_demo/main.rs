@@ -28,7 +28,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::env::env_var_or;
-use obzenflow::typed::{sources, stateful as typed_stateful, transforms as typed_transforms};
+use obzenflow::sources;
+use obzenflow::typed::{stateful as typed_stateful, transforms as typed_transforms};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;

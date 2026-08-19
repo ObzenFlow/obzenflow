@@ -3,7 +3,7 @@ error: inference!: ChatCompletion is NonIdempotentAtLeastOnce; retry is forbidde
    |
 14 |       let _ = inference!(
    |  _____________^
-15 | |         Input -> Output uses at_least_once(ChatCompletion) via chat with retry(3) => role
+15 | |         Input -> Output uses at_least_once(ChatCompletion) via chat with retry(3) => handler
 16 | |     );
    | |_____^
    |

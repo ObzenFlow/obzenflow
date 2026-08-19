@@ -17,9 +17,9 @@ use obzenflow_core::ai::{AiProvider, EmbeddingClient, EmbeddingTarget};
 use obzenflow_core::config::SecretRef;
 use obzenflow_core::http_client::Url;
 use obzenflow_runtime::effects::{
-    EffectBinding, EffectBindingBuildError, EffectPortRegistrationError, EffectPortRegistry,
-    EffectPortResolutionError, EffectPortResolver, EffectPortResolverWithMetadata,
-    EffectRegistration, EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort,
+    EffectBinding, EffectBindingBuildError, EffectPortResolutionError, EffectPortResolver,
+    EffectPortResolverWithMetadata, EffectRegistrationBuilder, LogicalEffectBindingName,
+    ResolvedEffectPort,
 };
 use obzenflow_runtime::runtime_config::AiModelsConfig;
 use std::sync::Arc;
@@ -42,8 +42,15 @@ pub enum EmbeddingEffectBindingError {
     InvalidEvidence(#[from] EmbeddingBindingEvidenceBuildError),
     #[error(transparent)]
     InvalidRegistration(#[from] EffectBindingBuildError),
-    #[error(transparent)]
-    Installation(#[from] EffectPortRegistrationError),
+}
+
+impl From<EmbeddingEffectBindingError> for obzenflow_dsl::FlowBuildError {
+    fn from(error: EmbeddingEffectBindingError) -> Self {
+        Self::BindingConfiguration {
+            binding: "embedding".to_string(),
+            detail: error.to_string(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -92,7 +99,7 @@ impl EmbeddingEffectBinding {
     pub fn ollama(
         model: impl Into<String>,
         base_url: Option<Url>,
-    ) -> Result<Self, EmbeddingEffectBindingError> {
+    ) -> Result<EffectBinding<EmbeddingGeneration>, EmbeddingEffectBindingError> {
         let model = required_model(model.into())?;
         let endpoint = base_url.clone().unwrap_or_else(default_ollama_base_url);
         validate_endpoint(&endpoint)?;
@@ -101,27 +108,29 @@ impl EmbeddingEffectBinding {
             model,
             &endpoint,
             DeferredProvider::Ollama { base_url },
-        )
+        )?
+        .finish()
     }
 
     pub fn openai(
         model: impl Into<String>,
         api_key: SecretRef,
-    ) -> Result<Self, EmbeddingEffectBindingError> {
+    ) -> Result<EffectBinding<EmbeddingGeneration>, EmbeddingEffectBindingError> {
         let model = required_model(model.into())?;
         Self::new_bound(
             "openai",
             model,
             &default_openai_base_url(),
             DeferredProvider::OpenAi { api_key },
-        )
+        )?
+        .finish()
     }
 
     pub fn openai_compatible(
         model: impl Into<String>,
         api_key: SecretRef,
         base_url: Url,
-    ) -> Result<Self, EmbeddingEffectBindingError> {
+    ) -> Result<EffectBinding<EmbeddingGeneration>, EmbeddingEffectBindingError> {
         validate_endpoint(&base_url)?;
         Self::new_bound(
             "openai_compatible",
@@ -131,10 +140,13 @@ impl EmbeddingEffectBinding {
                 api_key,
                 base_url: base_url.clone(),
             },
-        )
+        )?
+        .finish()
     }
 
-    pub fn from_config(config: &AiModelsConfig) -> Result<Self, EmbeddingEffectBindingError> {
+    pub fn from_config(
+        config: &AiModelsConfig,
+    ) -> Result<EffectBinding<EmbeddingGeneration>, EmbeddingEffectBindingError> {
         let provider = config.provider.value.trim().to_ascii_lowercase();
         let model = config
             .model
@@ -171,32 +183,15 @@ impl EmbeddingEffectBinding {
     pub fn from_resolver(
         target: EmbeddingTarget,
         resolver: EffectPortResolver<dyn EmbeddingClient>,
-    ) -> Result<Self, EmbeddingEffectBindingError> {
-        Ok(Self {
+    ) -> Result<EffectBinding<EmbeddingGeneration>, EmbeddingEffectBindingError> {
+        Self {
             evidence: EmbeddingBindingEvidence::new(target)?,
             authority: DeferredEmbeddingAuthority::Resolver(resolver),
-        })
+        }
+        .finish()
     }
 
-    /// Install this facade-owned registration and return its lexical binding.
-    pub fn install_into(
-        self,
-        effect_ports: &mut EffectPortRegistry,
-    ) -> Result<EffectBinding<EmbeddingGeneration>, EmbeddingEffectBindingError> {
-        let (binding, registration) = self.into_parts()?;
-        effect_ports.install(registration)?;
-        Ok(binding)
-    }
-
-    fn into_parts(
-        self,
-    ) -> Result<
-        (
-            EffectBinding<EmbeddingGeneration>,
-            EffectRegistration<EmbeddingGeneration>,
-        ),
-        EmbeddingEffectBindingError,
-    > {
+    fn finish(self) -> Result<EffectBinding<EmbeddingGeneration>, EmbeddingEffectBindingError> {
         let target = self.evidence.target().clone();
         let authority = Arc::new(self.authority);
         let resolver: EffectPortResolverWithMetadata<dyn EmbeddingClient, EmbeddingTarget> =
@@ -290,15 +285,10 @@ fn validate_endpoint(endpoint: &Url) -> Result<(), EmbeddingEffectBindingError> 
 mod tests {
     use super::*;
     use obzenflow_core::config::SecretRef;
-    use obzenflow_runtime::effects::EffectPortRegistry;
 
     #[test]
     fn ollama_is_a_native_fingerprinted_binding() {
-        let mut registry = EffectPortRegistry::new();
-        let contract = EmbeddingEffectBinding::ollama("nomic-embed-text", None)
-            .unwrap()
-            .install_into(&mut registry)
-            .unwrap();
+        let contract = EmbeddingEffectBinding::ollama("nomic-embed-text", None).unwrap();
         assert_eq!(contract.evidence().target().provider.as_str(), "ollama");
         assert_eq!(contract.evidence().target().model, "nomic-embed-text");
     }
@@ -313,12 +303,9 @@ mod tests {
     #[test]
     fn hosted_construction_and_registration_defer_and_hide_the_secret() {
         let secret_name = "FLOWIP_128B_MISSING_EMBEDDING_KEY";
-        let binding = EmbeddingEffectBinding::openai("text-embedding", SecretRef::new(secret_name))
-            .expect("binding construction does not resolve its secret");
-        let mut registry = EffectPortRegistry::new();
-        let contract = binding
-            .install_into(&mut registry)
-            .expect("deferred registration does not resolve its secret");
+        let contract =
+            EmbeddingEffectBinding::openai("text-embedding", SecretRef::new(secret_name))
+                .expect("binding construction does not resolve its secret");
 
         let encoded_target = serde_json::to_string(contract.evidence().target()).unwrap();
         assert!(!encoded_target.contains(secret_name));

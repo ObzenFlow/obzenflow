@@ -29,7 +29,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow::typed::sources;
+use obzenflow::sources;
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;

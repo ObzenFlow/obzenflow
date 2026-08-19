@@ -2,13 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::ai::{effect_error_to_handler_error, ChatCompletion};
+use crate::ai::{effect_error_to_handler_error, ChatCompletion, ChatEffects};
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     ChatMessage, ChatParams, ChatRequestSpec, ChatResponse, ChatResponseFormat, ToolDefinition,
 };
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::effects::{EffectBinding, Effects, StageCompletion};
+use obzenflow_runtime::effects::{Effects, StageCompletion};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use std::fmt;
@@ -28,9 +28,8 @@ pub(crate) struct ChatTransformSettings {
     pub(crate) response_format: Option<ChatResponseFormat>,
 }
 
-/// Typed standalone chat handler whose only live authority is `fx.perform`.
+/// Typed standalone chat handler using the declaration-scoped chat operation.
 pub struct ChatTransform<In, Out> {
-    binding: EffectBinding<ChatCompletion>,
     system: Option<String>,
     params: ChatParams,
     tools: Vec<ToolDefinition>,
@@ -43,14 +42,12 @@ pub struct ChatTransform<In, Out> {
 
 impl<In, Out> ChatTransform<In, Out> {
     pub(crate) fn from_parts(
-        binding: EffectBinding<ChatCompletion>,
         settings: ChatTransformSettings,
         input_to_prompt: Arc<PromptMapper<In>>,
         response_to_output: Arc<ResponseMapper<In, Out>>,
         logic_version: String,
     ) -> Self {
         Self {
-            binding,
             system: settings.system,
             params: settings.params,
             tools: settings.tools,
@@ -66,7 +63,6 @@ impl<In, Out> ChatTransform<In, Out> {
 impl<In, Out> Clone for ChatTransform<In, Out> {
     fn clone(&self) -> Self {
         Self {
-            binding: self.binding.clone(),
             system: self.system.clone(),
             params: self.params.clone(),
             tools: self.tools.clone(),
@@ -83,7 +79,6 @@ impl<In, Out> fmt::Debug for ChatTransform<In, Out> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ChatTransform")
-            .field("binding", &self.binding)
             .field("logic_version", &self.logic_version)
             .finish_non_exhaustive()
     }
@@ -117,17 +112,10 @@ where
             tools: self.tools.clone(),
             response_format: self.response_format.clone(),
         };
-        let request = spec.bind_target(self.binding.evidence().target());
-        let effect = ChatCompletion::new(
-            STANDALONE_CHAT_COMPLETION_LABEL,
-            request,
-            self.binding.invocation(),
-        )
-        .map_err(|error| HandlerError::Validation(error.to_string()))?;
         let reply = fx
-            .perform(effect)
+            .chat_completion(STANDALONE_CHAT_COMPLETION_LABEL, spec)
             .await
-            .map_err(effect_error_to_handler_error)?;
+            .map_err(HandlerError::from)?;
         let output = (self.response_to_output)(input, reply.response)?;
         fx.emit(output)
             .await

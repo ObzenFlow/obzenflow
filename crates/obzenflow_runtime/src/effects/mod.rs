@@ -111,9 +111,9 @@ pub use identity::{
     EffectOutputOrdinal,
 };
 pub use ports::{
-    EffectBindingBuildError, EffectPortRegistrationError, EffectPortRegistry,
-    EffectPortResolutionError, EffectPortResolver, EffectPortResolverWithMetadata,
-    EffectRegistration, EffectRegistrationBuilder, ResolvedEffectPort,
+    EffectBindingBuildError, EffectPortRegistry, EffectPortResolutionError, EffectPortResolver,
+    EffectPortResolverWithMetadata, EffectRegistrationBuilder, EffectRegistrationCollectionError,
+    ResolvedEffectPort,
 };
 pub(crate) use runtime::EffectsCore;
 // FLOWIP-120z/B9: the proof facades are doc-hidden public bounds so rustc can

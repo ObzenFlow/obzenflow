@@ -27,10 +27,9 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
     is_framework_effect_event_type, transactional_effect_port_slot, Effect, EffectBinding,
     EffectBindingEvidence, EffectBindingUse, EffectCommitHandle, EffectContext, EffectCursor,
-    EffectError, EffectPortRegistry, EffectPortResolver, EffectPortSlot, EffectPortSlotSet,
-    EffectRecord, EffectRegistration, EffectRegistrationBuilder, EffectSafety, Effects,
-    IdempotencyKey, LogicalEffectBindingName, Named, NamedEffect, SinkRedeliverySafety,
-    TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
+    EffectError, EffectPortResolver, EffectPortSlot, EffectPortSlotSet, EffectRecord,
+    EffectRegistrationBuilder, EffectSafety, Effects, IdempotencyKey, LogicalEffectBindingName,
+    Named, NamedEffect, SinkRedeliverySafety, TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -918,7 +917,6 @@ fn build_flow(
         Ok(flow! {
             name: "effect_replay_suppression",
             journals: disk_journals(journal_base),
-            effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
 
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
@@ -3356,15 +3354,13 @@ async fn resume_incomplete_archive_suppresses_committed_effect_records() {
 }
 
 // ============================================================================
-// FLOWIP-120g Decision 2: end-to-end effect-port provisioning through `flow!`.
+// FLOWIP-133e: end-to-end package collection from lexical `via` bindings.
 //
 // FLOWIP-120a implemented typed and transactional effect ports in the runtime
-// but left the authoring-surface supply path unexercised end to end. These tests
-// drive a populated `EffectPortRegistry` through the `flow!` `effect_ports:`
-// clause into the ordinary flow builder -> `with_effect_ports`, covering
-// materialisation-time exact-slot validation and live typed `EffectContext::port(slot)`
-// access for both an ordinary ported effect and a transactional
-// execute-and-record port.
+// but left explicit registry plumbing on the authoring surface. These tests
+// prove that the ordinary flow builder collects the pending package carried by
+// each lexical binding, while preserving live typed `EffectContext::port(slot)`
+// access for ordinary and transactional effects.
 // ============================================================================
 
 /// A host-provided port. The ordinary ported effect resolves it through
@@ -3486,9 +3482,8 @@ fn build_ported_flow(
     source_calls: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
-    authority: (EffectBinding<PortedEffect>, EffectPortRegistry),
+    ported_binding: EffectBinding<PortedEffect>,
 ) -> FlowDefinition {
-    let (ported_binding, ports) = authority;
     FlowDefinition::materialize(move |_runtime_config| {
         let inputs_handler = ReplaySource::counted(source_calls);
         let ported_handler = PortedTransform {
@@ -3500,8 +3495,6 @@ fn build_ported_flow(
         Ok(flow! {
             name: "effect_port_supply",
             journals: disk_journals(journal_base),
-            effect_ports: ports,
-
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 ported = effectful_transform!(
@@ -3519,12 +3512,7 @@ fn build_ported_flow(
     })
 }
 
-fn ported_binding(
-    port: Arc<dyn GreetingPort>,
-) -> (
-    EffectBinding<PortedEffect>,
-    EffectRegistration<PortedEffect>,
-) {
+fn ported_binding(port: Arc<dyn GreetingPort>) -> EffectBinding<PortedEffect> {
     EffectRegistrationBuilder::<PortedEffect>::new(
         LogicalEffectBindingName::new("greeting").unwrap(),
         PortedBindingEvidence,
@@ -3535,12 +3523,7 @@ fn ported_binding(
     .unwrap()
 }
 
-fn deferred_ported_binding(
-    resolver_calls: Arc<AtomicUsize>,
-) -> (
-    EffectBinding<PortedEffect>,
-    EffectRegistration<PortedEffect>,
-) {
+fn deferred_ported_binding(resolver_calls: Arc<AtomicUsize>) -> EffectBinding<PortedEffect> {
     let resolver: EffectPortResolver<dyn GreetingPort> = Arc::new(move || {
         resolver_calls.fetch_add(1, Ordering::SeqCst);
         Ok(Arc::new(DoublingGreetingPort) as Arc<dyn GreetingPort>)
@@ -3556,7 +3539,7 @@ fn deferred_ported_binding(
 }
 
 #[tokio::test]
-async fn application_local_builder_runs_live_and_strict_replays_with_an_empty_registry() {
+async fn application_local_builder_runs_live_and_strict_replays_without_registry_plumbing() {
     let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
@@ -3565,9 +3548,7 @@ async fn application_local_builder_runs_live_and_strict_replays_with_an_empty_re
     let source_calls = Arc::new(AtomicUsize::new(0));
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
-    let (binding, registration) = ported_binding(Arc::new(DoublingGreetingPort));
-    let mut ports = EffectPortRegistry::new();
-    ports.install(registration).unwrap();
+    let binding = ported_binding(Arc::new(DoublingGreetingPort));
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
@@ -3576,7 +3557,7 @@ async fn application_local_builder_runs_live_and_strict_replays_with_an_empty_re
             source_calls.clone(),
             calls.clone(),
             outputs.clone(),
-            (binding, ports),
+            binding,
         ))
         .await
         .expect("a flow that supplies the required effect port should materialise and run");
@@ -3605,8 +3586,7 @@ async fn application_local_builder_runs_live_and_strict_replays_with_an_empty_re
 
     let archive = latest_run_dir(&journal_base);
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    let (replay_binding, unused_registration) = ported_binding(Arc::new(DoublingGreetingPort));
-    drop(unused_registration);
+    let replay_binding = ported_binding(Arc::new(DoublingGreetingPort));
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
@@ -3619,10 +3599,10 @@ async fn application_local_builder_runs_live_and_strict_replays_with_an_empty_re
             source_calls.clone(),
             calls.clone(),
             replay_outputs.clone(),
-            (replay_binding, EffectPortRegistry::new()),
+            replay_binding,
         ))
         .await
-        .expect("strict replay must accept an empty executable registry");
+        .expect("strict replay must not resolve the newly collected package");
 
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -3645,66 +3625,77 @@ async fn application_local_builder_runs_live_and_strict_replays_with_an_empty_re
 }
 
 #[tokio::test]
-async fn flow_without_required_effect_port_fails_closed_at_materialisation() {
+async fn reusing_a_collected_binding_package_fails_closed_before_stage_work() {
     let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
-    let calls = Arc::new(AtomicUsize::new(0));
-    let source_calls = Arc::new(AtomicUsize::new(0));
     let resolver_calls = Arc::new(AtomicUsize::new(0));
-    let outputs = Arc::new(Mutex::new(Vec::new()));
-
-    // The binding is valid but its opaque registration is deliberately not
-    // installed. Descriptor materialisation must fail without resolving its
-    // deferred port or allowing the pipeline to reach `Materialized`.
-    let (binding, registration) = deferred_ported_binding(resolver_calls.clone());
-    drop(registration);
-    let err = FlowApplication::builder()
+    let binding = deferred_ported_binding(resolver_calls.clone());
+    let reused_binding = binding.clone();
+    FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(build_ported_flow(
             journal_base.clone(),
-            source_calls.clone(),
-            calls.clone(),
-            outputs.clone(),
-            (binding, EffectPortRegistry::new()),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(Mutex::new(Vec::new())),
+            binding,
         ))
         .await
-        .expect_err("a flow missing the selected binding registration must fail closed");
+        .expect("the first materialisation owns and runs the pending package");
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+
+    let second_source_calls = Arc::new(AtomicUsize::new(0));
+    let second_effect_calls = Arc::new(AtomicUsize::new(0));
+    let second_outputs = Arc::new(Mutex::new(Vec::new()));
+    let err = FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_ported_flow(
+            journal_base,
+            second_source_calls.clone(),
+            second_effect_calls.clone(),
+            second_outputs.clone(),
+            reused_binding,
+        ))
+        .await
+        .expect_err("a consumed package must reject repeated materialisation");
 
     let detail = match err {
         ApplicationError::FlowBuildFailed(detail) => detail,
-        other => panic!("missing registration failed after materialisation: {other:?}"),
+        other => panic!("package reuse failed after materialisation: {other:?}"),
     };
     assert!(
         detail.contains(
-            "Effectful stage 'ported' cannot materialise: binding 'greeting' for effect \
-             'effect_port_supply.ported' has no installed registration"
+            "cannot collect `effect_port_supply.ported via greeting`: the package was already collected"
         ),
         "unexpected build failure: {detail}"
     );
     assert_eq!(
-        source_calls.load(Ordering::SeqCst),
+        second_source_calls.load(Ordering::SeqCst),
         0,
-        "the source must not be polled before registration preflight passes"
+        "the source must not be polled before package collection passes"
     );
     assert_eq!(
-        calls.load(Ordering::SeqCst),
+        second_effect_calls.load(Ordering::SeqCst),
         0,
-        "the effect must not execute when its required port is unregistered"
+        "the effect must not execute after package reuse is rejected"
     );
     assert_eq!(
         resolver_calls.load(Ordering::SeqCst),
-        0,
-        "registration preflight must not invoke deferred resolvers"
+        1,
+        "the failed second materialisation must not resolve the package again"
     );
     assert!(
-        outputs.lock().expect("outputs lock poisoned").is_empty(),
-        "no stage work may be emitted before registration preflight passes"
+        second_outputs
+            .lock()
+            .expect("outputs lock poisoned")
+            .is_empty(),
+        "no stage work may be emitted before package collection passes"
     );
 }
 
-// --- Transactional execute-and-record port supplied through `flow!` ---------
+// --- Transactional execute-and-record port collected from `via` -------------
 
 /// A transactional effect whose commit runs through a flow-supplied
 /// `TransactionalEffectPort`. The macro `transactional(..)` entry adds the port
@@ -3827,9 +3818,8 @@ impl EffectfulTransformHandler for LedgerTransform {
 fn build_transactional_flow(
     journal_base: PathBuf,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
-    authority: (EffectBinding<LedgerEffect>, EffectPortRegistry),
+    ledger_binding: EffectBinding<LedgerEffect>,
 ) -> FlowDefinition {
-    let (ledger_binding, ports) = authority;
     FlowDefinition::materialize(move |_runtime_config| {
         let resilience = EffectResilience::with_breaker(
             CircuitBreaker::builder()
@@ -3848,8 +3838,6 @@ fn build_transactional_flow(
         Ok(flow! {
             name: "effect_port_supply_transactional",
             journals: disk_journals(journal_base),
-            effect_ports: ports,
-
             stages: {
                 inputs = source!(ReplayInput => inputs_handler);
                 ledger = effectful_transform!(
@@ -3869,10 +3857,7 @@ fn build_transactional_flow(
 
 fn ledger_binding(
     port: Arc<dyn TransactionalEffectPort<LedgerEffect>>,
-) -> (
-    EffectBinding<LedgerEffect>,
-    EffectRegistration<LedgerEffect>,
-) {
+) -> EffectBinding<LedgerEffect> {
     EffectRegistrationBuilder::<LedgerEffect>::new(
         LogicalEffectBindingName::new("ledger_tx").unwrap(),
         LedgerBindingEvidence,
@@ -3884,7 +3869,7 @@ fn ledger_binding(
 }
 
 #[tokio::test]
-async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
+async fn collected_binding_dispatches_transactional_effect_through_port() {
     let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
@@ -3892,18 +3877,16 @@ async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
     let port_calls = Arc::new(AtomicUsize::new(0));
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
-    let (binding, registration) = ledger_binding(Arc::new(LedgerPort {
+    let binding = ledger_binding(Arc::new(LedgerPort {
         calls: port_calls.clone(),
     }));
-    let mut ports = EffectPortRegistry::new();
-    ports.install(registration).unwrap();
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(build_transactional_flow(
             journal_base.clone(),
             outputs.clone(),
-            (binding, ports),
+            binding,
         ))
         .await
         .expect("a transactional flow with a supplied executor port should materialise and run");
@@ -3958,10 +3941,9 @@ async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
 
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
-    let (replay_binding, replay_registration) = ledger_binding(Arc::new(LedgerPort {
+    let replay_binding = ledger_binding(Arc::new(LedgerPort {
         calls: replay_calls.clone(),
     }));
-    drop(replay_registration);
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
@@ -3971,7 +3953,7 @@ async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
         .run_async(build_transactional_flow(
             journal_base.clone(),
             replay_outputs.clone(),
-            (replay_binding, EffectPortRegistry::new()),
+            replay_binding,
         ))
         .await
         .expect("transactional replay should use the atomically recorded outcome");

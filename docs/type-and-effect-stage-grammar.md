@@ -85,38 +85,38 @@ their own FLOWIP.
 
 ## Constructing named authority
 
-Normal applications select an effect-specific facade, install it, and retain
-the lexical binding returned by that operation:
+Normal applications select an effect-specific facade and retain the lexical
+binding returned by its constructor:
 
 ```rust,ignore
-let mut effect_ports = EffectPortRegistry::new();
-let chat = ChatEffectBinding::from_config(&ai_models)?
-    .install_into(&mut effect_ports)?;
+let chat = ChatEffectBinding::from_config(&ai_models)?;
 ```
 
 The facade owns its logical name, typed slots, evidence, metadata projection,
-registration construction, and installation. An application-selected chat
+and collectable registration package. An application-selected chat
 implementation uses the same surface:
 
 ```rust,ignore
-let chat = ChatEffectBinding::from_resolver(chat_target, chat_resolver)?
-    .install_into(&mut effect_ports)?;
+let chat = ChatEffectBinding::from_resolver(chat_target, chat_resolver)?;
 ```
 
 Effect authors and advanced application-local effects may use the public
 generic `EffectRegistrationBuilder`. That builder validates the effect's exact
-typed slot set and returns a lexical binding plus an opaque registration. Use
+typed slot set and returns one lexical binding carrying a private package. Use
 `bind_eager` for an already constructed metadata-free implementation and
 `bind_deferred` only for bounded, non-suspending local construction. A resolver
 is not an async or remote discovery hook. Metadata-bearing integrations keep
 their projection inside their outward facade rather than requiring application
 code to construct `ResolvedEffectPort` values.
 
-Handlers retain `binding.invocation()` through their effect values. They do not
-receive the registration, resolver, registry, or an ambient port lookup. Live
-misses receive only their declaration's resolved typed slots through
-`EffectContext::port(slot)`. Strict replay hits require no live registration and
-never invoke a resolver.
+The flow builder validates the complete declaration set and atomically collects
+each distinct package before stage materialisation. `flow!` and `test_flow!` do
+not accept an effect-port registry. First-party handlers call domain operations
+such as `fx.chat_completion(...)`; advanced effect implementations may retain
+`binding.invocation()` in their effect values. Neither path receives the
+registration package, resolver, registry, or an ambient port lookup. Live misses
+receive only their declaration's resolved typed slots through
+`EffectContext::port(slot)`. Strict replay hits never invoke a resolver.
 
 If an implementation detects a target invariant failure, construct it from the
 same declared slot token with `EffectError::target_invariant_violation(slot)`.
@@ -127,7 +127,7 @@ Multi-effect declarations and singleton policy attachments canonicalize by
 stable effect identity, so source-order permutations materialize the same
 membership.
 
-## Migration from the pre-132a surface
+## Migration from the pre-133e surface
 
 Move every non-empty ordinary declaration into the trailing `uses` clause:
 
@@ -140,11 +140,10 @@ effectful_transform!(Input -> Output uses EffectA => handler);
 ```
 
 Replace string-selected or detached live ports with an effect-specific facade
-where one exists. Install the facade at the composition root, pass clones of
-the returned binding into declarations and handlers, and use `via binding` in
-the relevant `uses` entry. Application-local effects without a facade construct one
-`EffectBinding<E>`/`EffectRegistration<E>` pair through the generic builder and
-install its registration. Replace
+where one exists. Construct the facade inside `FlowDefinition::materialize`,
+use the returned binding in `via binding`, and let the flow builder collect its
+package. Application-local effects without a facade construct one
+`EffectBinding<E>` through the generic builder. Replace
 `transactional(Effect, "executor")` with `transactional(Effect) via binding`.
 
 The old raw registry insertion, deferred lookup, and AI-specific binding
@@ -153,7 +152,7 @@ contract APIs are removed rather than deprecated. Current run manifests carry
 before effect records are decoded. Rebuild test archives with the current
 schema instead of expecting pre-132a descriptor compatibility.
 
-## Concrete 132a migrations
+## Concrete 132a and 133e migrations
 
 ### Payment gateway
 
@@ -184,26 +183,43 @@ uses AuthorizePayment
 
 ### One-shot inference
 
-The one-shot example keeps its `via chat` capability and lets the binding
-facade own its consuming registration installation:
+The one-shot example keeps its `via chat` capability while removing registry,
+one-item collection, and scalar-role/factory ceremony. The application implements the
+same kind of handler trait used by the other stage families:
 
 ```rust,ignore
-// Before
-let (chat, chat_registration) =
-    ChatEffectBinding::from_config(&ai_models)?.into_parts();
-let effect_ports =
-    chat_registration.install_into(EffectPortRegistry::new())?;
+use obzenflow::sources;
 
-// After
-let mut effect_ports = EffectPortRegistry::new();
-let chat = ChatEffectBinding::from_config(&ai_models)?
-    .install_into(&mut effect_ports)?;
+#[derive(Clone, Debug)]
+struct GenerateBrief;
+
+impl InferenceHandler for GenerateBrief {
+    type Input = ReducedEvidence;
+    type Output = DecisionBrief;
+
+    fn prepare(&self, input: &Self::Input) -> Result<ChatRequestSpec, HandlerError> {
+        // Build the target-free request.
+    }
+
+    fn interpret(
+        &self,
+        input: Self::Input,
+        request: ChatRequestSpec,
+        reply: ChatCompletionReply,
+    ) -> Result<Self::Output, HandlerError> {
+        // Turn the recorded reply into the declared output.
+    }
+}
+
+let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;
+let evidence = sources::once(input);
+let generate_brief = GenerateBrief;
 
 ReducedEvidence -> DecisionBrief
 uses at_least_once(ChatCompletion)
     via chat
     with ai_resilience()
-=> brief_role
+=> generate_brief
 ```
 
 ### Hacker News digest
@@ -213,26 +229,12 @@ test seam now supplies the same high-level facade used by configured providers;
 the example never rebuilds registration or target-metadata machinery:
 
 ```rust,ignore
-// Before
-let (chat, chat_registration) =
-    ChatEffectBinding::from_config(&ai_models)?.into_parts();
-let chat_target = chat.target().clone();
-let effect_ports = if let Some(resolver) = chat_resolver_override {
-    EffectPortRegistry::new()
-        .with_deferred::<dyn ChatClient>(CHAT_CLIENT_PORT, resolver)
-} else {
-    chat_registration.install_into(EffectPortRegistry::new())
-}?;
-
-// After
-let chat_binding = if let Some(binding) = chat_binding_override {
+let chat = if let Some(binding) = chat_binding_override {
     binding
 } else {
-    ChatEffectBinding::from_config(&ai_models)?
+    ChatEffectBinding::from_config(&runtime_config.ai_models())?
 };
-let mut effect_ports = EffectPortRegistry::new();
-let chat = chat_binding.install_into(&mut effect_ports)?;
-let chat_target = chat.evidence().target().clone();
+let chat_target = chat.target().clone();
 ```
 
 Each generated role now finishes its type transformation before declaring the
@@ -269,8 +271,10 @@ effectful_transform!(
 );
 
 // After
-let chat = ChatEffectBinding::from_resolver(chat_target, chat_resolver)?
-    .install_into(&mut effect_ports)?;
+let chat = ChatEffectBinding::from_resolver(chat_target, chat_resolver)?;
+let chat_handler = ChatTransformBuilder::new()
+    .logic_version("ticket-summary-v1")
+    .build_typed(input_to_prompt, response_to_output)?;
 effectful_transform!(
     TicketRaised -> TicketSummarised
     uses at_least_once(ChatCompletion)
@@ -301,8 +305,10 @@ effectful_transform!(
 let embedding = EmbeddingEffectBinding::from_resolver(
     embedding_target,
     embedding_resolver,
-)?
-.install_into(&mut effect_ports)?;
+)?;
+let embedding_handler = EmbeddingTransformBuilder::new()
+    .logic_version("ticket-embedding-v1")
+    .build_typed(input_to_inputs, response_to_output)?;
 effectful_transform!(
     TicketSummarised -> TicketEmbedded
     uses at_least_once(EmbeddingGeneration)
@@ -330,17 +336,15 @@ effectful_transform!(
 );
 
 // After
-let (ledger_binding, registration) =
-    EffectRegistrationBuilder::<LedgerEffect>::new(
-        LogicalEffectBindingName::new("ledger_tx")?,
-        LedgerBindingEvidence,
-    )
+let ledger_binding = EffectRegistrationBuilder::<LedgerEffect>::new(
+    LogicalEffectBindingName::new("ledger_tx")?,
+    LedgerBindingEvidence,
+)
     .bind_eager(
         transactional_effect_port_slot::<LedgerEffect>(),
         ledger_port,
     )?
     .finish()?;
-ports.install(registration)?;
 effectful_transform!(
     ReplayInput -> { ReplayOutput, ReplayEffectValue }
     uses transactional(LedgerEffect)

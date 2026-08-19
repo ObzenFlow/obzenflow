@@ -10,9 +10,9 @@ use support::*;
 
 fn main() {
     let chat = binding();
-    let role = InferenceRole;
+    let handler = TestInferenceHandler;
     let policy = obzenflow_adapters::middleware::control::ai_resilience();
     let _ = inference!(
-        Input -> Output uses ChatCompletion via chat with policy => role
+        Input -> Output uses ChatCompletion via chat with policy => handler
     );
 }

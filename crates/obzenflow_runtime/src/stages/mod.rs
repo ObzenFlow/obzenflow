@@ -18,10 +18,11 @@ pub use common::handlers::source::SourceError;
 pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
     EffectfulStatefulHandler, EffectfulTransformHandler, HeartbeatConfig, HostedIngressSource,
-    InlineSink, ObserverHandler, ProcessingContext, ResourceManaged, SignalDecision, SignalGate,
-    SinkConnector, SinkDescription, SinkWriter, SinkWriterInitContext, SourceObservationSink,
-    StatefulEmission, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-    TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedStatefulHandler,
+    InferenceHandler, InlineSink, ObserverHandler, ProcessingContext, ResourceManaged,
+    SignalDecision, SignalGate, SinkConnector, SinkDescription, SinkWriter, SinkWriterInitContext,
+    SourceObservationSink, StatefulEmission, TypedAsyncFiniteSourceHandler,
+    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    TypedStatefulHandler,
 };
 
 // FLOWIP-115c runtime control-strategy hooks.
