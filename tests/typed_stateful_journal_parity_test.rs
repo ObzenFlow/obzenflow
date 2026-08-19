@@ -4,7 +4,7 @@
 
 //! FLOWIP-134e journal oracle for plain typed stateful handlers and accumulators.
 
-use obzenflow::typed::stateful as typed_stateful;
+use obzenflow::stateful;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainEventContent, EventEnvelope};
@@ -203,7 +203,7 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
         let input_handler = ValuesSource::new();
         let validate_handler = RejectThree;
         let fold_handler = WindowedFold;
-        let grouped = typed_stateful::group_by(
+        let grouped = stateful::group_by(
             |input: &Input| input.key.clone(),
             |state: &mut GroupTotal, input: &Input| {
                 state.total = state.total.saturating_add(input.value);
@@ -216,11 +216,11 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
             },
         )
         .emit_on_eof();
-        let current_ranking = typed_stateful::top_n(
+        let current_ranking = stateful::top_n(
             2,
             |input: &Input| input.key.clone(),
             |input: &Input| input.value as f64,
-            |snapshot: typed_stateful::TopNSnapshot<String, Input>| CurrentRanking {
+            |snapshot: stateful::TopNSnapshot<String, Input>| CurrentRanking {
                 keys: snapshot
                     .top_n
                     .iter()
@@ -234,11 +234,11 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
             },
         )
         .emit_on_eof();
-        let aggregate_ranking = typed_stateful::top_n_by(
+        let aggregate_ranking = stateful::top_n_by(
             2,
             |input: &Input| input.key.clone(),
             |input: &Input| input.value as f64,
-            |snapshot: typed_stateful::TopNBySnapshot<String, Input>| AggregateRanking {
+            |snapshot: stateful::TopNBySnapshot<String, Input>| AggregateRanking {
                 keys: snapshot
                     .top_n
                     .iter()

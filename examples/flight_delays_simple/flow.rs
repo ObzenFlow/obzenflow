@@ -14,7 +14,7 @@ use super::fixtures;
 use super::handlers::*;
 use anyhow::Result;
 use obzenflow::sources;
-use obzenflow::typed::{joins, sinks};
+use obzenflow::{joins, sinks};
 use obzenflow_dsl::{flow, join, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;

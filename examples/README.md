@@ -92,7 +92,7 @@ These examples are intentionally skeletal. Use them when you want to sketch topo
 
 More niche examples that target specific API surfaces or topology patterns. We use these to validate the developer experience as we add features, and they're useful if you want to explore a particular capability in isolation.
 
-- **`stateful_emit_within_tumbling`** — Processing-time tumbling windows with `typed_stateful::group_by(...).emit_within(...)` (FLOWIP-054j).
+- **`stateful_emit_within_tumbling`** — Processing-time tumbling windows with `stateful::group_by(...).emit_within(...)` (FLOWIP-054j).
   - Run: `cargo run -p obzenflow --example stateful_emit_within_tumbling`
   - Code: [`examples/stateful_emit_within_tumbling.rs`](stateful_emit_within_tumbling.rs)
 - **`web_analytics_pipeline`** — Group/reduce stateful patterns with multiple emission strategies

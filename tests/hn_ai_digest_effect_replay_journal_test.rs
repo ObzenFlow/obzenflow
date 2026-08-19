@@ -70,6 +70,7 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::testing::BackpressureAckGate;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1101,6 +1102,61 @@ async fn stage_envelopes(run_dir: &Path, stage_key: &str) -> Vec<EventEnvelope<C
         .expect("stage journal is readable")
 }
 
+#[derive(Debug, PartialEq)]
+struct StableDeliveryReceipt {
+    parent_event_type: String,
+    parent_payload: serde_json::Value,
+    result: serde_json::Value,
+    destination: String,
+    method: serde_json::Value,
+    items: Option<u64>,
+}
+
+fn stable_delivery_receipts(
+    parent_events: &[EventEnvelope<ChainEvent>],
+    sink_events: &[EventEnvelope<ChainEvent>],
+) -> Vec<StableDeliveryReceipt> {
+    let parents = parent_events
+        .iter()
+        .filter_map(|envelope| match &envelope.event.content {
+            ChainEventContent::Data {
+                event_type,
+                payload,
+            } => Some((envelope.event.id, (event_type.clone(), payload.clone()))),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+
+    sink_events
+        .iter()
+        .filter_map(|envelope| {
+            let ChainEventContent::Delivery(delivery) = &envelope.event.content else {
+                return None;
+            };
+            let parent_id = envelope
+                .event
+                .causality
+                .parent_ids
+                .first()
+                .expect("a sink delivery receipt retains its causal parent");
+            let (parent_event_type, parent_payload) = parents.get(parent_id).unwrap_or_else(|| {
+                panic!("sink delivery parent {parent_id} is journalled upstream")
+            });
+
+            Some(StableDeliveryReceipt {
+                parent_event_type: parent_event_type.clone(),
+                parent_payload: parent_payload.clone(),
+                result: serde_json::to_value(&delivery.result)
+                    .expect("delivery result serialises for stable comparison"),
+                destination: delivery.destination.clone(),
+                method: serde_json::to_value(&delivery.delivery_method)
+                    .expect("delivery method serialises for stable comparison"),
+                items: delivery.items_delivered,
+            })
+        })
+        .collect()
+}
+
 async fn system_events(run_dir: &Path) -> Vec<SystemEvent> {
     let manifest = archive_manifest(run_dir);
     let relative = manifest["system_journal_file"]
@@ -1723,6 +1779,12 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     let live_chunk = stage_envelopes(&live_archive, "digest__chunk").await;
     let live_map = stage_envelopes(&live_archive, "digest__map").await;
     let live_finalise = stage_envelopes(&live_archive, "digest__finalize").await;
+    let live_digest_summary = stage_envelopes(&live_archive, "digest_summary").await;
+    let live_delivery_receipts = stable_delivery_receipts(&live_finalise, &live_digest_summary);
+    assert!(
+        !live_delivery_receipts.is_empty(),
+        "the production digest summary must journal at least one stable delivery receipt"
+    );
     let manifests = live_chunk
         .iter()
         .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.event))
@@ -2570,8 +2632,12 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let replay_archive = latest_run_dir(&journal_base);
     let replay_map = stage_envelopes(&replay_archive, "digest__map").await;
     let replay_finalise = stage_envelopes(&replay_archive, "digest__finalize").await;
+    let replay_digest_summary = stage_envelopes(&replay_archive, "digest_summary").await;
+    let replay_delivery_receipts =
+        stable_delivery_receipts(&replay_finalise, &replay_digest_summary);
     assert_eq!(effect_evidence_ids(&replay_map), live_map_ids);
     assert_eq!(effect_evidence_ids(&replay_finalise), live_finalise_ids);
+    assert_eq!(replay_delivery_receipts, live_delivery_receipts);
 
     let verification = verify_run_dirs(
         &live_archive,
@@ -2584,6 +2650,21 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     .expect("shared production run-directory verification executes");
     let verification_details = match &verification {
         VerifyOutcome::Completed { report, .. } => {
+            for stage_key in ["hn_stories", "formatter", "batch"] {
+                let stage = report
+                    .stages
+                    .get(stage_key)
+                    .unwrap_or_else(|| panic!("verification reports stage {stage_key}"));
+                assert_eq!(stage.status, "matched", "stage {stage_key} must match");
+                assert!(
+                    stage.positional_rows_baseline > 0,
+                    "stage {stage_key} must have positive baseline rows"
+                );
+                assert_eq!(
+                    stage.positional_rows_candidate, stage.positional_rows_baseline,
+                    "stage {stage_key} must have equal positive replay rows"
+                );
+            }
             serde_json::to_string_pretty(report).expect("verification report serialises")
         }
         VerifyOutcome::Refused(reason) => format!("verification refused: {reason}"),

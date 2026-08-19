@@ -18,7 +18,7 @@
 
 use anyhow::Result;
 use obzenflow::sources;
-use obzenflow::typed::stateful as typed_stateful;
+use obzenflow::stateful;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -86,7 +86,7 @@ impl TypedPayload for FleetSummary {
 #[derive(Clone, Debug)]
 struct FleetSummaryAccumulator;
 
-impl typed_stateful::Accumulator for FleetSummaryAccumulator {
+impl stateful::Accumulator for FleetSummaryAccumulator {
     type State = FleetSummaryState;
     type Input = SensorReading;
     type Output = FleetSummary;
@@ -159,11 +159,11 @@ fn main() -> Result<()> {
             // Built-in latest-per-key semantics plus the previously uncovered
             // built-in always-emitting cadence.
             let latest_handler =
-                typed_stateful::conflate(|reading: &SensorReading| reading.sensor.clone())
+                stateful::conflate(|reading: &SensorReading| reading.sensor.clone())
                     .emit_always();
 
             // A custom cadence composed through the first-class public method.
-            let count_handler = typed_stateful::reduce(
+            let count_handler = stateful::reduce(
                 ReadingCount::default(),
                 |count: &mut ReadingCount, _reading: &SensorReading| {
                     count.total = count.total.saturating_add(1);
@@ -172,7 +172,7 @@ fn main() -> Result<()> {
             .with_emission(EveryTwoReadings);
 
             // A custom accumulator uses the same public wrapper as the built-ins.
-            let summary_handler = typed_stateful::StatefulWithEmission::new(
+            let summary_handler = stateful::StatefulWithEmission::new(
                 FleetSummaryAccumulator,
                 OnEOF,
             );

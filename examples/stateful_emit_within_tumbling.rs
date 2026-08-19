@@ -6,7 +6,7 @@
 //!
 //! This example exercises the canonical stateful API shape:
 //!
-//! - `typed_stateful::group_by(...).emit_within(duration)`
+//! - `stateful::group_by(...).emit_within(duration)`
 //! - more than one mid-stream window output per run
 //! - a final partial window flushed during drain
 //!
@@ -17,7 +17,7 @@
 
 use anyhow::{bail, Result};
 use obzenflow::sources;
-use obzenflow::typed::stateful as typed_stateful;
+use obzenflow::stateful;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::{
@@ -149,7 +149,7 @@ fn main() -> Result<()> {
                     seq: index as u64,
                 })
             });
-            let per_user_handler = typed_stateful::group_by(
+            let per_user_handler = stateful::group_by(
                 |e: &ClickEvent| e.user_id.clone(),
                 |state: &mut UserCount, _e: &ClickEvent| {
                     state.count += 1;

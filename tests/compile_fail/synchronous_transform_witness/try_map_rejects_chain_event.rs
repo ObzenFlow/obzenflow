@@ -8,7 +8,7 @@ use obzenflow_core::ChainEvent;
 use support::First;
 
 fn main() {
-    let _ = obzenflow::typed::transforms::try_map(
+    let _ = obzenflow::transforms::try_map(
         |_event: ChainEvent| Ok::<First, &'static str>(First),
     );
 }

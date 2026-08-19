@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow::typed::stateful as typed_stateful;
+use obzenflow::stateful;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{CycleDepth, StageOutputs};
@@ -295,7 +295,7 @@ async fn cycle_guard_rejects_stateful_emit_within_cycle() {
 
     let definition = FlowDefinition::materialize(move |_runtime_config| {
         let source = TestEventSource::new(1);
-        let window = typed_stateful::reduce(
+        let window = stateful::reduce(
             WindowCount::default(),
             |acc: &mut WindowCount, _ev: &SeedEvent| acc.count += 1,
         )

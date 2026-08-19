@@ -4,7 +4,7 @@
 
 //! Product-catalogue regression for first-class stateful accumulators.
 
-use obzenflow::typed::stateful as typed_stateful;
+use obzenflow::stateful;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::stateful::strategies::accumulators::{
     Accumulator, Conflate, GroupBy, Reduce, TopN, TopNBy, TopNBySnapshot, TopNSnapshot,
@@ -113,12 +113,12 @@ fn every_accumulator_is_directly_constructible_as_a_public_strategy() {
 }
 
 #[test]
-fn typed_stateful_helpers_construct_the_first_class_accumulators() {
-    let reduce = typed_stateful::reduce(Count::default(), |count: &mut Count, _score: &Score| {
+fn stateful_helpers_construct_the_first_class_accumulators() {
+    let reduce = stateful::reduce(Count::default(), |count: &mut Count, _score: &Score| {
         count.0 += 1;
     });
-    let conflate = typed_stateful::conflate(|score: &Score| score.key.clone());
-    let group_by = typed_stateful::group_by(
+    let conflate = stateful::conflate(|score: &Score| score.key.clone());
+    let group_by = stateful::group_by(
         |score: &Score| score.key.clone(),
         |count: &mut u64, _score: &Score| *count += 1,
         |key: &String, count: &u64| KeyCount {
@@ -126,7 +126,7 @@ fn typed_stateful_helpers_construct_the_first_class_accumulators() {
             count: *count,
         },
     );
-    let top_n = typed_stateful::top_n(
+    let top_n = stateful::top_n(
         3,
         |score: &Score| score.key.clone(),
         |score: &Score| score.score,
@@ -139,7 +139,7 @@ fn typed_stateful_helpers_construct_the_first_class_accumulators() {
             scores: snapshot.top_n.iter().map(|entry| entry.score).collect(),
         },
     );
-    let top_n_by = typed_stateful::top_n_by(
+    let top_n_by = stateful::top_n_by(
         3,
         |score: &Score| score.key.clone(),
         |score: &Score| score.score,

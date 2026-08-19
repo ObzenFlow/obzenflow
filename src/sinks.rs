@@ -22,6 +22,6 @@
 
 /// Console and CSV sinks, formatters, and output configuration.
 pub use obzenflow_adapters::sinks::{
-    ConsoleSink, CsvSink, CsvSinkBuilder, DebugFormatter, Formatter, JsonFormatter,
-    JsonPrettyFormatter, OutputDestination, TableFormatter,
+    console, debug, json, json_pretty, table, ConsoleSink, CsvSink, CsvSinkBuilder, DebugFormatter,
+    Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination, TableFormatter,
 };

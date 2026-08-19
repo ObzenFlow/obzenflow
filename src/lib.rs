@@ -51,7 +51,7 @@
 //!
 //! **Transforms** process typed payloads one at a time. Implement
 //! [`obzenflow_runtime::stages::TypedTransformHandler`], or use helper facades
-//! like [`crate::typed::transforms::map`] for simple one-to-one mappings.
+//! like [`crate::transforms::map`] for simple one-to-one mappings.
 //!
 //! **Sinks** consume events at the end of a pipeline. Implement
 //! [`obzenflow_runtime::stages::SinkWriter`], or construct a
@@ -119,7 +119,7 @@
 //! ```rust,ignore
 //! use anyhow::Result;
 //! use obzenflow_core::TypedPayload;
-//! use obzenflow::{sources, typed::transforms};
+//! use obzenflow::{sources, transforms};
 //! use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 //! use obzenflow_infra::application::FlowApplication;
 //! use obzenflow_infra::journal::disk_journals;
@@ -213,6 +213,8 @@
 pub mod ai;
 pub mod application;
 pub mod env;
+pub mod joins;
 pub mod sinks;
 pub mod sources;
-pub mod typed;
+pub mod stateful;
+pub mod transforms;

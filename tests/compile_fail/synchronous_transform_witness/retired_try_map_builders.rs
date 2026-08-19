@@ -7,7 +7,7 @@ mod support;
 use support::{First, Input};
 
 fn mapper() -> impl obzenflow_runtime::stages::transform::TypedTransformHandler {
-    obzenflow::typed::transforms::try_map(|_input: Input| Ok::<First, &'static str>(First))
+    obzenflow::transforms::try_map(|_input: Input| Ok::<First, &'static str>(First))
 }
 
 fn main() {
