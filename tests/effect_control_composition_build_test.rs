@@ -18,7 +18,7 @@ use obzenflow_dsl::dsl::stage_descriptor::{
     EffectPolicyAttachment, EffectfulTransformDescriptor, StageDescriptor,
 };
 use obzenflow_dsl::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
-use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
+use obzenflow_dsl::{effectful_stateful, effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectDeclaration, EffectError, EffectSafety, Effects,
@@ -26,7 +26,9 @@ use obzenflow_runtime::effects::{
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::DslConfigDefault;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+use obzenflow_runtime::stages::common::handlers::{
+    EffectfulStatefulHandler, EffectfulTransformHandler,
+};
 use obzenflow_runtime::stages::observer::EffectObserver;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -132,6 +134,32 @@ impl EffectfulTransformHandler for TwoEffectHandler {
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
     ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         Ok(fx.complete()?)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct StatefulOneEffectHandler;
+
+#[async_trait]
+impl EffectfulStatefulHandler for StatefulOneEffectHandler {
+    type State = ();
+    type Input = CompositionInput;
+    type Output = CompositionFact;
+    type AllowedEffects = obzenflow_runtime::effect_set![EffectA];
+
+    fn initial_state(&self) -> Self::State {}
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        _input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        Ok(fx.complete_empty()?)
+    }
+
+    fn apply(&mut self, _state: &mut Self::State, _fact: Self::Output) -> Result<(), HandlerError> {
+        Ok(())
     }
 }
 
@@ -463,6 +491,35 @@ macro_rules! two_effect_flow {
     };
 }
 
+macro_rules! stateful_single_effect_flow {
+    (observers: [$($observer:expr),* $(,)?], policy: $policy:expr) => {
+        FlowDefinition::materialize(move |_runtime_config| {
+            let guarded_handler = StatefulOneEffectHandler;
+
+            Ok(flow! {
+                name: "effect_control_composition_stateful",
+                journals: memory_journals(),
+
+                stages: {
+                    input = source!(CompositionInput => placeholder!());
+                    guarded = effectful_stateful!(
+                        CompositionInput -> CompositionFact
+                        uses EffectA with $policy
+                        => guarded_handler,
+                        observers: [$($observer),*]
+                    );
+                    output = sink!(CompositionFact => placeholder!());
+                },
+
+                topology: {
+                    input |> guarded;
+                    guarded |> output;
+                }
+            })
+        })
+    };
+}
+
 fn malformed_effect_policy_attachment_flow(
     policy_materializations: Arc<AtomicUsize>,
 ) -> FlowDefinition {
@@ -608,6 +665,26 @@ async fn bare_singleton_effect_policy_and_passive_observer_materialize_once() {
 }
 
 #[tokio::test]
+async fn stateful_policy_and_passive_observer_materialize_without_a_wrapper() {
+    let observer_materializations = Arc::new(AtomicUsize::new(0));
+    let policy_materializations = Arc::new(AtomicUsize::new(0));
+    let observer: Box<dyn MiddlewareFactory> = Box::new(ProofObserverFactory {
+        materializations: observer_materializations.clone(),
+    });
+    let policy = CountingFactory::boxed(aggregate(), policy_materializations.clone());
+
+    build(stateful_single_effect_flow!(
+        observers: [observer],
+        policy: policy
+    ))
+    .await
+    .expect("stateful boundary policy and typed observer must materialize independently");
+
+    assert_eq!(observer_materializations.load(Ordering::SeqCst), 1);
+    assert_eq!(policy_materializations.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn control_middleware_in_observers_fails_with_authority_diagnostic() {
     let error = build(single_effect_flow!(
         observers: [limiter()],
@@ -621,6 +698,23 @@ async fn control_middleware_in_observers_fails_with_authority_diagnostic() {
             "'observers:' accepts observer middleware only; attach control middleware 'rate_limiter' in the 'with [...]' clause of the live I/O unit it protects (FLOWIP-115s)"
         ),
         "unexpected authority diagnostic: {error}"
+    );
+}
+
+#[tokio::test]
+async fn stateful_observer_lane_still_rejects_control_middleware() {
+    let error = build(stateful_single_effect_flow!(
+        observers: [limiter()],
+        policy: aggregate()
+    ))
+    .await
+    .expect_err("the stateful observer lane must not grant control authority");
+
+    assert!(
+        error.to_string().contains(
+            "'observers:' accepts observer middleware only; attach control middleware 'rate_limiter' in the 'with [...]' clause of the live I/O unit it protects (FLOWIP-115s)"
+        ),
+        "unexpected stateful authority diagnostic: {error}"
     );
 }
 

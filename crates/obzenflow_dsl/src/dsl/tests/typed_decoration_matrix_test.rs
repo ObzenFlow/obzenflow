@@ -230,6 +230,61 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
+    struct PolicyEffect;
+
+    #[async_trait]
+    impl Effect for PolicyEffect {
+        const EFFECT_TYPE: &'static str = "test.stateful_policy_effect";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Idempotent;
+        type BindingMode = obzenflow_runtime::effects::Portless;
+        type Outcome = Out;
+        type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
+
+        fn label(&self) -> &str {
+            "stateful_policy_effect"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+            Ok(Out)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct FxPolicySt;
+
+    #[async_trait]
+    impl EffectfulStatefulHandler for FxPolicySt {
+        type State = ();
+        type Input = In;
+        type Output = Out;
+        type AllowedEffects = obzenflow_runtime::effect_set![PolicyEffect];
+
+        fn initial_state(&self) -> Self::State {}
+
+        async fn decide(
+            &mut self,
+            _state: &Self::State,
+            _input: &In,
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+            Ok(fx.complete_empty()?)
+        }
+
+        fn apply(
+            &mut self,
+            _state: &mut Self::State,
+            _fact: Self::Output,
+        ) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug)]
     struct Sn;
     #[async_trait]
     impl InlineSink for Sn {
@@ -584,6 +639,24 @@ mod tests {
     #[test]
     fn effectful_stateful_typed_name_mw() {
         let _ = crate::effectful_stateful!(name: "s", In -> Out => FxSt, observers: []);
+    }
+
+    #[test]
+    fn effectful_stateful_accepts_and_retains_inline_effect_policy() {
+        let descriptor = crate::effectful_stateful!(
+            In -> Out
+            uses PolicyEffect
+                with obzenflow_adapters::middleware::RateLimiterBuilder::new(1_000.0).build()
+            => FxPolicySt,
+            observers: []
+        );
+
+        let declarations = descriptor.effect_declarations();
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].effect_type(), PolicyEffect::EFFECT_TYPE);
+        let policies = descriptor.effect_policy_attachments();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].effect_type, PolicyEffect::EFFECT_TYPE);
     }
 
     // ── sink! ───────────────────────────────────────────────────────────────
