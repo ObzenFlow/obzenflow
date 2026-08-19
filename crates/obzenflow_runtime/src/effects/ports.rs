@@ -1155,11 +1155,11 @@ mod tests {
         let shared = bound_binding("shared");
         let right_only = bound_binding("right_only");
 
-        let left_declarations = vec![
+        let left_declarations = [
             EffectDeclaration::named(&left_only),
             EffectDeclaration::named(&shared),
         ];
-        let right_declarations = vec![
+        let right_declarations = [
             EffectDeclaration::named(&shared),
             EffectDeclaration::named(&right_only),
         ];

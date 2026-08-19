@@ -23,6 +23,9 @@ pub struct ChatTransformBuilder {
     response_format: Option<ChatResponseFormat>,
 }
 
+// `Default` is intentionally absent and pinned by the retired standalone-AI
+// surface compile-fail contract; `new` is the sole empty-builder entry point.
+#[allow(clippy::new_without_default)]
 impl ChatTransformBuilder {
     pub fn new() -> Self {
         Self {
@@ -116,6 +119,9 @@ pub struct EmbeddingTransformBuilder {
     dimensions: Option<EmbeddingDimensions>,
 }
 
+// Keep this aligned with `ChatTransformBuilder`: the negative public-surface
+// contract requires construction to remain explicit through `new`.
+#[allow(clippy::new_without_default)]
 impl EmbeddingTransformBuilder {
     pub fn new() -> Self {
         Self {
