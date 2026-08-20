@@ -4,7 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow::typed::stateful as typed_stateful;
+use obzenflow::stateful;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -317,7 +317,7 @@ fn payload_writer_stage(payload: &FlowControlPayload) -> Option<StageId> {
 async fn emit_within_flushes_final_partial_window_before_authored_eof() -> Result<()> {
     let (sink, seen) = AggregateSink::new();
     let source = SequenceSource::new(3);
-    let window = typed_stateful::reduce(
+    let window = stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
     )
@@ -394,7 +394,7 @@ async fn emit_within_flushes_final_partial_window_before_authored_eof() -> Resul
 async fn emit_within_final_aggregate_preserves_buffered_input_lineage() -> Result<()> {
     let (sink, _seen) = AggregateSink::new();
     let source = SequenceSource::new(3);
-    let window = typed_stateful::reduce(
+    let window = stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
     )
@@ -451,7 +451,7 @@ async fn emit_within_final_aggregate_preserves_buffered_input_lineage() -> Resul
 async fn emit_within_final_aggregate_folds_runtime_minted_source_correlations() -> Result<()> {
     let (sink, seen) = AggregateSink::new();
     let source = SequenceSource::new(2);
-    let window = typed_stateful::reduce(
+    let window = stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
     )
@@ -528,7 +528,7 @@ async fn emit_within_emits_more_than_one_window_aggregate_per_run_and_resets_sta
 
     let (sink, seen) = AggregateSink::new();
     let source = DelayedSequenceSource::new(total, per_event_delay);
-    let window_handler = typed_stateful::reduce(
+    let window_handler = stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
     )
@@ -582,7 +582,7 @@ async fn emit_within_emits_more_than_one_window_aggregate_per_run_and_resets_sta
 async fn forwarded_inbound_eof_does_not_complete_downstream_reader() -> Result<()> {
     let (sink, _seen) = AggregateSink::new();
     let source = SequenceSource::new(3);
-    let window = typed_stateful::reduce(
+    let window = stateful::reduce(
         WindowAgg::default(),
         |acc: &mut WindowAgg, _in: &WindowInput| acc.event_count += 1,
     )
@@ -667,7 +667,7 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
     ];
 
     let source = GroupedSequenceSource::new(items.clone());
-    let grouped = typed_stateful::group_by(
+    let grouped = stateful::group_by(
         |input: &GroupInput| input.group.clone(),
         |acc: &mut GroupAgg, _input: &GroupInput| acc.event_count += 1,
         |key: &String, result: &GroupAgg| GroupAggOutput {

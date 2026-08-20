@@ -20,7 +20,7 @@
 
 use anyhow::Result;
 use obzenflow::sources;
-use obzenflow::typed::stateful as typed_stateful;
+use obzenflow::stateful;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
@@ -278,7 +278,7 @@ fn main() -> Result<()> {
                     },
                 })
             });
-            let session_tracker_handler = typed_stateful::group_by(
+            let session_tracker_handler = stateful::group_by(
                 |event: &UserEvent| event.user_id.clone(),
                 |session: &mut SessionData, event: &UserEvent| {
                     event.update_session(session);
@@ -289,14 +289,14 @@ fn main() -> Result<()> {
                 },
             )
             .emit_within(Duration::from_secs(3));
-            let funnel_tracker_handler = typed_stateful::reduce(
+            let funnel_tracker_handler = stateful::reduce(
                 FunnelState::default(),
                 |state: &mut FunnelState, event: &UserEvent| {
                     event.update_funnel(state);
                 },
             )
             .emit_every_n(50);
-            let metrics_handler = typed_stateful::reduce(
+            let metrics_handler = stateful::reduce(
                 MetricsState::default(),
                 |state: &mut MetricsState, event: &UserEvent| {
                     event.update_metrics(state);

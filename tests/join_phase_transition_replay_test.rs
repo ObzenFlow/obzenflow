@@ -19,7 +19,7 @@
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow::typed::joins;
+use obzenflow::joins;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;

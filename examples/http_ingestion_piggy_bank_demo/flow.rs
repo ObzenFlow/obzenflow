@@ -40,7 +40,7 @@
 
 use super::domain::*;
 use super::handlers::Checkbook;
-use obzenflow::typed::{joins, sinks};
+use obzenflow::{joins, sinks};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_adapters::sinks::SnapshotTableFormatter;
 use obzenflow_adapters::sources::http::HostedIngressSource;

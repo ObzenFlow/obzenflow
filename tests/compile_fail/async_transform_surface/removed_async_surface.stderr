@@ -1,10 +1,10 @@
-error[E0432]: unresolved imports `obzenflow::typed::transforms::async_map`, `obzenflow::typed::transforms::async_try_map_with`
- --> tests/compile_fail/async_transform_surface/removed_async_surface.rs:5:36
+error[E0432]: unresolved imports `obzenflow::transforms::async_map`, `obzenflow::transforms::async_try_map_with`
+ --> tests/compile_fail/async_transform_surface/removed_async_surface.rs:5:29
   |
-5 | use obzenflow::typed::transforms::{async_map, async_try_map_with};
-  |                                    ^^^^^^^^^  ^^^^^^^^^^^^^^^^^^ no `async_try_map_with` in `typed::transforms`
-  |                                    |
-  |                                    no `async_map` in `typed::transforms`
+5 | use obzenflow::transforms::{async_map, async_try_map_with};
+  |                             ^^^^^^^^^  ^^^^^^^^^^^^^^^^^^ no `async_try_map_with` in `transforms`
+  |                             |
+  |                             no `async_map` in `transforms`
 
 error[E0432]: unresolved import `obzenflow_dsl::async_transform`
  --> tests/compile_fail/async_transform_surface/removed_async_surface.rs:6:5

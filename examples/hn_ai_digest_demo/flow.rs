@@ -12,7 +12,7 @@ use obzenflow::ai::{
     SystemPrompt, TokenCount, UserPrompt,
 };
 use obzenflow::sources::{http_pull_config, HttpPullSource};
-use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_transforms};
+use obzenflow::{sinks, stateful, transforms};
 use obzenflow_adapters::middleware::control::ai_resilience;
 use obzenflow_adapters::middleware::{CircuitBreaker, RateLimiterBuilder};
 use obzenflow_core::ai::{
@@ -400,9 +400,9 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 ))
             })?;
         let hn_source = HttpPullSource::new(decoder, http_source_config);
-        let formatter = typed_transforms::map(|story: HnStory| format_story(story));
+        let formatter = transforms::map(|story: HnStory| format_story(story));
         let digest_seed =
-            typed_stateful::reduce(HnTopStories::default(), |acc, story: &FormattedStory| {
+            stateful::reduce(HnTopStories::default(), |acc, story: &FormattedStory| {
                 acc.stories.push(story.clone());
             })
             .emit_on_eof();

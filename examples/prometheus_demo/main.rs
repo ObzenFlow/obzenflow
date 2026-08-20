@@ -29,7 +29,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::env::env_var_or;
 use obzenflow::sources;
-use obzenflow::typed::{stateful as typed_stateful, transforms as typed_transforms};
+use obzenflow::{stateful, transforms};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
@@ -99,7 +99,7 @@ fn error_prone_transform() -> TryMapTyped<
     String,
     impl Fn(DataRequest) -> Result<ProcessedEvent, String> + Send + Sync + Clone,
 > {
-    typed_transforms::try_map(|req: DataRequest| {
+    transforms::try_map(|req: DataRequest| {
         if req.should_fail {
             Err("Simulated processing error".to_string())
         } else {
@@ -214,7 +214,7 @@ fn main() -> Result<()> {
                 })
             });
             let error_processor_handler = error_prone_transform();
-            let event_counter_handler = typed_stateful::reduce(
+            let event_counter_handler = stateful::reduce(
                 EventCountState::default(),
                 |state: &mut EventCountState, _event: &ProcessedEvent| {
                     state.event_count += 1;

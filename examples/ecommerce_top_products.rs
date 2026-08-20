@@ -12,7 +12,7 @@
 
 use anyhow::Result;
 use obzenflow::sources;
-use obzenflow::typed::stateful as typed_stateful;
+use obzenflow::stateful;
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
@@ -276,7 +276,7 @@ fn main() -> Result<()> {
                     timestamp: order_number, // Simulated timestamp
                 })
             });
-            let top_products_handler = typed_stateful::top_n_by(
+            let top_products_handler = stateful::top_n_by(
                 5,
                 |order: &OrderEvent| order.product_id.clone(),
                 |order: &OrderEvent| order.total_value,
@@ -298,7 +298,7 @@ fn main() -> Result<()> {
                 },
             )
             .emit_every_n(5);
-            let top_current_orders_handler = typed_stateful::top_n(
+            let top_current_orders_handler = stateful::top_n(
                 5,
                 |order: &OrderEvent| order.product_id.clone(),
                 |order: &OrderEvent| order.total_value,

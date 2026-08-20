@@ -46,19 +46,5 @@ pub use obzenflow_adapters::sources::{
 /// HTTP primitives re-exported from `obzenflow_core` for building request specs.
 pub use obzenflow_core::http_client::{HeaderMap, RequestSpec, Url};
 
-/// Convenience helper that preloads [`HttpPullConfigBuilder`] with [`default_http_client`].
-///
-/// This lives in the `obzenflow` facade crate (not adapters) to preserve the onion boundary:
-/// `default_http_client()` is implemented in infra behind feature flags.
-pub fn http_pull_config(
-) -> Result<HttpPullConfigBuilder, obzenflow_infra::http_client::HttpClientFactoryError> {
-    let client = obzenflow_infra::http_client::default_http_client()?;
-    Ok(HttpPullConfig::builder().client(client))
-}
-
-/// Convenience helper that preloads [`HttpPollConfigBuilder`] with [`default_http_client`].
-pub fn http_poll_config(
-) -> Result<HttpPollConfigBuilder, obzenflow_infra::http_client::HttpClientFactoryError> {
-    let client = obzenflow_infra::http_client::default_http_client()?;
-    Ok(HttpPollConfig::builder().client(client))
-}
+/// Default HTTP pull and poll configuration composed by the infra layer.
+pub use obzenflow_infra::sources::{http_poll_config, http_pull_config};

@@ -14,7 +14,7 @@
 
 use anyhow::Result;
 use obzenflow::sources;
-use obzenflow::typed::{sinks, stateful as typed_stateful, transforms};
+use obzenflow::{sinks, stateful, transforms};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -116,7 +116,7 @@ fn main() -> Result<()> {
             let transform_text_handler = transforms::map(|input: CharInput| TextChunk {
                 text: transform_char(input.character),
             });
-            let collect_text_handler = typed_stateful::reduce(
+            let collect_text_handler = stateful::reduce(
                 TransformedText::default(),
                 |acc: &mut TransformedText, chunk: &TextChunk| {
                     acc.text.push_str(&chunk.text);

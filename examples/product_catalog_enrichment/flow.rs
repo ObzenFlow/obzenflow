@@ -6,7 +6,7 @@ use super::console;
 use super::domain::*;
 use super::sources::*;
 use anyhow::Result;
-use obzenflow::typed::{joins, stateful as typed_stateful};
+use obzenflow::{joins, stateful};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_dsl::{flow, join, sink, source, stateful, FlowDefinition};
 #[cfg(not(test))]
@@ -150,7 +150,7 @@ fn build_flow() -> FlowDefinition {
                 console::print_order(&order);
             })
             .idempotent();
-        let catalog_stats_handler = typed_stateful::reduce(
+        let catalog_stats_handler = stateful::reduce(
             CatalogAnalyticsSummary::default(),
             |summary: &mut CatalogAnalyticsSummary, order: &EnrichedOrderWithPromo| {
                 summary.order_count += 1;

@@ -2,6 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-fn main() {
-    let _ = obzenflow::transforms::try_map_with;
-}
+use obzenflow::typed::stateful;
+
+fn main() {}

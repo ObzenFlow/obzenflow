@@ -232,8 +232,15 @@ fn first_class_accumulator_catalogue_cannot_be_collapsed_or_shrunk() {
         root.join("crates/obzenflow_runtime/src/stages/stateful/strategies/accumulators");
     let module_source =
         fs::read_to_string(accumulator_root.join("mod.rs")).expect("read accumulator module");
-    let helper_source = fs::read_to_string(root.join("src/typed/stateful.rs"))
-        .expect("read typed stateful constructors");
+    let helper_source =
+        fs::read_to_string(root.join("crates/obzenflow_runtime/src/stages/stateful/mod.rs"))
+            .expect("read runtime-owned stateful constructors");
+    let facade_source =
+        fs::read_to_string(root.join("src/stateful.rs")).expect("read stateful facade");
+    assert!(
+        facade_source.contains("pub use obzenflow_runtime::stages::stateful"),
+        "obzenflow::stateful must remain a runtime-backed re-export facade"
+    );
 
     for (module, concept) in [
         ("reduce", "Reduce"),
@@ -255,7 +262,7 @@ fn first_class_accumulator_catalogue_cannot_be_collapsed_or_shrunk() {
         );
         assert!(
             helper_source.contains(&format!("pub fn {module}")),
-            "typed::stateful::{module} must remain a convenience constructor"
+            "obzenflow_runtime::stages::stateful::{module} must remain a convenience constructor"
         );
         for combinator in [
             "emit_on_eof",
