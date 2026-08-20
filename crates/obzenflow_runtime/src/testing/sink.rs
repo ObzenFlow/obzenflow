@@ -1155,6 +1155,7 @@ pub async fn run_writer_conformance<F: SinkWriterConformanceFixture>(
             "writer destruction changed committed destination state",
         ));
     }
+    passed(&mut passed_cases, "lifecycle", "drop-is-io-free");
 
     for fault_case in profile.faults() {
         fixture.reset_destination().await.map_err(|error| {
@@ -2007,6 +2008,10 @@ mod tests {
             .expect("honest terminal connector conforms");
         assert_eq!(report.protocol_version(), SINK_CONFORMANCE_PROTOCOL_VERSION);
         assert!(report.cases().len() >= 7);
+        assert!(report
+            .cases()
+            .iter()
+            .any(|case| case.suite() == "lifecycle" && case.case() == "drop-is-io-free"));
     }
 
     #[tokio::test]
