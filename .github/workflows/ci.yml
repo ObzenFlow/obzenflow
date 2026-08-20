@@ -135,7 +135,7 @@ jobs:
             features: ""
           - name: production-features
             # Keep this list in sync with the workspace root production features.
-            features: "console,http-pull,ai"
+            features: "console,http-pull,ai,postgres"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
