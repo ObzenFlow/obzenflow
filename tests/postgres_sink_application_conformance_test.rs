@@ -168,8 +168,10 @@ impl TypedFiniteSourceHandler for StallingPayments {
     }
 }
 
-fn flow_error(error: impl std::fmt::Display) -> FlowBuildError {
-    FlowBuildError::StageResourcesFailed(format!("failed to build PostgreSQL sink: {error}"))
+fn flow_error(error: impl std::fmt::Display) -> Box<FlowBuildError> {
+    Box::new(FlowBuildError::StageResourcesFailed(format!(
+        "failed to build PostgreSQL sink: {error}"
+    )))
 }
 
 fn build_sink(
@@ -177,7 +179,7 @@ fn build_sink(
     schema: &str,
     probe: PostgresTestProbe,
     class: SinkDestinationClass,
-) -> Result<PaymentSink, FlowBuildError> {
+) -> Result<PaymentSink, Box<FlowBuildError>> {
     let builder = PostgresSink::<Payment>::builder()
         .connection(connection)
         .table(schema, "payments")
@@ -212,7 +214,7 @@ fn single_flow(
     poison_eof: bool,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let postgres = build_sink(connection, &schema, probe, class)?;
+        let postgres = build_sink(connection, &schema, probe, class).map_err(|error| *error)?;
         let payments = sources::finite(payments());
         if poison_eof {
             Ok(flow! {
@@ -258,7 +260,8 @@ fn fan_in_flow(
             &schema,
             probe,
             SinkDestinationClass::SafeToRepeat,
-        )?;
+        )
+        .map_err(|error| *error)?;
         let left = sources::finite(vec![payments()[0].clone(), payments()[2].clone()]);
         let right = sources::finite(vec![payments()[1].clone(), payments()[3].clone()]);
         Ok(flow! {
@@ -291,13 +294,15 @@ fn fan_out_flow(
             &schema,
             probe.clone(),
             SinkDestinationClass::SafeToRepeat,
-        )?;
+        )
+        .map_err(|error| *error)?;
         let postgres_b = build_sink(
             connection,
             &schema,
             probe,
             SinkDestinationClass::SafeToRepeat,
-        )?;
+        )
+        .map_err(|error| *error)?;
         let payments = sources::finite(payments());
         Ok(flow! {
             name: "postgres_sink_application_fan_out",
@@ -329,7 +334,8 @@ fn stalling_flow(
             &schema,
             probe,
             SinkDestinationClass::SafeToRepeat,
-        )?;
+        )
+        .map_err(|error| *error)?;
         let payments = StallingPayments { next: 1 };
         Ok(flow! {
             name: "postgres_sink_application",

@@ -115,20 +115,11 @@ impl std::fmt::Debug for SinkConsumeReport {
     }
 }
 
+#[derive(Default)]
 pub struct SinkLifecycleReport {
     pub audit_payload: Option<DeliveryPayload>,
     pub commit_receipts: Vec<CommitReceipt>,
     settlement: Option<Box<dyn SinkSettlementCommit>>,
-}
-
-impl Default for SinkLifecycleReport {
-    fn default() -> Self {
-        Self {
-            audit_payload: None,
-            commit_receipts: Vec::new(),
-            settlement: None,
-        }
-    }
 }
 
 impl std::fmt::Debug for SinkLifecycleReport {

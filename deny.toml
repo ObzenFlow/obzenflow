@@ -98,6 +98,7 @@ allow = [
     "ISC",
     "Zlib",
     "CC0-1.0",
+    "CDLA-Permissive-2.0", # Permissive data licence used by webpki trust roots through SQLx/Rustls
     "Unlicense",
     "MPL-2.0",              # Weak copyleft, compatible with permissive
     "Unicode-3.0",          # Common for unicode-related crates

@@ -503,8 +503,10 @@ async fn rejection_makes_zero_writer_calls_and_authors_no_operation_failure() {
         run_case(WriterMode::BufferedBatch, PolicyMode::Reject).await;
     result.expect("policy rejection is an accounted per-input outcome");
     assert_eq!(observations.load(Ordering::SeqCst), 0);
-    let calls = calls.lock().expect("call log");
-    assert!(calls.iter().all(|call| !call.starts_with("write:")));
+    {
+        let calls = calls.lock().expect("call log");
+        assert!(calls.iter().all(|call| !call.starts_with("write:")));
+    }
 
     let data = read_stage(&run, "output", "data_journal_file").await;
     assert_eq!(

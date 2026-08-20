@@ -218,7 +218,7 @@ impl CsvWriterProbe {
     fn fault_open(&self) -> bool {
         #[cfg(feature = "test-support")]
         {
-            return self.take(obzenflow_runtime::testing::sink::SinkFault::Open);
+            self.take(obzenflow_runtime::testing::sink::SinkFault::Open)
         }
         #[cfg(not(feature = "test-support"))]
         false
@@ -227,7 +227,7 @@ impl CsvWriterProbe {
     fn fault_encode(&self) -> bool {
         #[cfg(feature = "test-support")]
         {
-            return self.take(obzenflow_runtime::testing::sink::SinkFault::Encode);
+            self.take(obzenflow_runtime::testing::sink::SinkFault::Encode)
         }
         #[cfg(not(feature = "test-support"))]
         false
@@ -236,7 +236,7 @@ impl CsvWriterProbe {
     fn fault_mid_batch_mutation(&self) -> bool {
         #[cfg(feature = "test-support")]
         {
-            return self.take(obzenflow_runtime::testing::sink::SinkFault::MidBatchMutation);
+            self.take(obzenflow_runtime::testing::sink::SinkFault::MidBatchMutation)
         }
         #[cfg(not(feature = "test-support"))]
         false
@@ -245,7 +245,7 @@ impl CsvWriterProbe {
     fn fault_pre_commit(&self) -> bool {
         #[cfg(feature = "test-support")]
         {
-            return self.take(obzenflow_runtime::testing::sink::SinkFault::PreCommit);
+            self.take(obzenflow_runtime::testing::sink::SinkFault::PreCommit)
         }
         #[cfg(not(feature = "test-support"))]
         false
@@ -254,7 +254,7 @@ impl CsvWriterProbe {
     fn fault_flush(&self) -> bool {
         #[cfg(feature = "test-support")]
         {
-            return self.take(obzenflow_runtime::testing::sink::SinkFault::Flush);
+            self.take(obzenflow_runtime::testing::sink::SinkFault::Flush)
         }
         #[cfg(not(feature = "test-support"))]
         false
@@ -263,7 +263,7 @@ impl CsvWriterProbe {
     fn fault_drain(&self) -> bool {
         #[cfg(feature = "test-support")]
         {
-            return self.take(obzenflow_runtime::testing::sink::SinkFault::Drain);
+            self.take(obzenflow_runtime::testing::sink::SinkFault::Drain)
         }
         #[cfg(not(feature = "test-support"))]
         false
@@ -610,7 +610,7 @@ where
 
 struct CsvWriteError {
     phase: SinkWritePhase,
-    error: SinkOperationError,
+    error: Box<SinkOperationError>,
     poisoned: bool,
 }
 
@@ -618,7 +618,7 @@ impl CsvWriteError {
     fn current(phase: SinkWritePhase, error: SinkOperationError) -> Self {
         Self {
             phase,
-            error,
+            error: Box::new(error),
             poisoned: false,
         }
     }
@@ -626,21 +626,21 @@ impl CsvWriteError {
     fn poisoned(phase: SinkWritePhase, error: SinkOperationError) -> Self {
         Self {
             phase,
-            error,
+            error: Box::new(error),
             poisoned: true,
         }
     }
 
     fn into_failure(self) -> SinkWriteFailure {
         if self.poisoned {
-            SinkWriteFailure::poisoned(self.phase, self.error)
+            SinkWriteFailure::poisoned(self.phase, *self.error)
         } else {
-            SinkWriteFailure::current_only(self.phase, self.error)
+            SinkWriteFailure::current_only(self.phase, *self.error)
         }
     }
 
     fn into_operation_error(self) -> SinkOperationError {
-        self.error
+        *self.error
     }
 }
 

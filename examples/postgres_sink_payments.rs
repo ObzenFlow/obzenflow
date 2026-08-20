@@ -8,6 +8,8 @@
 //! with `--replay-from <run-directory>`. The deterministic UPSERT converges to
 //! the same rows while still making real PostgreSQL calls.
 
+// allow-sink-io: live PostgreSQL witness intentionally exercises and verifies destination I/O
+
 use anyhow::{Context, Result};
 use obzenflow::sinks::postgres::sqlx::postgres::PgArguments;
 use obzenflow::sinks::postgres::sqlx::query::Query;

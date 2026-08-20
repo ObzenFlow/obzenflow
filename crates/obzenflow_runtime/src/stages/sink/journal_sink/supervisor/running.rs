@@ -1154,11 +1154,8 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
                 if let Some(primary) = poisoned_lifecycle_event_id {
                     fatal = fatal.secondary_to(primary);
                 }
-                if heartbeat_state.is_some() {
-                    heartbeat_state
-                        .as_ref()
-                        .expect("checked above")
-                        .record_last_consumed(event_id);
+                if let Some(state) = &heartbeat_state {
+                    state.record_last_consumed(event_id);
                 }
                 return record_protocol_fatal_and_transition(
                     ctx,

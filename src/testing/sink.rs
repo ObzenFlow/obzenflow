@@ -815,7 +815,7 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
         .collect::<Vec<_>>();
     let operation_receipt_ids = chain_events
         .iter()
-        .filter_map(|event| SinkOperationFailed::from_event(event))
+        .filter_map(SinkOperationFailed::from_event)
         .filter(|operation| matches!(operation.phase, SinkOperationPhase::Write(_)))
         .filter_map(|operation| operation.failed_delivery_event_id)
         .collect::<Vec<_>>();

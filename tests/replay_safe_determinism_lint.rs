@@ -71,6 +71,7 @@ fn sink_bodies_do_not_perform_direct_external_io() {
             continue;
         }
 
+        let mut sink_io_allowed = false;
         for (line_idx, line) in body.lines().enumerate() {
             if line.contains("allow-sink-io:") {
                 let reason = line
@@ -83,9 +84,15 @@ fn sink_bodies_do_not_perform_direct_external_io() {
                     file.display(),
                     line_idx + 1
                 );
-                continue;
+                sink_io_allowed = true;
             }
+        }
 
+        if sink_io_allowed {
+            continue;
+        }
+
+        for (line_idx, line) in body.lines().enumerate() {
             for (token, replacement) in SINK_FORBIDDEN {
                 if line.contains(token) {
                     failures.push(format!(
