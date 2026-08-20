@@ -403,6 +403,7 @@ mod tests {
             error: error.to_string(),
             recoverable: None,
             metrics: None,
+            causal_event_id: None,
         }
     }
 

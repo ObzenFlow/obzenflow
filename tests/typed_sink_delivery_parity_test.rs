@@ -19,7 +19,6 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkBufferedOutcome, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
     SinkWriteReport, TypedFiniteSourceHandler,
@@ -132,7 +131,7 @@ impl InlineSink for NamedDestination {
         &mut self,
         _input: Self::Input,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(
             SinkTerminalOutcome::success(None).with_items(1),
         ))
@@ -419,7 +418,7 @@ impl InlineSink for InvalidBufferedSink {
         &mut self,
         _input: Self::Input,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::buffered(
             SinkBufferedOutcome::accepted_via(DeliveryMethod::Noop, None),
         ))
@@ -506,8 +505,15 @@ impl InlineSink for FailingSink {
         &mut self,
         _input: Self::Input,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
-        Err(HandlerError::Other("intentional sink failure".to_string()))
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+        Err(
+            obzenflow_runtime::stages::sink::SinkWriteFailure::current_only(
+                obzenflow_runtime::stages::sink::SinkWritePhase::Execute,
+                obzenflow_runtime::stages::sink::SinkOperationError::other(
+                    "intentional sink failure",
+                ),
+            ),
+        )
     }
 }
 

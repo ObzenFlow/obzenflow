@@ -36,7 +36,7 @@ use obzenflow_runtime::stages::common::handlers::source::traits::{
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, JoinReferenceView, SinkConnector, SinkDescription, SinkTerminalOutcome,
-    SinkWriteContext, SinkWriteReport, StatefulEmission, TransformHandler,
+    SinkWriteContext, SinkWriteReport, SinkWriteResult, StatefulEmission, TransformHandler,
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
     TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler,
     TypedStatefulHandlerAdapter, TypedTransformHandler, TypedTransformHandlerAdapter,
@@ -1585,11 +1585,7 @@ where
 {
     type Input = In;
 
-    async fn write(
-        &mut self,
-        _input: In,
-        _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    async fn write(&mut self, _input: In, _context: SinkWriteContext) -> SinkWriteResult {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("sink", self.message));
         }

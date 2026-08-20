@@ -13,7 +13,6 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedFiniteSourceHandler,
@@ -108,7 +107,7 @@ impl InlineSink for LatencySink {
         &mut self,
         event: BenchEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.received.fetch_add(1, Ordering::Relaxed);
         if event.event_id >= WARMUP_EVENT_COUNT {
             let receive_time_nanos = SystemTime::now()

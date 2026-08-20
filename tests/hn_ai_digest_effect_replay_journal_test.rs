@@ -556,7 +556,7 @@ impl InlineSink for CollectOut {
         &mut self,
         output: DigestOut,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.outputs
             .lock()
             .expect("output collector lock")

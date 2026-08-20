@@ -88,6 +88,12 @@ pub enum HandlerError {
     ContractViolation(String),
     /// Generic or unclassified error.
     Other(String),
+    /// Sealed typed-to-erased sink lifecycle error channel.
+    #[doc(hidden)]
+    SinkOperation(Box<crate::stages::common::handlers::SinkOperationError>),
+    /// Sealed typed-to-erased sink write error channel.
+    #[doc(hidden)]
+    SinkWrite(Box<crate::stages::common::handlers::SinkWriteFailure>),
 }
 
 impl HandlerError {
@@ -113,6 +119,8 @@ impl HandlerError {
             // is retained for exhaustive callers that still inspect `kind()`.
             HandlerError::ContractViolation(_) => ErrorKind::Unknown,
             HandlerError::Other(_) => ErrorKind::Unknown,
+            HandlerError::SinkOperation(error) => error.kind(),
+            HandlerError::SinkWrite(failure) => failure.error().kind(),
         }
     }
 
@@ -170,6 +178,8 @@ impl fmt::Display for HandlerError {
                 write!(f, "Contract violation: {msg}")
             }
             HandlerError::Other(msg) => write!(f, "Handler error: {msg}"),
+            HandlerError::SinkOperation(error) => write!(f, "{error}"),
+            HandlerError::SinkWrite(failure) => write!(f, "{failure}"),
         }
     }
 }

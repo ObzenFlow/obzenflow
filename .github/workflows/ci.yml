@@ -268,6 +268,43 @@ jobs:
             --profile "${profile}" \
             --features test-support
 
+  postgres-conformance:
+    needs: fmt
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      OBZENFLOW_POSTGRES_TEST_URL: postgres://obzenflow:obzenflow-secret-122a@localhost:5432/obzenflow
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: obzenflow
+          POSTGRES_PASSWORD: obzenflow-secret-122a
+          POSTGRES_DB: obzenflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U obzenflow -d obzenflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - name: Verify lockfile
+        run: cargo fetch --locked
+      - uses: Swatinem/rust-cache@v2
+
+      - name: PostgreSQL connector conformance
+        run: cargo test --locked -p obzenflow_adapters --features postgres,test-support
+
+      - name: PostgreSQL application conformance
+        run: cargo test --locked -p obzenflow --features postgres,test-support --test postgres_sink_application_conformance_test
+
   doctest:
     needs: fmt
     runs-on: ubuntu-latest

@@ -37,7 +37,6 @@ use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::sink::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkTyped, SinkWriteContext, SinkWriteReport,
 };
@@ -152,7 +151,7 @@ impl InlineSink for CompletionSink {
         &mut self,
         _event: ProcessedEvent,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("InMemory".to_string()),
             Some(1),

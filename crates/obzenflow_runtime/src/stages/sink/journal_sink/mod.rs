@@ -40,8 +40,9 @@ pub(super) fn journalled_delivery_event(
 
 // Re-export public API
 pub use boundary::{
-    SinkDeliveryAttemptOutcome, SinkDeliveryBoundary, SinkDeliveryBoundaryOutcome,
-    SinkDeliveryBoundaryReport, SinkDeliveryExecutor, SinkDeliveryRejection,
+    SinkDeliveryAdmission, SinkDeliveryAttemptOutcome, SinkDeliveryBoundary, SinkDeliveryPermit,
+    SinkDeliveryRejection, SinkPolicyEvidence, SinkPolicyEvidenceBatch, SinkPolicyEvidenceError,
+    MAX_SINK_POLICY_EVIDENCE_ENTRIES,
 };
 pub use builder::JournalSinkBuilder;
 pub use config::JournalSinkConfig;

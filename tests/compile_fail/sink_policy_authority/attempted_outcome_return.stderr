@@ -1,0 +1,13 @@
+error[E0053]: method `observe` has an incompatible type for trait
+  --> tests/compile_fail/sink_policy_authority/attempted_outcome_return.rs:15:10
+   |
+15 |     ) -> SinkDeliveryAttemptOutcome {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `SinkPolicyEvidenceBatch`, found `SinkDeliveryAttemptOutcome`
+   |
+   = note: expected signature `fn(Box<ReplacingPermit>, &SinkDeliveryAttemptOutcome) -> SinkPolicyEvidenceBatch`
+              found signature `fn(Box<ReplacingPermit>, &SinkDeliveryAttemptOutcome) -> SinkDeliveryAttemptOutcome`
+help: change the output type to match the trait
+   |
+15 -     ) -> SinkDeliveryAttemptOutcome {
+15 +     ) -> SinkPolicyEvidenceBatch {
+   |

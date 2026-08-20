@@ -19,7 +19,6 @@ use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
 };
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedFiniteSourceHandler,
@@ -76,7 +75,7 @@ impl InlineSink for NullSink {
         &mut self,
         _event: Item,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Null".to_string()),
             None,

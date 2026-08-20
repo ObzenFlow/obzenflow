@@ -136,7 +136,7 @@ mod tests {
             &mut self,
             _input: IdlePayload,
             _context: SinkWriteContext,
-        ) -> Result<SinkWriteReport, HandlerError> {
+        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
             Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
                 DeliveryMethod::Custom("test".to_string()),
                 None,

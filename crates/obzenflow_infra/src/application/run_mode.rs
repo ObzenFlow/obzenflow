@@ -15,7 +15,7 @@
 //! and the catch-up-to-live transition is announced on the `ReplayLifecycle`
 //! system-event channel rather than by mutating this value mid-run.
 
-use obzenflow_core::journal::run_manifest::{RunManifest, RUN_MANIFEST_FILENAME};
+use obzenflow_core::journal::run_manifest::RUN_MANIFEST_FILENAME;
 use std::path::{Path, PathBuf};
 
 /// How this process is executing the flow, resolved once at startup.
@@ -78,8 +78,9 @@ impl ReplayRunContext {
 /// path; an unreadable manifest here only costs the flow id in the copy.
 fn peek_archive_flow_id(archive_path: &Path) -> Option<String> {
     let manifest = std::fs::read_to_string(archive_path.join(RUN_MANIFEST_FILENAME)).ok()?;
-    let manifest: RunManifest = serde_json::from_str(&manifest).ok()?;
-    Some(manifest.flow_id)
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).ok()?;
+    crate::journal::disk::manifest_gate::require_current_manifest_version(&manifest).ok()?;
+    manifest.get("flow_id")?.as_str().map(str::to_string)
 }
 
 #[cfg(test)]
@@ -111,5 +112,21 @@ mod tests {
             }
             other => panic!("expected resume mode, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn banner_peek_does_not_deserialise_an_old_manifest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join(RUN_MANIFEST_FILENAME),
+            serde_json::to_vec(&serde_json::json!({
+                "manifest_version": "2.0",
+                "flow_id": "old-flow-must-not-leak-through"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(peek_archive_flow_id(temp.path()).is_none());
     }
 }

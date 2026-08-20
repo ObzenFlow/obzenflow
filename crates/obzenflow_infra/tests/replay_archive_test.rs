@@ -262,7 +262,7 @@ async fn open_requires_completed_status_by_default() {
     assert!(matches!(err, ReplayError::IncompleteArchive { .. }));
 }
 
-/// Write a manifest with a custom `obzenflow_version` for version-compat tests.
+/// Write a manifest with a custom `obzenflow_version` for exact-build tests.
 fn write_manifest_with_version(dir: &Path, version: &str) {
     let mut stages = HashMap::new();
     stages.insert(
@@ -359,7 +359,7 @@ async fn open_rejects_archive_from_older_minor_version() {
 }
 
 #[tokio::test]
-async fn open_accepts_archive_with_different_patch_version() {
+async fn open_rejects_archive_with_different_patch_version() {
     let dir = tempdir().unwrap();
     let (major, minor, patch) = {
         let parts: Vec<u64> = OBZENFLOW_VERSION
@@ -374,10 +374,11 @@ async fn open_accepts_archive_with_different_patch_version() {
     write_manifest_with_version(dir.path(), &compat_version);
     write_system_log_completed(dir.path());
 
-    let archive = DiskReplayArchive::open(dir.path().to_path_buf(), false)
+    let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
         .await
-        .expect("same major.minor with different patch should be accepted");
-    assert_eq!(archive.status(), ArchiveStatus::Completed);
+        .err()
+        .expect("archive build identity must match exactly");
+    assert!(matches!(err, ReplayError::VersionMismatch { .. }));
 }
 
 #[tokio::test]
@@ -396,15 +397,15 @@ async fn open_rejects_archive_with_unparseable_version() {
     );
 }
 
-/// FLOWIP-095j: an archive written under the previous manifest version is refused
+/// FLOWIP-122a: an archive written under the previous manifest version is refused
 /// with the unsupported-version error, never a missing-field parse error. The raw
-/// JSON deliberately lacks the 2.0 `inbound`/`ordered_delivery` fields, so this
+/// JSON deliberately lacks current fields, so this
 /// only passes when the version gate runs before typed deserialization.
 #[tokio::test]
 async fn open_rejects_previous_manifest_version_before_typed_parse() {
     let dir = tempdir().unwrap();
     let old_manifest = serde_json::json!({
-        "manifest_version": "1.0",
+        "manifest_version": "2.0",
         "obzenflow_version": OBZENFLOW_VERSION,
         "flow_id": "flow_01H000000000000000000000000",
         "flow_name": "test_flow",
@@ -436,14 +437,53 @@ async fn open_rejects_previous_manifest_version_before_typed_parse() {
         matches!(
             err,
             ReplayError::UnsupportedManifestVersion { ref manifest_version, .. }
-                if manifest_version == "1.0"
+                if manifest_version == "2.0"
         ),
-        "expected UnsupportedManifestVersion for a 1.0 archive, got: {err}"
+        "expected UnsupportedManifestVersion for a 2.0 archive, got: {err}"
     );
     assert!(
         err.to_string().contains("re-record"),
         "refusal must carry the re-record guidance, got: {err}"
     );
+}
+
+#[tokio::test]
+async fn open_rejects_every_non_current_manifest_shape_before_journal_access() {
+    for (version, expected) in [
+        (None, "<missing>"),
+        (Some(serde_json::json!(3.0)), "3.0"),
+        (Some(serde_json::json!("2.0")), "2.0"),
+        (Some(serde_json::json!("4.0")), "4.0"),
+    ] {
+        let dir = tempdir().unwrap();
+        let mut manifest = serde_json::json!({
+            "journal_format_version": JOURNAL_FORMAT_VERSION,
+            "system_journal_file": "sentinel-system.log"
+        });
+        if let Some(version) = version {
+            manifest["manifest_version"] = version;
+        }
+        std::fs::write(
+            dir.path().join(RUN_MANIFEST_FILENAME),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("sentinel-system.log"),
+            b"this must never be scanned",
+        )
+        .unwrap();
+
+        let err = DiskReplayArchive::open(dir.path().to_path_buf(), true)
+            .await
+            .err()
+            .expect("non-current manifest must be refused");
+        assert!(matches!(
+            err,
+            ReplayError::UnsupportedManifestVersion { ref manifest_version, supported }
+                if manifest_version == expected && supported == RUN_MANIFEST_VERSION
+        ));
+    }
 }
 
 #[tokio::test]

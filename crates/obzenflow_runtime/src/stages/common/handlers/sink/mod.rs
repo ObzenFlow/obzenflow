@@ -5,11 +5,17 @@
 //! Sink handler components
 
 pub mod connector;
+pub mod error;
 pub mod traits;
 pub mod typed;
 
 pub use connector::{
     InlineSink, SinkConnector, SinkDescription, SinkWriterInitContext, WithRedeliverySafety,
+};
+pub use error::{
+    SinkDestinationErrorCode, SinkOperationError, SinkOperationErrorConversionError,
+    SinkOperationResult, SinkWriteFailure, SinkWriteFailureDisposition, SinkWritePhase,
+    SinkWriteResult,
 };
 #[doc(hidden)]
 pub use traits::UnifiedSinkHandler;

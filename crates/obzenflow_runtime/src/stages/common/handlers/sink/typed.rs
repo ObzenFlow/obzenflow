@@ -4,7 +4,10 @@
 
 //! Typed sink authoring and runtime erasure (FLOWIP-134h).
 
-use super::traits::{CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport};
+use super::error::{SinkOperationResult, SinkWriteResult};
+use super::traits::{
+    CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport, SinkSettlementCommit,
+};
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{
@@ -13,7 +16,7 @@ use obzenflow_core::event::payloads::delivery_payload::{
 use obzenflow_core::event::{ChainEventContent, StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, EventId, StageId, TypedPayload};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -163,40 +166,13 @@ impl PendingRegistry {
         }
     }
 
-    fn is_outstanding(&self, identity: PendingIdentity) -> bool {
-        identity.registry_id == self.registry_id
-            && identity.stage_id == self.stage_id
-            && matches!(
-                self.phases.get(&identity.nonce),
-                Some(PendingPhase::Deferred)
-            )
-    }
-
-    fn close_terminal(&mut self, identity: PendingIdentity) -> Result<(), HandlerError> {
-        debug_assert_eq!(identity.registry_id, self.registry_id);
-        debug_assert_eq!(identity.stage_id, self.stage_id);
-        match self.phases.get(&identity.nonce) {
-            Some(PendingPhase::Current) => {
-                self.phases.remove(&identity.nonce);
-                Ok(())
-            }
-            Some(PendingPhase::Deferred) => Err(protocol_fatal(
-                "sink returned a terminal primary outcome after deferring the input",
-            )),
-            None => Err(protocol_fatal(
-                "sink terminal input capability was already closed",
-            )),
-        }
-    }
-
     fn abandon(&mut self, identity: PendingIdentity) {
         if identity.registry_id == self.registry_id && identity.stage_id == self.stage_id {
             self.phases.remove(&identity.nonce);
         }
     }
 
-    fn settle(&mut self, pending: PendingSinkInput) -> Result<EventId, HandlerError> {
-        let identity = pending.identity;
+    fn validate_identity(&self, identity: PendingIdentity) -> Result<(), HandlerError> {
         if identity.stage_id != self.stage_id {
             return Err(protocol_fatal(format!(
                 "foreign sink settlement capability for stage {} submitted to stage {}",
@@ -208,20 +184,163 @@ impl PendingRegistry {
                 "stale sink settlement capability from another adapter instance",
             ));
         }
-        match self.phases.get(&identity.nonce) {
+        Ok(())
+    }
+
+    /// Validate the complete returned capability set before consuming any of
+    /// it, then remove the set as one registry mutation.
+    fn validate_write_batch(
+        &self,
+        current: PendingIdentity,
+        primary_is_buffered: bool,
+        settlements: &[PendingIdentity],
+    ) -> Result<(), HandlerError> {
+        self.validate_identity(current)?;
+        let expected_current = if primary_is_buffered {
+            PendingPhase::Deferred
+        } else {
+            PendingPhase::Current
+        };
+        match self.phases.get(&current.nonce) {
+            Some(phase) if *phase == expected_current => {}
             Some(PendingPhase::Deferred) => {
-                self.phases.remove(&identity.nonce);
+                return Err(protocol_fatal(
+                    "sink returned a terminal primary outcome after deferring the input",
+                ));
             }
             Some(PendingPhase::Current) => {
-                return Err(protocol_fatal("non-deferred sink settlement capability"));
+                return Err(protocol_fatal(
+                    "sink returned a buffered primary outcome without deferring the input",
+                ));
             }
             None => {
                 return Err(protocol_fatal(
-                    "duplicate, stale, or closed sink settlement capability",
+                    "sink primary input capability was already closed",
                 ));
             }
         }
+
+        let mut unique = HashSet::with_capacity(settlements.len());
+        for identity in settlements {
+            self.validate_identity(*identity)?;
+            if !unique.insert(identity.nonce) {
+                return Err(protocol_fatal(
+                    "duplicate sink settlement capability in one report",
+                ));
+            }
+            match self.phases.get(&identity.nonce) {
+                Some(PendingPhase::Deferred) => {}
+                Some(PendingPhase::Current) => {
+                    return Err(protocol_fatal("non-deferred sink settlement capability"));
+                }
+                None => {
+                    return Err(protocol_fatal(
+                        "duplicate, stale, or closed sink settlement capability",
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn commit_write_batch(
+        &mut self,
+        current: PendingIdentity,
+        primary_is_buffered: bool,
+        settlements: &[PendingIdentity],
+    ) -> Result<(), HandlerError> {
+        self.validate_write_batch(current, primary_is_buffered, settlements)?;
+        if !primary_is_buffered {
+            self.phases.remove(&current.nonce);
+        }
+        for identity in settlements {
+            self.phases.remove(&identity.nonce);
+        }
+        Ok(())
+    }
+
+    fn validate_lifecycle_batch(
+        &self,
+        settlements: &[PendingIdentity],
+    ) -> Result<(), HandlerError> {
+        let mut unique = HashSet::with_capacity(settlements.len());
+        for identity in settlements {
+            self.validate_identity(*identity)?;
+            if !unique.insert(identity.nonce) {
+                return Err(protocol_fatal(
+                    "duplicate sink settlement capability in one lifecycle report",
+                ));
+            }
+            match self.phases.get(&identity.nonce) {
+                Some(PendingPhase::Deferred) => {}
+                Some(PendingPhase::Current) => {
+                    return Err(protocol_fatal("non-deferred sink settlement capability"));
+                }
+                None => {
+                    return Err(protocol_fatal(
+                        "duplicate, stale, or closed sink settlement capability",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn commit_lifecycle_batch(
+        &mut self,
+        settlements: &[PendingIdentity],
+    ) -> Result<(), HandlerError> {
+        self.validate_lifecycle_batch(settlements)?;
+        for identity in settlements {
+            self.phases.remove(&identity.nonce);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn settle(&mut self, pending: PendingSinkInput) -> Result<EventId, HandlerError> {
+        let identity = pending.identity;
+        self.commit_lifecycle_batch(&[identity])?;
         Ok(pending.parent_event_id)
+    }
+
+    #[cfg(test)]
+    fn is_outstanding(&self, identity: PendingIdentity) -> bool {
+        identity.registry_id == self.registry_id
+            && identity.stage_id == self.stage_id
+            && matches!(
+                self.phases.get(&identity.nonce),
+                Some(PendingPhase::Deferred)
+            )
+    }
+}
+
+struct WriteSettlementCommit {
+    registry: Arc<Mutex<PendingRegistry>>,
+    current: PendingIdentity,
+    primary_is_buffered: bool,
+    settlements: Vec<PendingIdentity>,
+}
+
+impl SinkSettlementCommit for WriteSettlementCommit {
+    fn commit(self: Box<Self>) -> Result<(), HandlerError> {
+        lock_pending_registry(&self.registry).commit_write_batch(
+            self.current,
+            self.primary_is_buffered,
+            &self.settlements,
+        )
+    }
+}
+
+struct LifecycleSettlementCommit {
+    registry: Arc<Mutex<PendingRegistry>>,
+    settlements: Vec<PendingIdentity>,
+}
+
+impl SinkSettlementCommit for LifecycleSettlementCommit {
+    fn commit(self: Box<Self>) -> Result<(), HandlerError> {
+        lock_pending_registry(&self.registry).commit_lifecycle_batch(&self.settlements)
     }
 }
 
@@ -570,6 +689,18 @@ impl SinkWriterLifecycleReport {
 }
 
 /// Mutable, stage-local execution role created by a [`SinkConnector`](super::connector::SinkConnector).
+///
+/// The runtime invokes `write` once for each admitted physical treatment. Policy
+/// code can reject before that call and can observe its retained result afterwards,
+/// but cannot receive the writer future or replace the result. A successful report
+/// is validated as one atomic capability set before any capability is consumed.
+/// The runtime then journals its primary receipt and commit receipts in report order.
+///
+/// `flush` runs after normal input exhaustion and may settle retained work. `drain`
+/// runs during graceful cleanup. Their complete receipts precede contract
+/// verification and completion. Once a write is poisoned, or a lifecycle operation
+/// fails, the runtime performs drop-only teardown and calls neither lifecycle method
+/// again.
 #[async_trait]
 #[diagnostic::on_unimplemented(
     message = "this sink writer does not witness its connector input",
@@ -580,19 +711,15 @@ pub trait SinkWriter: Send + Sync + 'static {
     type Input: TypedPayload + Send + Sync + 'static;
 
     /// Write one decoded data input and return typed delivery evidence.
-    async fn write(
-        &mut self,
-        input: Self::Input,
-        context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError>;
+    async fn write(&mut self, input: Self::Input, context: SinkWriteContext) -> SinkWriteResult;
 
     /// Flush buffered work and return lifecycle evidence and commit receipts.
-    async fn flush(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
+    async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
         Ok(SinkWriterLifecycleReport::default())
     }
 
     /// Drain outstanding work before shutdown.
-    async fn drain(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
+    async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
         self.flush().await
     }
 }
@@ -665,55 +792,72 @@ impl<W> SinkWriterAdapter<W> {
         current: PendingIdentity,
         report: SinkWriteReport,
     ) -> Result<SinkConsumeReport, HandlerError> {
-        let primary = match report.primary {
-            SinkPrimaryOutcome::Terminal(outcome) => {
-                lock_pending_registry(&self.registry).close_terminal(current)?;
-                self.lower_terminal(outcome)?
-            }
+        let SinkWriteReport {
+            primary,
+            commit_receipts: returned_receipts,
+        } = report;
+        let primary_is_buffered = matches!(primary, SinkPrimaryOutcome::Buffered(_));
+        let primary = match primary {
+            SinkPrimaryOutcome::Terminal(outcome) => self.lower_terminal(outcome)?,
             SinkPrimaryOutcome::Buffered(outcome) => {
-                if !lock_pending_registry(&self.registry).is_outstanding(current) {
-                    return Err(protocol_fatal(
-                        "sink returned a buffered primary outcome without deferring the input",
-                    ));
-                }
                 self.resolve_method(outcome.payload, outcome.method_override)?
             }
         };
 
-        let mut commit_receipts = Vec::with_capacity(report.commit_receipts.len());
-        for receipt in report.commit_receipts {
-            let parent_event_id = lock_pending_registry(&self.registry).settle(receipt.pending)?;
+        let mut commit_receipts = Vec::with_capacity(returned_receipts.len());
+        let mut settlement_ids = Vec::with_capacity(returned_receipts.len());
+        for receipt in returned_receipts {
+            settlement_ids.push(receipt.pending.identity);
             commit_receipts.push(CommitReceipt {
-                parent_event_id,
+                parent_event_id: receipt.pending.parent_event_id,
                 payload: self.lower_terminal(receipt.outcome)?,
             });
         }
+        lock_pending_registry(&self.registry).validate_write_batch(
+            current,
+            primary_is_buffered,
+            &settlement_ids,
+        )?;
 
-        Ok(SinkConsumeReport {
-            primary,
-            commit_receipts,
-        })
+        let mut report = SinkConsumeReport::new(primary);
+        report.commit_receipts = commit_receipts;
+        Ok(report.with_settlement(Box::new(WriteSettlementCommit {
+            registry: Arc::clone(&self.registry),
+            current,
+            primary_is_buffered,
+            settlements: settlement_ids,
+        })))
     }
 
     fn lower_lifecycle_report(
         &self,
         report: SinkWriterLifecycleReport,
     ) -> Result<SinkLifecycleReport, HandlerError> {
-        let mut commit_receipts = Vec::with_capacity(report.commit_receipts.len());
-        for receipt in report.commit_receipts {
-            let parent_event_id = lock_pending_registry(&self.registry).settle(receipt.pending)?;
+        let SinkWriterLifecycleReport {
+            audit_outcome,
+            commit_receipts: returned_receipts,
+        } = report;
+        let audit_payload = audit_outcome
+            .map(|outcome| self.resolve_method(outcome.payload, outcome.method_override))
+            .transpose()?;
+        let mut commit_receipts = Vec::with_capacity(returned_receipts.len());
+        let mut settlement_ids = Vec::with_capacity(returned_receipts.len());
+        for receipt in returned_receipts {
+            settlement_ids.push(receipt.pending.identity);
             commit_receipts.push(CommitReceipt {
-                parent_event_id,
+                parent_event_id: receipt.pending.parent_event_id,
                 payload: self.lower_terminal(receipt.outcome)?,
             });
         }
-        Ok(SinkLifecycleReport {
-            audit_payload: report
-                .audit_outcome
-                .map(|outcome| self.resolve_method(outcome.payload, outcome.method_override))
-                .transpose()?,
-            commit_receipts,
-        })
+        lock_pending_registry(&self.registry).validate_lifecycle_batch(&settlement_ids)?;
+        Ok(
+            SinkLifecycleReport::new(audit_payload, commit_receipts).with_settlement(Box::new(
+                LifecycleSettlementCommit {
+                    registry: Arc::clone(&self.registry),
+                    settlements: settlement_ids,
+                },
+            )),
+        )
     }
 
     async fn consume_report_in_scope(
@@ -762,7 +906,11 @@ impl<W> SinkWriterAdapter<W> {
         };
         let mut guard = CurrentPendingGuard::new(Arc::clone(&self.registry), current);
 
-        let report = self.writer.write(input, context).await?;
+        let report = self
+            .writer
+            .write(input, context)
+            .await
+            .map_err(|failure| HandlerError::SinkWrite(Box::new(failure)))?;
         let lowered = self.lower_write_report(current, report)?;
         guard.complete();
         Ok(lowered)
@@ -799,7 +947,11 @@ where
     }
 
     async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
-        let report = self.writer.flush().await?;
+        let report = self
+            .writer
+            .flush()
+            .await
+            .map_err(|error| HandlerError::SinkOperation(Box::new(error)))?;
         self.lower_lifecycle_report(report)
     }
 
@@ -808,7 +960,11 @@ where
     }
 
     async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
-        let report = self.writer.drain().await?;
+        let report = self
+            .writer
+            .drain()
+            .await
+            .map_err(|error| HandlerError::SinkOperation(Box::new(error)))?;
         self.lower_lifecycle_report(report)
     }
 }
@@ -840,11 +996,7 @@ mod tests {
     impl SinkWriter for Buffered {
         type Input = Input;
 
-        async fn write(
-            &mut self,
-            _input: Input,
-            context: SinkWriteContext,
-        ) -> Result<SinkWriteReport, HandlerError> {
+        async fn write(&mut self, _input: Input, context: SinkWriteContext) -> SinkWriteResult {
             self.pending
                 .lock()
                 .expect("pending lock poisoned")
@@ -854,7 +1006,7 @@ mod tests {
             ))
         }
 
-        async fn flush(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
+        async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
             let receipts = self
                 .pending
                 .lock()
@@ -886,11 +1038,7 @@ mod tests {
     impl SinkWriter for UsesConnectorMethod {
         type Input = Input;
 
-        async fn write(
-            &mut self,
-            _input: Input,
-            _context: SinkWriteContext,
-        ) -> Result<SinkWriteReport, HandlerError> {
+        async fn write(&mut self, _input: Input, _context: SinkWriteContext) -> SinkWriteResult {
             Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success(
                 Some(7),
             )))
@@ -970,7 +1118,7 @@ mod tests {
                 &mut self,
                 _input: Input,
                 _context: SinkWriteContext,
-            ) -> Result<SinkWriteReport, HandlerError> {
+            ) -> SinkWriteResult {
                 Ok(SinkWriteReport::buffered(
                     SinkBufferedOutcome::accepted_via(DeliveryMethod::Noop, None),
                 ))
@@ -994,11 +1142,7 @@ mod tests {
         impl SinkWriter for Invalid {
             type Input = Input;
 
-            async fn write(
-                &mut self,
-                _input: Input,
-                context: SinkWriteContext,
-            ) -> Result<SinkWriteReport, HandlerError> {
+            async fn write(&mut self, _input: Input, context: SinkWriteContext) -> SinkWriteResult {
                 drop(context.defer());
                 Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
                     DeliveryMethod::Noop,
@@ -1026,11 +1170,7 @@ mod tests {
         impl SinkWriter for PanicsAfterDeferral {
             type Input = Input;
 
-            async fn write(
-                &mut self,
-                _input: Input,
-                context: SinkWriteContext,
-            ) -> Result<SinkWriteReport, HandlerError> {
+            async fn write(&mut self, _input: Input, context: SinkWriteContext) -> SinkWriteResult {
                 self.pending
                     .lock()
                     .expect("pending lock poisoned")
@@ -1038,7 +1178,7 @@ mod tests {
                 panic!("intentional typed sink panic after deferral");
             }
 
-            async fn flush(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
+            async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
                 let receipts = self
                     .pending
                     .lock()
@@ -1084,18 +1224,17 @@ mod tests {
     impl SinkWriter for RetainsContext {
         type Input = Input;
 
-        async fn write(
-            &mut self,
-            _input: Input,
-            context: SinkWriteContext,
-        ) -> Result<SinkWriteReport, HandlerError> {
+        async fn write(&mut self, _input: Input, context: SinkWriteContext) -> SinkWriteResult {
             *self
                 .retained
                 .lock()
                 .expect("retained context lock poisoned") = Some(context);
             if self.fail_consume {
-                Err(HandlerError::Other(
-                    "intentional consume failure after retaining context".to_string(),
+                Err(super::super::error::SinkWriteFailure::current_only(
+                    obzenflow_core::event::SinkWritePhase::Execute,
+                    super::super::error::SinkOperationError::other(
+                        "intentional consume failure after retaining context",
+                    ),
                 ))
             } else {
                 Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
@@ -1105,7 +1244,7 @@ mod tests {
             }
         }
 
-        async fn flush(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
+        async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
             let context = self
                 .retained
                 .lock()
@@ -1133,10 +1272,13 @@ mod tests {
             StageId::new(),
         );
 
-        adapter
+        let mut report = adapter
             .consume_report(event(1))
             .await
             .expect("terminal consume succeeds");
+        report
+            .commit_settlements()
+            .expect("runtime commits validated terminal authority");
         let error = adapter
             .flush_report()
             .await
@@ -1158,7 +1300,7 @@ mod tests {
             .consume_report(event(1))
             .await
             .expect_err("consume intentionally fails");
-        assert!(matches!(error, HandlerError::Other(_)));
+        assert!(matches!(error, HandlerError::SinkWrite(_)));
 
         let error = adapter
             .flush_report()
@@ -1231,11 +1373,7 @@ mod tests {
         impl SinkWriter for ReverseSettlement {
             type Input = Input;
 
-            async fn write(
-                &mut self,
-                _input: Input,
-                context: SinkWriteContext,
-            ) -> Result<SinkWriteReport, HandlerError> {
+            async fn write(&mut self, _input: Input, context: SinkWriteContext) -> SinkWriteResult {
                 let mut pending = self.pending.lock().expect("pending lock poisoned");
                 pending.push(context.defer());
                 let receipts = if pending.len() == 2 {
@@ -1280,6 +1418,83 @@ mod tests {
         assert_eq!(report.commit_receipts.len(), 2);
         assert_eq!(report.commit_receipts[0].parent_event_id, second.id);
         assert_eq!(report.commit_receipts[1].parent_event_id, first.id);
+    }
+
+    #[tokio::test]
+    async fn settlement_authority_is_delayed_and_revalidation_is_batch_atomic() {
+        #[derive(Debug)]
+        struct TwoInputBatch {
+            first: Option<PendingSinkInput>,
+        }
+
+        #[async_trait]
+        impl SinkWriter for TwoInputBatch {
+            type Input = Input;
+
+            async fn write(&mut self, _input: Input, context: SinkWriteContext) -> SinkWriteResult {
+                let current = context.defer();
+                let Some(first) = self.first.take() else {
+                    self.first = Some(current);
+                    return Ok(SinkWriteReport::buffered(
+                        SinkBufferedOutcome::accepted_via(DeliveryMethod::Noop, None),
+                    ));
+                };
+                Ok(SinkWriteReport::buffered(SinkBufferedOutcome::accepted_via(
+                    DeliveryMethod::Noop,
+                    None,
+                ))
+                .with_commit_receipts([
+                    SinkCommitReceipt::new(
+                        first,
+                        SinkTerminalOutcome::success_via(DeliveryMethod::Noop, None),
+                    ),
+                    SinkCommitReceipt::new(
+                        current,
+                        SinkTerminalOutcome::success_via(DeliveryMethod::Noop, None),
+                    ),
+                ]))
+            }
+        }
+
+        let mut adapter = SinkWriterAdapter::new(TwoInputBatch { first: None }, StageId::new());
+        let mut first_report = adapter
+            .consume_report(event(1))
+            .await
+            .expect("first input is accepted for buffering");
+        first_report
+            .commit_settlements()
+            .expect("buffered primary commits its validation token");
+
+        let mut batch_report = adapter
+            .consume_report(event(2))
+            .await
+            .expect("the complete two-input settlement validates");
+        let identities = {
+            let registry = lock_pending_registry(&adapter.registry);
+            assert_eq!(
+                registry.phases.len(),
+                2,
+                "lowering must not consume authority"
+            );
+            let mut identities = registry.phases.keys().copied().collect::<Vec<_>>();
+            identities.sort_unstable();
+            identities
+        };
+
+        lock_pending_registry(&adapter.registry)
+            .phases
+            .remove(&identities[1]);
+        let error = batch_report
+            .commit_settlements()
+            .expect_err("late invalidation rejects the whole affine commit token");
+        assert!(matches!(error, HandlerError::Fatal(_)));
+
+        let registry = lock_pending_registry(&adapter.registry);
+        assert_eq!(
+            registry.phases.get(&identities[0]),
+            Some(&PendingPhase::Deferred),
+            "a bad final capability must not consume an earlier valid capability"
+        );
     }
 
     #[tokio::test]

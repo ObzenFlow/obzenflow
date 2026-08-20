@@ -66,7 +66,7 @@ impl InlineSink for EventCounterSink {
         &mut self,
         _event: StreamItem,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.count.fetch_add(1, Ordering::Relaxed);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Count".to_string()),
@@ -296,7 +296,7 @@ impl InlineSink for SumSink {
         &mut self,
         event: NumberItem,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.sum.fetch_add(event.value, Ordering::Relaxed);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Sum".to_string()),

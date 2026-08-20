@@ -11,11 +11,15 @@
 
 use crate::middleware::MiddlewareContext;
 use async_trait::async_trait;
+use obzenflow_core::event::payloads::observability_payload::{
+    MiddlewareLifecycle, ObservabilityPayload,
+};
+use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use obzenflow_runtime::stages::common::handlers::SinkConsumeReport;
 use obzenflow_runtime::stages::sink::journal_sink::{
-    SinkDeliveryAttemptOutcome, SinkDeliveryBoundary, SinkDeliveryBoundaryOutcome,
-    SinkDeliveryBoundaryReport, SinkDeliveryExecutor, SinkDeliveryRejection,
+    SinkDeliveryAdmission, SinkDeliveryAttemptOutcome, SinkDeliveryBoundary, SinkDeliveryPermit,
+    SinkDeliveryRejection, SinkPolicyEvidence, SinkPolicyEvidenceBatch, SinkPolicyEvidenceError,
 };
 use std::sync::Arc;
 
@@ -51,6 +55,7 @@ pub enum SinkDeliveryPolicyOutcome<'a> {
 /// boundary report and never crosses into the runtime supervisor.
 pub struct SinkPolicyCtx {
     middleware_ctx: MiddlewareContext,
+    evidence: SinkPolicyEvidenceBatch,
 }
 
 impl Default for SinkPolicyCtx {
@@ -65,15 +70,46 @@ impl SinkPolicyCtx {
             middleware_ctx: MiddlewareContext::with_scope(
                 MiddlewareExecutionScope::LiveSinkDeliveryBoundary,
             ),
+            evidence: SinkPolicyEvidenceBatch::new(),
         }
     }
 
-    pub fn write_control_event(&mut self, event: ChainEvent) {
+    pub fn try_push_evidence(
+        &mut self,
+        evidence: SinkPolicyEvidence,
+    ) -> Result<(), SinkPolicyEvidenceError> {
+        self.evidence.try_push(evidence)
+    }
+
+    pub(crate) fn write_control_event(&mut self, event: ChainEvent) {
         self.middleware_ctx.write_control_event(event);
     }
 
-    pub fn take_control_events(&mut self) -> Vec<ChainEvent> {
-        self.middleware_ctx.take_control_events()
+    fn capture_internal_events(&mut self) {
+        for event in self.middleware_ctx.take_control_events() {
+            let evidence = match event.content {
+                ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    MiddlewareLifecycle::CircuitBreaker(event),
+                )) => SinkPolicyEvidence::circuit_breaker(event),
+                ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    MiddlewareLifecycle::RateLimiter(event),
+                )) => SinkPolicyEvidence::rate_limiter(event),
+                _ => {
+                    tracing::warn!(
+                        "discarding event outside the closed sink-policy evidence vocabulary"
+                    );
+                    continue;
+                }
+            };
+            match evidence.and_then(|evidence| self.evidence.try_push(evidence)) {
+                Ok(()) => {}
+                Err(error) => tracing::warn!(%error, "discarding invalid sink-policy evidence"),
+            }
+        }
+    }
+
+    fn take_evidence(&mut self) -> SinkPolicyEvidenceBatch {
+        std::mem::take(&mut self.evidence)
     }
 
     pub(crate) fn middleware_context_mut(&mut self) -> &mut MiddlewareContext {
@@ -114,25 +150,42 @@ impl PerSinkDeliveryPolicyBoundary {
 
 type SinkAdmitGuard = Option<Box<dyn SinkAdmissionGuard>>;
 
+struct PerSinkDeliveryPermit {
+    admitted: Vec<(Arc<dyn SinkPolicy>, SinkAdmitGuard)>,
+    ctx: SinkPolicyCtx,
+}
+
+impl SinkDeliveryPermit for PerSinkDeliveryPermit {
+    fn observe(
+        mut self: Box<Self>,
+        outcome: &SinkDeliveryAttemptOutcome,
+    ) -> SinkPolicyEvidenceBatch {
+        let policy_outcome = match outcome {
+            SinkDeliveryAttemptOutcome::Delivered(Ok(report)) => {
+                SinkDeliveryPolicyOutcome::Delivered { report }
+            }
+            SinkDeliveryAttemptOutcome::Delivered(Err(_))
+            | SinkDeliveryAttemptOutcome::Panicked { .. } => SinkDeliveryPolicyOutcome::Failed,
+        };
+        for (policy, _) in self.admitted.iter().rev() {
+            policy.observe(&policy_outcome, &mut self.ctx);
+            self.ctx.capture_internal_events();
+        }
+        self.ctx.take_evidence()
+    }
+}
+
 #[async_trait]
 impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
-    async fn around_sink_delivery(
-        &self,
-        execute: &mut dyn SinkDeliveryExecutor,
-    ) -> SinkDeliveryBoundaryReport {
-        if self.policies.is_empty() {
-            return SinkDeliveryBoundaryReport {
-                outcome: SinkDeliveryBoundaryOutcome::Attempted(execute.attempt().await),
-                control_events: Vec::new(),
-            };
-        }
-
+    async fn admit_sink_delivery(&self) -> SinkDeliveryAdmission {
         let mut ctx = SinkPolicyCtx::new();
-        let mut admitted: Vec<(&Arc<dyn SinkPolicy>, SinkAdmitGuard)> = Vec::new();
+        let mut admitted: Vec<(Arc<dyn SinkPolicy>, SinkAdmitGuard)> = Vec::new();
 
         for policy in self.policies.iter() {
-            match policy.admit(&mut ctx).await {
-                SinkAdmission::Admit(guard) => admitted.push((policy, guard)),
+            let admission = policy.admit(&mut ctx).await;
+            ctx.capture_internal_events();
+            match admission {
+                SinkAdmission::Admit(guard) => admitted.push((Arc::clone(policy), guard)),
                 SinkAdmission::Reject { reason } => {
                     let outcome = SinkDeliveryPolicyOutcome::RejectedBy {
                         policy: policy.label(),
@@ -140,34 +193,17 @@ impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
                     };
                     for (prior, _) in admitted.iter().rev() {
                         prior.observe(&outcome, &mut ctx);
+                        ctx.capture_internal_events();
                     }
-                    return SinkDeliveryBoundaryReport {
-                        outcome: SinkDeliveryBoundaryOutcome::Rejected(SinkDeliveryRejection {
-                            policy: policy.label().to_string(),
-                            reason,
-                        }),
-                        control_events: ctx.take_control_events(),
+                    return SinkDeliveryAdmission::Rejected {
+                        rejection: SinkDeliveryRejection::new(policy.label(), reason),
+                        evidence: ctx.take_evidence(),
                     };
                 }
             }
         }
 
-        let attempt_outcome = execute.attempt().await;
-        let policy_outcome = match &attempt_outcome {
-            SinkDeliveryAttemptOutcome::Delivered(Ok(report)) => {
-                SinkDeliveryPolicyOutcome::Delivered { report }
-            }
-            SinkDeliveryAttemptOutcome::Delivered(Err(_))
-            | SinkDeliveryAttemptOutcome::Panicked { .. } => SinkDeliveryPolicyOutcome::Failed,
-        };
-        for (policy, _) in admitted.iter().rev() {
-            policy.observe(&policy_outcome, &mut ctx);
-        }
-
-        SinkDeliveryBoundaryReport {
-            outcome: SinkDeliveryBoundaryOutcome::Attempted(attempt_outcome),
-            control_events: ctx.take_control_events(),
-        }
+        SinkDeliveryAdmission::Admitted(Box::new(PerSinkDeliveryPermit { admitted, ctx }))
     }
 }
 
@@ -200,16 +236,6 @@ mod tests {
         }
 
         fn observe(&self, _outcome: &SinkDeliveryPolicyOutcome<'_>, _ctx: &mut SinkPolicyCtx) {}
-    }
-
-    /// An executor that must never run when a policy rejects before delivery.
-    struct PanicExecutor;
-
-    #[async_trait]
-    impl SinkDeliveryExecutor for PanicExecutor {
-        async fn attempt(&mut self) -> SinkDeliveryAttemptOutcome {
-            panic!("executor must not run when a sink policy rejects");
-        }
     }
 
     /// Override-key family marker for the third-party test factory.
@@ -302,13 +328,12 @@ mod tests {
             .expect("expected a SinkDelivery attachment from the third-party factory");
 
         let boundary = PerSinkDeliveryPolicyBoundary::new(vec![policy]);
-        let mut executor = PanicExecutor;
-        let report = boundary.around_sink_delivery(&mut executor).await;
+        let admission = boundary.admit_sink_delivery().await;
 
-        match report.outcome {
-            SinkDeliveryBoundaryOutcome::Rejected(rejection) => {
-                assert_eq!(rejection.policy, "third_party_reject");
-                assert_eq!(rejection.reason, "third party policy");
+        match admission {
+            SinkDeliveryAdmission::Rejected { rejection, .. } => {
+                assert_eq!(rejection.policy(), "third_party_reject");
+                assert_eq!(rejection.reason(), "third party policy");
             }
             _ => panic!("expected the third-party policy to reject delivery"),
         }

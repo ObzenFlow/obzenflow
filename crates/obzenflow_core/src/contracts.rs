@@ -511,7 +511,6 @@ struct DeliveryState {
     success_count: u64,
     partial_count: u64,
     failed_count: u64,
-    failed_final_count: u64,
 
     /// Receipts whose immediate parent does not match any pending consumed event ID.
     ///
@@ -588,15 +587,10 @@ impl Contract for DeliveryContract {
                     .partial_count
                     .saturating_add(event.causality.parent_ids.len() as u64);
             }
-            DeliveryResult::Failed { final_attempt, .. } => {
+            DeliveryResult::Failed { .. } => {
                 st.failed_count = st
                     .failed_count
                     .saturating_add(event.causality.parent_ids.len() as u64);
-                if *final_attempt {
-                    st.failed_final_count = st
-                        .failed_final_count
-                        .saturating_add(event.causality.parent_ids.len() as u64);
-                }
             }
         }
     }
@@ -638,7 +632,6 @@ impl Contract for DeliveryContract {
                     "success_count": st.success_count,
                     "partial_count": st.partial_count,
                     "failed_count": st.failed_count,
-                    "failed_final_count": st.failed_final_count,
                 }),
             })
         } else {
@@ -1009,12 +1002,7 @@ mod tests {
         let parent_id = consumed.id;
         contract.on_read(&consumed, &mut read_ctx);
 
-        let receipt_payload = DeliveryPayload::failed(
-            DeliveryMethod::Noop,
-            "sink_error",
-            "boom",
-            /* final_attempt */ true,
-        );
+        let receipt_payload = DeliveryPayload::failed(DeliveryMethod::Noop, "sink_error", "boom");
         let receipt =
             ChainEventFactory::delivery_event(WriterId::from(downstream), receipt_payload)
                 .with_causality(CausalityContext::with_parent(parent_id));

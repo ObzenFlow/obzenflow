@@ -1,0 +1,16 @@
+error[E0308]: mismatched types
+  --> tests/compile_fail/sink_operation_authority/poisoned_framework_variant.rs:13:9
+   |
+11 |       let _ = SinkWriteFailure::poisoned(
+   |               -------------------------- arguments to this function are incorrect
+12 |           SinkWritePhase::Commit,
+13 | /         HandlerError::SinkOperation(Box::new(SinkOperationError::remote(
+14 | |             "connector-forged framework wrapper",
+15 | |         ))),
+   | |___________^ expected `SinkOperationError`, found `HandlerError`
+   |
+note: associated function defined here
+  --> crates/obzenflow_runtime/src/stages/common/handlers/sink/error.rs
+   |
+   |     pub fn poisoned(phase: SinkWritePhase, error: SinkOperationError) -> Self {
+   |            ^^^^^^^^

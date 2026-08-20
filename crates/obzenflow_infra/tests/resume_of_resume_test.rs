@@ -138,7 +138,7 @@ impl InlineSink for CountingSink {
         &mut self,
         _input: Doubled,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.delivered.fetch_add(1, Ordering::SeqCst);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Noop,

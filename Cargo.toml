@@ -92,6 +92,7 @@ sysinfo = "0.29"
 
 # I/O and formats
 csv = "1"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
 
 # Security / hashing
 crc32fast = "1.3"
@@ -157,6 +158,7 @@ csv = { workspace = true }
 console = ["obzenflow_infra/console"]
 http-pull = ["obzenflow_infra/reqwest-client"]
 ai = ["obzenflow_infra/ai-rig", "obzenflow_infra/ai-tiktoken"]
+postgres = ["obzenflow_adapters/postgres"]
 test-support = [
     "obzenflow_runtime/test-support",
     "obzenflow_dsl/test-support",
@@ -239,6 +241,11 @@ required-features = ["ai"]
 name = "multi_source_ingest_demo"
 path = "examples/multi_source_ingest_demo/main.rs"
 
+[[example]]
+name = "postgres_sink_payments"
+path = "examples/postgres_sink_payments.rs"
+required-features = ["postgres"]
+
 [[test]]
 name = "stateful_metrics_integration_test"
 path = "tests/stateful_metrics_integration_test.rs"
@@ -318,3 +325,18 @@ required-features = ["test-support"]
 name = "lineage_policy_flow_test"
 path = "tests/lineage_policy_flow_test.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "sink_conformance_authority_compile_fail_tests"
+path = "tests/sink_conformance_authority_compile_fail_tests.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "public_sink_author_fixture_test"
+path = "tests/public_sink_author_fixture_test.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "postgres_sink_application_conformance_test"
+path = "tests/postgres_sink_application_conformance_test.rs"
+required-features = ["postgres", "test-support"]

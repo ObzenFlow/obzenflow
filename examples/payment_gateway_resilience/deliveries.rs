@@ -8,7 +8,6 @@ use super::console;
 use super::domain::PaymentAuthorized;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::observer::{SinkDeliveryObserver, SinkDeliveryObserverContext};
 use obzenflow_runtime::stages::sink::{
     InlineSink, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
@@ -26,7 +25,7 @@ impl InlineSink for ShippingHandoff {
         &mut self,
         authorized: PaymentAuthorized,
         context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         console::send_to_shipping(authorized, context.delivery().provenance());
         Ok(SinkWriteReport::terminal(
             SinkTerminalOutcome::success_via(

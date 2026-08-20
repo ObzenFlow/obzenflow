@@ -134,7 +134,7 @@ impl InlineSink for CollectSink {
         &mut self,
         event: Aggregate,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.events
             .lock()
             .expect("collector lock")

@@ -1,5 +1,5 @@
 {
-  "manifest_version": "2.0",
+  "manifest_version": "3.0",
   "journal_format_version": 2,
   "obzenflow_version": "0.1.0",
   "flow_id": "flow_01J00000000000000000000000",

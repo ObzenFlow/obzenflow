@@ -272,7 +272,7 @@ impl InlineSink for DoneCounterSink {
         &mut self,
         event: SeedEvent,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         if event.kind == KIND_DONE {
             self.done_events.fetch_add(1, Ordering::Relaxed);
         }

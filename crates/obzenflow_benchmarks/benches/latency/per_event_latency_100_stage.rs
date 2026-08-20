@@ -137,7 +137,7 @@ impl InlineSink for LatencySink {
         &mut self,
         event: BenchEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.received.fetch_add(1, Ordering::Relaxed);
         if event.event_id >= self.warmup_events {
             let now = SystemTime::now()

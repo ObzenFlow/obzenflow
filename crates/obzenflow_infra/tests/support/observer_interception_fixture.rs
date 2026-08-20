@@ -225,7 +225,7 @@ impl InlineSink for ShippingHandoff {
         &mut self,
         order: ShippingReady,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.writes.fetch_add(1, Ordering::SeqCst);
         tracing::info!(order_id = order.order_id, "shipping accepted order");
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(

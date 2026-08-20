@@ -8,6 +8,7 @@ pub mod config;
 pub mod inspect;
 pub mod journal;
 pub mod log_record;
+pub(crate) mod manifest_gate;
 pub mod reader;
 pub mod replay_archive;
 pub(crate) mod scanner;

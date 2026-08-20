@@ -654,7 +654,7 @@ impl InlineSink for ReservationFailureSink {
         &mut self,
         failure: ReservationFailed,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.failures
             .lock()
             .expect("reservation failures lock poisoned")
@@ -1043,7 +1043,7 @@ impl InlineSink for CollectSink {
         &mut self,
         output: ReplayOutput,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.outputs
             .lock()
             .expect("outputs lock poisoned")

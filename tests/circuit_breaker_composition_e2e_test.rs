@@ -249,7 +249,7 @@ impl InlineSink for CollectSink {
         &mut self,
         output: CompOutput,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.outputs
             .lock()
             .expect("outputs lock poisoned")

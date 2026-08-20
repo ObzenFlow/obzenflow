@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 pub const RUN_MANIFEST_FILENAME: &str = "run_manifest.json";
-pub const RUN_MANIFEST_VERSION: &str = "2.0";
+pub const RUN_MANIFEST_VERSION: &str = "3.0";
 
 /// On-disk journal record format version (FLOWIP-120q). Bumped only when the
 /// framed record byte format changes. Readers gate on this in the same raw-JSON
@@ -42,12 +42,14 @@ pub struct RunManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay: Option<RunManifestReplayConfig>,
     /// Present when this run is a resume of a recorded archive (FLOWIP-120n).
+    /// Omission is the current schema's representation of a non-resume run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<RunManifestResumeConfig>,
     pub stages: HashMap<String, RunManifestStage>,
     pub system_journal_file: String,
     /// FLOWIP-010 §6a: redacted effective config with provenance, recorded
-    /// at flow build. Optional + default so pre-010 archives deserialize.
+    /// at flow build. Omission is the current schema's representation of no
+    /// effective-config evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_config: Option<crate::config::EffectiveConfigEvidence>,
     /// Versioned runtime contracts required to interpret this archive.

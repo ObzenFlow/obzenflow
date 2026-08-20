@@ -341,7 +341,7 @@ impl InlineSink for CollectBrief {
         &mut self,
         output: DecisionBrief,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.outputs.lock().expect("brief output lock").push(output);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("CollectBrief".to_string()),

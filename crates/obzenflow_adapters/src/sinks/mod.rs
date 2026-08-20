@@ -6,6 +6,8 @@
 
 pub mod console;
 pub mod csv;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 
 pub use console::{
     ConsoleSink, DebugFormatter, Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination,

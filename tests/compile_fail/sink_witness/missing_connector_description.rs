@@ -26,7 +26,7 @@ impl SinkWriter for MissingDescriptionWriter {
         &mut self,
         _input: Self::Input,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(
             SinkTerminalOutcome::success_via(
                 obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
@@ -44,7 +44,7 @@ impl SinkConnector for MissingDescription {
     async fn open(
         &self,
         _context: SinkWriterInitContext,
-    ) -> Result<Self::Writer, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkOperationResult<Self::Writer> {
         Ok(MissingDescriptionWriter)
     }
 }

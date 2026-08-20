@@ -18,9 +18,8 @@ use obzenflow_adapters::middleware::{sink_delivery_observer, CircuitBreaker};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkDescription, SinkWriteContext, SinkWriteReport, TypedFiniteSourceHandler,
+    InlineSink, SinkDescription, SinkWriteContext, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::observer::{
     SinkDeliveryObserver, SinkDeliveryObserverContext, SinkDeliveryObserverOutcome,
@@ -96,9 +95,14 @@ impl InlineSink for AlwaysFailingSink {
         &mut self,
         _event: SinkBreakerEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(HandlerError::Remote("sink delivery failed".to_string()))
+        Err(
+            obzenflow_runtime::stages::sink::SinkWriteFailure::current_only(
+                obzenflow_runtime::stages::sink::SinkWritePhase::Execute,
+                obzenflow_runtime::stages::sink::SinkOperationError::remote("sink delivery failed"),
+            ),
+        )
     }
 }
 

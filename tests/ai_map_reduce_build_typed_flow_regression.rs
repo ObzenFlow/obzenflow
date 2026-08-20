@@ -274,7 +274,7 @@ where
         &mut self,
         _event: T,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Noop".to_string()),
             None,
@@ -306,7 +306,7 @@ impl InlineSink for CountingOutSink {
         &mut self,
         out: BuildOnlyOut,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.delivered.fetch_add(1, Ordering::SeqCst);
         self.total.store(out.total, Ordering::SeqCst);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(

@@ -433,7 +433,7 @@ mod tests {
             &mut self,
             _input: OutputEvent,
             _context: SinkWriteContext,
-        ) -> Result<SinkWriteReport, HandlerError> {
+        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
             Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
                 DeliveryMethod::Noop,
                 None,

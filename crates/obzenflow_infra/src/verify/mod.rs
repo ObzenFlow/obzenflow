@@ -403,7 +403,7 @@ mod tests {
     };
     use obzenflow_core::event::ChainEvent;
     use obzenflow_core::journal::run_manifest::{
-        RunManifest, RunManifestReplayConfig, RunManifestStage,
+        RunManifest, RunManifestReplayConfig, RunManifestStage, RUN_MANIFEST_VERSION,
     };
     use obzenflow_core::journal::ArchiveStatus;
     use obzenflow_core::{StageId, WriterId};
@@ -459,7 +459,7 @@ mod tests {
             );
         }
         RunManifest {
-            manifest_version: "2.0".to_string(),
+            manifest_version: RUN_MANIFEST_VERSION.to_string(),
             journal_format_version: obzenflow_core::journal::run_manifest::JOURNAL_FORMAT_VERSION,
             obzenflow_version: "0.1.2".to_string(),
             flow_id: flow_id.to_string(),

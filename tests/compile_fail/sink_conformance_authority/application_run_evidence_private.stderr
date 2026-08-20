@@ -1,0 +1,15 @@
+error[E0451]: fields `locator`, `eof_kinds`, `operation_failures`, `operation_failure_metrics` and `failure_chains` of struct `SinkRunEvidence` are private
+  --> tests/compile_fail/sink_conformance_authority/application_run_evidence_private.rs:10:9
+   |
+ 9 |     let _ = SinkRunEvidence {
+   |             --------------- in this type
+10 |         locator: CurrentRunLocator::new("forged-run".into()),
+   |         ^^^^^^^ private field
+11 |         eof_kinds: Vec::new(),
+   |         ^^^^^^^^^ private field
+12 |         operation_failures: Vec::new(),
+   |         ^^^^^^^^^^^^^^^^^^ private field
+13 |         operation_failure_metrics: Vec::new(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+14 |         failure_chains: Vec::new(),
+   |         ^^^^^^^^^^^^^^ private field

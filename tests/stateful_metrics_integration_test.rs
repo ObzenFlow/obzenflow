@@ -219,7 +219,7 @@ where
         &mut self,
         event: T,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.events.lock().unwrap().push(event);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(

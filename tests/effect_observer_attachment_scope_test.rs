@@ -163,7 +163,7 @@ impl InlineSink for CountingSink {
         &mut self,
         _event: Self::Input,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.deliveries.fetch_add(1, Ordering::SeqCst);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("effect-observer-scope-test".to_string()),

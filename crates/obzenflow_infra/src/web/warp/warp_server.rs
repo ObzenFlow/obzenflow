@@ -2895,6 +2895,7 @@ fn map_system_event_to_sse(
                     error,
                     recoverable,
                     metrics,
+                    ..
                 } => (
                     "stage_failed",
                     metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
@@ -4414,6 +4415,7 @@ fn map_stage_lifecycle_to_sse_snapshot(envelope: &SystemEventEnvelope) -> Option
             error,
             recoverable,
             metrics,
+            ..
         } => (
             "stage_failed",
             metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),

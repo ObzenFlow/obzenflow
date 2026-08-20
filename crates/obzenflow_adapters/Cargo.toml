@@ -24,10 +24,12 @@ anyhow = { workspace = true }
 csv = { workspace = true }
 http = { workspace = true }
 ring = { workspace = true }
+sqlx = { workspace = true, optional = true }
 
 [features]
 default = []
-test-support = []
+postgres = ["dep:sqlx"]
+test-support = ["obzenflow_runtime/test-support"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

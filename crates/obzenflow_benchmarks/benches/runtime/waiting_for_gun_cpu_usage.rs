@@ -18,7 +18,6 @@ use obzenflow_runtime::bootstrap::{
     install_bootstrap_config, BootstrapConfig, MetricsBootstrap, StartupMode,
 };
 use obzenflow_runtime::pipeline::PipelineState;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedFiniteSourceHandler,
@@ -83,7 +82,7 @@ impl InlineSink for NoopSink {
         &mut self,
         _event: BenchEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Noop,
             None,
