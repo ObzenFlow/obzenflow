@@ -11,7 +11,10 @@ use obzenflow_runtime::stages::transform::strategies::ai_chunking::generated_ai_
 use obzenflow_runtime::stages::transform::ChunkByBudgetBuilder;
 use support::{First, Input};
 
+struct Debug; // Stabilises opaque-bound diagnostics across feature sets.
+
 fn main() {
+    let _ = Debug;
     let planner = ChunkByBudgetBuilder::new()
         .items(|_input: &Input| vec!["one".to_string()])
         .render(|item: &String, _context| item.clone())
