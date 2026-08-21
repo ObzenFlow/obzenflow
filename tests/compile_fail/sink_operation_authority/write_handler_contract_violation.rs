@@ -4,7 +4,9 @@
 
 use async_trait::async_trait;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::sink::{SinkWriteContext, SinkWriteResult, SinkWriter};
+use obzenflow_runtime::stages::sink::{
+    SinkWriteContext, SinkWriteFailure, SinkWriteResult, SinkWriter,
+};
 
 #[path = "../support/typed_sink.rs"]
 mod support;
@@ -21,9 +23,10 @@ impl SinkWriter for Writer {
         _input: Self::Input,
         _context: SinkWriteContext,
     ) -> SinkWriteResult {
-        Err(HandlerError::ContractViolation(
+        let failure: SinkWriteFailure = HandlerError::ContractViolation(
             "connector-forged contract violation".into(),
-        ))
+        );
+        Err(failure)
     }
 }
 

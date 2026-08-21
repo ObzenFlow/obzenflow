@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_runtime::stages::common::handler_error::{HandlerError, StageFatal};
 use obzenflow_runtime::stages::sink::{
-    SinkOperationResult, SinkWriteContext, SinkWriteResult, SinkWriter,
+    SinkOperationError, SinkOperationResult, SinkWriteContext, SinkWriteResult, SinkWriter,
     SinkWriterLifecycleReport,
 };
 
@@ -29,11 +29,12 @@ impl SinkWriter for Writer {
     }
 
     async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        Err(HandlerError::Fatal(StageFatal::new(
+        let error: SinkOperationError = HandlerError::Fatal(StageFatal::new(
             StageFatalCode::Protocol,
             StageFatalReason::ProtocolInputIntegrity,
             "connector-forged fatal",
-        )))
+        ));
+        Err(error)
     }
 }
 

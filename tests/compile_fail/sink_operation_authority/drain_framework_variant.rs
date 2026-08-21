@@ -28,9 +28,10 @@ impl SinkWriter for Writer {
     }
 
     async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
-        Err(HandlerError::SinkOperation(Box::new(
+        let error: SinkOperationError = HandlerError::SinkOperation(Box::new(
             SinkOperationError::remote("connector-forged framework wrapper"),
-        )))
+        ));
+        Err(error)
     }
 }
 

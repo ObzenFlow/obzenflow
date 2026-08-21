@@ -17,7 +17,7 @@ use obzenflow_core::journal::{Journal, JournalError, JournalReader, RunManifest}
 use obzenflow_core::{
     AdmissionSeq, EventEnvelope, EventId, FlowId, JournalId, StageId, SystemId, TypedPayload,
 };
-use obzenflow_dsl::{flow, sink, source, FlowDefinition};
+use obzenflow_dsl::{async_source, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{ApplicationError, FlowApplication};
 use obzenflow_infra::journal::{disk_journals, DiskJournal, DiskJournalFactory};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
@@ -28,7 +28,9 @@ use obzenflow_runtime::stages::sink::{
     SinkOperationResult, SinkTerminalOutcome, SinkWriteContext, SinkWriteFailure, SinkWriteReport,
     SinkWriteResult, SinkWriter, SinkWriterInitContext, SinkWriterLifecycleReport,
 };
-use obzenflow_runtime::stages::{SourceError, TypedFiniteSourceHandler};
+use obzenflow_runtime::stages::{
+    SourceError, TypedAsyncFiniteSourceHandler, TypedFiniteSourceHandler,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -242,37 +244,64 @@ impl TypedFiniteSourceHandler for ProbeSource {
 }
 
 #[derive(Clone, Debug)]
-struct CoordinatedSource {
-    schedule: Vec<(usize, u64, usize)>,
-    next: usize,
-    phase: Arc<AtomicUsize>,
+struct FanInCoordination {
+    write_count: Arc<AtomicUsize>,
+    write_advanced: Arc<tokio::sync::Notify>,
 }
 
-impl TypedFiniteSourceHandler for CoordinatedSource {
+impl FanInCoordination {
+    fn new() -> Self {
+        Self {
+            write_count: Arc::new(AtomicUsize::new(0)),
+            write_advanced: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    async fn wait_for_writes(&self, required: usize) {
+        loop {
+            let advanced = self.write_advanced.notified();
+            if self.write_count.load(Ordering::SeqCst) >= required {
+                return;
+            }
+            advanced.await;
+        }
+    }
+
+    fn record_write(&self, count: usize) {
+        self.write_count.store(count, Ordering::SeqCst);
+        self.write_advanced.notify_waiters();
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CoordinatedPoll {
+    AfterWrites { required: usize, value: u64 },
+    Pending,
+}
+
+#[derive(Clone, Debug)]
+struct CoordinatedAsyncSource {
+    schedule: Vec<CoordinatedPoll>,
+    next: usize,
+    coordination: FanInCoordination,
+}
+
+#[async_trait]
+impl TypedAsyncFiniteSourceHandler for CoordinatedAsyncSource {
     type Output = ProbeInput;
 
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        let Some((required, value, completed)) = self.schedule.get(self.next).copied() else {
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        let Some(poll) = self.schedule.get(self.next).copied() else {
             return Ok(None);
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while self.phase.load(Ordering::SeqCst) < required {
-            if std::time::Instant::now() >= deadline {
-                return Err(SourceError::Other(
-                    "fan-in source coordination timed out".to_string(),
-                ));
+        match poll {
+            CoordinatedPoll::AfterWrites { required, value } => {
+                self.coordination.wait_for_writes(required).await;
+                self.next += 1;
+                Ok(Some(vec![ProbeInput { value }]))
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            CoordinatedPoll::Pending => std::future::pending().await,
         }
-        if required > 0 {
-            // The predecessor publishes its phase immediately before returning
-            // its event. Give that source supervisor time to append the event
-            // before this lane releases the next interleaved value.
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        self.next += 1;
-        self.phase.store(completed, Ordering::SeqCst);
-        Ok(Some(vec![ProbeInput { value }]))
     }
 }
 
@@ -292,6 +321,7 @@ enum FailureMode {
 struct ProbeConnector {
     mode: FailureMode,
     calls: Arc<Mutex<Vec<String>>>,
+    fan_in_coordination: Option<FanInCoordination>,
 }
 
 #[async_trait]
@@ -320,6 +350,7 @@ impl SinkConnector for ProbeConnector {
             calls: Arc::clone(&self.calls),
             writes: 0,
             retained: Vec::new(),
+            fan_in_coordination: self.fan_in_coordination.clone(),
         })
     }
 }
@@ -329,6 +360,7 @@ struct ProbeWriter {
     calls: Arc<Mutex<Vec<String>>>,
     writes: usize,
     retained: Vec<PendingSinkInput>,
+    fan_in_coordination: Option<FanInCoordination>,
 }
 
 impl std::fmt::Debug for ProbeWriter {
@@ -370,6 +402,9 @@ impl SinkWriter for ProbeWriter {
             .lock()
             .expect("call log")
             .push(format!("write:{}", input.value));
+        if let Some(coordination) = &self.fan_in_coordination {
+            coordination.record_write(self.writes);
+        }
 
         match (self.mode, self.writes) {
             (FailureMode::CurrentOnlyFirst, 1) => Err(SinkWriteFailure::current_only(
@@ -484,6 +519,7 @@ fn build_flow(
         let probe = ProbeConnector {
             mode,
             calls: Arc::clone(&calls),
+            fan_in_coordination: None,
         };
         Ok(flow! {
             name: "sink_operation_failure_chain",
@@ -523,6 +559,7 @@ fn build_append_probed_flow(
         let probe = ProbeConnector {
             mode: FailureMode::PoisonedFirst,
             calls,
+            fan_in_coordination: None,
         };
         Ok(flow! {
             name: "sink_operation_append_sequence",
@@ -546,28 +583,51 @@ fn build_fan_in_flow(
     calls: Arc<Mutex<Vec<String>>>,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let phase = Arc::new(AtomicUsize::new(0));
-        let left = CoordinatedSource {
-            schedule: vec![(0, 1, 1), (2, 3, 3)],
+        let coordination = FanInCoordination::new();
+        let left = CoordinatedAsyncSource {
+            schedule: vec![
+                CoordinatedPoll::AfterWrites {
+                    required: 0,
+                    value: 1,
+                },
+                CoordinatedPoll::AfterWrites {
+                    required: 2,
+                    value: 3,
+                },
+            ],
             next: 0,
-            phase: Arc::clone(&phase),
+            coordination: coordination.clone(),
         };
-        let right = CoordinatedSource {
-            schedule: vec![(1, 2, 2), (3, 4, 4)],
+        let right = CoordinatedAsyncSource {
+            schedule: vec![
+                CoordinatedPoll::AfterWrites {
+                    required: 1,
+                    value: 2,
+                },
+                match mode {
+                    FailureMode::ConfirmedRollbackThirdFanIn => CoordinatedPoll::AfterWrites {
+                        required: 3,
+                        value: 4,
+                    },
+                    FailureMode::PoisonedThirdFanIn => CoordinatedPoll::Pending,
+                    _ => unreachable!("fan-in flow requires a fan-in failure mode"),
+                },
+            ],
             next: 0,
-            phase,
+            coordination: coordination.clone(),
         };
         let probe = ProbeConnector {
             mode,
             calls: Arc::clone(&calls),
+            fan_in_coordination: Some(coordination),
         };
         Ok(flow! {
             name: "sink_operation_failure_fan_in",
             journals: disk_journals(journal_root),
 
             stages: {
-                left = source!(ProbeInput => left);
-                right = source!(ProbeInput => right);
+                left = async_source!(ProbeInput => left);
+                right = async_source!(ProbeInput => right);
                 probe = sink!(ProbeInput => probe);
             },
 

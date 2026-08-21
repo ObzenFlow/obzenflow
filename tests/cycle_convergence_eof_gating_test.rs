@@ -460,9 +460,13 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let entry_processed_for_flow = entry_processed.clone();
     let iter_processed_for_flow = iter_processed.clone();
     let (sink, done_count) = DoneCounterSink::new();
+    let iteration_started = Arc::new(Notify::new());
     let source = SeedThenDrainSource::new(target_iterations);
     let entry = EntryConvergeTransform::new(entry_processed_for_flow);
-    let iter = IterationTransform::new(iter_processed_for_flow, None);
+    let iter = IterationTransform::new(
+        iter_processed_for_flow,
+        Some(Arc::clone(&iteration_started)),
+    );
 
     let harness = test_flow! {
         name: "cycle_buffers_drain_until_scc_quiescent",
@@ -492,18 +496,13 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("flow start failed: {e}"))?;
 
-    // Wait until the cycle is in flight, then request the runtime-owned drain.
-    for _ in 0..100 {
-        if iter_processed.load(Ordering::Relaxed) > 0 {
-            break;
-        }
-        clock.advance(Duration::from_millis(10)).await?;
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        iter_processed.load(Ordering::Relaxed) > 0,
-        "cycle did not enter its first iteration before drain"
-    );
+    // Wait for the transform itself to report that the cycle is in flight,
+    // then request the runtime-owned drain. A polling loop over paused time can
+    // outrun executor scheduling and spuriously observe zero iterations.
+    tokio::time::timeout(Duration::from_secs(5), iteration_started.notified())
+        .await
+        .map_err(|_| anyhow::anyhow!("cycle did not enter its first iteration before drain"))?;
+    assert!(iter_processed.load(Ordering::Relaxed) > 0);
     handle
         .stop_graceful(Duration::from_secs(5))
         .await

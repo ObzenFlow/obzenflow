@@ -3,12 +3,12 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
+use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_runtime::stages::common::handler_error::{HandlerError, StageFatal};
 use obzenflow_runtime::stages::sink::{
-    SinkConnector, SinkDescription, SinkOperationResult, SinkWriteContext, SinkWriteResult,
-    SinkWriter, SinkWriterInitContext,
+    SinkConnector, SinkDescription, SinkOperationError, SinkOperationResult, SinkWriteContext,
+    SinkWriteResult, SinkWriter, SinkWriterInitContext,
 };
-use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 
 #[path = "../support/typed_sink.rs"]
 mod support;
@@ -43,11 +43,12 @@ impl SinkConnector for Connector {
         &self,
         _context: SinkWriterInitContext,
     ) -> SinkOperationResult<Self::Writer> {
-        Err(HandlerError::Fatal(StageFatal::new(
+        let error: SinkOperationError = HandlerError::Fatal(StageFatal::new(
             StageFatalCode::Protocol,
             StageFatalReason::ProtocolInputIntegrity,
             "connector-forged fatal",
-        )))
+        ));
+        Err(error)
     }
 }
 
