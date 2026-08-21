@@ -11,13 +11,18 @@ use obzenflow_core::event::{
     ChainEvent, ChainEventContent, SinkDestinationErrorCode, SinkOperationFailed,
     SinkOperationPhase, SinkWritePhase, StageLifecycleEvent, SystemEvent, SystemEventType,
 };
+use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{EventEnvelope, EventId, StageId, SystemId, TypedPayload};
+use obzenflow_core::journal::{Journal, JournalError, JournalReader, RunManifest};
+use obzenflow_core::{
+    AdmissionSeq, EventEnvelope, EventId, FlowId, JournalId, StageId, SystemId, TypedPayload,
+};
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{ApplicationError, FlowApplication};
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::{disk_journals, DiskJournal, DiskJournalFactory};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
+use obzenflow_runtime::journal::{FlowJournalFactory, RunResourcePlan, RunSubstrateState};
+use obzenflow_runtime::replay::ReplayArchive;
 use obzenflow_runtime::stages::sink::{
     PendingSinkInput, SinkCommitReceipt, SinkConnector, SinkDescription, SinkOperationError,
     SinkOperationResult, SinkTerminalOutcome, SinkWriteContext, SinkWriteFailure, SinkWriteReport,
@@ -28,6 +33,185 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppendBoundary {
+    Begin,
+    Returned,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AppendObservation {
+    fact: &'static str,
+    boundary: AppendBoundary,
+    admission_seq: Option<AdmissionSeq>,
+}
+
+type AppendProbe = Arc<Mutex<Vec<AppendObservation>>>;
+
+struct ProbedJournal<T: obzenflow_core::event::JournalEvent> {
+    inner: Arc<dyn Journal<T>>,
+    probe: AppendProbe,
+    fact: fn(&T) -> Option<&'static str>,
+    admission_seq: fn(&T) -> Option<AdmissionSeq>,
+}
+
+#[async_trait]
+impl<T: obzenflow_core::event::JournalEvent> Journal<T> for ProbedJournal<T> {
+    fn id(&self) -> &JournalId {
+        self.inner.id()
+    }
+
+    fn owner(&self) -> Option<&JournalOwner> {
+        self.inner.owner()
+    }
+
+    async fn append(
+        &self,
+        event: T,
+        parent: Option<&EventEnvelope<T>>,
+    ) -> Result<EventEnvelope<T>, JournalError> {
+        let fact = (self.fact)(&event);
+        if let Some(fact) = fact {
+            self.probe
+                .lock()
+                .expect("append probe")
+                .push(AppendObservation {
+                    fact,
+                    boundary: AppendBoundary::Begin,
+                    admission_seq: (self.admission_seq)(&event),
+                });
+        }
+        let result = self.inner.append(event, parent).await;
+        if let (Some(fact), Ok(envelope)) = (fact, &result) {
+            self.probe
+                .lock()
+                .expect("append probe")
+                .push(AppendObservation {
+                    fact,
+                    boundary: AppendBoundary::Returned,
+                    admission_seq: (self.admission_seq)(&envelope.event),
+                });
+        }
+        result
+    }
+
+    async fn append_group(
+        &self,
+        group_id: &str,
+        events: Vec<T>,
+        parent: Option<&EventEnvelope<T>>,
+    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        self.inner.append_group(group_id, events, parent).await
+    }
+
+    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        self.inner.read_all_unordered().await
+    }
+
+    async fn read_event(
+        &self,
+        event_id: &EventId,
+    ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        self.inner.read_event(event_id).await
+    }
+
+    async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+        self.inner.reader_from(position).await
+    }
+
+    async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        self.inner.read_last_n(count).await
+    }
+}
+
+fn chain_fact(event: &ChainEvent) -> Option<&'static str> {
+    if matches!(
+        &event.content,
+        ChainEventContent::Delivery(payload)
+            if matches!(payload.result, DeliveryResult::Failed { .. })
+    ) {
+        Some("R")
+    } else if SinkOperationFailed::from_event(event).is_some() {
+        Some("O")
+    } else if ProbeInput::from_event(event).is_some()
+        && matches!(event.processing_info.status, ProcessingStatus::Error { .. })
+    {
+        Some("X")
+    } else {
+        None
+    }
+}
+
+fn chain_admission_seq(event: &ChainEvent) -> Option<AdmissionSeq> {
+    event.admission_seq
+}
+
+fn system_fact(event: &SystemEvent) -> Option<&'static str> {
+    matches!(
+        event.event,
+        SystemEventType::StageLifecycle {
+            event: StageLifecycleEvent::Failed { .. },
+            ..
+        }
+    )
+    .then_some("P")
+}
+
+fn no_system_admission_seq(_event: &SystemEvent) -> Option<AdmissionSeq> {
+    None
+}
+
+struct ProbedDiskJournalFactory {
+    inner: DiskJournalFactory,
+    probe: AppendProbe,
+}
+
+impl FlowJournalFactory for ProbedDiskJournalFactory {
+    fn run_state(&self) -> RunSubstrateState {
+        FlowJournalFactory::run_state(&self.inner)
+    }
+
+    fn create_chain_journal(
+        &mut self,
+        name: JournalName,
+        owner: JournalOwner,
+    ) -> Result<Arc<dyn Journal<ChainEvent>>, JournalError> {
+        let inner = FlowJournalFactory::create_chain_journal(&mut self.inner, name, owner)?;
+        Ok(Arc::new(ProbedJournal {
+            inner,
+            probe: self.probe.clone(),
+            fact: chain_fact,
+            admission_seq: chain_admission_seq,
+        }))
+    }
+
+    fn create_system_journal(
+        &mut self,
+        name: JournalName,
+        owner: JournalOwner,
+    ) -> Result<Arc<dyn Journal<SystemEvent>>, JournalError> {
+        let inner = FlowJournalFactory::create_system_journal(&mut self.inner, name, owner)?;
+        Ok(Arc::new(ProbedJournal {
+            inner,
+            probe: self.probe.clone(),
+            fact: system_fact,
+            admission_seq: no_system_admission_seq,
+        }))
+    }
+
+    fn resource_preflight(&self, plan: &RunResourcePlan) -> Result<(), JournalError> {
+        FlowJournalFactory::resource_preflight(&self.inner, plan)
+    }
+
+    fn write_run_manifest(&self, manifest: &RunManifest) -> Result<(), JournalError> {
+        FlowJournalFactory::write_run_manifest(&self.inner, manifest)
+    }
+
+    fn seed_admission_from_archive(&self, archive: &dyn ReplayArchive) {
+        FlowJournalFactory::seed_admission_from_archive(&self.inner, archive);
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProbeInput {
@@ -304,6 +488,45 @@ fn build_flow(
         Ok(flow! {
             name: "sink_operation_failure_chain",
             journals: disk_journals(journal_root),
+
+            stages: {
+                inputs = source!(ProbeInput => source);
+                probe = sink!(ProbeInput => probe);
+            },
+
+            topology: {
+                inputs |> probe;
+            }
+        })
+    })
+}
+
+fn probed_disk_journals(
+    base_path: PathBuf,
+    probe: AppendProbe,
+) -> impl Fn(FlowId) -> Result<ProbedDiskJournalFactory, JournalError> {
+    move |flow_id| {
+        Ok(ProbedDiskJournalFactory {
+            inner: DiskJournalFactory::new(base_path.clone(), flow_id)?,
+            probe: probe.clone(),
+        })
+    }
+}
+
+fn build_append_probed_flow(
+    journal_root: PathBuf,
+    calls: Arc<Mutex<Vec<String>>>,
+    append_probe: AppendProbe,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let source = ProbeSource { next: 1, end: 3 };
+        let probe = ProbeConnector {
+            mode: FailureMode::PoisonedFirst,
+            calls,
+        };
+        Ok(flow! {
+            name: "sink_operation_append_sequence",
+            journals: probed_disk_journals(journal_root, append_probe),
 
             stages: {
                 inputs = source!(ProbeInput => source);
@@ -695,8 +918,23 @@ async fn poisoned_failure_links_lifecycle_and_performs_drop_only_teardown() {
     );
 
     let stage_id = chain.operation.stage_id;
-    let tied_failures = read_system_journal(&run)
-        .await
+    let system_events = read_system_journal(&run).await;
+    let completed = system_events.iter().filter(|envelope| {
+        matches!(
+            &envelope.event.event,
+            SystemEventType::StageLifecycle {
+                stage_id: completed_stage,
+                event: StageLifecycleEvent::Completed { .. },
+            } if *completed_stage == stage_id
+        )
+    });
+    assert_eq!(
+        completed.count(),
+        0,
+        "a failed sink lifecycle must never retain completion evidence"
+    );
+
+    let tied_failures = system_events
         .into_iter()
         .filter_map(|envelope| match envelope.event.event {
             SystemEventType::StageLifecycle {
@@ -714,6 +952,67 @@ async fn poisoned_failure_links_lifecycle_and_performs_drop_only_teardown() {
         calls.lock().expect("call log").as_slice(),
         ["open", "write:1", "drop"],
         "poison teardown must never write, flush, or drain again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn poisoned_failure_awaits_each_unstamped_r_o_x_p_append() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let append_probe = Arc::new(Mutex::new(Vec::new()));
+    let result = FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_append_probed_flow(
+            temp.path().join("journals"),
+            calls,
+            append_probe.clone(),
+        ))
+        .await;
+    result.expect_err("poisoned writer terminates the materialisation");
+
+    let observations = append_probe.lock().expect("append probe").clone();
+    assert_eq!(
+        observations
+            .iter()
+            .map(|observation| (observation.fact, observation.boundary))
+            .collect::<Vec<_>>(),
+        vec![
+            ("R", AppendBoundary::Begin),
+            ("R", AppendBoundary::Returned),
+            ("O", AppendBoundary::Begin),
+            ("O", AppendBoundary::Returned),
+            ("X", AppendBoundary::Begin),
+            ("X", AppendBoundary::Returned),
+            ("P", AppendBoundary::Begin),
+            ("P", AppendBoundary::Returned),
+        ],
+        "each successor append must begin only after its predecessor returned"
+    );
+
+    for observation in observations.iter().filter(|observation| {
+        observation.boundary == AppendBoundary::Begin && observation.fact != "P"
+    }) {
+        assert_eq!(
+            observation.admission_seq, None,
+            "{} must arrive at append without a pre-filled admission sequence",
+            observation.fact
+        );
+    }
+    let stamped = observations
+        .iter()
+        .filter(|observation| {
+            observation.boundary == AppendBoundary::Returned && observation.fact != "P"
+        })
+        .map(|observation| {
+            observation
+                .admission_seq
+                .expect("journal stamps sequence")
+                .0
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        stamped.windows(2).all(|window| window[0] < window[1]),
+        "journal-stamped R -> O -> X admission order must increase: {stamped:?}"
     );
 }
 
@@ -796,8 +1095,23 @@ async fn assert_lifecycle_failure(
     assert_eq!(operation.failed_delivery_event_id, None);
     assert_eq!(direct_parent(operation_event), None);
 
-    let tied_failures = read_system_journal(&run)
-        .await
+    let system_events = read_system_journal(&run).await;
+    let completed = system_events.iter().filter(|envelope| {
+        matches!(
+            &envelope.event.event,
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Completed { .. },
+            } if *stage_id == operation.stage_id
+        )
+    });
+    assert_eq!(
+        completed.count(),
+        0,
+        "a failed sink lifecycle must never retain completion evidence"
+    );
+
+    let tied_failures = system_events
         .into_iter()
         .filter_map(|envelope| match envelope.event.event {
             SystemEventType::StageLifecycle {

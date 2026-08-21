@@ -27,11 +27,11 @@ pub use sink::{
 pub use sink::{
     DeliveryContext, DeliveryProvenance, InlineSink, PendingSinkInput, SinkAuditOutcome,
     SinkBufferedOutcome, SinkCommitReceipt, SinkConnector, SinkDescription,
-    SinkDestinationErrorCode, SinkOperationError, SinkOperationErrorConversionError,
-    SinkOperationResult, SinkPrimaryOutcome, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteFailure, SinkWriteFailureDisposition, SinkWritePhase, SinkWriteReport,
-    SinkWriteResult, SinkWriter, SinkWriterInitContext, SinkWriterLifecycleReport,
-    WithRedeliverySafety,
+    SinkDestinationErrorCode, SinkInputOrder, SinkOperationError,
+    SinkOperationErrorConversionError, SinkOperationResult, SinkPrimaryOutcome,
+    SinkTerminalOutcome, SinkWriteContext, SinkWriteFailure, SinkWriteFailureDisposition,
+    SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter, SinkWriterInitContext,
+    SinkWriterLifecycleReport, WithRedeliverySafety,
 };
 pub use source::{
     HostedIngressSource, SourceError, SourceObservationSink, TypedAsyncFiniteSourceHandler,

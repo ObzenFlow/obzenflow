@@ -156,6 +156,12 @@ impl SinkConformanceProfile {
     pub fn faults(&self) -> &[SinkFaultCase] {
         &self.faults
     }
+
+    /// Credential canaries that must be absent from every captured diagnostic
+    /// and durable application-conformance surface.
+    pub fn credential_sentinels(&self) -> &[String] {
+        &self.credential_sentinels
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

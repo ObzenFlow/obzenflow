@@ -6,7 +6,9 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::sinks::postgres::testing::PostgresTestProbe;
-use obzenflow_adapters::sinks::postgres::{PostgresBind, PostgresConnection, PostgresSink};
+use obzenflow_adapters::sinks::postgres::{
+    PostgresBind, PostgresConnection, PostgresQuery, PostgresSink,
+};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::sink::SinkWriteFailureDisposition;
 use obzenflow_runtime::testing::sink::{
@@ -16,9 +18,7 @@ use obzenflow_runtime::testing::sink::{
     SINK_CONFORMANCE_PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::postgres::PgArguments;
-use sqlx::query::Query;
-use sqlx::{PgPool, Postgres, Row};
+use sqlx::{PgPool, Row};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Payment {
@@ -34,11 +34,7 @@ impl TypedPayload for Payment {
 struct PaymentBinder;
 
 impl PostgresBind<Payment> for PaymentBinder {
-    fn bind<'q>(
-        &self,
-        query: Query<'q, Postgres, PgArguments>,
-        input: &'q Payment,
-    ) -> Query<'q, Postgres, PgArguments> {
+    fn bind<'q>(&self, query: PostgresQuery<'q>, input: &'q Payment) -> PostgresQuery<'q> {
         query.bind(input.id).bind(input.amount_cents)
     }
 }
@@ -213,10 +209,9 @@ impl SinkWriterConformanceFixture for PostgresFixture {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn postgres_passes_the_real_writer_protocol_and_fault_matrix() {
-    let Some(url) = std::env::var("OBZENFLOW_POSTGRES_TEST_URL").ok() else {
-        eprintln!("skipping PostgreSQL conformance: OBZENFLOW_POSTGRES_TEST_URL is unset");
-        return;
-    };
+    let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL").expect(
+        "OBZENFLOW_POSTGRES_TEST_URL is required: PostgreSQL conformance must not pass without a real database",
+    );
     let mut fixture = PostgresFixture::connect(&url)
         .await
         .expect("PostgreSQL fixture initialises");

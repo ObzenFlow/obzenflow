@@ -15,7 +15,7 @@ use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::sink::{
     PendingSinkInput, SinkCommitReceipt, SinkConnector, SinkDescription, SinkDestinationErrorCode,
-    SinkOperationError, SinkOperationResult, SinkTerminalOutcome, SinkWriteContext,
+    SinkInputOrder, SinkOperationError, SinkOperationResult, SinkTerminalOutcome, SinkWriteContext,
     SinkWriteFailure, SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter,
     SinkWriterInitContext, SinkWriterLifecycleReport,
 };
@@ -28,14 +28,16 @@ use std::str::FromStr;
 use std::time::Duration;
 use thiserror::Error;
 
-/// SQLx types used by [`PostgresBind`], re-exported so facade-only connector
-/// authors do not need a second version-sensitive dependency declaration.
-pub use sqlx;
+/// Adapter-owned PostgreSQL query carrier accepted by [`PostgresBind`].
+///
+/// Connector authors do not need a direct SQLx dependency merely to bind
+/// domain values to the configured statement.
+pub type PostgresQuery<'q> = Query<'q, Postgres, PgArguments>;
 
 const DEFAULT_BATCH_SIZE: usize = 1;
-const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BATCH_SIZE: usize = 100_000;
+const POSTGRES_SQLSTATE_NAMESPACE: &str = "postgresql.sqlstate";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PostgresConfigError {
@@ -63,7 +65,6 @@ pub enum PostgresConfigError {
 #[derive(Clone)]
 pub struct PostgresConnection {
     options: PgConnectOptions,
-    max_connections: u32,
     acquire_timeout: Duration,
 }
 
@@ -84,13 +85,12 @@ impl PostgresConnection {
     pub fn from_options(options: PgConnectOptions) -> Self {
         Self {
             options,
-            max_connections: DEFAULT_MAX_CONNECTIONS,
             acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
         }
     }
 
-    pub fn with_pool_limits(mut self, max_connections: u32, acquire_timeout: Duration) -> Self {
-        self.max_connections = max_connections.max(1);
+    /// Override how long a writer waits to acquire its sole connection.
+    pub fn with_acquire_timeout(mut self, acquire_timeout: Duration) -> Self {
         self.acquire_timeout = acquire_timeout;
         self
     }
@@ -100,7 +100,6 @@ impl fmt::Debug for PostgresConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PostgresConnection")
             .field("configured", &true)
-            .field("max_connections", &self.max_connections)
             .field("acquire_timeout", &self.acquire_timeout)
             .finish()
     }
@@ -186,11 +185,7 @@ pub trait PostgresBind<T>: Clone + Send + Sync + 'static {
         Ok(())
     }
 
-    fn bind<'q>(
-        &self,
-        query: Query<'q, Postgres, PgArguments>,
-        input: &'q T,
-    ) -> Query<'q, Postgres, PgArguments>;
+    fn bind<'q>(&self, query: PostgresQuery<'q>, input: &'q T) -> PostgresQuery<'q>;
 }
 
 #[doc(hidden)]
@@ -229,7 +224,7 @@ impl<T> PostgresSink<T, MissingPostgresBinder> {
             statement: None,
             binder: None,
             batch_size: DEFAULT_BATCH_SIZE,
-            redelivery_safety: None,
+            redelivery_safety: Some(SinkRedeliverySafety::DuplicateSensitive),
             #[cfg(feature = "test-support")]
             test_probe: None,
             _input: PhantomData,
@@ -295,6 +290,14 @@ impl<T, B> PostgresSinkBuilder<T, B> {
         self
     }
 
+    /// Test-only seam for the generic archive gate's undeclared-sink case.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_redelivery_unspecified(mut self) -> Self {
+        self.redelivery_safety = None;
+        self
+    }
+
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn test_probe(mut self, probe: testing::PostgresTestProbe) -> Self {
@@ -355,6 +358,9 @@ pub mod testing {
         SinkExternalCall, SinkExternalCallKind, SinkExternalCallSnapshot, SinkFault,
     };
     use std::sync::{Arc, Mutex, MutexGuard};
+
+    /// Connector-owned namespace for projected PostgreSQL SQLSTATE diagnostics.
+    pub const POSTGRES_SQLSTATE_NAMESPACE: &str = super::POSTGRES_SQLSTATE_NAMESPACE;
 
     #[derive(Default)]
     struct ProbeState {
@@ -553,7 +559,8 @@ where
             DeliveryMethod::DatabaseInsert {
                 table: self.destination.qualified(),
             },
-        );
+        )
+        .with_input_order(SinkInputOrder::OrderSensitive);
         match self.redelivery_safety {
             Some(safety) => description.with_redelivery_safety(safety),
             None => description,
@@ -573,7 +580,7 @@ where
             ));
         }
         let pool = PgPoolOptions::new()
-            .max_connections(self.connection.max_connections)
+            .max_connections(1)
             .acquire_timeout(self.connection.acquire_timeout)
             .connect_with(self.connection.options.clone())
             .await
@@ -957,7 +964,7 @@ fn test_operation_error(detail: &'static str, sqlstate: Option<&str>) -> SinkOpe
 }
 
 fn sqlstate_code(value: &str) -> Option<SinkDestinationErrorCode> {
-    SinkDestinationErrorCode::try_new("postgresql.sqlstate", value).ok()
+    SinkDestinationErrorCode::try_new(POSTGRES_SQLSTATE_NAMESPACE, value).ok()
 }
 
 #[cfg(test)]
@@ -978,11 +985,7 @@ mod tests {
     struct Binder;
 
     impl PostgresBind<Input> for Binder {
-        fn bind<'q>(
-            &self,
-            query: Query<'q, Postgres, PgArguments>,
-            input: &'q Input,
-        ) -> Query<'q, Postgres, PgArguments> {
+        fn bind<'q>(&self, query: PostgresQuery<'q>, input: &'q Input) -> PostgresQuery<'q> {
             query.bind(&input.value)
         }
     }
@@ -1013,6 +1016,14 @@ mod tests {
             sink.describe().destination_name(),
             Some("postgres.public.items")
         );
+        assert_eq!(
+            sink.describe().redelivery_safety(),
+            Some(SinkRedeliverySafety::DuplicateSensitive)
+        );
+        assert_eq!(
+            sink.describe().input_order(),
+            SinkInputOrder::OrderSensitive
+        );
     }
 
     #[test]
@@ -1042,9 +1053,10 @@ mod tests {
 
     #[test]
     fn sqlstate_codes_use_the_typed_bounded_carrier() {
+        assert_eq!(POSTGRES_SQLSTATE_NAMESPACE, "postgresql.sqlstate");
         for value in ["23505", "08007"] {
             let code = sqlstate_code(value).expect("SQLSTATE is valid");
-            assert_eq!(code.namespace(), "postgresql.sqlstate");
+            assert_eq!(code.namespace(), POSTGRES_SQLSTATE_NAMESPACE);
             assert_eq!(code.value(), value);
         }
         assert!(sqlstate_code("unsafe code with spaces").is_none());
@@ -1052,10 +1064,9 @@ mod tests {
 
     #[tokio::test]
     async fn real_driver_sqlstates_and_transport_absence_map_without_text_parsing() {
-        let Some(url) = std::env::var("OBZENFLOW_POSTGRES_TEST_URL").ok() else {
-            eprintln!("skipping SQLSTATE proof: OBZENFLOW_POSTGRES_TEST_URL is unset");
-            return;
-        };
+        let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL").expect(
+            "OBZENFLOW_POSTGRES_TEST_URL is required: the real-driver SQLSTATE proof must not pass without PostgreSQL",
+        );
         let pool = PgPool::connect(&url).await.expect("PostgreSQL test pool");
         let schema = format!("obz122a_codes_{}", std::process::id());
         sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))

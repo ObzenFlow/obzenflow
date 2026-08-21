@@ -140,6 +140,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+sqlx = { workspace = true }
 obzenflow-topology = { workspace = true }
 
 tokio-test = { workspace = true }

@@ -13,10 +13,11 @@ pub mod typed;
 pub use crate::stages::common::handlers::sink::{
     DeliveryContext, DeliveryProvenance, InlineSink, PendingSinkInput, SinkAuditOutcome,
     SinkBufferedOutcome, SinkCommitReceipt, SinkConnector, SinkDescription,
-    SinkDestinationErrorCode, SinkOperationError, SinkOperationErrorConversionError,
-    SinkOperationResult, SinkPrimaryOutcome, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteFailure, SinkWriteFailureDisposition, SinkWritePhase, SinkWriteReport,
-    SinkWriteResult, SinkWriter, SinkWriterInitContext, SinkWriterLifecycleReport,
+    SinkDestinationErrorCode, SinkInputOrder, SinkOperationError,
+    SinkOperationErrorConversionError, SinkOperationResult, SinkPrimaryOutcome,
+    SinkTerminalOutcome, SinkWriteContext, SinkWriteFailure, SinkWriteFailureDisposition,
+    SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter, SinkWriterInitContext,
+    SinkWriterLifecycleReport,
 };
 #[doc(hidden)]
 pub use operation_failure::{

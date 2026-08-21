@@ -21,8 +21,8 @@ use obzenflow_core::{AdmissionSeq, EventId, StageId, TypedPayload};
 use obzenflow_dsl::FlowDefinition;
 use obzenflow_runtime::stages::sink::{SinkDestinationErrorCode, SinkWriteFailureDisposition};
 use obzenflow_runtime::testing::sink::{
-    SinkConformanceProfile, SinkExternalCallSnapshot, SinkFixtureError,
-    SINK_CONFORMANCE_PROTOCOL_VERSION,
+    SinkConformanceProfile, SinkDiagnosticSample, SinkExternalCallKind, SinkExternalCallSnapshot,
+    SinkFixtureError, SINK_CONFORMANCE_PROTOCOL_VERSION,
 };
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -246,6 +246,12 @@ pub trait SinkApplicationConformanceFixture: Send {
         scenario: SinkApplicationScenario,
     ) -> Result<SinkApplicationBuildCase, SinkFixtureError>;
     fn verifier(&self) -> &Self::Verifier;
+
+    /// Additional connector-, error-, trace-, snapshot-, or verifier-shaped
+    /// text that the fixture can expose to the harness's credential canary.
+    fn diagnostic_samples(&self) -> Result<Vec<SinkDiagnosticSample>, SinkFixtureError> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -342,6 +348,8 @@ pub struct SinkRunEvidence {
     operation_failures: Vec<ProjectedSinkOperationFailure>,
     operation_failure_metrics: Vec<SinkOperationFailureMetric>,
     failure_chains: Vec<SinkFailureChainVerdict>,
+    completed_sink_count: usize,
+    failed_sink_count: usize,
 }
 
 impl SinkRunEvidence {
@@ -363,6 +371,14 @@ impl SinkRunEvidence {
 
     pub fn failure_chains(&self) -> &[SinkFailureChainVerdict] {
         &self.failure_chains
+    }
+
+    pub fn completed_sink_count(&self) -> usize {
+        self.completed_sink_count
+    }
+
+    pub fn failed_sink_count(&self) -> usize {
+        self.failed_sink_count
     }
 }
 
@@ -446,6 +462,123 @@ fn failure(
         case: case.into(),
         detail: detail.into(),
     }
+}
+
+fn reject_credential_text(
+    profile: &SinkConformanceProfile,
+    case: impl Into<String>,
+    text: &str,
+) -> Result<(), SinkConformanceFailure> {
+    let case = case.into();
+    for (index, sentinel) in profile.credential_sentinels().iter().enumerate() {
+        if !sentinel.is_empty() && text.contains(sentinel) {
+            return Err(failure(
+                "credential-redaction",
+                &case,
+                format!("credential sentinel #{index} appeared in captured text"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reject_error_diagnostics(
+    profile: &SinkConformanceProfile,
+    case: &str,
+    error: &(dyn std::error::Error + 'static),
+) -> Result<(), SinkConformanceFailure> {
+    let mut source = Some(error);
+    for depth in 0..64 {
+        let Some(error) = source else {
+            return Ok(());
+        };
+        reject_credential_text(
+            profile,
+            format!("{case}-error-source-{depth}-display"),
+            &error.to_string(),
+        )?;
+        reject_credential_text(
+            profile,
+            format!("{case}-error-source-{depth}-debug"),
+            &format!("{error:?}"),
+        )?;
+        source = error.source();
+    }
+    Err(failure(
+        "credential-redaction",
+        case,
+        "error source chain exceeded the diagnostic scan limit",
+    ))
+}
+
+fn failure_from_error(
+    profile: &SinkConformanceProfile,
+    suite: &'static str,
+    case: impl Into<String>,
+    error: &(dyn std::error::Error + 'static),
+) -> SinkConformanceFailure {
+    let case = case.into();
+    match reject_error_diagnostics(profile, &case, error) {
+        Ok(()) => failure(suite, case, error.to_string()),
+        Err(redaction_failure) => redaction_failure,
+    }
+}
+
+fn reject_credential_bytes(
+    profile: &SinkConformanceProfile,
+    case: impl Into<String>,
+    bytes: &[u8],
+) -> Result<(), SinkConformanceFailure> {
+    let case = case.into();
+    for (index, sentinel) in profile.credential_sentinels().iter().enumerate() {
+        let needle = sentinel.as_bytes();
+        if !needle.is_empty() && bytes.windows(needle.len()).any(|window| window == needle) {
+            return Err(failure(
+                "credential-redaction",
+                &case,
+                format!("credential sentinel #{index} appeared in a durable artifact"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn scan_durable_tree_for_credentials(
+    profile: &SinkConformanceProfile,
+    root: &Path,
+    case: &str,
+) -> Result<(), SinkConformanceFailure> {
+    if profile.credential_sentinels().is_empty() || !root.exists() {
+        return Ok(());
+    }
+    let metadata = std::fs::metadata(root)
+        .map_err(|error| failure_from_error(profile, "credential-redaction", case, &error))?;
+    if metadata.is_file() {
+        let bytes = std::fs::read(root)
+            .map_err(|error| failure_from_error(profile, "credential-redaction", case, &error))?;
+        return reject_credential_bytes(profile, case, &bytes);
+    }
+    for entry in std::fs::read_dir(root)
+        .map_err(|error| failure_from_error(profile, "credential-redaction", case, &error))?
+    {
+        let path = entry
+            .map_err(|error| failure_from_error(profile, "credential-redaction", case, &error))?
+            .path();
+        scan_durable_tree_for_credentials(profile, &path, case)?;
+    }
+    Ok(())
+}
+
+fn replay_archive_arg(args: &[OsString]) -> Option<PathBuf> {
+    for (index, arg) in args.iter().enumerate() {
+        if arg == "--replay-from" {
+            return args.get(index + 1).map(PathBuf::from);
+        }
+        if let Some(value) = arg.to_string_lossy().strip_prefix("--replay-from=") {
+            return Some(PathBuf::from(value));
+        }
+    }
+    None
 }
 
 fn latest_run_dir(root: &Path) -> Option<PathBuf> {
@@ -701,6 +834,58 @@ fn inherited_route_context_matches(input: &ChainEvent, route: &ChainEvent) -> bo
                 .map(|value| format!("{value:?}"))
 }
 
+fn operation_failure_identity_matches(
+    event: &ChainEvent,
+    operation: &SinkOperationFailed,
+    route: Option<&SinkJournalRoute>,
+) -> bool {
+    operation.stage_id == event.flow_context.stage_id
+        && operation.stage_key == event.flow_context.stage_name
+        && !operation.logical_destination.is_empty()
+        && event_error_kind(event) == Some(&operation.kind)
+        && route == Some(&SinkJournalRoute::Error)
+        && !event.causality.parent_ids.contains(&event.id)
+}
+
+fn write_failure_receipt_matches(
+    input: &ChainEvent,
+    receipt: &ChainEvent,
+    operation_event: &ChainEvent,
+    operation: &SinkOperationFailed,
+    receipt_route: Option<&SinkJournalRoute>,
+) -> bool {
+    is_failed_receipt(receipt)
+        && receipt_route == Some(&SinkJournalRoute::Data)
+        && direct_parent(receipt) == Some(input.id)
+        && direct_parent(operation_event) == Some(receipt.id)
+        && receipt.flow_context.stage_id == operation.stage_id
+        && matches!(
+            &receipt.content,
+            ChainEventContent::Delivery(payload)
+                if payload.destination == operation.logical_destination
+        )
+}
+
+fn write_failure_route_matches(
+    input: &ChainEvent,
+    receipt: &ChainEvent,
+    operation_event: &ChainEvent,
+    operation: &SinkOperationFailed,
+    route: &ChainEvent,
+    journal_route: Option<&SinkJournalRoute>,
+) -> bool {
+    route.id != input.id
+        && route.id != receipt.id
+        && route.id != operation_event.id
+        && !route.causality.parent_ids.contains(&route.id)
+        && direct_parent(route) == Some(operation_event.id)
+        && same_data_payload(input, route)
+        && inherited_route_context_matches(input, route)
+        && route.flow_context.stage_id == operation.stage_id
+        && event_error_kind(route) == Some(&operation.kind)
+        && journal_route == Some(&expected_error_route(&operation.kind))
+}
+
 fn require_admission_order(
     earlier: &ChainEvent,
     later: &ChainEvent,
@@ -801,6 +986,172 @@ fn parse_current_manifest(raw: &str) -> Result<RunManifest, SinkConformanceFailu
         .map_err(|error| failure("archive", "manifest-shape", error.to_string()))
 }
 
+fn validate_sink_lifecycle_projection(
+    manifest: &RunManifest,
+    system_events: &[SystemEvent],
+) -> Result<(usize, usize), SinkConformanceFailure> {
+    let mut completed_sink_count = 0;
+    let mut failed_sink_count = 0;
+    for (stage_key, stage) in manifest
+        .stages
+        .iter()
+        .filter(|(_, stage)| stage.stage_type == obzenflow_core::event::context::StageType::Sink)
+    {
+        let lifecycle = system_events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match &event.event {
+                SystemEventType::StageLifecycle {
+                    stage_id,
+                    event: lifecycle,
+                } if stage_id.to_string() == stage.stage_id => Some((index, lifecycle)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let running = lifecycle
+            .iter()
+            .filter(|(_, event)| matches!(event, StageLifecycleEvent::Running))
+            .map(|(index, _)| *index)
+            .collect::<Vec<_>>();
+        let completed = lifecycle
+            .iter()
+            .filter(|(_, event)| matches!(event, StageLifecycleEvent::Completed { .. }))
+            .map(|(index, _)| *index)
+            .collect::<Vec<_>>();
+        let failed = lifecycle
+            .iter()
+            .filter(|(_, event)| matches!(event, StageLifecycleEvent::Failed { .. }))
+            .map(|(index, _)| *index)
+            .collect::<Vec<_>>();
+        if running.len() != 1 {
+            return Err(failure(
+                "lifecycle",
+                stage_key,
+                format!("sink has {} Running lifecycle facts", running.len()),
+            ));
+        }
+        if completed.len() + failed.len() != 1 {
+            return Err(failure(
+                "lifecycle",
+                stage_key,
+                format!(
+                    "sink must have exactly one Completed-or-Failed terminal fact, observed {} Completed and {} Failed",
+                    completed.len(),
+                    failed.len()
+                ),
+            ));
+        }
+        let terminal = completed
+            .first()
+            .or_else(|| failed.first())
+            .copied()
+            .unwrap();
+        if running[0] >= terminal {
+            return Err(failure(
+                "lifecycle",
+                stage_key,
+                "sink terminal lifecycle fact preceded Running",
+            ));
+        }
+        completed_sink_count += completed.len();
+        failed_sink_count += failed.len();
+    }
+    Ok((completed_sink_count, failed_sink_count))
+}
+
+fn validate_external_call_lifecycle(
+    before: &SinkExternalCallSnapshot,
+    after: &SinkExternalCallSnapshot,
+    verdict: SinkDestinationVerdict,
+    case: &str,
+) -> Result<(), SinkConformanceFailure> {
+    let Some(delta) = after.calls().strip_prefix(before.calls()) else {
+        return Err(failure(
+            "lifecycle",
+            case,
+            "external-call snapshot did not preserve its pre-launch prefix",
+        ));
+    };
+    if verdict == SinkDestinationVerdict::Refused {
+        if delta.is_empty() {
+            return Ok(());
+        }
+        return Err(failure(
+            "lifecycle",
+            case,
+            "refused application created a writer lifecycle",
+        ));
+    }
+    if delta.is_empty() {
+        return Err(failure(
+            "lifecycle",
+            case,
+            "executed application captured no writer lifecycle",
+        ));
+    }
+    if delta
+        .windows(2)
+        .any(|window| window[0].sequence() >= window[1].sequence())
+    {
+        return Err(failure(
+            "lifecycle",
+            case,
+            "external-call sequence is not strictly increasing",
+        ));
+    }
+
+    let mut by_writer = HashMap::<u64, Vec<SinkExternalCallKind>>::new();
+    for call in delta {
+        by_writer
+            .entry(call.writer())
+            .or_default()
+            .push(call.kind());
+    }
+    for (writer, calls) in by_writer {
+        if calls.first() != Some(&SinkExternalCallKind::Open)
+            || calls.last() != Some(&SinkExternalCallKind::Drop)
+        {
+            return Err(failure(
+                "lifecycle",
+                case,
+                format!("writer {writer} is not bounded by Open and Drop: {calls:?}"),
+            ));
+        }
+        let flush = calls
+            .iter()
+            .position(|kind| *kind == SinkExternalCallKind::Flush);
+        let drain = calls
+            .iter()
+            .position(|kind| *kind == SinkExternalCallKind::Drain);
+        match verdict {
+            SinkDestinationVerdict::Committed | SinkDestinationVerdict::Converged => {
+                if !flush.zip(drain).is_some_and(|(flush, drain)| flush < drain) {
+                    return Err(failure(
+                        "lifecycle",
+                        case,
+                        format!(
+                            "writer {writer} did not complete Flush -> Drain -> Drop: {calls:?}"
+                        ),
+                    ));
+                }
+            }
+            SinkDestinationVerdict::Failed => {
+                if flush.is_some() || drain.is_some() {
+                    return Err(failure(
+                        "lifecycle",
+                        case,
+                        format!(
+                            "failed writer {writer} performed lifecycle I/O before Drop: {calls:?}"
+                        ),
+                    ));
+                }
+            }
+            SinkDestinationVerdict::Refused => unreachable!("handled before writer grouping"),
+        }
+    }
+    Ok(())
+}
+
 async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceFailure> {
     let manifest_path = run_dir.join(RUN_MANIFEST_FILENAME);
     let raw = std::fs::read_to_string(&manifest_path)
@@ -832,6 +1183,8 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
         }
     }
     let system_events = read_system_journal(&run_dir.join(&manifest.system_journal_file)).await?;
+    let (completed_sink_count, failed_sink_count) =
+        validate_sink_lifecycle_projection(&manifest, &system_events)?;
 
     let journal_routes = projections
         .iter()
@@ -934,13 +1287,7 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
             destination_error_code: operation.destination_error_code.clone(),
         };
 
-        if operation.stage_id != event.flow_context.stage_id
-            || operation.stage_key != event.flow_context.stage_name
-            || operation.logical_destination.is_empty()
-            || event_error_kind(event) != Some(&operation.kind)
-            || journal_routes.get(&event.id) != Some(&SinkJournalRoute::Error)
-            || direct_parent(event) == Some(event.id)
-        {
+        if !operation_failure_identity_matches(event, &operation, journal_routes.get(&event.id)) {
             return Err(failure(
                 "journal-truth",
                 event.id.to_string(),
@@ -994,16 +1341,13 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
                     "failed receipt has no recognised sink write disposition",
                 )
             })?;
-            let receipt_ok = is_failed_receipt(receipt)
-                && journal_routes.get(&receipt.id) == Some(&SinkJournalRoute::Data)
-                && direct_parent(receipt) == Some(input.id)
-                && direct_parent(event) == Some(receipt.id)
-                && receipt.flow_context.stage_id == operation.stage_id
-                && matches!(
-                    &receipt.content,
-                    ChainEventContent::Delivery(payload)
-                        if payload.destination == operation.logical_destination
-                );
+            let receipt_ok = write_failure_receipt_matches(
+                input,
+                receipt,
+                event,
+                &operation,
+                journal_routes.get(&receipt.id),
+            );
             if !receipt_ok {
                 return Err(failure(
                         "journal-truth",
@@ -1028,14 +1372,14 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
                 ));
             }
             let route = routes[0];
-            let route_ok = route.id != input.id
-                && route.id != receipt.id
-                && route.id != event.id
-                && same_data_payload(input, route)
-                && inherited_route_context_matches(input, route)
-                && route.flow_context.stage_id == operation.stage_id
-                && event_error_kind(route) == Some(&operation.kind)
-                && journal_routes.get(&route.id) == Some(&expected_error_route(&operation.kind));
+            let route_ok = write_failure_route_matches(
+                input,
+                receipt,
+                event,
+                &operation,
+                route,
+                journal_routes.get(&route.id),
+            );
             if !route_ok {
                 return Err(failure(
                     "journal-truth",
@@ -1112,6 +1456,8 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
         operation_failures,
         operation_failure_metrics,
         failure_chains,
+        completed_sink_count,
+        failed_sink_count,
     })
 }
 
@@ -1130,67 +1476,122 @@ pub async fn run_application_conformance<F: SinkApplicationConformanceFixture>(
             ),
         ));
     }
+    for sample in fixture.diagnostic_samples().map_err(|error| {
+        failure_from_error(
+            &profile,
+            "credential-redaction",
+            "diagnostic-samples",
+            &error,
+        )
+    })? {
+        reject_credential_text(
+            &profile,
+            format!("diagnostic-{:?}", sample.surface()),
+            sample.text(),
+        )?;
+    }
 
     let mut cases = Vec::new();
     let mut runs = Vec::new();
     for scenario in required_scenarios() {
+        let scenario_name = scenario.name();
         fixture
             .reset_destination()
             .await
-            .map_err(|error| failure("application", scenario.name(), error.to_string()))?;
-        let before = fixture
-            .verifier()
-            .snapshot()
-            .await
-            .map_err(|error| failure("application", scenario.name(), error.to_string()))?;
+            .map_err(|error| failure_from_error(&profile, "application", &scenario_name, &error))?;
+        let before =
+            fixture.verifier().snapshot().await.map_err(|error| {
+                failure_from_error(&profile, "application", &scenario_name, &error)
+            })?;
         let calls_before = fixture
             .verifier()
             .external_calls()
-            .map_err(|error| failure("application", scenario.name(), error.to_string()))?;
+            .map_err(|error| failure_from_error(&profile, "application", &scenario_name, &error))?;
+        reject_credential_text(
+            &profile,
+            format!("{scenario_name}-before-snapshot"),
+            &format!("{before:?}"),
+        )?;
+        reject_credential_text(
+            &profile,
+            format!("{scenario_name}-before-calls"),
+            &format!("{calls_before:?}"),
+        )?;
         let build_case = fixture
             .build_case(scenario)
-            .map_err(|error| failure("application", scenario.name(), error.to_string()))?;
+            .map_err(|error| failure_from_error(&profile, "application", &scenario_name, &error))?;
         let (flow, archive_root, cli_args) = build_case.into_parts();
+        if let Some(source_archive) = replay_archive_arg(&cli_args) {
+            scan_durable_tree_for_credentials(
+                &profile,
+                &source_archive,
+                &format!("{scenario_name}-source-archive"),
+            )?;
+        }
         let result = FlowApplication::builder()
             .with_cli_args(cli_args)
             .run_async(flow)
             .await;
+        reject_credential_text(
+            &profile,
+            format!("{scenario_name}-application-result"),
+            &format!("{result:?}"),
+        )?;
+        if let Err(error) = &result {
+            reject_error_diagnostics(
+                &profile,
+                &format!("{scenario_name}-application-result"),
+                error,
+            )?;
+        }
 
         if scenario.expects_refusal() {
             if result.is_ok() {
                 return Err(failure(
                     "archive-gate",
-                    scenario.name(),
+                    &scenario_name,
                     "duplicate-sensitive or unspecified redelivery was not refused",
                 ));
             }
-        } else if scenario.eof_kind != EofKind::Poison && result.is_err() {
-            return Err(failure(
-                "application",
-                scenario.name(),
-                result.expect_err("checked error").to_string(),
-            ));
+        } else if scenario.eof_kind != EofKind::Poison {
+            if let Err(error) = &result {
+                return Err(failure_from_error(
+                    &profile,
+                    "application",
+                    &scenario_name,
+                    error,
+                ));
+            }
         }
 
-        let after = fixture
-            .verifier()
-            .snapshot()
-            .await
-            .map_err(|error| failure("application", scenario.name(), error.to_string()))?;
+        let after =
+            fixture.verifier().snapshot().await.map_err(|error| {
+                failure_from_error(&profile, "application", &scenario_name, &error)
+            })?;
         let calls_after = fixture
             .verifier()
             .external_calls()
-            .map_err(|error| failure("application", scenario.name(), error.to_string()))?;
+            .map_err(|error| failure_from_error(&profile, "application", &scenario_name, &error))?;
+        reject_credential_text(
+            &profile,
+            format!("{scenario_name}-after-snapshot"),
+            &format!("{after:?}"),
+        )?;
+        reject_credential_text(
+            &profile,
+            format!("{scenario_name}-after-calls"),
+            &format!("{calls_after:?}"),
+        )?;
         if scenario.expects_refusal() && calls_before != calls_after {
             return Err(failure(
                 "archive-gate",
-                scenario.name(),
+                &scenario_name,
                 "refused redelivery made destination calls",
             ));
         } else if !scenario.expects_refusal() && calls_before == calls_after {
             return Err(failure(
                 "application",
-                scenario.name(),
+                &scenario_name,
                 "executed application scenario made no connector or destination calls",
             ));
         }
@@ -1204,6 +1605,7 @@ pub async fn run_application_conformance<F: SinkApplicationConformanceFixture>(
         } else {
             SinkDestinationVerdict::Converged
         };
+        validate_external_call_lifecycle(&calls_before, &calls_after, verdict, &scenario_name)?;
         fixture
             .verifier()
             .verify(
@@ -1212,7 +1614,7 @@ pub async fn run_application_conformance<F: SinkApplicationConformanceFixture>(
                 &after,
             )
             .await
-            .map_err(|error| failure("destination", scenario.name(), error.to_string()))?;
+            .map_err(|error| failure_from_error(&profile, "destination", &scenario_name, &error))?;
 
         let archive = if scenario.expects_refusal() {
             None
@@ -1220,17 +1622,50 @@ pub async fn run_application_conformance<F: SinkApplicationConformanceFixture>(
             let run_dir = latest_run_dir(&archive_root).ok_or_else(|| {
                 failure(
                     "archive",
-                    scenario.name(),
+                    &scenario_name,
                     "application produced no durable run manifest",
                 )
             })?;
+            scan_durable_tree_for_credentials(
+                &profile,
+                &run_dir,
+                &format!("{scenario_name}-output-archive"),
+            )?;
             let evidence = project_run(&run_dir).await?;
+            reject_credential_text(
+                &profile,
+                format!("{scenario_name}-projected-evidence"),
+                &format!("{evidence:?}"),
+            )?;
             if !evidence.eof_kinds().contains(&scenario.eof_kind()) {
                 return Err(failure(
                     "journal-truth",
-                    scenario.name(),
+                    &scenario_name,
                     format!("archive contains no {:?} EOF evidence", scenario.eof_kind()),
                 ));
+            }
+            match verdict {
+                SinkDestinationVerdict::Failed
+                    if evidence.failed_sink_count() == 0
+                        || evidence.completed_sink_count() != 0 =>
+                {
+                    return Err(failure(
+                        "lifecycle",
+                        &scenario_name,
+                        "failed treatment did not retain Failed-only sink lifecycle evidence",
+                    ));
+                }
+                SinkDestinationVerdict::Committed | SinkDestinationVerdict::Converged
+                    if evidence.completed_sink_count() == 0
+                        || evidence.failed_sink_count() != 0 =>
+                {
+                    return Err(failure(
+                        "lifecycle",
+                        &scenario_name,
+                        "successful treatment did not retain Completed-only sink lifecycle evidence",
+                    ));
+                }
+                _ => {}
             }
             runs.push(evidence);
             Some(run_dir)
@@ -1238,11 +1673,13 @@ pub async fn run_application_conformance<F: SinkApplicationConformanceFixture>(
         cases.push(SinkConformanceCaseResult { scenario, archive });
     }
 
-    Ok(SinkConformanceReport {
+    let report = SinkConformanceReport {
         protocol_version: SINK_CONFORMANCE_PROTOCOL_VERSION,
         cases,
         runs,
-    })
+    };
+    reject_credential_text(&profile, "conformance-report", &format!("{report:?}"))?;
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -1250,7 +1687,9 @@ mod tests {
     use super::*;
     use crate::journal::disk_journals;
     use obzenflow_adapters::sources;
+    use obzenflow_core::event::context::causality_context::CausalityContext;
     use obzenflow_core::event::context::{FlowContext, StageType};
+    use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::WriterId;
     use obzenflow_dsl::{flow, sink, source};
@@ -1262,6 +1701,32 @@ mod tests {
 
     impl TypedPayload for ProjectionInput {
         const EVENT_TYPE: &'static str = "sink_conformance.projection_input";
+    }
+
+    #[test]
+    fn outward_redaction_rejects_canaries_without_reflecting_them() {
+        let sentinel = "sink-conformance-secret-canary";
+        let profile = SinkConformanceProfile::new(
+            SINK_CONFORMANCE_PROTOCOL_VERSION,
+            obzenflow_runtime::testing::sink::SinkSettlementMode::Terminal,
+        )
+        .with_credential_sentinel(sentinel);
+
+        let error = crate::application::ApplicationError::Other(Box::new(SinkFixtureError::new(
+            format!("nested source contains {sentinel}"),
+        )));
+        let failure = failure_from_error(&profile, "application", "nested-error", &error);
+        assert_eq!(failure.suite(), "credential-redaction");
+        assert!(!failure.to_string().contains(sentinel));
+
+        let temp = tempfile::tempdir().expect("temporary credential scan root");
+        let artifact = temp.path().join("artifact");
+        std::fs::write(&artifact, format!("durable {sentinel}"))
+            .expect("write credential canary artifact");
+        let failure = scan_durable_tree_for_credentials(&profile, &artifact, "durable-artifact")
+            .expect_err("durable credential canary must be rejected");
+        assert_eq!(failure.suite(), "credential-redaction");
+        assert!(!failure.to_string().contains(sentinel));
     }
 
     #[test]
@@ -1298,6 +1763,203 @@ mod tests {
         assert!(orphan
             .detail()
             .contains("no recognised failed sink receipt"));
+    }
+
+    struct FailureProjectionFixture {
+        input: ChainEvent,
+        receipt: ChainEvent,
+        operation_event: ChainEvent,
+        operation: SinkOperationFailed,
+        route: ChainEvent,
+    }
+
+    fn failure_projection_fixture() -> FailureProjectionFixture {
+        let source_stage = StageId::new();
+        let sink_stage = StageId::new();
+        let context = |stage_name: &str, stage_id, stage_type| FlowContext {
+            flow_name: "failure-projection".to_string(),
+            flow_id: "flow_failure_projection".to_string(),
+            stage_name: stage_name.to_string(),
+            stage_id,
+            stage_type,
+        };
+        let mut input = ChainEventFactory::data_event(
+            WriterId::from(source_stage),
+            "failure.projection.input.v1",
+            serde_json::json!({"id": 7}),
+        )
+        .with_flow_context(context("inputs", source_stage, StageType::FiniteSource));
+        input.admission_seq = Some(AdmissionSeq(1));
+
+        let mut receipt_payload = DeliveryPayload::failed(
+            DeliveryMethod::Noop,
+            "sink_materialisation_poisoned",
+            "redacted failure",
+        );
+        receipt_payload.destination = "projection-output".to_string();
+        let mut receipt =
+            ChainEventFactory::delivery_event(WriterId::from(sink_stage), receipt_payload)
+                .with_flow_context(context("output", sink_stage, StageType::Sink))
+                .with_causality(CausalityContext::with_parent(input.id));
+        receipt.admission_seq = Some(AdmissionSeq(2));
+
+        let operation = SinkOperationFailed {
+            stage_id: sink_stage,
+            stage_key: "output".to_string(),
+            logical_destination: "projection-output".to_string(),
+            causal_event_id: Some(input.id),
+            input_position: Some(7),
+            failed_delivery_event_id: Some(receipt.id),
+            phase: SinkOperationPhase::Write(obzenflow_core::event::SinkWritePhase::Commit),
+            kind: ErrorKind::Remote,
+            destination_error_code: None,
+            detail: "redacted failure".to_string(),
+        };
+        let mut operation_event = ChainEventFactory::data_event(
+            WriterId::from(sink_stage),
+            SinkOperationFailed::versioned_event_type(),
+            serde_json::to_value(&operation).expect("operation serialises"),
+        )
+        .with_flow_context(context("output", sink_stage, StageType::Sink))
+        .with_causality(CausalityContext::with_parent(receipt.id))
+        .mark_as_error("redacted failure", ErrorKind::Remote);
+        operation_event.admission_seq = Some(AdmissionSeq(3));
+
+        let mut route = ChainEventFactory::data_event(
+            WriterId::from(sink_stage),
+            "failure.projection.input.v1",
+            serde_json::json!({"id": 7}),
+        )
+        .with_flow_context(context("output", sink_stage, StageType::Sink))
+        .with_causality(CausalityContext::with_parent(operation_event.id))
+        .mark_as_error("redacted failure", ErrorKind::Remote);
+        route.admission_seq = Some(AdmissionSeq(4));
+
+        FailureProjectionFixture {
+            input,
+            receipt,
+            operation_event,
+            operation,
+            route,
+        }
+    }
+
+    #[test]
+    fn outward_projection_rejects_wrong_stage_and_self_cycles() {
+        let fixture = failure_projection_fixture();
+        assert!(operation_failure_identity_matches(
+            &fixture.operation_event,
+            &fixture.operation,
+            Some(&SinkJournalRoute::Error),
+        ));
+
+        let mut wrong_stage = fixture.operation.clone();
+        wrong_stage.stage_id = StageId::new();
+        assert!(!operation_failure_identity_matches(
+            &fixture.operation_event,
+            &wrong_stage,
+            Some(&SinkJournalRoute::Error),
+        ));
+
+        let mut self_cycle = fixture.operation_event.clone();
+        self_cycle.causality.parent_ids.push(self_cycle.id);
+        assert!(!operation_failure_identity_matches(
+            &self_cycle,
+            &fixture.operation,
+            Some(&SinkJournalRoute::Error),
+        ));
+    }
+
+    #[test]
+    fn outward_projection_rejects_wrong_type_reuse_and_route_corruption() {
+        let fixture = failure_projection_fixture();
+        assert!(write_failure_receipt_matches(
+            &fixture.input,
+            &fixture.receipt,
+            &fixture.operation_event,
+            &fixture.operation,
+            Some(&SinkJournalRoute::Data),
+        ));
+        assert!(write_failure_route_matches(
+            &fixture.input,
+            &fixture.receipt,
+            &fixture.operation_event,
+            &fixture.operation,
+            &fixture.route,
+            Some(&SinkJournalRoute::Error),
+        ));
+
+        let mut wrong_type = fixture.route.clone();
+        if let ChainEventContent::Data { event_type, .. } = &mut wrong_type.content {
+            *event_type = "failure.projection.wrong.v1".to_string();
+        }
+        assert!(!write_failure_route_matches(
+            &fixture.input,
+            &fixture.receipt,
+            &fixture.operation_event,
+            &fixture.operation,
+            &wrong_type,
+            Some(&SinkJournalRoute::Error),
+        ));
+
+        let mut reused_input = fixture.route.clone();
+        reused_input.id = fixture.input.id;
+        assert!(!write_failure_route_matches(
+            &fixture.input,
+            &fixture.receipt,
+            &fixture.operation_event,
+            &fixture.operation,
+            &reused_input,
+            Some(&SinkJournalRoute::Error),
+        ));
+
+        let mut wrong_stage = fixture.route.clone();
+        wrong_stage.flow_context.stage_id = StageId::new();
+        assert!(!write_failure_route_matches(
+            &fixture.input,
+            &fixture.receipt,
+            &fixture.operation_event,
+            &fixture.operation,
+            &wrong_stage,
+            Some(&SinkJournalRoute::Error),
+        ));
+        assert!(!write_failure_route_matches(
+            &fixture.input,
+            &fixture.receipt,
+            &fixture.operation_event,
+            &fixture.operation,
+            &fixture.route,
+            Some(&SinkJournalRoute::Data),
+        ));
+
+        let mut self_cycle = fixture.route.clone();
+        self_cycle.causality.parent_ids.push(self_cycle.id);
+        assert!(!write_failure_route_matches(
+            &fixture.input,
+            &fixture.receipt,
+            &fixture.operation_event,
+            &fixture.operation,
+            &self_cycle,
+            Some(&SinkJournalRoute::Error),
+        ));
+    }
+
+    #[test]
+    fn outward_projection_rejects_reversed_or_missing_admission_order() {
+        let mut fixture = failure_projection_fixture();
+        require_admission_order(&fixture.receipt, &fixture.operation_event, "R-to-O")
+            .expect("canonical receipt-to-operation order");
+        require_admission_order(&fixture.operation_event, &fixture.route, "O-to-X")
+            .expect("canonical operation-to-route order");
+
+        fixture.operation_event.admission_seq = Some(AdmissionSeq(1));
+        assert!(
+            require_admission_order(&fixture.receipt, &fixture.operation_event, "R-to-O").is_err()
+        );
+        fixture.route.admission_seq = None;
+        assert!(
+            require_admission_order(&fixture.operation_event, &fixture.route, "O-to-X").is_err()
+        );
     }
 
     #[test]

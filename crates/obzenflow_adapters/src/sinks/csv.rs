@@ -12,7 +12,7 @@ use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     PendingSinkInput, SinkAuditOutcome, SinkBufferedOutcome, SinkCommitReceipt, SinkConnector,
-    SinkDescription, SinkOperationError, SinkOperationResult, SinkTerminalOutcome,
+    SinkDescription, SinkInputOrder, SinkOperationError, SinkOperationResult, SinkTerminalOutcome,
     SinkWriteContext, SinkWriteFailure, SinkWritePhase, SinkWriteReport, SinkWriteResult,
     SinkWriter, SinkWriterInitContext, SinkWriterLifecycleReport,
 };
@@ -282,6 +282,8 @@ pub struct CsvSinkBuilder<T> {
     auto_flush: bool,
     append: bool,
     #[cfg(feature = "test-support")]
+    test_redelivery_unspecified: bool,
+    #[cfg(feature = "test-support")]
     test_probe: Option<testing::CsvTestProbe>,
     _phantom: PhantomData<fn() -> T>,
 }
@@ -297,6 +299,8 @@ impl<T> Default for CsvSinkBuilder<T> {
             flush_every: None,
             auto_flush: false,
             append: false,
+            #[cfg(feature = "test-support")]
+            test_redelivery_unspecified: false,
             #[cfg(feature = "test-support")]
             test_probe: None,
             _phantom: PhantomData,
@@ -362,6 +366,16 @@ impl<T> CsvSinkBuilder<T> {
         self
     }
 
+    /// Conformance-only seam for exercising the generic undeclared-safety
+    /// archive gate. Production CSV configurations are always classified from
+    /// their append mode.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_redelivery_unspecified(mut self) -> Self {
+        self.test_redelivery_unspecified = true;
+        self
+    }
+
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn test_probe(mut self, probe: testing::CsvTestProbe) -> Self {
@@ -401,6 +415,8 @@ impl<T> CsvSinkBuilder<T> {
             auto_flush: self.auto_flush,
             append: self.append,
             #[cfg(feature = "test-support")]
+            test_redelivery_unspecified: self.test_redelivery_unspecified,
+            #[cfg(feature = "test-support")]
             test_probe: self.test_probe,
             _phantom: PhantomData,
         })
@@ -420,6 +436,8 @@ pub struct CsvSink<T> {
     flush_every: Option<usize>,
     auto_flush: bool,
     append: bool,
+    #[cfg(feature = "test-support")]
+    test_redelivery_unspecified: bool,
     #[cfg(feature = "test-support")]
     test_probe: Option<testing::CsvTestProbe>,
     _phantom: PhantomData<fn() -> T>,
@@ -459,15 +477,20 @@ where
     type Writer = CsvWriter<T>;
 
     fn describe(&self) -> SinkDescription {
+        let description = SinkDescription::method(DeliveryMethod::FileWrite {
+            path: self.path.clone(),
+        })
+        .with_input_order(SinkInputOrder::OrderSensitive);
+        #[cfg(feature = "test-support")]
+        if self.test_redelivery_unspecified {
+            return description;
+        }
         let safety = if self.append {
             SinkRedeliverySafety::DuplicateSensitive
         } else {
             SinkRedeliverySafety::SafeToRepeat
         };
-        SinkDescription::method(DeliveryMethod::FileWrite {
-            path: self.path.clone(),
-        })
-        .with_redelivery_safety(safety)
+        description.with_redelivery_safety(safety)
     }
 
     async fn open(&self, _context: SinkWriterInitContext) -> SinkOperationResult<Self::Writer> {

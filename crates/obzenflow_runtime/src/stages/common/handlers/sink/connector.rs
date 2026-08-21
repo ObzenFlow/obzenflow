@@ -41,6 +41,20 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::{StageId, TypedPayload};
 
+/// Whether a sink observes the relative order of inputs delivered to one
+/// materialised writer.
+///
+/// `Unspecified` preserves existing connector behaviour without asserting
+/// order independence. An `OrderSensitive` sink asks the DSL to canonicalise
+/// every acyclic fan-in in its upstream cone and reject a topology whose order
+/// cannot be stabilised.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SinkInputOrder {
+    #[default]
+    Unspecified,
+    OrderSensitive,
+}
+
 /// Stable, pre-erasure facts about one configured sink connector.
 ///
 /// This is a description of the configured connector, not a second execution
@@ -52,6 +66,7 @@ pub struct SinkDescription {
     destination: Option<String>,
     default_method: Option<DeliveryMethod>,
     redelivery_safety: Option<SinkRedeliverySafety>,
+    input_order: SinkInputOrder,
 }
 
 impl SinkDescription {
@@ -61,6 +76,7 @@ impl SinkDescription {
             destination: None,
             default_method: None,
             redelivery_safety: None,
+            input_order: SinkInputOrder::Unspecified,
         }
     }
 
@@ -71,6 +87,7 @@ impl SinkDescription {
             destination: None,
             default_method: Some(method),
             redelivery_safety: None,
+            input_order: SinkInputOrder::Unspecified,
         }
     }
 
@@ -82,6 +99,7 @@ impl SinkDescription {
             destination: Some(destination.into()),
             default_method: Some(method),
             redelivery_safety: None,
+            input_order: SinkInputOrder::Unspecified,
         }
     }
 
@@ -89,6 +107,17 @@ impl SinkDescription {
     pub fn with_redelivery_safety(mut self, safety: SinkRedeliverySafety) -> Self {
         self.redelivery_safety = Some(safety);
         self
+    }
+
+    /// Declare whether this sink observes input order.
+    pub fn with_input_order(mut self, input_order: SinkInputOrder) -> Self {
+        self.input_order = input_order;
+        self
+    }
+
+    /// Return the configured input-order requirement.
+    pub fn input_order(&self) -> SinkInputOrder {
+        self.input_order
     }
 
     #[doc(hidden)]

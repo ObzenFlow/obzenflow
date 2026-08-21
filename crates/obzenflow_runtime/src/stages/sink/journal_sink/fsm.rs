@@ -234,6 +234,12 @@ pub enum JournalSinkAction<H> {
     /// Flush any buffered data to ensure durability
     FlushBuffers,
 
+    /// Gracefully drain the writer and journal every returned receipt.
+    ///
+    /// This is a fallible settlement operation and therefore remains distinct
+    /// from drop-only resource cleanup.
+    DrainWriter,
+
     /// Run the authoritative post-flush contract evaluation.
     ///
     /// This must run only after `FlushBuffers` has journalled any per-event commit receipts so that
@@ -258,6 +264,7 @@ impl<H> Clone for JournalSinkAction<H> {
                 message: message.clone(),
             },
             Self::FlushBuffers => Self::FlushBuffers,
+            Self::DrainWriter => Self::DrainWriter,
             Self::VerifyContractsAfterFlush => Self::VerifyContractsAfterFlush,
             Self::Cleanup => Self::Cleanup,
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
@@ -273,6 +280,7 @@ impl<H> std::fmt::Debug for JournalSinkAction<H> {
             Self::SendCompletion => write!(f, "SendCompletion"),
             Self::SendFailure { message } => write!(f, "SendFailure({message:?})"),
             Self::FlushBuffers => write!(f, "FlushBuffers"),
+            Self::DrainWriter => write!(f, "DrainWriter"),
             Self::VerifyContractsAfterFlush => write!(f, "VerifyContractsAfterFlush"),
             Self::Cleanup => write!(f, "Cleanup"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
@@ -745,32 +753,27 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                 Ok(())
             }
 
-            JournalSinkAction::Cleanup => {
-                if let Some(heartbeat) = ctx.heartbeat.take() {
-                    heartbeat.cancel();
-                }
-
+            JournalSinkAction::DrainWriter => {
                 if ctx.failure_lifecycle_recorded {
                     tracing::info!(
                         stage_name = %ctx.stage_name,
-                        "sink failure cleanup is drop-only; no drain callback will run"
+                        "sink failure state is drop-only; no drain callback will run"
                     );
                     return Ok(());
                 }
 
                 let stage_name = ctx.stage_name.clone();
-                lifecycle_actions::cleanup_with_result("Sink", &stage_name, || async {
+                async {
                     tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %stage_name,
-                        "sink: Cleanup action - acquiring handler lock"
+                        "sink: DrainWriter action - acquiring handler lock"
                     );
-                    // Call handler drain before stopping tasks
                     let handler = &mut ctx.handler;
                     tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %stage_name,
-                        "sink: Cleanup action - calling handler.drain()"
+                        "sink: DrainWriter action - calling handler.drain()"
                     );
                     let drain_result = match handler.drain_report().await {
                         Ok(report) => report,
@@ -825,7 +828,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                             })
                         else {
                             return Err(obzenflow_fsm::FsmError::HandlerError(format!(
-                                "Cleanup: commit receipt parent {} is not pending",
+                                "DrainWriter: commit receipt parent {} is not pending",
                                 commit.parent_event_id
                             )));
                         };
@@ -833,14 +836,14 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     }
                     drain_result.commit_settlements().map_err(|error| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Cleanup: settlement validation changed before commit: {error}"
+                            "DrainWriter: settlement validation changed before commit: {error}"
                         ))
                     })?;
                     if let Some(payload) = drain_result.audit_payload.take() {
                         tracing::trace!(
                             target: "flowip-080o",
                             stage_name = %ctx.stage_name,
-                            "sink: Cleanup action - drain returned audit payload, writing delivery"
+                            "sink: DrainWriter action - drain returned audit payload, writing delivery"
                         );
                         let writer_id = ctx.writer_id.ok_or_else(|| {
                             obzenflow_fsm::FsmError::HandlerError(
@@ -873,16 +876,27 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %stage_name,
-                        "sink: Cleanup action - handler.drain() complete, dropping handler lock"
+                        "sink: DrainWriter action - handler.drain() complete"
                     );
                     tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %stage_name,
-                        "sink: Cleanup action - COMPLETE (handler drained)"
+                        "sink: DrainWriter action - COMPLETE"
                     );
                     Ok::<(), obzenflow_fsm::FsmError>(())
-                })
+                }
                 .await?;
+                Ok(())
+            }
+
+            JournalSinkAction::Cleanup => {
+                if let Some(heartbeat) = ctx.heartbeat.take() {
+                    heartbeat.cancel();
+                }
+                tracing::info!(
+                    stage_name = %ctx.stage_name,
+                    "Sink cleaned up resources with drop-only teardown"
+                );
                 Ok(())
             }
 

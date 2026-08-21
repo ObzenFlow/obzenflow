@@ -10,7 +10,8 @@ pub mod traits;
 pub mod typed;
 
 pub use connector::{
-    InlineSink, SinkConnector, SinkDescription, SinkWriterInitContext, WithRedeliverySafety,
+    InlineSink, SinkConnector, SinkDescription, SinkInputOrder, SinkWriterInitContext,
+    WithRedeliverySafety,
 };
 pub use error::{
     SinkDestinationErrorCode, SinkOperationError, SinkOperationErrorConversionError,

@@ -5,11 +5,8 @@
 #![cfg(all(feature = "postgres", feature = "test-support"))]
 
 use async_trait::async_trait;
-use obzenflow::sinks::postgres::sqlx::postgres::PgArguments;
-use obzenflow::sinks::postgres::sqlx::query::Query;
-use obzenflow::sinks::postgres::sqlx::{PgPool, Postgres, Row};
-use obzenflow::sinks::postgres::testing::PostgresTestProbe;
-use obzenflow::sinks::postgres::{PostgresBind, PostgresConnection, PostgresSink};
+use obzenflow::sinks::postgres::testing::{PostgresTestProbe, POSTGRES_SQLSTATE_NAMESPACE};
+use obzenflow::sinks::postgres::{PostgresBind, PostgresConnection, PostgresQuery, PostgresSink};
 use obzenflow::sources;
 use obzenflow::testing::sink::{
     run_application_conformance, SinkApplicationBuildCase, SinkApplicationConformanceFixture,
@@ -38,10 +35,12 @@ use obzenflow_runtime::stages::source::strategies::{
 use obzenflow_runtime::stages::{SourceError, TypedFiniteSourceHandler};
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use obzenflow_runtime::testing::sink::{
-    SinkConformanceProfile, SinkExternalCallKind, SinkExternalCallSnapshot, SinkFault,
-    SinkFixtureError, SinkSettlementMode, SINK_CONFORMANCE_PROTOCOL_VERSION,
+    SinkConformanceProfile, SinkDiagnosticSample, SinkDiagnosticSurface, SinkExternalCallKind,
+    SinkExternalCallSnapshot, SinkFault, SinkFixtureError, SinkSettlementMode,
+    SINK_CONFORMANCE_PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, Row};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -61,11 +60,7 @@ impl TypedPayload for Payment {
 struct PaymentBinder;
 
 impl PostgresBind<Payment> for PaymentBinder {
-    fn bind<'q>(
-        &self,
-        query: Query<'q, Postgres, PgArguments>,
-        input: &'q Payment,
-    ) -> Query<'q, Postgres, PgArguments> {
+    fn bind<'q>(&self, query: PostgresQuery<'q>, input: &'q Payment) -> PostgresQuery<'q> {
         query.bind(input.id).bind(input.amount_cents)
     }
 }
@@ -200,7 +195,7 @@ fn build_sink(
         SinkDestinationClass::DuplicateSensitive => {
             builder.redelivery_safety(SinkRedeliverySafety::DuplicateSensitive)
         }
-        SinkDestinationClass::Unspecified => builder,
+        SinkDestinationClass::Unspecified => builder.test_redelivery_unspecified(),
     };
     builder.build().map_err(flow_error)
 }
@@ -364,7 +359,7 @@ fn latest_run_dir(root: &Path) -> PathBuf {
 }
 
 async fn truncate(pool: &PgPool, schema: &str) -> Result<(), SinkFixtureError> {
-    obzenflow::sinks::postgres::sqlx::query(&format!("TRUNCATE TABLE {schema}.payments"))
+    sqlx::query(&format!("TRUNCATE TABLE {schema}.payments"))
         .execute(pool)
         .await
         .map_err(|error| SinkFixtureError::new(error.to_string()))?;
@@ -437,7 +432,7 @@ impl SinkDestinationVerifier for PostgresVerifier {
     type Snapshot = Vec<(i64, i64)>;
 
     async fn snapshot(&self) -> Result<Self::Snapshot, SinkFixtureError> {
-        obzenflow::sinks::postgres::sqlx::query(&format!(
+        sqlx::query(&format!(
             "SELECT id, amount_cents FROM {}.payments ORDER BY id",
             self.schema
         ))
@@ -510,15 +505,15 @@ impl PostgresApplicationFixture {
             .await
             .map_err(|error| SinkFixtureError::new(error.to_string()))?;
         let schema = format!("obz122a_app_{}", std::process::id());
-        obzenflow::sinks::postgres::sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             .execute(&pool)
             .await
             .map_err(|error| SinkFixtureError::new(error.to_string()))?;
-        obzenflow::sinks::postgres::sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
             .execute(&pool)
             .await
             .map_err(|error| SinkFixtureError::new(error.to_string()))?;
-        obzenflow::sinks::postgres::sqlx::query(&format!(
+        sqlx::query(&format!(
             "CREATE TABLE {schema}.payments (id BIGINT PRIMARY KEY, amount_cents BIGINT NOT NULL)"
         ))
         .execute(&pool)
@@ -572,7 +567,7 @@ impl PostgresApplicationFixture {
     }
 
     async fn cleanup(&self) {
-        let _ = obzenflow::sinks::postgres::sqlx::query(&format!(
+        let _ = sqlx::query(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE",
             self.verifier.schema
         ))
@@ -590,6 +585,7 @@ impl SinkApplicationConformanceFixture for PostgresApplicationFixture {
             SINK_CONFORMANCE_PROTOCOL_VERSION,
             SinkSettlementMode::Buffered { batch_size: 2 },
         )
+        .with_credential_sentinel("obzenflow-secret-122a")
     }
 
     async fn reset_destination(&mut self) -> Result<(), SinkFixtureError> {
@@ -672,46 +668,118 @@ impl SinkApplicationConformanceFixture for PostgresApplicationFixture {
     fn verifier(&self) -> &Self::Verifier {
         &self.verifier
     }
+
+    fn diagnostic_samples(&self) -> Result<Vec<SinkDiagnosticSample>, SinkFixtureError> {
+        Ok(vec![
+            SinkDiagnosticSample::new(
+                SinkDiagnosticSurface::Debug,
+                format!("{:?}", self.connection),
+            ),
+            SinkDiagnosticSample::new(
+                SinkDiagnosticSurface::Verifier,
+                format!("schema={}", self.verifier.schema),
+            ),
+        ])
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn postgres_passes_live_redelivery_gate_and_archived_failure_projection() {
-    let Some(url) = std::env::var("OBZENFLOW_POSTGRES_TEST_URL").ok() else {
-        eprintln!("skipping PostgreSQL application conformance: test URL is unset");
-        return;
-    };
+    let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL").expect(
+        "OBZENFLOW_POSTGRES_TEST_URL is required: PostgreSQL application conformance must not pass without a real database",
+    );
     let mut fixture = PostgresApplicationFixture::connect(&url)
         .await
         .expect("PostgreSQL application fixture initialises");
     let report = run_application_conformance(&mut fixture)
         .await
         .expect("PostgreSQL passes outward application conformance");
-    assert_eq!(report.protocol_version(), SINK_CONFORMANCE_PROTOCOL_VERSION);
-    assert_eq!(report.cases().len(), 9);
-    assert_eq!(report.runs().len(), 7);
+    let mut report_failures = Vec::new();
+    if report.protocol_version() != SINK_CONFORMANCE_PROTOCOL_VERSION {
+        report_failures.push(format!(
+            "protocol version: expected {SINK_CONFORMANCE_PROTOCOL_VERSION}, got {}",
+            report.protocol_version()
+        ));
+    }
+    if report.cases().len() != 9 {
+        report_failures.push(format!(
+            "case count: expected 9, got {}",
+            report.cases().len()
+        ));
+    }
+    if report.runs().len() != 7 {
+        report_failures.push(format!(
+            "durable run count: expected 7, got {}",
+            report.runs().len()
+        ));
+    }
 
     let operation_runs = report
         .runs()
         .iter()
         .filter(|run| !run.operation_failures().is_empty())
         .collect::<Vec<_>>();
-    assert_eq!(operation_runs.len(), 1);
-    let operation = &operation_runs[0].operation_failures()[0];
-    assert_eq!(
-        operation.phase(),
-        SinkOperationPhase::Write(SinkWritePhase::Commit)
-    );
-    assert_eq!(
-        operation
-            .destination_error_code()
-            .map(|code| (code.namespace(), code.value())),
-        Some(("postgres.sqlstate", "08007"))
-    );
-    assert_eq!(operation_runs[0].operation_failure_metrics().len(), 1);
-    let chain = &operation_runs[0].failure_chains()[0];
-    assert!(chain.receipt_to_operation());
-    assert!(chain.operation_to_route());
-    assert!(chain.route_to_lifecycle());
+    if operation_runs.len() != 1 {
+        report_failures.push(format!(
+            "operation-failure run count: expected 1, got {}",
+            operation_runs.len()
+        ));
+    }
+    if let Some(run) = operation_runs.first() {
+        if run.operation_failures().len() != 1 {
+            report_failures.push(format!(
+                "operation failure count: expected 1, got {}",
+                run.operation_failures().len()
+            ));
+        }
+        if let Some(operation) = run.operation_failures().first() {
+            let expected_phase = SinkOperationPhase::Write(SinkWritePhase::Commit);
+            if operation.phase() != expected_phase {
+                report_failures.push(format!(
+                    "operation phase: expected {expected_phase:?}, got {:?}",
+                    operation.phase()
+                ));
+            }
+            let expected_code = Some((POSTGRES_SQLSTATE_NAMESPACE, "08007"));
+            let actual_code = operation
+                .destination_error_code()
+                .map(|code| (code.namespace(), code.value()));
+            if actual_code != expected_code {
+                report_failures.push(format!(
+                    "destination error code: expected {expected_code:?}, got {actual_code:?}"
+                ));
+            }
+        }
+        if run.operation_failure_metrics().len() != 1 {
+            report_failures.push(format!(
+                "operation failure metric count: expected 1, got {}",
+                run.operation_failure_metrics().len()
+            ));
+        }
+        if run.failure_chains().len() != 1 {
+            report_failures.push(format!(
+                "failure-chain count: expected 1, got {}",
+                run.failure_chains().len()
+            ));
+        }
+        if let Some(chain) = run.failure_chains().first() {
+            if !chain.receipt_to_operation() {
+                report_failures.push("failure chain is missing receipt -> operation".to_string());
+            }
+            if !chain.operation_to_route() {
+                report_failures.push("failure chain is missing operation -> route".to_string());
+            }
+            if !chain.route_to_lifecycle() {
+                report_failures.push("failure chain is missing route -> lifecycle".to_string());
+            }
+        }
+    }
 
     fixture.cleanup().await;
+
+    assert!(
+        report_failures.is_empty(),
+        "PostgreSQL application conformance report mismatches:\n{}",
+        report_failures.join("\n")
+    );
 }
