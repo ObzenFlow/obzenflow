@@ -53,45 +53,47 @@ fn configured_payment_flow(
     journals: PathBuf,
     connection: PostgresConnection,
     schema: String,
-) -> Result<FlowDefinition, FlowBuildError> {
-    let payments = sources::finite([
-        Payment {
-            id: 1001,
-            amount_cents: 12_500,
-        },
-        Payment {
-            id: 1002,
-            amount_cents: 8_750,
-        },
-    ]);
-    let postgres = PostgresSink::<Payment>::builder()
-        .connection(connection)
-        .table(&schema, "payments")
-        .map_err(build_error)?
-        .statement(format!(
-            "INSERT INTO {schema}.payments (id, amount_cents) VALUES ($1, $2) \
-             ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents"
-        ))
-        .map_err(build_error)?
-        .batch_size(2)
-        .map_err(build_error)?
-        .redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-        .bind_with(PaymentBinder)
-        .build()
-        .map_err(build_error)?;
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let payments = sources::finite([
+            Payment {
+                id: 1001,
+                amount_cents: 12_500,
+            },
+            Payment {
+                id: 1002,
+                amount_cents: 8_750,
+            },
+        ]);
+        let postgres = PostgresSink::<Payment>::builder()
+            .connection(connection)
+            .table(&schema, "payments")
+            .map_err(build_error)?
+            .statement(format!(
+                "INSERT INTO {schema}.payments (id, amount_cents) VALUES ($1, $2) \
+                 ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents"
+            ))
+            .map_err(build_error)?
+            .batch_size(2)
+            .map_err(build_error)?
+            .redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+            .bind_with(PaymentBinder)
+            .build()
+            .map_err(build_error)?;
 
-    Ok(flow! {
-        name: "postgres_sink_payments",
-        journals: disk_journals(journals),
+        Ok(flow! {
+            name: "postgres_sink_payments",
+            journals: disk_journals(journals),
 
-        stages: {
-            payments = source!(Payment => payments);
-            postgres = sink!(Payment => postgres);
-        },
+            stages: {
+                payments = source!(Payment => payments);
+                postgres = sink!(Payment => postgres);
+            },
 
-        topology: {
-            payments |> postgres;
-        }
+            topology: {
+                payments |> postgres;
+            }
+        })
     })
 }
 
@@ -159,8 +161,7 @@ fn payment_flow(
     // this build closure. Keeping destination setup here is what proves a bad
     // raw manifest cannot cause PostgreSQL I/O.
     FlowDefinition::new(move |build_context| async move {
-        let flow = configured_payment_flow(journals, connection, schema.clone())
-            .map_err(FlowBuildFailure::from)?;
+        let flow = configured_payment_flow(journals, connection, schema.clone());
         let baseline = prepare_destination(&url, &schema)
             .await
             .map_err(|error| FlowBuildFailure::from(build_error(error)))?;

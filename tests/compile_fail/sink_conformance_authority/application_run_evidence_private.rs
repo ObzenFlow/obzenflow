@@ -12,5 +12,7 @@ fn main() {
         operation_failures: Vec::new(),
         operation_failure_metrics: Vec::new(),
         failure_chains: Vec::new(),
+        completed_sink_count: 0,
+        failed_sink_count: 0,
     };
 }

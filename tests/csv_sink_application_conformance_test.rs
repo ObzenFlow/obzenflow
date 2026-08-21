@@ -148,15 +148,17 @@ impl TypedFiniteSourceHandler for StallingRows {
     }
 }
 
-fn flow_error(error: impl std::fmt::Display) -> FlowBuildError {
-    FlowBuildError::StageResourcesFailed(format!("failed to build CSV sink: {error}"))
+fn flow_error(error: impl std::fmt::Display) -> Box<FlowBuildError> {
+    Box::new(FlowBuildError::StageResourcesFailed(format!(
+        "failed to build CSV sink: {error}"
+    )))
 }
 
 fn build_sink(
     path: PathBuf,
     probe: CsvTestProbe,
     class: SinkDestinationClass,
-) -> Result<CsvSink<Row>, FlowBuildError> {
+) -> Result<CsvSink<Row>, Box<FlowBuildError>> {
     let builder = CsvSink::<Row>::builder()
         .path(path)
         .columns(["id", "amount_cents"])
@@ -179,7 +181,7 @@ fn single_flow(
     poison_eof: bool,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let output = build_sink(output, probe, class)?;
+        let output = build_sink(output, probe, class).map_err(|error| *error)?;
         let inputs = sources::finite(rows());
         if poison_eof {
             Ok(flow! {
@@ -215,7 +217,8 @@ fn single_flow(
 
 fn fan_in_flow(journal_root: PathBuf, output: PathBuf, probe: CsvTestProbe) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let output = build_sink(output, probe, SinkDestinationClass::SafeToRepeat)?;
+        let output = build_sink(output, probe, SinkDestinationClass::SafeToRepeat)
+            .map_err(|error| *error)?;
         let left = sources::finite(vec![rows()[0].clone(), rows()[2].clone()]);
         let right = sources::finite(vec![rows()[1].clone(), rows()[3].clone()]);
         Ok(flow! {
@@ -243,8 +246,10 @@ fn fan_out_flow(
     probe: CsvTestProbe,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let primary = build_sink(primary, probe.clone(), SinkDestinationClass::SafeToRepeat)?;
-        let secondary = build_sink(secondary, probe, SinkDestinationClass::SafeToRepeat)?;
+        let primary = build_sink(primary, probe.clone(), SinkDestinationClass::SafeToRepeat)
+            .map_err(|error| *error)?;
+        let secondary = build_sink(secondary, probe, SinkDestinationClass::SafeToRepeat)
+            .map_err(|error| *error)?;
         let inputs = sources::finite(rows());
         Ok(flow! {
             name: "csv_sink_application_fan_out",
@@ -266,7 +271,8 @@ fn fan_out_flow(
 
 fn stalling_flow(journal_root: PathBuf, output: PathBuf, probe: CsvTestProbe) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let output = build_sink(output, probe, SinkDestinationClass::SafeToRepeat)?;
+        let output = build_sink(output, probe, SinkDestinationClass::SafeToRepeat)
+            .map_err(|error| *error)?;
         let inputs = StallingRows { next: 1 };
         Ok(flow! {
             name: "csv_sink_application",

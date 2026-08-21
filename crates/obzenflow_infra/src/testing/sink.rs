@@ -1125,7 +1125,7 @@ fn validate_external_call_lifecycle(
             .position(|kind| *kind == SinkExternalCallKind::Drain);
         match verdict {
             SinkDestinationVerdict::Committed | SinkDestinationVerdict::Converged => {
-                if !flush.zip(drain).is_some_and(|(flush, drain)| flush < drain) {
+                if flush.zip(drain).is_none_or(|(flush, drain)| flush >= drain) {
                     return Err(failure(
                         "lifecycle",
                         case,

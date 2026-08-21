@@ -1062,6 +1062,7 @@ mod tests {
         assert!(sqlstate_code("unsafe code with spaces").is_none());
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn real_driver_sqlstates_and_transport_absence_map_without_text_parsing() {
         let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL").expect(
