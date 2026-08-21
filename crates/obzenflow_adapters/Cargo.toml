@@ -37,3 +37,8 @@ chrono = { workspace = true }
 tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
 trybuild = { workspace = true }
+
+[[test]]
+name = "postgres_sink_conformance_test"
+path = "tests/postgres_sink_conformance_test.rs"
+required-features = ["postgres", "test-support"]
