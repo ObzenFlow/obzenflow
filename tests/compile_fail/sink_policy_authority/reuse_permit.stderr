@@ -12,8 +12,8 @@ error[E0382]: use of moved value: `permit`
 note: `obzenflow_runtime::stages::sink::journal_sink::SinkDeliveryPermit::observe` takes ownership of the receiver `self`, which moves `permit`
   --> crates/obzenflow_runtime/src/stages/sink/journal_sink/boundary.rs
    |
-   |         self: Box<Self>,
-   |         ^^^^
+   |     fn observe(self: Box<Self>, outcome: &SinkDeliveryAttemptOutcome) -> SinkPolicyEvidenceBatch;
+   |                ^^^^
 help: you could `clone` the value and consume it, if the following trait bounds could be satisfied: `dyn SinkDeliveryPermit: Sized` and `dyn SinkDeliveryPermit: Clone`
    |
 13 |     let _ = permit.clone().observe(outcome);

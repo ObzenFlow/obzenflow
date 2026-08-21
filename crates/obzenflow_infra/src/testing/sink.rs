@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Application certification for production sink connectors.
+//! Outward application certification for production sink connectors.
 
+use crate::application::{CurrentRunLocator, FlowApplication};
+use crate::journal::DiskJournal;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryResult};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
@@ -17,8 +19,6 @@ use obzenflow_core::journal::{Journal, RunManifest, RUN_MANIFEST_FILENAME, RUN_M
 use obzenflow_core::metrics::SinkOperationFailureMetric;
 use obzenflow_core::{AdmissionSeq, EventId, StageId, TypedPayload};
 use obzenflow_dsl::FlowDefinition;
-use obzenflow_infra::application::{CurrentRunLocator, FlowApplication};
-use obzenflow_infra::journal::DiskJournal;
 use obzenflow_runtime::stages::sink::{SinkDestinationErrorCode, SinkWriteFailureDisposition};
 use obzenflow_runtime::testing::sink::{
     SinkConformanceProfile, SinkExternalCallSnapshot, SinkFixtureError,

@@ -519,7 +519,17 @@ pub(crate) struct PendingReceiptMeta {
     pub seq: SeqNo,
     pub event_id: EventId,
     pub vector_clock: VectorClock,
+}
+
+/// Exact delivered input retained until the sink authors a terminal receipt.
+///
+/// This registry is intentionally broader than `pending_receipts`: forwarded
+/// data still needs an exact durable parent even though it does not contribute
+/// to the immediate upstream writer's receipt watermark.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingDeliveryInput {
     pub event: ChainEvent,
+    pub vector_clock: VectorClock,
 }
 
 #[derive(Debug)]
@@ -534,6 +544,7 @@ pub struct ReaderProgress {
     pub last_vector_clock: Option<VectorClock>,
     pub last_receipted_event_id: Option<EventId>,
     pub last_receipted_vector_clock: Option<VectorClock>,
+    pub(crate) pending_delivery_inputs: HashMap<EventId, PendingDeliveryInput>,
     pub(crate) pending_receipts: HashMap<EventId, PendingReceiptMeta>,
     pub(crate) committed_out_of_order: BTreeMap<SeqNo, PendingReceiptMeta>,
 
@@ -570,6 +581,7 @@ impl ReaderProgress {
             last_vector_clock: None,
             last_receipted_event_id: None,
             last_receipted_vector_clock: None,
+            pending_delivery_inputs: HashMap::new(),
             pending_receipts: HashMap::new(),
             committed_out_of_order: BTreeMap::new(),
             last_progress_seq: SeqNo(0),
@@ -584,21 +596,30 @@ impl ReaderProgress {
         }
     }
 
-    /// Stores receipt metadata for a just-read event that requires durable delivery evidence.
-    ///
-    /// `reader_seq` at the time of tracking is used as the receipt-ordering key for advancing
-    /// the contiguous receipt watermark (`receipted_seq`).
-    pub(crate) fn track_pending_receipt(
+    /// Retain the exact parent of any delivered data input until terminal settlement.
+    pub(crate) fn track_pending_delivery_input(
         &mut self,
-        event_id: EventId,
         event: ChainEvent,
         vector_clock: VectorClock,
     ) {
+        self.pending_delivery_inputs.insert(
+            event.id,
+            PendingDeliveryInput {
+                event,
+                vector_clock,
+            },
+        );
+    }
+
+    /// Stores watermark metadata for an accounted just-read event.
+    ///
+    /// `reader_seq` at the time of tracking is used as the receipt-ordering key for advancing
+    /// the contiguous receipt watermark (`receipted_seq`).
+    pub(crate) fn track_pending_receipt(&mut self, event_id: EventId, vector_clock: VectorClock) {
         let meta = PendingReceiptMeta {
             seq: self.reader_seq,
             event_id,
             vector_clock,
-            event,
         };
         self.pending_receipts.insert(event_id, meta);
     }

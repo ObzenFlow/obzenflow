@@ -163,6 +163,7 @@ test-support = [
     "obzenflow_runtime/test-support",
     "obzenflow_dsl/test-support",
     "obzenflow_adapters/test-support",
+    "obzenflow_infra/test-support",
 ]
 
 [profile.release]

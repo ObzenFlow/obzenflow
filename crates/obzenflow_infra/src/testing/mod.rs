@@ -2,6 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Public application-level test-kit facade.
+//! Application-level conformance kits.
 
-pub use obzenflow_infra::testing::sink;
+pub mod sink;

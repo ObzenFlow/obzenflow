@@ -62,6 +62,7 @@ reqwest-client = ["dep:reqwest", "dep:rustls-native-certs"]
 studio-registration = ["warp-server", "reqwest-client"]
 ai-rig = ["reqwest-client", "dep:rig_rs"]
 ai-tiktoken = ["dep:tiktoken-rs"]
+test-support = ["obzenflow_runtime/test-support"]
 
 [dev-dependencies]
 # FLOWIP-114o: `test-util` enables `#[tokio::test(start_paused = true)]` for the

@@ -32,7 +32,8 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{
-    AdmissionSeq, EventId, EventType, ReaderGeneration, StageId, TransportContract, WriterId,
+    AdmissionSeq, ContractResult, DeliveryContract, EventId, EventType, ReaderGeneration, StageId,
+    TransportContract, WriterId,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -766,9 +767,11 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
     reader_progress[0].reader_seq = SeqNo(1);
-    reader_progress[0].track_pending_receipt(first.id, first.clone(), clock_1);
+    reader_progress[0].track_pending_delivery_input(first.clone(), clock_1.clone());
+    reader_progress[0].track_pending_receipt(first.id, clock_1);
     reader_progress[0].reader_seq = SeqNo(2);
-    reader_progress[0].track_pending_receipt(second.id, second.clone(), clock_2.clone());
+    reader_progress[0].track_pending_delivery_input(second.clone(), clock_2.clone());
+    reader_progress[0].track_pending_receipt(second.id, clock_2.clone());
 
     let second_receipt = ChainEventFactory::delivery_event(
         WriterId::from(contract_stage),
@@ -795,8 +798,67 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
     assert_eq!(watermark.1, second.id);
     assert_eq!(watermark.2, clock_2);
     assert_eq!(reader_progress[0].receipted_seq, SeqNo(2));
+    assert!(reader_progress[0].pending_delivery_inputs.is_empty());
     assert!(reader_progress[0].pending_receipts.is_empty());
     assert!(reader_progress[0].committed_out_of_order.is_empty());
+}
+
+#[tokio::test]
+async fn forwarded_sink_input_settles_without_entering_authored_delivery_contract() {
+    let upstream_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap();
+
+    let sink_stage = StageId::new();
+    let contract_owner = JournalOwner::stage(sink_stage);
+    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
+    subscription = subscription.with_contracts(ContractsWiring {
+        writer_id: WriterId::from(sink_stage),
+        contract_journal,
+        config: ContractConfig::default(),
+        system_journal: None,
+        reader_stage: Some(sink_stage),
+        control_plane: Arc::new(NoControlPlane),
+        include_delivery_contract: true,
+        cycle_guard_config: None,
+    });
+
+    let source_stage = StageId::new();
+    let forwarded = ChainEventFactory::data_event(
+        WriterId::from(source_stage),
+        "forwarded.event",
+        json!({"value": 1}),
+    );
+    let mut clock = VectorClock::new();
+    clock.clocks.insert("source".to_string(), 1);
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+    reader_progress[0].track_pending_delivery_input(forwarded.clone(), clock);
+
+    let receipt = ChainEventFactory::delivery_event(
+        WriterId::from(sink_stage),
+        DeliveryPayload::success(DeliveryMethod::Noop, None),
+    )
+    .with_causality(CausalityContext::with_parent(forwarded.id));
+
+    assert!(subscription
+        .record_delivery_receipt(&receipt, &mut reader_progress)
+        .is_none());
+    assert!(reader_progress[0].pending_delivery_inputs.is_empty());
+    assert_eq!(reader_progress[0].receipted_seq, SeqNo(0));
+
+    let delivery_result = subscription.contract_chains[0]
+        .as_ref()
+        .expect("delivery contract chain")
+        .verify_all(upstream_stage, sink_stage)
+        .into_iter()
+        .find_map(|(name, result)| (name.as_str() == DeliveryContract::NAME).then_some(result))
+        .expect("delivery contract result");
+    assert!(matches!(delivery_result, ContractResult::Passed(_)));
 }
 
 #[tokio::test]

@@ -5,7 +5,6 @@
 #[path = "../support/typed_sink.rs"]
 mod support;
 use async_trait::async_trait;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::sink::{
     SinkConnector, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, SinkWriter,
     SinkWriterInitContext,

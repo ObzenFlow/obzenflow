@@ -20,6 +20,8 @@ pub mod http_client;
 pub mod journal;
 pub mod monitoring_backend;
 pub mod sources;
+#[cfg(feature = "test-support")]
+pub mod testing;
 pub mod verify;
 pub mod web;
 
