@@ -92,7 +92,7 @@ sysinfo = "0.29"
 
 # I/O and formats
 csv = "1"
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres"] }
 
 # Security / hashing
 crc32fast = "1.3"

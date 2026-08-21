@@ -19,9 +19,9 @@ use obzenflow_runtime::stages::sink::{
     SinkWriteFailure, SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter,
     SinkWriterInitContext, SinkWriterLifecycleReport,
 };
-use sqlx::postgres::{PgArguments, PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::{PgArguments, PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::query::Query;
-use sqlx::{PgPool, Postgres};
+use sqlx::{ConnectOptions as _, PgPool, Postgres};
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
@@ -47,6 +47,10 @@ pub enum PostgresConfigError {
     MissingEnvironment(String),
     #[error("PostgreSQL connection options are invalid")]
     InvalidConnection,
+    #[error(
+        "PostgreSQL sslmode must be explicitly set to 'verify-full' for authenticated TLS or 'disable' for a separately protected local transport"
+    )]
+    UnsafeSslMode,
     #[error("PostgreSQL schema or table identifier is invalid")]
     InvalidIdentifier,
     #[error("PostgreSQL INSERT statement is missing")]
@@ -79,14 +83,20 @@ impl PostgresConnection {
     pub fn from_url(url: &str) -> Result<Self, PostgresConfigError> {
         let options =
             PgConnectOptions::from_str(url).map_err(|_| PostgresConfigError::InvalidConnection)?;
-        Ok(Self::from_options(options))
+        Self::from_options(options)
     }
 
-    pub fn from_options(options: PgConnectOptions) -> Self {
-        Self {
-            options,
-            acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
+    pub fn from_options(options: PgConnectOptions) -> Result<Self, PostgresConfigError> {
+        match options.get_ssl_mode() {
+            PgSslMode::Disable | PgSslMode::VerifyFull => {}
+            PgSslMode::Allow | PgSslMode::Prefer | PgSslMode::Require | PgSslMode::VerifyCa => {
+                return Err(PostgresConfigError::UnsafeSslMode);
+            }
         }
+        Ok(Self {
+            options: options.disable_statement_logging(),
+            acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
+        })
     }
 
     /// Override how long a writer waits to acquire its sole connection.
@@ -991,8 +1001,39 @@ mod tests {
     }
 
     fn connection() -> PostgresConnection {
-        PostgresConnection::from_url("postgres://sentinel-user:sentinel-password@localhost/test")
-            .expect("test URL parses without I/O")
+        PostgresConnection::from_url(
+            "postgres://sentinel-user:sentinel-password@localhost/test?sslmode=disable",
+        )
+        .expect("test URL parses without I/O")
+    }
+
+    #[test]
+    fn connection_requires_an_explicit_safe_transport_mode() {
+        let base = "postgres://sentinel-user:sentinel-password@localhost/test";
+
+        assert!(matches!(
+            PostgresConnection::from_url(base),
+            Err(PostgresConfigError::UnsafeSslMode)
+        ));
+        assert!(matches!(
+            PostgresConnection::from_options(PgConnectOptions::new()),
+            Err(PostgresConfigError::UnsafeSslMode)
+        ));
+        for mode in ["allow", "prefer", "require", "verify-ca"] {
+            assert!(matches!(
+                PostgresConnection::from_url(&format!("{base}?sslmode={mode}")),
+                Err(PostgresConfigError::UnsafeSslMode)
+            ));
+        }
+
+        PostgresConnection::from_url(&format!("{base}?sslmode=disable"))
+            .expect("explicit plaintext is permitted for a separately protected transport");
+        PostgresConnection::from_url(&format!("{base}?sslmode=verify-full"))
+            .expect("hostname-verified TLS is permitted");
+        PostgresConnection::from_options(PgConnectOptions::new().ssl_mode(PgSslMode::VerifyFull))
+            .expect("programmatic hostname-verified TLS is permitted");
+        PostgresConnection::from_options(PgConnectOptions::new().ssl_mode(PgSslMode::Disable))
+            .expect("programmatic explicit plaintext is permitted");
     }
 
     #[test]
