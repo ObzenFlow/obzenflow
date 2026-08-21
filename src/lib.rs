@@ -218,3 +218,6 @@ pub mod sinks;
 pub mod sources;
 pub mod stateful;
 pub mod transforms;
+
+#[cfg(feature = "test-support")]
+pub mod testing;

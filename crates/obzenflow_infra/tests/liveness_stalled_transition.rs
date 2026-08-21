@@ -109,7 +109,7 @@ impl InlineSink for NoopSink {
         &mut self,
         _input: ProbeOutputEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Noop".to_string()),
             None,

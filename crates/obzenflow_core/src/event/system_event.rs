@@ -360,6 +360,8 @@ pub enum StageLifecycleEvent {
         recoverable: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         metrics: Option<StageMetricsSnapshot>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        causal_event_id: Option<EventId>,
     },
 }
 
@@ -552,6 +554,7 @@ impl SystemEvent {
                     error,
                     recoverable: Some(recoverable),
                     metrics: None,
+                    causal_event_id: None,
                 },
             },
         )
@@ -598,6 +601,30 @@ impl SystemEvent {
                     error,
                     recoverable: Some(recoverable),
                     metrics: Some(metrics),
+                    causal_event_id: None,
+                },
+            },
+        )
+    }
+
+    /// Construct correctness-bearing failed lifecycle evidence causally linked
+    /// to the final chain event in a sink failure sequence.
+    pub fn stage_failed_with_metrics_causal(
+        stage_id: StageId,
+        error: String,
+        recoverable: bool,
+        metrics: StageMetricsSnapshot,
+        causal_event_id: EventId,
+    ) -> Self {
+        Self::new(
+            WriterId::from(stage_id),
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Failed {
+                    error,
+                    recoverable: Some(recoverable),
+                    metrics: Some(metrics),
+                    causal_event_id: Some(causal_event_id),
                 },
             },
         )
@@ -694,6 +721,7 @@ impl SystemEventFactory {
                     error,
                     recoverable: Some(recoverable),
                     metrics: None,
+                    causal_event_id: None,
                 },
             },
         )

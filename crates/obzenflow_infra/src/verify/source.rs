@@ -21,6 +21,7 @@ use obzenflow_core::journal::run_manifest::{
 };
 use obzenflow_core::journal::ArchiveStatus;
 
+use crate::journal::disk::manifest_gate::require_current_manifest_version;
 use crate::journal::disk::replay_archive::derive_status_derivation_from_system_log;
 use crate::journal::disk::scanner::{
     classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy,
@@ -88,15 +89,10 @@ impl DiskRunSource {
                 message: e.to_string(),
             })
         })?;
-        let version = value
-            .get("manifest_version")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if version != RUN_MANIFEST_VERSION {
+        if let Err(version) = require_current_manifest_version(&value) {
             return Err(refused(RefusalReason::ManifestVersion {
                 path: manifest_path,
-                found: version,
+                found: version.found().to_string(),
                 supported: RUN_MANIFEST_VERSION.to_string(),
             }));
         }
@@ -265,6 +261,51 @@ impl Iterator for JournalRows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verification_rejects_non_current_manifest_shapes_before_journal_decode() {
+        for (version, expected) in [
+            (None, "<missing>"),
+            (Some(serde_json::json!(3.0)), "3.0"),
+            (Some(serde_json::json!("2.0")), "2.0"),
+            (Some(serde_json::json!("4.0")), "4.0"),
+        ] {
+            let temp = tempfile::tempdir().expect("temporary archive");
+            let mut manifest = serde_json::json!({
+                "journal_format_version": JOURNAL_FORMAT_VERSION,
+                "system_journal_file": "sentinel-system.journal"
+            });
+            if let Some(version) = version {
+                manifest["manifest_version"] = version;
+            }
+            std::fs::write(
+                temp.path().join(RUN_MANIFEST_FILENAME),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                temp.path().join("sentinel-system.journal"),
+                b"this must never be decoded",
+            )
+            .unwrap();
+
+            match DiskRunSource::open(temp.path()) {
+                Err(SourceOpenError::Refused(reason)) => match *reason {
+                    RefusalReason::ManifestVersion {
+                        found, supported, ..
+                    } => {
+                        assert_eq!(found, expected);
+                        assert_eq!(supported, RUN_MANIFEST_VERSION);
+                    }
+                    other => panic!("wrong refusal: {other:?}"),
+                },
+                Err(SourceOpenError::Failed(error)) => {
+                    panic!("raw version gate must win over journal decoding: {error}")
+                }
+                Ok(_) => panic!("non-current manifest must refuse verification"),
+            }
+        }
+    }
 
     #[test]
     fn verification_gates_binding_descriptor_capability_before_journal_decode() {

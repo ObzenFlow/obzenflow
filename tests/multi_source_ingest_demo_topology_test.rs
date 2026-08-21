@@ -156,7 +156,7 @@ impl InlineSink for NullSink {
         &mut self,
         _event: IngestSummary,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Noop".to_string()),
             None,

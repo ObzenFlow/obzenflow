@@ -61,7 +61,6 @@ use obzenflow_runtime::effects::{
     EffectBinding, EffectPortResolutionError, EffectPortResolver, EffectRegistrationBuilder,
     LogicalEffectBindingName, ResolvedEffectPort, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
 };
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
@@ -556,7 +555,7 @@ impl InlineSink for CollectOut {
         &mut self,
         output: DigestOut,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.outputs
             .lock()
             .expect("output collector lock")

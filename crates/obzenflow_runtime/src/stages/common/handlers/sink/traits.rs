@@ -64,10 +64,10 @@ pub struct CommitReceipt {
     pub payload: DeliveryPayload,
 }
 
-#[derive(Debug, Clone)]
 pub struct SinkConsumeReport {
     pub primary: DeliveryPayload,
     pub commit_receipts: Vec<CommitReceipt>,
+    settlement: Option<Box<dyn SinkSettlementCommit>>,
 }
 
 impl SinkConsumeReport {
@@ -75,14 +75,90 @@ impl SinkConsumeReport {
         Self {
             primary,
             commit_receipts: Vec::new(),
+            settlement: None,
+        }
+    }
+
+    pub(crate) fn with_settlement(mut self, settlement: Box<dyn SinkSettlementCommit>) -> Self {
+        self.settlement = Some(settlement);
+        self
+    }
+
+    pub(crate) fn commit_settlements(&mut self) -> Result<(), HandlerError> {
+        match self.settlement.take() {
+            Some(settlement) => settlement.commit(),
+            None => Ok(()),
         }
     }
 }
 
-#[derive(Debug, Clone, Default)]
+impl Clone for SinkConsumeReport {
+    fn clone(&self) -> Self {
+        Self {
+            primary: self.primary.clone(),
+            commit_receipts: self.commit_receipts.clone(),
+            // Clones are read-only observation views. Settlement authority is
+            // affine and remains on the production report until the runtime's
+            // complete parent preflight succeeds.
+            settlement: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for SinkConsumeReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SinkConsumeReport")
+            .field("primary", &self.primary)
+            .field("commit_receipts", &self.commit_receipts)
+            .field("settlement_authority", &self.settlement.is_some())
+            .finish()
+    }
+}
+
+#[derive(Default)]
 pub struct SinkLifecycleReport {
     pub audit_payload: Option<DeliveryPayload>,
     pub commit_receipts: Vec<CommitReceipt>,
+    settlement: Option<Box<dyn SinkSettlementCommit>>,
+}
+
+impl std::fmt::Debug for SinkLifecycleReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SinkLifecycleReport")
+            .field("audit_payload", &self.audit_payload)
+            .field("commit_receipts", &self.commit_receipts)
+            .field("settlement_authority", &self.settlement.is_some())
+            .finish()
+    }
+}
+
+impl SinkLifecycleReport {
+    pub(crate) fn new(
+        audit_payload: Option<DeliveryPayload>,
+        commit_receipts: Vec<CommitReceipt>,
+    ) -> Self {
+        Self {
+            audit_payload,
+            commit_receipts,
+            settlement: None,
+        }
+    }
+
+    pub(crate) fn with_settlement(mut self, settlement: Box<dyn SinkSettlementCommit>) -> Self {
+        self.settlement = Some(settlement);
+        self
+    }
+
+    pub(crate) fn commit_settlements(&mut self) -> Result<(), HandlerError> {
+        match self.settlement.take() {
+            Some(settlement) => settlement.commit(),
+            None => Ok(()),
+        }
+    }
+}
+
+pub(crate) trait SinkSettlementCommit: Send + Sync {
+    fn commit(self: Box<Self>) -> Result<(), HandlerError>;
 }
 
 /// Erased protocol implemented by framework sink adapters.
@@ -137,10 +213,7 @@ pub trait SinkHandler: Send + Sync {
     /// Default behaviour preserves the legacy `flush()` contract so existing
     /// sinks do not need to change.
     async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
-        Ok(SinkLifecycleReport {
-            audit_payload: self.flush().await?,
-            commit_receipts: Vec::new(),
-        })
+        Ok(SinkLifecycleReport::new(self.flush().await?, Vec::new()))
     }
 
     /// Draining hook called during graceful shutdown.
@@ -156,10 +229,7 @@ pub trait SinkHandler: Send + Sync {
     /// Default behaviour preserves the legacy `drain()` contract so existing
     /// sinks do not need to change.
     async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
-        Ok(SinkLifecycleReport {
-            audit_payload: self.drain().await?,
-            commit_receipts: Vec::new(),
-        })
+        Ok(SinkLifecycleReport::new(self.drain().await?, Vec::new()))
     }
 }
 

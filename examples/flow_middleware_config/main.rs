@@ -101,7 +101,7 @@ impl InlineSink for CountingSink {
         &mut self,
         event: CounterEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.received += 1;
 
         // Log progress every 20 events

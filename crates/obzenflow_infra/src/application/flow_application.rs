@@ -69,7 +69,6 @@ mod tests {
 
     use obzenflow_dsl::{flow, infinite_source, sink, source};
     use obzenflow_runtime::pipeline::PipelineState;
-    use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::{
         InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
         TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
@@ -136,7 +135,7 @@ mod tests {
             &mut self,
             _input: IdlePayload,
             _context: SinkWriteContext,
-        ) -> Result<SinkWriteReport, HandlerError> {
+        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
             Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
                 DeliveryMethod::Custom("test".to_string()),
                 None,

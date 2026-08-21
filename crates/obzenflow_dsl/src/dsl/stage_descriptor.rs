@@ -21,6 +21,7 @@ use obzenflow_adapters::middleware::{
     PerSourcePolicyBoundary, SinkPolicy, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::SinkOperationPhase;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::__private::{SinkWriterAdapter, UnifiedJoinHandler};
 use obzenflow_runtime::stages::observer::{
@@ -52,6 +53,7 @@ use obzenflow_runtime::{
             JournalSinkBuilder, JournalSinkConfig, JournalSinkEvent, JournalSinkState,
             SinkDeliveryBoundary,
         },
+        sink::{record_sink_lifecycle_operation_failure, SinkLifecycleFailureCommit},
         source::{
             finite::{
                 AsyncFiniteSourceBuilder, FiniteSourceBuilder, FiniteSourceConfig,
@@ -2031,6 +2033,9 @@ impl<C: SinkConnector + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
         // middleware wrapping. The binding-derived fallback is resolved only
         // now, after the final stage name exists.
         let receipt_destination = self.description.destination_name().map(str::to_owned);
+        let logical_destination = receipt_destination
+            .clone()
+            .unwrap_or_else(|| config.name.clone());
         let default_delivery_method = self.description.default_method().cloned();
 
         // Create the stage configuration
@@ -2053,11 +2058,30 @@ impl<C: SinkConnector + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
             config.name.clone(),
             config.flow_name.clone(),
         );
-        let writer = self
-            .connector
-            .open(writer_context)
-            .await
-            .map_err(|error| format!("Failed to open sink connector: {error}"))?;
+        let writer = match self.connector.open(writer_context).await {
+            Ok(writer) => writer,
+            Err(error) => {
+                record_sink_lifecycle_operation_failure(SinkLifecycleFailureCommit {
+                    stage_id: config.stage_id,
+                    stage_key: &config.name,
+                    flow_id: &resources.flow_id.to_string(),
+                    flow_name: &config.flow_name,
+                    logical_destination: &logical_destination,
+                    phase: SinkOperationPhase::Open,
+                    error: &error,
+                    error_journal: &resources.error_journal,
+                    system_journal: &resources.system_journal,
+                    instrumentation: instrumentation.as_ref(),
+                })
+                .await
+                .map_err(|record_error| {
+                    format!(
+                        "Failed to record sink connector open failure ({error}): {record_error}"
+                    )
+                })?;
+                return Err(format!("Failed to open sink connector: {error}").into());
+            }
+        };
         let handler = SinkWriterAdapter::with_default_method(
             writer,
             config.stage_id,

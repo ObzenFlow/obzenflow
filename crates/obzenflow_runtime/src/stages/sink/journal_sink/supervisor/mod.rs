@@ -129,12 +129,13 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
                     Box::pin(async move {
                         tracing::info!(
                             stage_name = %ctx.stage_name,
-                            "JournalSinkSupervisor: ReceivedEOF -> Drained (flush + completion + cleanup)"
+                            "JournalSinkSupervisor: ReceivedEOF -> Drained (flush + drain + verification + completion + cleanup)"
                         );
                         Ok(Transition {
                             next_state: JournalSinkState::Drained,
                             actions: vec![
                                 JournalSinkAction::FlushBuffers,
+                                JournalSinkAction::DrainWriter,
                                 JournalSinkAction::VerifyContractsAfterFlush,
                                 JournalSinkAction::SendCompletion,
                                 JournalSinkAction::Cleanup,
@@ -229,11 +230,16 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
                     Box::pin(async move {
                         tracing::info!(
                             target: "flowip-080o",
-                            "JournalSinkSupervisor: BeginDrain -> Drained (SendCompletion + Cleanup)"
+                            "JournalSinkSupervisor: BeginDrain -> Drained (drain + verification + completion + cleanup)"
                         );
                         Ok(Transition {
                             next_state: JournalSinkState::Drained,
-                            actions: vec![JournalSinkAction::SendCompletion, JournalSinkAction::Cleanup],
+                            actions: vec![
+                                JournalSinkAction::DrainWriter,
+                                JournalSinkAction::VerifyContractsAfterFlush,
+                                JournalSinkAction::SendCompletion,
+                                JournalSinkAction::Cleanup,
+                            ],
                         })
                     })
                 };

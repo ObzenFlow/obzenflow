@@ -8,7 +8,6 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedFiniteSourceHandler,
@@ -82,7 +81,7 @@ impl InlineSink for Printer {
         &mut self,
         _input: DoubledEvent,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Print".to_string()),
             None,

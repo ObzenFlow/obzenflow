@@ -35,10 +35,10 @@ use obzenflow_runtime::stages::common::handlers::source::traits::{
 };
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, JoinReferenceView, SinkConnector, SinkDescription, SinkTerminalOutcome,
-    SinkWriteContext, SinkWriteReport, StatefulEmission, TransformHandler,
-    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
-    TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler,
+    InlineSink, JoinReferenceView, SinkConnector, SinkDescription, SinkInputOrder,
+    SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, SinkWriteResult, StatefulEmission,
+    TransformHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler,
     TypedStatefulHandlerAdapter, TypedTransformHandler, TypedTransformHandlerAdapter,
 };
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
@@ -1585,11 +1585,7 @@ where
 {
     type Input = In;
 
-    async fn write(
-        &mut self,
-        _input: In,
-        _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    async fn write(&mut self, _input: In, _context: SinkWriteContext) -> SinkWriteResult {
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("sink", self.message));
         }
@@ -2598,7 +2594,8 @@ pub fn validate_order_observer_deterministic_input_order(
 
 /// FLOWIP-095m: does this stage's reconstruction read fan-in delivery order?
 /// Effects (095d), stateful folds, and live/symmetric joins do; a hydrating join
-/// is a structural orderer, and sources, transforms, and sinks are carriers.
+/// is a structural orderer; sources and transforms are carriers, while sinks
+/// opt in when their connector declares input order observable.
 ///
 /// Must be evaluated on the UNWRAPPED descriptor: the join arm reads
 /// `is_deterministic_input_orderer()`, which `wrap_deterministic_orderers` forces
@@ -2610,6 +2607,9 @@ fn is_order_observer(descriptor: &dyn StageDescriptor) -> bool {
     match descriptor.stage_type() {
         StageType::Stateful => true,
         StageType::Join => !descriptor.is_deterministic_input_orderer(),
+        StageType::Sink => descriptor
+            .sink_description()
+            .is_some_and(|description| description.input_order() == SinkInputOrder::OrderSensitive),
         _ => false,
     }
 }

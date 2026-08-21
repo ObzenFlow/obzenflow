@@ -5,10 +5,10 @@
 //! Closure conveniences for the canonical typed sink protocol.
 
 use crate::effects::SinkRedeliverySafety;
-use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::{
-    DeliveryContext, SinkConnector, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, SinkWriter, SinkWriterInitContext, WithRedeliverySafety,
+    DeliveryContext, SinkConnector, SinkDescription, SinkOperationError, SinkOperationResult,
+    SinkTerminalOutcome, SinkWriteContext, SinkWriteFailure, SinkWritePhase, SinkWriteReport,
+    SinkWriteResult, SinkWriter, SinkWriterInitContext, WithRedeliverySafety,
 };
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
@@ -87,7 +87,7 @@ where
     pub fn fallible<G, FutG>(handler: G) -> SinkTyped<T, G, FutG, FallibleSinkMode>
     where
         G: FnMut(T) -> FutG + Send + Sync + Clone + 'static,
-        FutG: Future<Output = Result<(), HandlerError>> + Send + 'static,
+        FutG: Future<Output = Result<(), SinkOperationError>> + Send + 'static,
     {
         SinkTyped {
             handler,
@@ -176,7 +176,7 @@ macro_rules! impl_closure_connector {
             async fn open(
                 &self,
                 _context: SinkWriterInitContext,
-            ) -> Result<Self::Writer, HandlerError> {
+            ) -> SinkOperationResult<Self::Writer> {
                 Ok(ClosureSinkWriter {
                     handler: self.handler.clone(),
                     _input: PhantomData,
@@ -201,7 +201,7 @@ impl_closure_connector!(
 impl_closure_connector!(
     FallibleSinkMode,
     F: FnMut(T) -> Fut,
-    Fut: Future<Output = Result<(), HandlerError>>
+    Fut: Future<Output = Result<(), SinkOperationError>>
 );
 
 #[async_trait]
@@ -213,11 +213,7 @@ where
 {
     type Input = T;
 
-    async fn write(
-        &mut self,
-        input: T,
-        _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    async fn write(&mut self, input: T, _context: SinkWriteContext) -> SinkWriteResult {
         (self.handler)(input).await;
         Ok(closure_success())
     }
@@ -232,11 +228,7 @@ where
 {
     type Input = T;
 
-    async fn write(
-        &mut self,
-        input: T,
-        context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    async fn write(&mut self, input: T, context: SinkWriteContext) -> SinkWriteResult {
         (self.handler)(input, context.delivery().clone()).await;
         Ok(closure_success())
     }
@@ -247,16 +239,14 @@ impl<T, F, Fut> SinkWriter for ClosureSinkWriter<T, F, Fut, FallibleSinkMode>
 where
     T: TypedPayload + Send + Sync + 'static,
     F: FnMut(T) -> Fut + Send + Sync + Clone + 'static,
-    Fut: Future<Output = Result<(), HandlerError>> + Send + 'static,
+    Fut: Future<Output = Result<(), SinkOperationError>> + Send + 'static,
 {
     type Input = T;
 
-    async fn write(
-        &mut self,
-        input: T,
-        _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
-        (self.handler)(input).await?;
+    async fn write(&mut self, input: T, _context: SinkWriteContext) -> SinkWriteResult {
+        (self.handler)(input)
+            .await
+            .map_err(|error| SinkWriteFailure::current_only(SinkWritePhase::Execute, error))?;
         Ok(closure_success())
     }
 }

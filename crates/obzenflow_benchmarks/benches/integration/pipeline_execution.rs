@@ -137,7 +137,7 @@ impl InlineSink for TimestampedSink {
         &mut self,
         event: BenchEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.received.fetch_add(1, Ordering::Relaxed);
 
         // Skip warmup events for latency calculation.

@@ -123,7 +123,7 @@ impl InlineSink for TimestampedSink {
         &mut self,
         event: BenchEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.received.fetch_add(1, Ordering::Relaxed);
         if event.index >= THROUGHPUT_WARMUP {
             let receive_time_nanos = std::time::SystemTime::now()

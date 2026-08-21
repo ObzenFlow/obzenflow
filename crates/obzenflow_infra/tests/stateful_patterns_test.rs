@@ -151,7 +151,7 @@ where
         &mut self,
         input: T,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.events
             .lock()
             .unwrap()

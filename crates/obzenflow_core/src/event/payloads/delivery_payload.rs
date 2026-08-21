@@ -73,10 +73,6 @@ pub enum DeliveryResult {
     Failed {
         error_type: String,
         error_message: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error_code: Option<String>,
-        #[serde(default)]
-        final_attempt: bool,
     },
     Partial {
         successful_count: u64,
@@ -130,14 +126,11 @@ impl DeliveryPayload {
         method: DeliveryMethod,
         error_type: impl Into<String>,
         error_msg: impl Into<String>,
-        final_attempt: bool,
     ) -> Self {
         Self {
             result: DeliveryResult::Failed {
                 error_type: error_type.into(),
                 error_message: error_msg.into(),
-                error_code: None,
-                final_attempt,
             },
             destination: String::new(),
             delivery_method: method,

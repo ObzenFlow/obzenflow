@@ -266,7 +266,7 @@
 //!         &mut self,
 //!         _input: Out,
 //!         _ctx: SinkWriteContext,
-//!     ) -> Result<SinkWriteReport, HandlerError> {
+//!     ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
 //!         Ok(SinkWriteReport::terminal(
 //!             SinkTerminalOutcome::success_via(DeliveryMethod::Noop, None),
 //!         ))

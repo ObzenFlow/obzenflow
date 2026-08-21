@@ -145,7 +145,7 @@ impl InlineSink for CollectEmbedded {
         &mut self,
         output: TicketEmbedded,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.outputs.lock().expect("output lock").push(output);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("CollectEmbedded".to_string()),

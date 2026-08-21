@@ -146,6 +146,8 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             backpressure_readers: self.resources.backpressure_readers.clone(),
             heartbeat,
             catch_up_flip: None,
+            failure_lifecycle_recorded: false,
+            failure_causal_event_id: None,
         };
 
         // Create supervisor (private - not exposed)

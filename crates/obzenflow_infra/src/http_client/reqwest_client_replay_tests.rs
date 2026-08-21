@@ -23,7 +23,6 @@ use obzenflow_runtime::bootstrap::{
 };
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedAsyncFiniteSourceHandler,
@@ -86,7 +85,7 @@ impl InlineSink for CountingSink {
         &mut self,
         _input: HttpFixtureEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.delivered.fetch_add(1, Ordering::SeqCst);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Noop,

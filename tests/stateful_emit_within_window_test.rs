@@ -188,7 +188,7 @@ impl InlineSink for AggregateSink {
         &mut self,
         event: WindowAgg,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.seen.lock().unwrap().push(event);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Collect".to_string()),
@@ -212,7 +212,7 @@ impl InlineSink for AckSink {
         &mut self,
         _event: GroupAggOutput,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Ack".to_string()),
             None,

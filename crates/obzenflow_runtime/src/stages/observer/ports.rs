@@ -380,9 +380,7 @@ pub enum SinkDeliveryAttemptResult {
         failed_count: u64,
     },
     ReportedBuffered,
-    ReportedFailure {
-        final_attempt: bool,
-    },
+    ReportedFailure,
     HandlerError {
         kind: ErrorKind,
     },

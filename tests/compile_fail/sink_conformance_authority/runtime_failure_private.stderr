@@ -1,0 +1,11 @@
+error[E0451]: fields `suite`, `case` and `detail` of struct `SinkConformanceFailure` are private
+  --> tests/compile_fail/sink_conformance_authority/runtime_failure_private.rs:9:9
+   |
+ 8 |     let _ = SinkConformanceFailure {
+   |             ---------------------- in this type
+ 9 |         suite: "forged",
+   |         ^^^^^ private field
+10 |         case: "forged".into(),
+   |         ^^^^ private field
+11 |         detail: "forged".into(),
+   |         ^^^^^^ private field

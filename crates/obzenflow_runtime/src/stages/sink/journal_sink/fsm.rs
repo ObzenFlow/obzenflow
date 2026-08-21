@@ -12,9 +12,9 @@ use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
-use crate::metrics::instrumentation::StageInstrumentation;
+use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::stages::common::control_strategies::SignalGate;
-use crate::stages::common::handler_error::StageFatal;
+use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
@@ -26,6 +26,7 @@ use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::event::SinkOperationPhase;
 use obzenflow_core::event::{EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
@@ -36,6 +37,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use super::journalled_delivery_event;
+use crate::stages::sink::{record_sink_lifecycle_operation_failure, SinkLifecycleFailureCommit};
 
 // ============================================================================
 // FSM States
@@ -232,6 +234,12 @@ pub enum JournalSinkAction<H> {
     /// Flush any buffered data to ensure durability
     FlushBuffers,
 
+    /// Gracefully drain the writer and journal every returned receipt.
+    ///
+    /// This is a fallible settlement operation and therefore remains distinct
+    /// from drop-only resource cleanup.
+    DrainWriter,
+
     /// Run the authoritative post-flush contract evaluation.
     ///
     /// This must run only after `FlushBuffers` has journalled any per-event commit receipts so that
@@ -256,6 +264,7 @@ impl<H> Clone for JournalSinkAction<H> {
                 message: message.clone(),
             },
             Self::FlushBuffers => Self::FlushBuffers,
+            Self::DrainWriter => Self::DrainWriter,
             Self::VerifyContractsAfterFlush => Self::VerifyContractsAfterFlush,
             Self::Cleanup => Self::Cleanup,
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
@@ -271,6 +280,7 @@ impl<H> std::fmt::Debug for JournalSinkAction<H> {
             Self::SendCompletion => write!(f, "SendCompletion"),
             Self::SendFailure { message } => write!(f, "SendFailure({message:?})"),
             Self::FlushBuffers => write!(f, "FlushBuffers"),
+            Self::DrainWriter => write!(f, "DrainWriter"),
             Self::VerifyContractsAfterFlush => write!(f, "VerifyContractsAfterFlush"),
             Self::Cleanup => write!(f, "Cleanup"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
@@ -382,6 +392,14 @@ pub struct JournalSinkContext<H: UnifiedSinkHandler> {
     /// flipped at, making the flip idempotent per generation across both
     /// triggers (watermark and authored EOF).
     pub(crate) catch_up_flip: Option<obzenflow_core::ReaderGeneration>,
+
+    /// Set once a failed transition has durable lifecycle evidence. Failure
+    /// cleanup must never invoke another connector lifecycle method.
+    pub(crate) failure_lifecycle_recorded: bool,
+
+    /// Final chain-event cause used by the correctness-bearing failed
+    /// lifecycle append for sink protocol and operation failures.
+    pub(crate) failure_causal_event_id: Option<obzenflow_core::EventId>,
 }
 
 impl<H: UnifiedSinkHandler + 'static> FsmContext for JournalSinkContext<H> {}
@@ -525,17 +543,38 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
             }
 
             JournalSinkAction::SendFailure { message } => {
-                lifecycle_actions::send_failure_best_effort(
-                    "Sink",
-                    ctx.stage_id,
-                    &ctx.stage_name,
-                    message,
-                    &ctx.system_journal,
-                    &ctx.data_journal,
-                    Some(&ctx.error_journal),
-                    ctx.instrumentation.as_ref(),
-                )
-                .await;
+                if !ctx.failure_lifecycle_recorded {
+                    if let Some(causal_event_id) = ctx.failure_causal_event_id {
+                        let event = SystemEvent::stage_failed_with_metrics_causal(
+                            ctx.stage_id,
+                            message.clone(),
+                            false,
+                            snapshot_stage_metrics(ctx.instrumentation.as_ref()),
+                            causal_event_id,
+                        );
+                        ctx.system_journal
+                            .append(event, None)
+                            .await
+                            .map_err(|error| {
+                                obzenflow_fsm::FsmError::HandlerError(format!(
+                                    "Failed to write causally linked sink failure: {error}"
+                                ))
+                            })?;
+                    } else {
+                        lifecycle_actions::send_failure_best_effort(
+                            "Sink",
+                            ctx.stage_id,
+                            &ctx.stage_name,
+                            message,
+                            &ctx.system_journal,
+                            &ctx.data_journal,
+                            Some(&ctx.error_journal),
+                            ctx.instrumentation.as_ref(),
+                        )
+                        .await;
+                    }
+                    ctx.failure_lifecycle_recorded = true;
+                }
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
@@ -581,8 +620,32 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         // FLOWIP-095k finalizer gate: the audit payload is an
                         // end-of-input completion statement; Truncated discards
                         // it while flush and receipt effects run for every kind.
-                        let report = apply_terminal_eof_audit_gate(report, ctx.terminal_eof_kind);
-                        if let Some(payload) = report.audit_payload {
+                        let mut report =
+                            apply_terminal_eof_audit_gate(report, ctx.terminal_eof_kind);
+                        let mut prepared_commits = Vec::with_capacity(report.commit_receipts.len());
+                        for commit in &report.commit_receipts {
+                            let Some((_upstream_stage, parent_envelope)) =
+                                ctx.subscription.as_ref().and_then(|subscription| {
+                                    subscription.pending_receipt_envelope(
+                                        commit.parent_event_id,
+                                        &ctx.contract_state[..],
+                                    )
+                                })
+                            else {
+                                return Err(obzenflow_fsm::FsmError::HandlerError(format!(
+                                    "FlushBuffers: commit receipt parent {} is not pending",
+                                    commit.parent_event_id
+                                )));
+                            };
+                            prepared_commits.push((parent_envelope, commit.payload.clone()));
+                        }
+                        report.commit_settlements().map_err(|error| {
+                            obzenflow_fsm::FsmError::HandlerError(format!(
+                                "FlushBuffers: settlement validation changed before commit: {error}"
+                            ))
+                        })?;
+
+                        if let Some(payload) = report.audit_payload.take() {
                             tracing::trace!(
                                 target: "flowip-080o",
                                 stage_name = %ctx.stage_name,
@@ -617,27 +680,35 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                             })?;
                         }
 
-                        for commit in report.commit_receipts {
-                            let Some((_upstream_stage, parent_envelope)) =
-                                ctx.subscription.as_ref().and_then(|subscription| {
-                                    subscription.pending_receipt_envelope(
-                                        commit.parent_event_id,
-                                        &ctx.contract_state[..],
-                                    )
-                                })
-                            else {
-                                tracing::warn!(
-                                    stage_name = %ctx.stage_name,
-                                    parent_event_id = %commit.parent_event_id,
-                                    "FlushBuffers: skipping commit receipt with no pending parent metadata"
-                                );
-                                continue;
-                            };
-
-                            journal_commit_receipt(ctx, &parent_envelope, commit.payload).await?;
+                        for (parent_envelope, payload) in prepared_commits {
+                            journal_commit_receipt(ctx, &parent_envelope, payload).await?;
                         }
                     }
                     Err(e) => {
+                        if let HandlerError::SinkOperation(error) = &e {
+                            let recorded = record_sink_lifecycle_operation_failure(
+                                SinkLifecycleFailureCommit {
+                                    stage_id: ctx.stage_id,
+                                    stage_key: &ctx.stage_name,
+                                    flow_id: &ctx.flow_id.to_string(),
+                                    flow_name: &ctx.flow_name,
+                                    logical_destination: &ctx.receipt_destination,
+                                    phase: SinkOperationPhase::Flush,
+                                    error,
+                                    error_journal: &ctx.error_journal,
+                                    system_journal: &ctx.system_journal,
+                                    instrumentation: ctx.instrumentation.as_ref(),
+                                },
+                            )
+                            .await
+                            .map_err(|error| {
+                                obzenflow_fsm::FsmError::HandlerError(format!(
+                                    "Failed to record sink flush failure: {error}"
+                                ))
+                            })?;
+                            ctx.failure_causal_event_id = Some(recorded.operation.event.id);
+                            ctx.failure_lifecycle_recorded = true;
+                        }
                         if let Some(fatal) = e.as_fatal() {
                             record_sink_lifecycle_fatal(ctx, fatal, "flush").await?;
                         }
@@ -682,28 +753,55 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                 Ok(())
             }
 
-            JournalSinkAction::Cleanup => {
-                if let Some(heartbeat) = ctx.heartbeat.take() {
-                    heartbeat.cancel();
+            JournalSinkAction::DrainWriter => {
+                if ctx.failure_lifecycle_recorded {
+                    tracing::info!(
+                        stage_name = %ctx.stage_name,
+                        "sink failure state is drop-only; no drain callback will run"
+                    );
+                    return Ok(());
                 }
 
                 let stage_name = ctx.stage_name.clone();
-                lifecycle_actions::cleanup_with_result("Sink", &stage_name, || async {
+                async {
                     tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %stage_name,
-                        "sink: Cleanup action - acquiring handler lock"
+                        "sink: DrainWriter action - acquiring handler lock"
                     );
-                    // Call handler drain before stopping tasks
                     let handler = &mut ctx.handler;
                     tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %stage_name,
-                        "sink: Cleanup action - calling handler.drain()"
+                        "sink: DrainWriter action - calling handler.drain()"
                     );
                     let drain_result = match handler.drain_report().await {
                         Ok(report) => report,
                         Err(error) => {
+                            if let HandlerError::SinkOperation(operation_error) = &error {
+                                let recorded = record_sink_lifecycle_operation_failure(
+                                    SinkLifecycleFailureCommit {
+                                        stage_id: ctx.stage_id,
+                                        stage_key: &ctx.stage_name,
+                                        flow_id: &ctx.flow_id.to_string(),
+                                        flow_name: &ctx.flow_name,
+                                        logical_destination: &ctx.receipt_destination,
+                                        phase: SinkOperationPhase::Drain,
+                                        error: operation_error,
+                                        error_journal: &ctx.error_journal,
+                                        system_journal: &ctx.system_journal,
+                                        instrumentation: ctx.instrumentation.as_ref(),
+                                    },
+                                )
+                                .await
+                                .map_err(|record_error| {
+                                    obzenflow_fsm::FsmError::HandlerError(format!(
+                                        "Failed to record sink drain failure: {record_error}"
+                                    ))
+                                })?;
+                                ctx.failure_causal_event_id = Some(recorded.operation.event.id);
+                                ctx.failure_lifecycle_recorded = true;
+                            }
                             if let Some(fatal) = error.as_fatal() {
                                 record_sink_lifecycle_fatal(ctx, fatal, "drain").await?;
                             }
@@ -716,13 +814,36 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     // FLOWIP-095k finalizer gate: the drain audit payload is an
                     // end-of-input completion statement; Truncated discards it
                     // while the drain call and receipt effects run for every kind.
-                    let drain_result =
+                    let mut drain_result =
                         apply_terminal_eof_audit_gate(drain_result, ctx.terminal_eof_kind);
-                    if let Some(payload) = drain_result.audit_payload {
+                    let mut prepared_commits =
+                        Vec::with_capacity(drain_result.commit_receipts.len());
+                    for commit in &drain_result.commit_receipts {
+                        let Some((_upstream_stage, parent_envelope)) =
+                            ctx.subscription.as_ref().and_then(|subscription| {
+                                subscription.pending_receipt_envelope(
+                                    commit.parent_event_id,
+                                    &ctx.contract_state[..],
+                                )
+                            })
+                        else {
+                            return Err(obzenflow_fsm::FsmError::HandlerError(format!(
+                                "DrainWriter: commit receipt parent {} is not pending",
+                                commit.parent_event_id
+                            )));
+                        };
+                        prepared_commits.push((parent_envelope, commit.payload.clone()));
+                    }
+                    drain_result.commit_settlements().map_err(|error| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "DrainWriter: settlement validation changed before commit: {error}"
+                        ))
+                    })?;
+                    if let Some(payload) = drain_result.audit_payload.take() {
                         tracing::trace!(
                             target: "flowip-080o",
                             stage_name = %ctx.stage_name,
-                            "sink: Cleanup action - drain returned audit payload, writing delivery"
+                            "sink: DrainWriter action - drain returned audit payload, writing delivery"
                         );
                         let writer_id = ctx.writer_id.ok_or_else(|| {
                             obzenflow_fsm::FsmError::HandlerError(
@@ -749,38 +870,33 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                             ))
                         })?;
                     }
-                    for commit in drain_result.commit_receipts {
-                        let Some((_upstream_stage, parent_envelope)) =
-                            ctx.subscription.as_ref().and_then(|subscription| {
-                                subscription.pending_receipt_envelope(
-                                    commit.parent_event_id,
-                                    &ctx.contract_state[..],
-                                )
-                            })
-                        else {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                parent_event_id = %commit.parent_event_id,
-                                "Cleanup: skipping commit receipt with no pending parent metadata"
-                            );
-                            continue;
-                        };
-
-                        journal_commit_receipt(ctx, &parent_envelope, commit.payload).await?;
+                    for (parent_envelope, payload) in prepared_commits {
+                        journal_commit_receipt(ctx, &parent_envelope, payload).await?;
                     }
                     tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %stage_name,
-                        "sink: Cleanup action - handler.drain() complete, dropping handler lock"
+                        "sink: DrainWriter action - handler.drain() complete"
                     );
                     tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %stage_name,
-                        "sink: Cleanup action - COMPLETE (handler drained)"
+                        "sink: DrainWriter action - COMPLETE"
                     );
                     Ok::<(), obzenflow_fsm::FsmError>(())
-                })
+                }
                 .await?;
+                Ok(())
+            }
+
+            JournalSinkAction::Cleanup => {
+                if let Some(heartbeat) = ctx.heartbeat.take() {
+                    heartbeat.cancel();
+                }
+                tracing::info!(
+                    stage_name = %ctx.stage_name,
+                    "Sink cleaned up resources with drop-only teardown"
+                );
                 Ok(())
             }
 
@@ -899,13 +1015,13 @@ mod tests {
     use obzenflow_core::EventId;
 
     fn lifecycle_report(parent_event_id: EventId) -> SinkLifecycleReport {
-        SinkLifecycleReport {
-            audit_payload: Some(DeliveryPayload::success(DeliveryMethod::Noop, None)),
-            commit_receipts: vec![CommitReceipt {
-                parent_event_id,
-                payload: DeliveryPayload::success(DeliveryMethod::Noop, None),
-            }],
-        }
+        let mut report = SinkLifecycleReport::default();
+        report.audit_payload = Some(DeliveryPayload::success(DeliveryMethod::Noop, None));
+        report.commit_receipts = vec![CommitReceipt {
+            parent_event_id,
+            payload: DeliveryPayload::success(DeliveryMethod::Noop, None),
+        }];
+        report
     }
 
     #[test]

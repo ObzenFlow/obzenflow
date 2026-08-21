@@ -317,7 +317,6 @@ mod tests {
         MetricsAggregatorAction, MetricsAggregatorContext, MetricsStore,
     };
     use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
-    use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::{
         InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
         TypedAsyncInfiniteSourceHandler,
@@ -876,7 +875,7 @@ mod tests {
             &mut self,
             _event: T,
             _context: SinkWriteContext,
-        ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
             self.delivered.fetch_add(1, Ordering::AcqRel);
             self.notify.notify_waiters();
             Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(

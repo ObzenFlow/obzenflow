@@ -10,10 +10,9 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    InlineSink, SinkAuditOutcome, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
-    SinkWriteReport, SinkWriterLifecycleReport,
+    InlineSink, SinkAuditOutcome, SinkDescription, SinkOperationResult, SinkTerminalOutcome,
+    SinkWriteContext, SinkWriteReport, SinkWriteResult, SinkWriterLifecycleReport,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -613,11 +612,7 @@ where
         self.destination.description()
     }
 
-    async fn write(
-        &mut self,
-        input: T,
-        _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    async fn write(&mut self, input: T, _context: SinkWriteContext) -> SinkWriteResult {
         if let Some(output) = self.formatter.format(&input) {
             self.destination.write_line(&output);
         }
@@ -627,7 +622,7 @@ where
         )))
     }
 
-    async fn flush(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
+    async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
         let Some(output) = self.formatter.flush() else {
             return Ok(SinkWriterLifecycleReport::default());
         };
@@ -648,6 +643,7 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::{
         SinkConnector, SinkHandler, SinkWriterAdapter, SinkWriterInitContext,
     };
+    use obzenflow_runtime::stages::common::HandlerError;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};

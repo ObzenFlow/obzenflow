@@ -93,7 +93,7 @@ where
         &mut self,
         _event: T,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Null".to_string()),
             None,
@@ -481,11 +481,11 @@ async fn manifest_retains_two_real_effect_rows_for_one_stage_broadcast() {
 }
 
 #[test]
-fn checked_schema_v2_studio_fixture_is_a_complete_run_manifest() {
-    let fixture = include_str!("fixtures/effective_config_v2_manifest.json");
+fn checked_schema_v3_studio_fixture_is_a_complete_run_manifest() {
+    let fixture = include_str!("fixtures/effective_config_v3_manifest.json");
     let manifest: RunManifest =
         serde_json::from_str(fixture).expect("Studio fixture must be a valid RunManifest");
-    assert_eq!(manifest.manifest_version, "2.0");
+    assert_eq!(manifest.manifest_version, "3.0");
     assert_eq!(manifest.journal_format_version, 2);
     let evidence = manifest
         .effective_config

@@ -3,13 +3,57 @@
 // https://obzenflow.dev
 
 //! Configured sink connectors and stage-local writer construction.
+//!
+//! # Production contract
+//!
+//! Connector construction and [`SinkConnector::describe`] are pure configuration
+//! operations. They must not open sockets, start tasks, mutate a destination, or
+//! retain runtime resources. [`SinkConnector::open`] is the sole resource-opening
+//! boundary. Each call returns an isolated stage-local writer, including when two
+//! writers are opened from the same connector and used concurrently.
+//!
+//! A writer authors destination facts, never runtime control. `open`, `flush`, and
+//! `drain` return only [`SinkOperationError`](super::error::SinkOperationError),
+//! while `write` returns [`SinkWriteFailure`](super::error::SinkWriteFailure).
+//! These private-field carriers admit operational error classes only. They cannot
+//! select a stage-fatal code, forge settlement, ask middleware to retry, or access
+//! journals, replay history, supervisor handles, or an effect registry.
+//!
+//! A terminal success may be returned only after the destination commit is known.
+//! Buffered work retains the opaque capability produced by
+//! [`SinkWriteContext::defer`]. It becomes terminal only when that exact capability
+//! is returned in a commit receipt after destination commit. A write failure uses
+//! `CurrentOnly` when only the current input is removed, `ConfirmedRollback` when
+//! positive rollback evidence proves earlier buffered inputs remain intact, and
+//! `Poisoned` whenever commit state or any earlier capability is uncertain. The
+//! runtime records receipts and typed failure evidence before policy observation,
+//! and a poisoned writer is dropped without `flush` or `drain` re-entry.
+//!
+//! Replay and redelivery create new physical treatments when admitted. A connector
+//! must not implement an internal retry loop or background commit task. Destination
+//! redelivery classification describes semantics only; the archive gate remains a
+//! runtime decision.
 
-use super::typed::{SinkWriteContext, SinkWriteReport, SinkWriter, SinkWriterLifecycleReport};
+use super::error::{SinkOperationResult, SinkWriteResult};
+use super::typed::{SinkWriteContext, SinkWriter, SinkWriterLifecycleReport};
 use crate::effects::SinkRedeliverySafety;
-use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::{StageId, TypedPayload};
+
+/// Whether a sink observes the relative order of inputs delivered to one
+/// materialised writer.
+///
+/// `Unspecified` preserves existing connector behaviour without asserting
+/// order independence. An `OrderSensitive` sink asks the DSL to canonicalise
+/// every acyclic fan-in in its upstream cone and reject a topology whose order
+/// cannot be stabilised.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SinkInputOrder {
+    #[default]
+    Unspecified,
+    OrderSensitive,
+}
 
 /// Stable, pre-erasure facts about one configured sink connector.
 ///
@@ -22,6 +66,7 @@ pub struct SinkDescription {
     destination: Option<String>,
     default_method: Option<DeliveryMethod>,
     redelivery_safety: Option<SinkRedeliverySafety>,
+    input_order: SinkInputOrder,
 }
 
 impl SinkDescription {
@@ -31,6 +76,7 @@ impl SinkDescription {
             destination: None,
             default_method: None,
             redelivery_safety: None,
+            input_order: SinkInputOrder::Unspecified,
         }
     }
 
@@ -41,6 +87,7 @@ impl SinkDescription {
             destination: None,
             default_method: Some(method),
             redelivery_safety: None,
+            input_order: SinkInputOrder::Unspecified,
         }
     }
 
@@ -52,6 +99,7 @@ impl SinkDescription {
             destination: Some(destination.into()),
             default_method: Some(method),
             redelivery_safety: None,
+            input_order: SinkInputOrder::Unspecified,
         }
     }
 
@@ -59,6 +107,17 @@ impl SinkDescription {
     pub fn with_redelivery_safety(mut self, safety: SinkRedeliverySafety) -> Self {
         self.redelivery_safety = Some(safety);
         self
+    }
+
+    /// Declare whether this sink observes input order.
+    pub fn with_input_order(mut self, input_order: SinkInputOrder) -> Self {
+        self.input_order = input_order;
+        self
+    }
+
+    /// Return the configured input-order requirement.
+    pub fn input_order(&self) -> SinkInputOrder {
+        self.input_order
     }
 
     #[doc(hidden)]
@@ -130,7 +189,11 @@ pub trait SinkConnector: Send + Sync + Sized + 'static {
     fn describe(&self) -> SinkDescription;
 
     /// Open a fresh stage-local mutable writer.
-    async fn open(&self, context: SinkWriterInitContext) -> Result<Self::Writer, HandlerError>;
+    ///
+    /// Repeated calls must not share transient buffers, transactions, pending
+    /// capabilities, or mutable writer state. Failures use the narrow operational
+    /// channel and are stamped as the `Open` phase by the runtime.
+    async fn open(&self, context: SinkWriterInitContext) -> SinkOperationResult<Self::Writer>;
 }
 
 /// Small, already-configured sink tier for in-process integrations.
@@ -155,17 +218,13 @@ pub trait InlineSink: Clone + Send + Sync + 'static {
         SinkDescription::unspecified()
     }
 
-    async fn write(
-        &mut self,
-        input: Self::Input,
-        context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError>;
+    async fn write(&mut self, input: Self::Input, context: SinkWriteContext) -> SinkWriteResult;
 
-    async fn flush(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
+    async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
         Ok(SinkWriterLifecycleReport::default())
     }
 
-    async fn drain(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
+    async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
         self.flush().await
     }
 }
@@ -177,19 +236,15 @@ where
 {
     type Input = I::Input;
 
-    async fn write(
-        &mut self,
-        input: Self::Input,
-        context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    async fn write(&mut self, input: Self::Input, context: SinkWriteContext) -> SinkWriteResult {
         InlineSink::write(self, input, context).await
     }
 
-    async fn flush(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
+    async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
         InlineSink::flush(self).await
     }
 
-    async fn drain(&mut self) -> Result<SinkWriterLifecycleReport, HandlerError> {
+    async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
         InlineSink::drain(self).await
     }
 }
@@ -206,7 +261,7 @@ where
         InlineSink::describe(self)
     }
 
-    async fn open(&self, _context: SinkWriterInitContext) -> Result<Self::Writer, HandlerError> {
+    async fn open(&self, _context: SinkWriterInitContext) -> SinkOperationResult<Self::Writer> {
         Ok(self.clone())
     }
 }
@@ -247,7 +302,7 @@ where
             .with_redelivery_safety(self.safety)
     }
 
-    async fn open(&self, context: SinkWriterInitContext) -> Result<Self::Writer, HandlerError> {
+    async fn open(&self, context: SinkWriterInitContext) -> SinkOperationResult<Self::Writer> {
         self.connector.open(context).await
     }
 }

@@ -106,7 +106,7 @@ impl InlineSink for EventCounterSink {
         &mut self,
         _event: TransformStageEvent,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.count.fetch_add(1, Ordering::Relaxed);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Count".to_string()),
@@ -138,7 +138,7 @@ impl InlineSink for CollectSink {
         &mut self,
         event: TransformStageEvent,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.events
             .lock()
             .unwrap()

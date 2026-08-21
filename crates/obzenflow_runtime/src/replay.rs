@@ -40,7 +40,7 @@ pub enum ReplayError {
         supported: u32,
     },
 
-    #[error("Replay archive version {archive_version} is incompatible with running framework version {current_version} (major.minor must match)")]
+    #[error("Replay archive build version {archive_version} does not exactly match running framework version {current_version}; re-record the run with this build of ObzenFlow")]
     VersionMismatch {
         archive_version: String,
         current_version: String,

@@ -164,7 +164,7 @@ impl InlineSink for SummaryConsole {
         &mut self,
         event: IngestSummary,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         println!("=== IngestSummary ===");
         println!(
             "{}",

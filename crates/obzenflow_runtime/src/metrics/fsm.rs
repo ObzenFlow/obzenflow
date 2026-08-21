@@ -16,7 +16,7 @@ use obzenflow_core::event::payloads::observability_payload::{
     ObservabilityPayload,
 };
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::{JournalEvent, WriterId};
+use obzenflow_core::event::{JournalEvent, SinkOperationFailed, SinkOperationPhase, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
 use obzenflow_core::ingress::IngressKey;
 use obzenflow_core::metrics::{
@@ -26,7 +26,7 @@ use obzenflow_core::metrics::{
 };
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::web::HttpMethod;
-use obzenflow_core::{ChainEvent, EventId, EventType, Journal};
+use obzenflow_core::{ChainEvent, EventId, EventType, Journal, TypedPayload};
 use obzenflow_fsm::{
     fsm, EventVariant, FsmAction, FsmContext, StateMachine, StateVariant, Transition,
 };
@@ -198,6 +198,9 @@ pub struct MetricsStore {
     pub first_event_time: Option<std::time::Instant>,
     pub last_event_time: Option<std::time::Instant>,
     pub total_events_processed: u64,
+
+    /// Projection of durable sink-operation failure facts only.
+    pub sink_operation_failures: HashMap<(StageId, SinkOperationPhase, ErrorKind), u64>,
 
     /// Per-stage vector clock watermark (FLOWIP-059c)
     /// Tracks the highest writer sequence observed for each stage's journal writer.
@@ -905,6 +908,18 @@ impl MetricsAggregatorContext {
 
         // Add stage metadata
         snapshot.stage_metadata = self.stage_metadata.clone();
+        snapshot.sink_operation_failures = store
+            .sink_operation_failures
+            .iter()
+            .map(|((stage_id, phase, error_kind), count)| {
+                obzenflow_core::metrics::SinkOperationFailureMetric {
+                    stage_id: *stage_id,
+                    phase: *phase,
+                    error_kind: error_kind.clone(),
+                    count: *count,
+                }
+            })
+            .collect();
 
         // FLOWIP-059a: Middleware metrics
         snapshot.circuit_breaker_state = store.circuit_breaker_state.clone();
@@ -1100,6 +1115,13 @@ impl MetricsAggregatorContext {
 }
 
 impl MetricsStore {
+    fn fold_sink_operation_failure(&mut self, failure: &SinkOperationFailed) {
+        *self
+            .sink_operation_failures
+            .entry((failure.stage_id, failure.phase, failure.kind.clone()))
+            .or_insert(0) += 1;
+    }
+
     fn fold_http_pull_snapshot(&mut self, stage_id: StageId, snapshot: &HttpPullTelemetry) {
         let entry = self.http_pull_metrics.entry(stage_id).or_default();
 
@@ -1704,6 +1726,22 @@ impl FsmAction for MetricsAggregatorAction {
                             Err(e) => tracing::warn!(
                                 error = %e,
                                 "Failed to decode ai_chunking.snapshot payload; ignoring"
+                            ),
+                        }
+                    }
+                }
+
+                if let ChainEventContent::Data {
+                    event_type,
+                    payload,
+                } = &event.content
+                {
+                    if SinkOperationFailed::event_type_matches(event_type) {
+                        match serde_json::from_value::<SinkOperationFailed>(payload.clone()) {
+                            Ok(failure) => store.fold_sink_operation_failure(&failure),
+                            Err(error) => tracing::warn!(
+                                %error,
+                                "Failed to decode SinkOperationFailed metric fact; ignoring"
                             ),
                         }
                     }
@@ -2395,6 +2433,50 @@ mod tests {
     use obzenflow_core::{EventEnvelope, JournalId};
     use std::collections::VecDeque;
     use std::marker::PhantomData;
+
+    #[test]
+    fn sink_operation_metric_projection_folds_only_typed_phase_and_error_kind() {
+        let stage_id = StageId::new();
+        let mut store = MetricsStore::default();
+        for phase in [
+            SinkOperationPhase::Open,
+            SinkOperationPhase::Write(obzenflow_core::event::SinkWritePhase::Encode),
+            SinkOperationPhase::Write(obzenflow_core::event::SinkWritePhase::Acquire),
+            SinkOperationPhase::Write(obzenflow_core::event::SinkWritePhase::Execute),
+            SinkOperationPhase::Write(obzenflow_core::event::SinkWritePhase::Commit),
+            SinkOperationPhase::Flush,
+            SinkOperationPhase::Drain,
+        ] {
+            let failure = SinkOperationFailed {
+                stage_id,
+                stage_key: "sink".to_string(),
+                logical_destination: "high.cardinality.destination".to_string(),
+                causal_event_id: None,
+                input_position: None,
+                failed_delivery_event_id: None,
+                phase,
+                kind: ErrorKind::Remote,
+                destination_error_code: Some(
+                    obzenflow_core::event::SinkDestinationErrorCode::try_new(
+                        "postgresql.sqlstate",
+                        "23505",
+                    )
+                    .unwrap(),
+                ),
+                detail: "free-form detail must never become a key".to_string(),
+            };
+            store.fold_sink_operation_failure(&failure);
+            store.fold_sink_operation_failure(&failure);
+        }
+
+        assert_eq!(store.sink_operation_failures.len(), 7);
+        assert!(store
+            .sink_operation_failures
+            .iter()
+            .all(|((metric_stage, _, kind), count)| {
+                *metric_stage == stage_id && *kind == ErrorKind::Remote && *count == 2
+            }));
+    }
 
     #[test]
     fn typed_http_pull_snapshots_fold_latest_state_and_monotonic_totals() {

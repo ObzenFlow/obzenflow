@@ -25,3 +25,9 @@ pub use obzenflow_adapters::sinks::{
     console, debug, json, json_pretty, table, ConsoleSink, CsvSink, CsvSinkBuilder, DebugFormatter,
     Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination, TableFormatter,
 };
+
+/// Feature-gated PostgreSQL sink and its typed parameter-binding surface.
+#[cfg(feature = "postgres")]
+pub mod postgres {
+    pub use obzenflow_adapters::sinks::postgres::*;
+}

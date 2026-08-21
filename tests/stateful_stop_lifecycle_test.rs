@@ -26,7 +26,6 @@ impl TypedPayload for LifecycleEvent {
 }
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
@@ -51,7 +50,7 @@ impl InlineSink for NoopSink {
         &mut self,
         _event: LifecycleEvent,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Noop".to_string()),
             None,
@@ -82,7 +81,7 @@ impl InlineSink for SlowSink {
         &mut self,
         _event: LifecycleEvent,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         tokio::time::sleep(self.sleep).await;
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Noop".to_string()),

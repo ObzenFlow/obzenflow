@@ -502,8 +502,9 @@ where
     /// Record a just-journalled delivery receipt and advance the receipt watermark if possible.
     ///
     /// This is called by sink supervisors after appending a `ChainEventContent::Delivery` event.
-    /// It updates per-upstream `ReaderProgress` bookkeeping and returns the new receipt watermark
-    /// triple when (and only when) receipts become contiguous.
+    /// It clears exact-parent bookkeeping for every terminal receipt and returns the new receipt
+    /// watermark triple when (and only when) accounted receipts become contiguous. Forwarded data
+    /// is settled without entering the immediate upstream's authored-prefix contract population.
     ///
     /// `DeliveryResult::Buffered` receipts are recorded for auditing but do **not** advance the
     /// receipt watermark or clear pending receipt metadata.
@@ -528,20 +529,23 @@ where
         let Some(index) = reader_progress
             .iter()
             .enumerate()
-            .find_map(|(index, progress)| progress.pending_receipts.get(&parent_id).map(|_| index))
+            .find_map(|(index, progress)| {
+                progress
+                    .pending_delivery_inputs
+                    .contains_key(&parent_id)
+                    .then_some(index)
+            })
         else {
             tracing::warn!(
                 owner = %self.owner_label,
                 receipt_id = %receipt.id,
                 ?parent_id,
-                "record_delivery_receipt: no pending receipt metadata for parent"
+                "record_delivery_receipt: no pending delivered input for parent"
             );
             return None;
         };
 
         let upstream_stage = reader_progress[index].stage_id;
-        self.notify_delivery_receipt(receipt, upstream_stage);
-
         let obzenflow_core::event::ChainEventContent::Delivery(payload) = &receipt.content else {
             tracing::warn!(
                 owner = %self.owner_label,
@@ -553,7 +557,28 @@ where
             return None;
         };
 
+        let is_accounted_receipt = reader_progress[index]
+            .pending_receipts
+            .contains_key(&parent_id);
+        if is_accounted_receipt {
+            self.notify_delivery_receipt(receipt, upstream_stage);
+        }
+
         if matches!(&payload.result, DeliveryResult::Buffered { .. }) {
+            return None;
+        }
+
+        reader_progress[index]
+            .pending_delivery_inputs
+            .remove(&parent_id);
+
+        if !is_accounted_receipt {
+            tracing::debug!(
+                owner = %self.owner_label,
+                ?upstream_stage,
+                ?parent_id,
+                "record_delivery_receipt: terminal forwarded input has no receipt-watermark position"
+            );
             return None;
         }
 
@@ -587,7 +612,7 @@ where
     ) -> Option<(StageId, EventEnvelope<ChainEvent>)> {
         reader_progress.iter().find_map(|progress| {
             progress
-                .pending_receipts
+                .pending_delivery_inputs
                 .get(&parent_event_id)
                 .map(|pending| {
                     let envelope = EventEnvelope {

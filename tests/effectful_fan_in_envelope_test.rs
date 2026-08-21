@@ -195,7 +195,7 @@ impl InlineSink for DropSink {
         &mut self,
         _event: EnvelopeOutput,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
             None,

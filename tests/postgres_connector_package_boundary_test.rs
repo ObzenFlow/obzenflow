@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+use serde_json::Value;
+use std::process::Command;
+
+#[test]
+fn postgres_stays_in_the_feature_gated_adapter_boundary() {
+    let output = Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("cargo metadata launches");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: Value = serde_json::from_slice(&output.stdout).expect("metadata is JSON");
+    let packages = metadata["packages"].as_array().expect("metadata packages");
+    assert!(
+        packages
+            .iter()
+            .all(|package| package["name"] != "obzenflow-connector-postgres"),
+        "PostgreSQL must not introduce a connector API or implementation crate"
+    );
+    let adapters = packages
+        .iter()
+        .find(|package| package["name"] == "obzenflow_adapters")
+        .expect("adapters package exists");
+    let workspace_dependencies = adapters["dependencies"]
+        .as_array()
+        .expect("adapter dependencies")
+        .iter()
+        .filter(|dependency| dependency["kind"].is_null())
+        .filter_map(|dependency| dependency["name"].as_str())
+        .filter(|name| name.starts_with("obzenflow"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        workspace_dependencies,
+        ["obzenflow_core", "obzenflow_runtime"],
+        "adapters must keep only core and runtime as production workspace dependencies"
+    );
+    let sqlx = adapters["dependencies"]
+        .as_array()
+        .expect("adapter dependencies")
+        .iter()
+        .find(|dependency| dependency["name"] == "sqlx")
+        .expect("adapters declares SQLx");
+    assert_eq!(sqlx["optional"], true, "SQLx must remain optional");
+
+    let root = packages
+        .iter()
+        .find(|package| package["name"] == "obzenflow")
+        .expect("root facade exists");
+    assert!(
+        root["features"]["default"]
+            .as_array()
+            .is_none_or(|features| {
+                features
+                    .iter()
+                    .all(|feature| feature.as_str() != Some("postgres"))
+            }),
+        "the default root feature set must not activate PostgreSQL"
+    );
+    assert_eq!(
+        root["features"]["postgres"],
+        serde_json::json!(["obzenflow_adapters/postgres"]),
+        "the root facade must forward its PostgreSQL feature to adapters"
+    );
+}

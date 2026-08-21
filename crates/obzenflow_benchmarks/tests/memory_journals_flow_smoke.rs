@@ -8,7 +8,6 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::pipeline::PipelineState;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedFiniteSourceHandler,
@@ -83,7 +82,7 @@ impl InlineSink for CountingSink {
         &mut self,
         _event: SmokeEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.received.fetch_add(1, Ordering::Relaxed);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Noop,

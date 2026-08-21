@@ -116,7 +116,7 @@ impl InlineSink for CollectorSink {
         &mut self,
         event: MetricEvent,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         if let Ok(mut events) = self.events.lock() {
             events.push(event);
         }

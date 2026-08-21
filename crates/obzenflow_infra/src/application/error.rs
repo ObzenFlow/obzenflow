@@ -56,7 +56,15 @@ impl fmt::Display for ApplicationError {
     }
 }
 
-impl Error for ApplicationError {}
+impl Error for ApplicationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::IoError(error) => Some(error),
+            Self::Other(error) => Some(error.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 impl ApplicationError {
     /// Map to a process exit code. Verification verdicts carry their

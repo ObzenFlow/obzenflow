@@ -26,8 +26,11 @@ pub use sink::{
 };
 pub use sink::{
     DeliveryContext, DeliveryProvenance, InlineSink, PendingSinkInput, SinkAuditOutcome,
-    SinkBufferedOutcome, SinkCommitReceipt, SinkConnector, SinkDescription, SinkPrimaryOutcome,
-    SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, SinkWriter, SinkWriterInitContext,
+    SinkBufferedOutcome, SinkCommitReceipt, SinkConnector, SinkDescription,
+    SinkDestinationErrorCode, SinkInputOrder, SinkOperationError,
+    SinkOperationErrorConversionError, SinkOperationResult, SinkPrimaryOutcome,
+    SinkTerminalOutcome, SinkWriteContext, SinkWriteFailure, SinkWriteFailureDisposition,
+    SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter, SinkWriterInitContext,
     SinkWriterLifecycleReport, WithRedeliverySafety,
 };
 pub use source::{

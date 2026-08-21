@@ -123,7 +123,7 @@ async fn test_dsl_pipeline() -> Result<()> {
             &mut self,
             event: AdvancedTestEvent,
             _context: SinkWriteContext,
-        ) -> std::result::Result<SinkWriteReport, HandlerError> {
+        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
             if let Some(doubled) = event.doubled {
                 self.total.fetch_add(doubled, Ordering::Relaxed);
             }

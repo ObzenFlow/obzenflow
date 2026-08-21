@@ -11,7 +11,6 @@ use obzenflow_core::event::SystemEventType;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     SourceObservationSink, TypedAsyncFiniteSourceHandler,
@@ -104,7 +103,7 @@ impl InlineSink for CollectSink {
         &mut self,
         event: AsyncTestEvent,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.events
             .lock()
             .unwrap()

@@ -157,7 +157,7 @@ impl InlineSink for CountingSink {
         &mut self,
         _event: MetricEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         if let Ok(mut count) = self.count.lock() {
             *count += 1;
         }
@@ -191,7 +191,7 @@ impl InlineSink for SleepingSink {
         &mut self,
         _event: MetricEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         sleep(self.sleep_per_event).await;
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("sleep".to_string()),

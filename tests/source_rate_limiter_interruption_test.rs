@@ -27,7 +27,6 @@ use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedAsyncFiniteSourceHandler,
@@ -100,7 +99,7 @@ impl InlineSink for NoopSink {
         &mut self,
         _event: DripEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Noop".to_string()),
             None,

@@ -42,6 +42,11 @@ pub use payloads::effect_payload::{
     EffectSchemaVersion, EffectStageKey, EffectType, OutcomeFactOrdinal, RecordedFlowId,
     RetryDisposition, StageLogicVersion,
 };
+pub use payloads::sink_operation_payload::{
+    SinkDestinationErrorCode, SinkDestinationErrorCodeError, SinkOperationFailed,
+    SinkOperationPhase, SinkWritePhase, MAX_SINK_DESTINATION_ERROR_NAMESPACE_BYTES,
+    MAX_SINK_DESTINATION_ERROR_VALUE_BYTES,
+};
 pub use payloads::stage_fatal_payload::{
     StageFatalCode, StageFatalReason, StageFatalRecorded, StageFatalSeverity,
 };

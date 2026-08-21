@@ -165,32 +165,6 @@ pub(crate) async fn cleanup_best_effort<E, Fut>(
     }
 }
 
-pub(crate) async fn cleanup_with_result<E, Fut>(
-    stage_label: &'static str,
-    stage_name: &str,
-    run: impl FnOnce() -> Fut,
-) -> Result<(), E>
-where
-    Fut: Future<Output = Result<(), E>>,
-    E: std::fmt::Debug,
-{
-    match run().await {
-        Ok(()) => {
-            tracing::info!(stage_name = %stage_name, "{} cleaned up resources", stage_label);
-            Ok(())
-        }
-        Err(e) => {
-            tracing::error!(
-                stage_name = %stage_name,
-                error = ?e,
-                "{} cleanup failed",
-                stage_label
-            );
-            Err(e)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,14 +399,6 @@ mod tests {
             },
             other => panic!("expected StageLifecycle, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn cleanup_with_result_propagates_errors() {
-        let err = cleanup_with_result("Test", "test_stage", || async { Err::<(), _>("boom") })
-            .await
-            .expect_err("expected error");
-        assert_eq!(err, "boom");
     }
 
     #[tokio::test]

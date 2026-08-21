@@ -300,7 +300,7 @@ impl InlineSink for PrioritySink {
         &mut self,
         event: RawDataEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         // Only process events matching our filter
         if event.route.as_deref().unwrap_or("") == self.route_filter {
             let new_total = self.event_count.fetch_add(1, Ordering::Relaxed) + 1;

@@ -171,7 +171,7 @@ impl InlineSink for CountingSink {
         &mut self,
         _event: DeliveryTestEvent,
         _context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.count.fetch_add(1, Ordering::Relaxed);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Count".to_string()),
@@ -223,7 +223,7 @@ where
         &mut self,
         _event: T,
         context: SinkWriteContext,
-    ) -> std::result::Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.count.fetch_add(1, Ordering::Relaxed);
         self.pending
             .lock()
@@ -237,11 +237,14 @@ where
         ))
     }
 
-    async fn flush(&mut self) -> std::result::Result<SinkWriterLifecycleReport, HandlerError> {
-        let mut pending = self
-            .pending
-            .lock()
-            .map_err(|_| HandlerError::Other("BufferedCountingSink mutex poisoned".to_string()))?;
+    async fn flush(
+        &mut self,
+    ) -> obzenflow_runtime::stages::sink::SinkOperationResult<SinkWriterLifecycleReport> {
+        let mut pending = self.pending.lock().map_err(|_| {
+            obzenflow_runtime::stages::sink::SinkOperationError::other(
+                "BufferedCountingSink mutex poisoned",
+            )
+        })?;
 
         let commit_receipts: Vec<_> = pending
             .drain(..)

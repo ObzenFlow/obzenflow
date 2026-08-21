@@ -118,7 +118,7 @@ impl InlineSink for LatencySink {
         &mut self,
         event: BenchEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.received.fetch_add(1, Ordering::Relaxed);
 
         // Skip warmup events

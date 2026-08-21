@@ -1,0 +1,9 @@
+error[E0451]: fields `protocol_version` and `cases` of struct `SinkConformanceReport` are private
+  --> tests/compile_fail/sink_conformance_authority/runtime_report_private.rs:9:9
+   |
+ 8 |     let _ = SinkConformanceReport {
+   |             --------------------- in this type
+ 9 |         protocol_version: 1,
+   |         ^^^^^^^^^^^^^^^^ private field
+10 |         cases: Vec::new(),
+   |         ^^^^^ private field

@@ -16,8 +16,8 @@ mod tests {
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
-        EffectfulTransformHandler, InlineSink, JoinReferenceView, SinkTerminalOutcome,
-        SinkWriteContext, SinkWriteReport, StatefulEmission, TransformHandler,
+        EffectfulTransformHandler, InlineSink, JoinReferenceView, SinkDescription, SinkInputOrder,
+        SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, StatefulEmission, TransformHandler,
         TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
         TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
@@ -433,7 +433,31 @@ mod tests {
             &mut self,
             _input: OutputEvent,
             _context: SinkWriteContext,
-        ) -> Result<SinkWriteReport, HandlerError> {
+        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+                DeliveryMethod::Noop,
+                None,
+            )))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct OrderSensitiveSink;
+
+    #[async_trait]
+    impl InlineSink for OrderSensitiveSink {
+        type Input = OutputEvent;
+
+        fn describe(&self) -> SinkDescription {
+            SinkDescription::method(DeliveryMethod::Noop)
+                .with_input_order(SinkInputOrder::OrderSensitive)
+        }
+
+        async fn write(
+            &mut self,
+            _input: OutputEvent,
+            _context: SinkWriteContext,
+        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
             Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
                 DeliveryMethod::Noop,
                 None,
@@ -2496,6 +2520,184 @@ mod tests {
                 "output contracts must be unchanged behind the override"
             );
         }
+    }
+
+    #[test]
+    fn order_sensitive_sinks_mark_source_and_derived_fan_in_with_the_right_merge_mode() {
+        let unspecified_sink_id = StageId::new();
+        let unspecified_descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::from([(
+            "unspecified_sink".to_string(),
+            crate::sink!(name: "unspecified_sink", OutputEvent => ExactSink),
+        )]);
+        let unspecified_names =
+            HashMap::from([("unspecified_sink".to_string(), unspecified_sink_id)]);
+        assert!(crate::dsl::typing::order_observer_stage_ids(
+            &unspecified_descriptors,
+            &unspecified_names,
+        )
+        .is_empty());
+
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let branch_a_id = StageId::new();
+        let branch_b_id = StageId::new();
+        let direct_sink_id = StageId::new();
+        let derived_sink_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", OutputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", OutputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "branch_a".to_string(),
+            crate::transform!(name: "branch_a", OutputEvent -> OutputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "branch_b".to_string(),
+            crate::transform!(name: "branch_b", OutputEvent -> OutputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "direct_sink".to_string(),
+            crate::sink!(name: "direct_sink", OutputEvent => OrderSensitiveSink),
+        );
+        descriptors.insert(
+            "derived_sink".to_string(),
+            crate::sink!(name: "derived_sink", OutputEvent => OrderSensitiveSink),
+        );
+
+        let name_to_id = HashMap::from([
+            ("source_a".to_string(), source_a_id),
+            ("source_b".to_string(), source_b_id),
+            ("branch_a".to_string(), branch_a_id),
+            ("branch_b".to_string(), branch_b_id),
+            ("direct_sink".to_string(), direct_sink_id),
+            ("derived_sink".to_string(), derived_sink_id),
+        ]);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, stage_type) in [
+            (source_a_id, "source_a", TopologyStageType::FiniteSource),
+            (source_b_id, "source_b", TopologyStageType::FiniteSource),
+            (branch_a_id, "branch_a", TopologyStageType::Transform),
+            (branch_b_id, "branch_b", TopologyStageType::Transform),
+            (direct_sink_id, "direct_sink", TopologyStageType::Sink),
+            (derived_sink_id, "derived_sink", TopologyStageType::Sink),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), stage_type);
+            topology.reset_current();
+        }
+        topology.add_edge(
+            source_a_id.to_topology_id(),
+            direct_sink_id.to_topology_id(),
+        );
+        topology.add_edge(
+            source_b_id.to_topology_id(),
+            direct_sink_id.to_topology_id(),
+        );
+        topology.add_edge(source_a_id.to_topology_id(), branch_a_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), branch_b_id.to_topology_id());
+        topology.add_edge(
+            branch_a_id.to_topology_id(),
+            derived_sink_id.to_topology_id(),
+        );
+        topology.add_edge(
+            branch_b_id.to_topology_id(),
+            derived_sink_id.to_topology_id(),
+        );
+        let topology = topology.build_unchecked().unwrap();
+
+        let observers = crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id);
+        assert!(observers.contains(&direct_sink_id));
+        assert!(observers.contains(&derived_sink_id));
+
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        assert!(marked.contains(&direct_sink_id));
+        assert!(marked.contains(&derived_sink_id));
+
+        let seq_ordered = crate::dsl::typing::derive_seq_ordered_fan_ins(&topology, &marked);
+        assert!(seq_ordered.contains(&direct_sink_id));
+        assert!(!seq_ordered.contains(&derived_sink_id));
+
+        crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
+        validate_order_observer_deterministic_input_order(
+            &topology,
+            &descriptors,
+            &name_to_id,
+            &observers,
+        )
+        .expect("both acyclic sink fan-ins are canonicalised");
+    }
+
+    #[test]
+    fn order_sensitive_sink_rejects_a_cycle_fed_input() {
+        let source_id = StageId::new();
+        let cycle_a_id = StageId::new();
+        let cycle_b_id = StageId::new();
+        let sink_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source".to_string(),
+            crate::source!(name: "source", OutputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "cycle_a".to_string(),
+            crate::transform!(name: "cycle_a", OutputEvent -> OutputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "cycle_b".to_string(),
+            crate::transform!(name: "cycle_b", OutputEvent -> OutputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "sink".to_string(),
+            crate::sink!(name: "sink", OutputEvent => OrderSensitiveSink),
+        );
+        let name_to_id = HashMap::from([
+            ("source".to_string(), source_id),
+            ("cycle_a".to_string(), cycle_a_id),
+            ("cycle_b".to_string(), cycle_b_id),
+            ("sink".to_string(), sink_id),
+        ]);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, stage_type) in [
+            (source_id, "source", TopologyStageType::FiniteSource),
+            (cycle_a_id, "cycle_a", TopologyStageType::Transform),
+            (cycle_b_id, "cycle_b", TopologyStageType::Transform),
+            (sink_id, "sink", TopologyStageType::Sink),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), stage_type);
+            topology.reset_current();
+        }
+        topology.add_edge(source_id.to_topology_id(), cycle_a_id.to_topology_id());
+        topology.add_edge(cycle_a_id.to_topology_id(), cycle_b_id.to_topology_id());
+        topology.add_edge(cycle_b_id.to_topology_id(), cycle_a_id.to_topology_id());
+        topology.add_edge(cycle_b_id.to_topology_id(), sink_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
+        let observers = crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id);
+        assert!(validate_order_observer_deterministic_input_order(
+            &topology,
+            &descriptors,
+            &name_to_id,
+            &observers,
+        )
+        .is_err());
     }
 
     // ─── FLOWIP-114c PR D closing-pass regression tests ────────────────────

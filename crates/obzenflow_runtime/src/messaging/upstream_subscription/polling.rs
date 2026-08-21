@@ -637,17 +637,21 @@ where
         set_read_instant: bool,
     ) -> SeqNo {
         if let Some(chain_event) = contract_chain_event {
+            if chain_event.is_data() && self.uses_receipt_watermark() {
+                progress.track_pending_delivery_input(
+                    chain_event.clone(),
+                    envelope.vector_clock.clone(),
+                );
+            }
+
             if chain_event.is_data() && self.event_authored_by_upstream(chain_event, stage_id) {
                 progress.reader_seq.0 += 1;
                 if set_read_instant {
                     progress.last_read_instant = Some(Instant::now());
                 }
                 if self.uses_receipt_watermark() {
-                    progress.track_pending_receipt(
-                        *envelope.event.id(),
-                        chain_event.clone(),
-                        envelope.vector_clock.clone(),
-                    );
+                    progress
+                        .track_pending_receipt(*envelope.event.id(), envelope.vector_clock.clone());
                 } else {
                     progress.receipted_seq = progress.reader_seq;
                     progress.last_receipted_event_id = Some(*envelope.event.id());

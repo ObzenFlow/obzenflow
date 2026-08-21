@@ -8,6 +8,7 @@
 //! archived disk journals, exposed to runtime services via the `ReplayArchive`
 //! trait.
 
+use super::manifest_gate::require_current_manifest_version;
 use super::reader::DiskJournalReader;
 use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
 use async_trait::async_trait;
@@ -85,14 +86,9 @@ impl DiskReplayArchive {
                     e
                 ),
             })?;
-        let manifest_version = manifest_value
-            .get("manifest_version")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if manifest_version != RUN_MANIFEST_VERSION {
+        if let Err(version) = require_current_manifest_version(&manifest_value) {
             return Err(ReplayError::UnsupportedManifestVersion {
-                manifest_version,
+                manifest_version: version.found().to_string(),
                 supported: RUN_MANIFEST_VERSION,
             });
         }
@@ -135,7 +131,7 @@ impl DiskReplayArchive {
                 ),
             })?;
 
-        if !is_compatible_semver(&manifest.obzenflow_version, OBZENFLOW_VERSION) {
+        if manifest.obzenflow_version != OBZENFLOW_VERSION {
             return Err(ReplayError::VersionMismatch {
                 archive_version: manifest.obzenflow_version.clone(),
                 current_version: OBZENFLOW_VERSION.to_string(),
@@ -590,32 +586,4 @@ pub(crate) fn derive_status_derivation_from_system_log(
             None
         },
     })
-}
-
-/// Check whether an archive's ObzenFlow version is compatible with the running
-/// framework.  Compatibility requires an exact major.minor match; patch-level
-/// differences are tolerated.  If either version string cannot be parsed the
-/// check fails closed (incompatible).
-fn is_compatible_semver(archive_version: &str, current_version: &str) -> bool {
-    let Some(archive) = parse_semver_triplet(archive_version) else {
-        return false;
-    };
-    let Some(current) = parse_semver_triplet(current_version) else {
-        return false;
-    };
-    archive.0 == current.0 && archive.1 == current.1
-}
-
-fn parse_semver_triplet(version: &str) -> Option<(u64, u64, u64)> {
-    let version = version.trim().strip_prefix('v').unwrap_or(version.trim());
-    let mut parts = version.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch_str = parts.next()?;
-    let patch_str = patch_str
-        .split_once('-')
-        .map(|(p, _)| p)
-        .unwrap_or(patch_str);
-    let patch = patch_str.parse().ok()?;
-    Some((major, minor, patch))
 }

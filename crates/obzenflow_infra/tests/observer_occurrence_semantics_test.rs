@@ -127,7 +127,7 @@ impl InlineSink for NoopSink {
         &mut self,
         _input: Joined,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Noop,
             None,
@@ -477,7 +477,7 @@ impl InlineSink for CountsHandlerOutputs {
         &mut self,
         _input: HandlerOutput,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.deliveries.fetch_add(1, Ordering::SeqCst);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Noop,
@@ -651,7 +651,7 @@ impl InlineSink for CountsConcurrentOutputs {
         &mut self,
         _input: ConcurrentOutput,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         self.deliveries.fetch_add(1, Ordering::SeqCst);
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Noop,

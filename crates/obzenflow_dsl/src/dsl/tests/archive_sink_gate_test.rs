@@ -12,7 +12,6 @@ mod tests {
     use obzenflow_core::TypedPayload;
     use obzenflow_runtime::bootstrap::ReplayVerb;
     use obzenflow_runtime::effects::SinkRedeliverySafety;
-    use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::sink::{
         SinkConnector, SinkDescription, SinkTerminalOutcome, SinkTyped, SinkWriteContext,
         SinkWriteReport, SinkWriter, SinkWriterInitContext,
@@ -60,7 +59,7 @@ mod tests {
         async fn open(
             &self,
             _context: SinkWriterInitContext,
-        ) -> Result<Self::Writer, HandlerError> {
+        ) -> obzenflow_runtime::stages::sink::SinkOperationResult<Self::Writer> {
             Ok(CountingWriter)
         }
     }
@@ -73,7 +72,7 @@ mod tests {
             &mut self,
             _input: Self::Input,
             _context: SinkWriteContext,
-        ) -> Result<SinkWriteReport, HandlerError> {
+        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
             Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success(
                 None,
             )))

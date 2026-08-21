@@ -25,7 +25,6 @@ use obzenflow_dsl::{
     async_infinite_source, async_source, infinite_source, sink, source, test_flow,
 };
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
@@ -68,7 +67,7 @@ impl InlineSink for NoopSink {
         &mut self,
         _event: PollingEvent,
         _context: SinkWriteContext,
-    ) -> Result<SinkWriteReport, HandlerError> {
+    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("source-polling-proof".to_string()),
             None,

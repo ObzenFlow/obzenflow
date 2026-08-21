@@ -22,6 +22,7 @@ use obzenflow_core::journal::run_manifest::{
 use obzenflow_core::journal::ArchiveStatus;
 use thiserror::Error;
 
+use super::manifest_gate::require_current_manifest_version;
 use super::replay_archive::derive_status_derivation_from_system_log;
 use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
 
@@ -261,15 +262,12 @@ fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspectError> {
             message: e.to_string(),
         })?;
 
-    let manifest_version = value
-        .get("manifest_version")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    if manifest_version != RUN_MANIFEST_VERSION {
+    if let Err(version) = require_current_manifest_version(&value) {
         return Err(JournalInspectError::Manifest {
             path: manifest_path,
             message: format!(
-                "unsupported manifest_version {manifest_version:?} (supported: {RUN_MANIFEST_VERSION})"
+                "unsupported manifest_version {:?} (supported: {RUN_MANIFEST_VERSION})",
+                version.found()
             ),
         });
     }
@@ -287,4 +285,52 @@ fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspectError> {
         path: manifest_path,
         message: e.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspection_rejects_non_current_manifest_before_output_or_journal_access() {
+        for (version, expected) in [
+            (None, "<missing>"),
+            (Some(serde_json::json!(3.0)), "3.0"),
+            (Some(serde_json::json!("2.0")), "2.0"),
+            (Some(serde_json::json!("4.0")), "4.0"),
+        ] {
+            let temp = tempfile::tempdir().expect("temporary archive");
+            let mut manifest = serde_json::json!({
+                "journal_format_version": JOURNAL_FORMAT_VERSION,
+                "system_journal_file": "sentinel-system.journal"
+            });
+            if let Some(version) = version {
+                manifest["manifest_version"] = version;
+            }
+            std::fs::write(
+                temp.path().join(RUN_MANIFEST_FILENAME),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                temp.path().join("sentinel-system.journal"),
+                b"this must never be decoded",
+            )
+            .unwrap();
+            let output = temp.path().join("must-not-exist.jsonl");
+
+            let error = export_jsonl(temp.path(), Some(&output))
+                .expect_err("non-current manifest must refuse inspection");
+            assert!(matches!(
+                error,
+                JournalInspectError::Manifest { ref message, .. }
+                    if message.contains(expected)
+                        && message.contains(RUN_MANIFEST_VERSION)
+            ));
+            assert!(
+                !output.exists(),
+                "version refusal must precede output creation"
+            );
+        }
+    }
 }
