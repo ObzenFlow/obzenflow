@@ -522,6 +522,109 @@ enum SinkJournalRoute {
     Error,
 }
 
+#[derive(Debug)]
+struct ChainEventProjection {
+    event_index: usize,
+    route: SinkJournalRoute,
+    stage_keys: Vec<String>,
+}
+
+fn normalised_forwarded_control(
+    event: &ChainEvent,
+) -> Result<Option<serde_json::Value>, SinkConformanceFailure> {
+    if !matches!(event.content, ChainEventContent::FlowControl(_)) {
+        return Ok(None);
+    }
+
+    let mut value = serde_json::to_value(event)
+        .map_err(|error| failure("journal-truth", "event-identity", error.to_string()))?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        failure(
+            "journal-truth",
+            "event-identity",
+            "serialised ChainEvent is not an object",
+        )
+    })?;
+    object.remove("runtime_context");
+    let flow_context = object
+        .get_mut("flow_context")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| {
+            failure(
+                "journal-truth",
+                "event-identity",
+                "serialised ChainEvent has no flow context",
+            )
+        })?;
+    for field in ["stage_name", "stage_id", "stage_type"] {
+        flow_context.remove(field);
+    }
+    Ok(Some(value))
+}
+
+fn record_chain_event_projection(
+    chain_events: &mut Vec<ChainEvent>,
+    projections: &mut HashMap<EventId, ChainEventProjection>,
+    stage_key: &str,
+    route: SinkJournalRoute,
+    event: ChainEvent,
+) -> Result<(), SinkConformanceFailure> {
+    let Some(existing) = projections.get_mut(&event.id) else {
+        let event_index = chain_events.len();
+        projections.insert(
+            event.id,
+            ChainEventProjection {
+                event_index,
+                route,
+                stage_keys: vec![stage_key.to_string()],
+            },
+        );
+        chain_events.push(event);
+        return Ok(());
+    };
+
+    if existing.stage_keys.iter().any(|key| key == stage_key) {
+        return Err(failure(
+            "journal-truth",
+            "event-identity",
+            format!(
+                "duplicate ChainEvent {} ({}) within the {route:?} journal for stage {stage_key}",
+                event.id,
+                event.event_type()
+            ),
+        ));
+    }
+
+    let canonical = &chain_events[existing.event_index];
+    let equivalent_forward = existing.route == SinkJournalRoute::Data
+        && route == SinkJournalRoute::Data
+        && normalised_forwarded_control(canonical)?
+            .zip(normalised_forwarded_control(&event)?)
+            .is_some_and(|(left, right)| left == right);
+    if !equivalent_forward {
+        return Err(failure(
+            "journal-truth",
+            "event-identity",
+            format!(
+                "conflicting reuse of ChainEvent {} ({}) between stages {} ({:?}) and {stage_key} ({route:?})",
+                event.id,
+                event.event_type(),
+                existing.stage_keys.join(", "),
+                existing.route
+            ),
+        ));
+    }
+
+    let canonical_is_authored_here =
+        canonical.writer_id.as_stage() == Some(&canonical.flow_context.stage_id);
+    let current_is_authored_here = event.writer_id.as_stage() == Some(&event.flow_context.stage_id);
+    if current_is_authored_here && !canonical_is_authored_here {
+        chain_events[existing.event_index] = event;
+    }
+    existing.stage_keys.push(stage_key.to_string());
+    Ok(())
+}
+
 fn expected_error_route(kind: &ErrorKind) -> SinkJournalRoute {
     match kind {
         ErrorKind::Validation | ErrorKind::Domain => SinkJournalRoute::Data,
@@ -705,50 +808,41 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
     let manifest = parse_current_manifest(&raw)?;
 
     let mut chain_events = Vec::new();
-    let mut journal_routes = HashMap::new();
-    for stage in manifest.stages.values() {
+    let mut projections = HashMap::new();
+    for (stage_key, stage) in &manifest.stages {
         let data_events = read_chain_journal(&run_dir.join(&stage.data_journal_file)).await?;
-        for event in &data_events {
-            if journal_routes
-                .insert(event.id, SinkJournalRoute::Data)
-                .is_some()
-            {
-                return Err(failure(
-                    "journal-truth",
-                    "event-identity",
-                    "duplicate ChainEvent id across journal projections",
-                ));
-            }
+        for event in data_events {
+            record_chain_event_projection(
+                &mut chain_events,
+                &mut projections,
+                stage_key,
+                SinkJournalRoute::Data,
+                event,
+            )?;
         }
-        chain_events.extend(data_events);
         let error_events = read_chain_journal(&run_dir.join(&stage.error_journal_file)).await?;
-        for event in &error_events {
-            if journal_routes
-                .insert(event.id, SinkJournalRoute::Error)
-                .is_some()
-            {
-                return Err(failure(
-                    "journal-truth",
-                    "event-identity",
-                    "duplicate ChainEvent id across journal projections",
-                ));
-            }
+        for event in error_events {
+            record_chain_event_projection(
+                &mut chain_events,
+                &mut projections,
+                stage_key,
+                SinkJournalRoute::Error,
+                event,
+            )?;
         }
-        chain_events.extend(error_events);
     }
     let system_events = read_system_journal(&run_dir.join(&manifest.system_journal_file)).await?;
+
+    let journal_routes = projections
+        .iter()
+        .map(|(event_id, projection)| (*event_id, projection.route))
+        .collect::<HashMap<_, _>>();
 
     let by_id = chain_events
         .iter()
         .map(|event| (event.id, event))
         .collect::<HashMap<_, _>>();
-    if by_id.len() != chain_events.len() {
-        return Err(failure(
-            "journal-truth",
-            "event-identity",
-            "duplicate ChainEvent id",
-        ));
-    }
+    debug_assert_eq!(by_id.len(), chain_events.len());
 
     let lifecycle_causes = system_events
         .iter()
@@ -1154,6 +1248,21 @@ pub async fn run_application_conformance<F: SinkApplicationConformanceFixture>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::disk_journals;
+    use obzenflow_adapters::sources;
+    use obzenflow_core::event::context::{FlowContext, StageType};
+    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::WriterId;
+    use obzenflow_dsl::{flow, sink, source};
+    use obzenflow_runtime::stages::sink::SinkTyped;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct ProjectionInput(u64);
+
+    impl TypedPayload for ProjectionInput {
+        const EVENT_TYPE: &'static str = "sink_conformance.projection_input";
+    }
 
     #[test]
     fn outward_manifest_gate_rejects_every_non_exact_raw_shape() {
@@ -1189,5 +1298,117 @@ mod tests {
         assert!(orphan
             .detail()
             .contains("no recognised failed sink receipt"));
+    }
+
+    #[test]
+    fn outward_projection_coalesces_only_equivalent_forwarded_controls() {
+        let source_stage = StageId::new();
+        let sink_stage = StageId::new();
+        let flow_context = |stage_name: &str, stage_id, stage_type| FlowContext {
+            flow_name: "projection-test".to_string(),
+            flow_id: "flow_projection_test".to_string(),
+            stage_name: stage_name.to_string(),
+            stage_id,
+            stage_type,
+        };
+        let authored =
+            ChainEventFactory::drain_event(WriterId::from(source_stage)).with_flow_context(
+                flow_context("inputs", source_stage, StageType::FiniteSource),
+            );
+        let mut forwarded =
+            authored
+                .clone()
+                .with_flow_context(flow_context("output", sink_stage, StageType::Sink));
+        forwarded.runtime_context = None;
+
+        let mut events = Vec::new();
+        let mut projections = HashMap::new();
+        record_chain_event_projection(
+            &mut events,
+            &mut projections,
+            "output",
+            SinkJournalRoute::Data,
+            forwarded.clone(),
+        )
+        .expect("forwarded projection is recorded first");
+        record_chain_event_projection(
+            &mut events,
+            &mut projections,
+            "inputs",
+            SinkJournalRoute::Data,
+            authored.clone(),
+        )
+        .expect("equivalent authored projection coalesces");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].flow_context.stage_id, source_stage);
+
+        let same_stage = record_chain_event_projection(
+            &mut events,
+            &mut projections,
+            "inputs",
+            SinkJournalRoute::Data,
+            authored.clone(),
+        )
+        .expect_err("one physical stage projection cannot repeat an id");
+        assert!(same_stage.detail().contains("within the Data journal"));
+
+        let mut conflicting = forwarded;
+        conflicting.causality.parent_ids.push(EventId::new());
+        let conflict = record_chain_event_projection(
+            &mut events,
+            &mut projections,
+            "other",
+            SinkJournalRoute::Data,
+            conflicting,
+        )
+        .expect_err("same-id control with different durable content must fail");
+        assert!(conflict.detail().contains("conflicting reuse"));
+
+        let route_conflict = record_chain_event_projection(
+            &mut events,
+            &mut projections,
+            "errors",
+            SinkJournalRoute::Error,
+            authored,
+        )
+        .expect_err("a data projection cannot reappear on the error route");
+        assert!(route_conflict.detail().contains("conflicting reuse"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn outward_projection_accepts_an_ordinary_source_to_sink_archive() {
+        let temp = tempfile::tempdir().expect("temporary journal root");
+        let root = temp.path().join("journals");
+        let flow = FlowDefinition::materialize({
+            let root = root.clone();
+            move |_runtime_config| {
+                let inputs = sources::finite(vec![ProjectionInput(1), ProjectionInput(2)]);
+                let output = SinkTyped::new(|_input: ProjectionInput| async move {}).idempotent();
+                Ok(flow! {
+                    name: "sink_conformance_projection",
+                    journals: disk_journals(root),
+
+                    stages: {
+                        inputs = source!(ProjectionInput => inputs);
+                        output = sink!(ProjectionInput => output);
+                    },
+
+                    topology: {
+                        inputs |> output;
+                    }
+                })
+            }
+        });
+
+        FlowApplication::builder()
+            .with_cli_args(["sink-conformance-projection"])
+            .run_async(flow)
+            .await
+            .expect("ordinary source-to-sink flow completes");
+        let run = latest_run_dir(&root).expect("flow produced an archive");
+        let evidence = project_run(&run)
+            .await
+            .expect("ordinary source-to-sink archive projects");
+        assert_eq!(evidence.eof_kinds(), &[EofKind::Natural]);
     }
 }
