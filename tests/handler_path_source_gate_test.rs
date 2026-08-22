@@ -18,15 +18,6 @@ const LOWERING_IMPLEMENTATIONS: &[&str] = &[
 // Public-surface tests must not be added there.
 const LOWERING_CONTRACT_TESTS: &str =
     "crates/obzenflow_dsl/src/dsl/tests/lowering_helper_contract_test.rs";
-// Negative fixture licensed to name the retired untyped helper solely to prove
-// that downstream code can no longer resolve it (FLOWIP-134b).
-const RETIRED_HELPER_COMPILE_FAIL_FIXTURE: &str =
-    "tests/compile_fail/synchronous_transform_witness/raw_helper_removed.rs";
-const RETIRED_STATEFUL_HELPER_COMPILE_FAIL_FIXTURE: &str =
-    "tests/compile_fail/plain_stateful_witness/raw_helper_removed.rs";
-// Negative fixture licensed to cross the generated lowering seam solely to
-// prove that a raw TransformHandler cannot occupy the typed chunker slot.
-const RAW_CHUNKER_COMPILE_FAIL_FIXTURE: &str = "tests/compile_fail/ai_map_reduce_raw_chunker.rs";
 
 fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory)
@@ -115,12 +106,7 @@ fn first_party_declarations_do_not_call_exported_lowering_helpers_directly() {
     let allowed: Vec<&str> = LOWERING_IMPLEMENTATIONS
         .iter()
         .copied()
-        .chain([
-            LOWERING_CONTRACT_TESTS,
-            RETIRED_HELPER_COMPILE_FAIL_FIXTURE,
-            RETIRED_STATEFUL_HELPER_COMPILE_FAIL_FIXTURE,
-            RAW_CHUNKER_COMPILE_FAIL_FIXTURE,
-        ])
+        .chain([LOWERING_CONTRACT_TESTS])
         .collect();
     let mut violations = Vec::new();
 
@@ -156,13 +142,6 @@ fn compiling_first_party_flow_files_name_the_deferred_materialisation_boundary()
 
     let mut violations = Vec::new();
     for path in rust_files {
-        let relative = path
-            .strip_prefix(&repository)
-            .expect("source path must be inside the repository");
-        if relative.starts_with("tests/compile_fail") {
-            continue;
-        }
-
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         if source.contains("#![cfg(any())]") {
@@ -182,8 +161,7 @@ fn compiling_first_party_flow_files_name_the_deferred_materialisation_boundary()
     assert!(
         violations.is_empty(),
         "compiling first-party files with authored `flow!` declarations must name \
-         `FlowDefinition::materialize` (negative fixtures and cfg-disabled legacy harnesses are \
-         excluded):\n{}",
+         `FlowDefinition::materialize` (cfg-disabled legacy harnesses are excluded):\n{}",
         violations.join("\n")
     );
 }

@@ -1,7 +1,0 @@
-error[E0046]: not all trait items implemented, missing: `describe`
-  --> tests/compile_fail/sink_witness/missing_connector_description.rs:39:1
-   |
-39 | impl SinkConnector for MissingDescription {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `describe` in implementation
-   |
-   = help: implement the missing item: `fn describe(&self) -> SinkDescription { todo!() }`

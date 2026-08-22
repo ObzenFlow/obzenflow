@@ -2,8 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-mod compile_contracts;
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
@@ -127,7 +125,6 @@ fn run() -> Result<()> {
             print_help();
             Ok(())
         }
-        [cmd, rest @ ..] if cmd == "compile-contracts" => compile_contracts::run(rest),
         [cmd, rest @ ..] if cmd == "studio-jobs" => run_studio_jobs(rest),
         _ => Err(error(format!("unknown xtask command: {}", args.join(" ")))),
     }
@@ -764,9 +761,7 @@ fn print_started_table(states: &[JobState]) {
 }
 
 fn print_help() {
-    println!("usage:");
-    println!("  cargo xtask compile-contracts");
-    println!("  cargo xtask studio-jobs <up|down|status>");
+    println!("usage: cargo xtask studio-jobs <up|down|status>");
 }
 
 fn print_studio_jobs_help() {

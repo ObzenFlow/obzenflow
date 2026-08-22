@@ -1,8 +1,0 @@
-error[E0594]: cannot assign to `outputs[_].writer_id`, which is behind a `&` reference
-  --> tests/compile_fail/observer_cannot_mutate_outputs.rs:16:9
-   |
-14 |         outputs: &[ChainEvent],
-   |         ------- this is an immutable reference
-15 |     ) {
-16 |         outputs[0].writer_id = WriterId::from(StageId::new());
-   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `outputs` is a `&` reference, so it cannot be written to

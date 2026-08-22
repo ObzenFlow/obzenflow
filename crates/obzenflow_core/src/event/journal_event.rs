@@ -46,30 +46,3 @@ pub trait JournalEvent:
 // Export Sealed trait so chain_event.rs and system_event.rs can implement it
 #[doc(hidden)]
 pub use private::Sealed;
-
-#[cfg(test)]
-mod tests {
-
-    // This test verifies that the trait is properly sealed
-    // by attempting to implement it for a custom type.
-    // This should fail to compile if the trait is sealed correctly.
-
-    /* Uncomment to verify sealing works - this should NOT compile:
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    struct MyCustomEvent {
-        id: EventId,
-    }
-
-    // This should fail because MyCustomEvent doesn't implement Sealed
-    impl JournalEvent for MyCustomEvent {
-        fn id(&self) -> &EventId {
-            &self.id
-        }
-
-        fn event_type_name(&self) -> &str {
-            "custom"
-        }
-    }
-    */
-}

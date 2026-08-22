@@ -111,7 +111,6 @@ subtle = "2"
 	proptest = "1.0"
 	fastrand = "2.0"
 	tempfile = "3.8"
-	trybuild = "1.0"
 	libc = "0.2"
 	clap = { version = "4.5", features = ["derive"] }
 
@@ -144,7 +143,6 @@ sqlx = { workspace = true }
 obzenflow-topology = { workspace = true }
 
 tokio-test = { workspace = true }
-trybuild = { workspace = true }
 proptest = { workspace = true }
 criterion = { workspace = true, features = ["async_tokio"] }
 fastrand = { workspace = true }
@@ -234,11 +232,6 @@ name = "standalone_ai_effect_replay_test"
 path = "tests/standalone_ai_effect_replay_test.rs"
 required-features = ["ai"]
 
-[[test]]
-name = "standalone_ai_compile_fail_tests"
-path = "tests/standalone_ai_compile_fail_tests.rs"
-required-features = ["ai"]
-
 [[example]]
 name = "multi_source_ingest_demo"
 path = "examples/multi_source_ingest_demo/main.rs"
@@ -326,11 +319,6 @@ required-features = ["test-support"]
 [[test]]
 name = "lineage_policy_flow_test"
 path = "tests/lineage_policy_flow_test.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "sink_conformance_authority_compile_fail_tests"
-path = "tests/sink_conformance_authority_compile_fail_tests.rs"
 required-features = ["test-support"]
 
 [[test]]

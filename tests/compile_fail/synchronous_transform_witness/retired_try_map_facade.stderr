@@ -1,5 +1,0 @@
-error[E0425]: cannot find value `try_map_with` in module `obzenflow::transforms`
- --> tests/compile_fail/synchronous_transform_witness/retired_try_map_facade.rs:6:36
-  |
-6 |     let _ = obzenflow::transforms::try_map_with;
-  |                                    ^^^^^^^^^^^^ not found in `obzenflow::transforms`

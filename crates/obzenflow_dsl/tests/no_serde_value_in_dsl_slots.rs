@@ -43,10 +43,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
          FlowApplication launch mechanics, not typed authoring; handlers are \
          payload-agnostic by design",
     ),
-    (
-        "tests/compile_fail/sink_witness/csv_value_witness.rs",
-        "FLOWIP-134h compile-fail fixture proving CsvSink rejects Value witnesses",
-    ),
 ];
 
 /// DSL macros whose type slots are subject to the lint.

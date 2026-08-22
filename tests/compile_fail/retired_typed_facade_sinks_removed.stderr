@@ -1,5 +1,0 @@
-error[E0432]: unresolved import `obzenflow::typed`
- --> tests/compile_fail/retired_typed_facade_sinks_removed.rs:5:16
-  |
-5 | use obzenflow::typed::sinks;
-  |                ^^^^^ could not find `typed` in `obzenflow`

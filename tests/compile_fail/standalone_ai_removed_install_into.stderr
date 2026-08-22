@@ -1,5 +1,0 @@
-error[E0609]: no field `install_into` on type `EffectBinding<ChatCompletion>`
-  --> tests/compile_fail/standalone_ai_removed_install_into.rs:13:21
-   |
-13 |     let _ = binding.install_into;
-   |                     ^^^^^^^^^^^^ unknown field

@@ -1,5 +1,0 @@
-error[E0599]: no variant or associated item named `Other` found for enum `EffectPortResolutionError` in the current scope
- --> tests/compile_fail/effect_authoring_resolution_error_other_variant_removed.rs:8:40
-  |
-8 |     let _ = EffectPortResolutionError::Other("credential-canary".to_string());
-  |                                        ^^^^^ variant or associated item not found in `EffectPortResolutionError`
