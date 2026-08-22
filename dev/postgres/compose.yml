@@ -17,7 +17,9 @@ services:
       - -c
       - ssl_key_file=/var/lib/postgresql/obzenflow-tls/server.key
     ports:
-      - 127.0.0.1:${OBZENFLOW_POSTGRES_PORT:?required}:5432
+      - target: 5432
+        host_ip: 127.0.0.1
+        protocol: tcp
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U obzenflow -d obzenflow"]
       interval: 1s

@@ -70,6 +70,7 @@ These examples don't have tutorials, but they demonstrate concrete framework con
   - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)
 
 - **`postgres_sink_payments`** — A real PostgreSQL 17 sink session with deterministic UPSERT delivery, destination inspection, and verified archive redelivery across separate processes.
+  - Run the disposable acceptance proof: `cargo xtask postgres test` builds this example once, then executes that binary in separate live and verified-replay processes.
   - Start the persistent service: `cargo xtask postgres up`
   - Run live: `cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_payments`
   - Replay: rerun the same command with `-- --replay-from <live-run-dir> --verify`
