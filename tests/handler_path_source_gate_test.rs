@@ -142,6 +142,9 @@ fn compiling_first_party_flow_files_name_the_deferred_materialisation_boundary()
 
     let mut violations = Vec::new();
     for path in rust_files {
+        let relative = path
+            .strip_prefix(&repository)
+            .expect("source path must be inside the repository");
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         if source.contains("#![cfg(any())]") {

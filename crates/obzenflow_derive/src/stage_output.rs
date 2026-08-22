@@ -448,3 +448,63 @@ fn expand_struct(
         #stage_fact_set
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_output_rejects_duplicate_leaf_within_variant() {
+        let input: DeriveInput = syn::parse_quote! {
+            enum Output {
+                Combined { first: Fact, second: Fact },
+            }
+        };
+
+        let error = expand(&input).expect_err("duplicate leaves must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate leaf type `Fact` within one stage output variant"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn stage_output_rejects_identical_leaf_sets() {
+        let input: DeriveInput = syn::parse_quote! {
+            enum Output {
+                Forward { first: FirstFact, second: SecondFact },
+                Backward { second: SecondFact, first: FirstFact },
+            }
+        };
+
+        let error = expand(&input).expect_err("ambiguous leaf sets must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("share an identical leaf-type set"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn stage_output_requires_explicit_empty_marker() {
+        let input: DeriveInput = syn::parse_quote! {
+            enum Output {
+                Skipped,
+            }
+        };
+
+        let error = expand(&input).expect_err("unmarked empty variants must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("must carry an explicit #[stage_output(empty)] attribute"),
+            "unexpected error: {error}"
+        );
+    }
+}
