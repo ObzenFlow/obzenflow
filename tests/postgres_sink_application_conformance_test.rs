@@ -1004,12 +1004,13 @@ async fn postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row(
     let temp = tempfile::tempdir().expect("source fan-in journal directory");
     let journal_root = temp.path().join("journals");
     let delay = Duration::from_secs(4);
+    let live_probe = PostgresTestProbe::default();
 
     let handle = ordered_source_fan_in_flow(
         journal_root.clone(),
         database.connection.clone(),
         database.schema.clone(),
-        PostgresTestProbe::default(),
+        live_probe.clone(),
         delay,
     )
     .build(FlowBuildContext::for_tests())
@@ -1032,6 +1033,10 @@ async fn postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row(
         .await
         .expect("source-fed PostgreSQL fan-in completes")
         .expect("source-fed PostgreSQL fan-in succeeds");
+    let live_authority = live_probe.authority_snapshot();
+    assert_eq!(live_authority.hook_invocations(), 1);
+    assert_eq!(live_authority.sessions().len(), 1);
+    assert_eq!(live_authority.preparations().len(), 1);
     let live_run = replay_testkit::latest_run_dir(&journal_root);
     assert_postgres_ordered_delivery(&live_run, &["left", "right"]);
     let live_projection =
@@ -1045,6 +1050,7 @@ async fn postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row(
         "the live destination row is the final delivered value"
     );
 
+    let replay_probe = PostgresTestProbe::default();
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
@@ -1056,11 +1062,15 @@ async fn postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row(
             journal_root.clone(),
             database.connection.clone(),
             database.schema.clone(),
-            PostgresTestProbe::default(),
+            replay_probe.clone(),
             delay,
         ))
         .await
         .expect("same-key PostgreSQL fan-in redelivers with verified journals");
+    let replay_authority = replay_probe.authority_snapshot();
+    assert_eq!(replay_authority.hook_invocations(), 1);
+    assert_eq!(replay_authority.sessions().len(), 1);
+    assert_eq!(replay_authority.preparations().len(), 1);
     let replay_run = replay_testkit::latest_run_dir(&journal_root);
     assert_ne!(replay_run, live_run);
     assert_postgres_ordered_delivery(&replay_run, &["left", "right"]);

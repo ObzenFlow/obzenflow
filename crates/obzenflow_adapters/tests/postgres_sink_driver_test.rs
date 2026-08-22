@@ -130,6 +130,43 @@ fn sqlstate(error: &SinkOperationError) -> Option<&str> {
     error.destination_error_code().map(|code| code.value())
 }
 
+fn latest_authority_backend(probe: &PostgresTestProbe) -> i32 {
+    probe
+        .authority_snapshot()
+        .sessions()
+        .last()
+        .map(|(_, backend_pid)| *backend_pid)
+        .expect("an authority check identified its physical PostgreSQL backend")
+}
+
+async fn terminate_backend(pool: &PgPool, backend_pid: i32) {
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(backend_pid)
+        .fetch_one(pool)
+        .await
+        .expect("terminate the writer's physical PostgreSQL backend");
+    assert!(terminated, "the writer backend must still be terminable");
+}
+
+async fn assert_backend_closed(pool: &PgPool, backend_pid: i32) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let active: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)")
+                    .bind(backend_pid)
+                    .fetch_one(pool)
+                    .await
+                    .expect("inspect PostgreSQL backend activity");
+            if !active {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("rejected or unverified PostgreSQL backend closes promptly");
+}
+
 async fn open_writer<B>(
     sink: &PostgresSink<DriverInput, B>,
 ) -> Result<PostgresWriter<DriverInput, B>, SinkOperationError>
@@ -560,6 +597,472 @@ async fn binding_is_parameterised_and_readiness_remains_point_in_time() {
         }
         other => panic!("expected typed sink write failure, got {other:?}"),
     }
+    fixture.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replacement_sessions_reestablish_target_authority_before_begin() {
+    let fixture = Fixture::new("session_authority").await;
+    sqlx::query(&format!(
+        "CREATE TABLE {}.authority_values (id BIGINT PRIMARY KEY, value TEXT NOT NULL)",
+        fixture.schema
+    ))
+    .execute(&fixture.pool)
+    .await
+    .expect("create physical-session authority target");
+
+    let open_rejection_probe = PostgresTestProbe::default();
+    open_rejection_probe.authority_limit_once(8);
+    let open_rejection = sink(
+        fixture.connection(),
+        &fixture.schema,
+        "authority_values",
+        "(id, value) VALUES ($1, $2)",
+        IdValueBinder,
+        open_rejection_probe.clone(),
+    );
+    let error = open_writer(&open_rejection)
+        .await
+        .expect_err("initial physical-session rejection fails open");
+    assert_eq!(error.kind(), ErrorKind::PermanentFailure);
+    assert_eq!(sqlstate(&error), None);
+    assert!(error
+        .detail()
+        .ends_with("PostgreSQL destination identifier exceeds the server limit"));
+    let rejected_open_pid = latest_authority_backend(&open_rejection_probe);
+    let open_snapshot = open_rejection_probe.authority_snapshot();
+    assert_eq!(open_snapshot.hook_invocations(), 1);
+    assert_eq!(open_snapshot.rejections(), 1);
+    assert!(open_snapshot.preparations().is_empty());
+    assert_backend_closed(&fixture.pool, rejected_open_pid).await;
+
+    let probe = PostgresTestProbe::default();
+    let primary = sink(
+        fixture.connection(),
+        &fixture.schema,
+        "authority_values",
+        "(id, value) VALUES ($1, $2)",
+        IdValueBinder,
+        probe.clone(),
+    );
+    let (mut primary, primary_writer_id) = open_adapter(primary)
+        .await
+        .expect("primary writer establishes initial authority");
+    let initial_snapshot = probe.authority_snapshot();
+    assert_eq!(initial_snapshot.hook_invocations(), 1);
+    assert_eq!(initial_snapshot.sessions().len(), 1);
+    let (primary_probe_writer, initial_pid) = initial_snapshot.sessions()[0];
+    assert_eq!(initial_snapshot.preparations(), &[primary_probe_writer]);
+
+    let sibling_probe = PostgresTestProbe::default();
+    let sibling = sink(
+        fixture.connection(),
+        &fixture.schema,
+        "authority_values",
+        "(id, value) VALUES ($1, $2)",
+        IdValueBinder,
+        sibling_probe.clone(),
+    );
+    let (mut sibling, sibling_writer_id) = open_adapter(sibling)
+        .await
+        .expect("fan-out sibling establishes independent authority");
+    let sibling_pid = latest_authority_backend(&sibling_probe);
+    assert_ne!(initial_pid, sibling_pid);
+
+    terminate_backend(&fixture.pool, initial_pid).await;
+    probe.authority_limit_once(8);
+    let error = consume(
+        &mut primary,
+        primary_writer_id,
+        DriverInput {
+            id: 1,
+            value: "must-not-mutate".to_string(),
+        },
+    )
+    .await
+    .expect_err("replacement session with a smaller limit is rejected");
+    match error {
+        HandlerError::SinkWrite(failure) => {
+            assert_eq!(failure.phase(), SinkWritePhase::Acquire);
+            assert_eq!(
+                failure.disposition(),
+                SinkWriteFailureDisposition::CurrentOnly
+            );
+            assert_eq!(failure.error().kind(), ErrorKind::PermanentFailure);
+            assert_eq!(sqlstate(failure.error()), None);
+            assert!(failure
+                .error()
+                .detail()
+                .ends_with("PostgreSQL destination identifier exceeds the server limit"));
+        }
+        other => panic!("expected typed replacement-authority failure, got {other:?}"),
+    }
+    let rejected_snapshot = probe.authority_snapshot();
+    assert_eq!(rejected_snapshot.hook_invocations(), 2);
+    assert_eq!(rejected_snapshot.sessions().len(), 2);
+    assert_eq!(rejected_snapshot.rejections(), 1);
+    assert_eq!(rejected_snapshot.preparations(), &[primary_probe_writer]);
+    let (replacement_writer, rejected_pid) = rejected_snapshot.sessions()[1];
+    assert_eq!(replacement_writer, primary_probe_writer);
+    assert_ne!(rejected_pid, initial_pid);
+    let calls = probe.snapshot();
+    assert_eq!(calls.count(SinkExternalCallKind::Begin), 0);
+    assert_eq!(calls.count(SinkExternalCallKind::Execute), 0);
+    assert_eq!(calls.count(SinkExternalCallKind::Commit), 0);
+    assert_backend_closed(&fixture.pool, rejected_pid).await;
+    let unchanged: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {}.authority_values",
+        fixture.schema
+    ))
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("inspect rejected authority destination");
+    assert_eq!(unchanged, 0);
+
+    let sibling_receipt = consume(
+        &mut sibling,
+        sibling_writer_id,
+        DriverInput {
+            id: 9,
+            value: "fan-out-isolated".to_string(),
+        },
+    )
+    .await
+    .expect("one rejected writer cannot poison its fan-out sibling");
+    assert!(matches!(
+        sibling_receipt.result,
+        DeliveryResult::Success { .. }
+    ));
+    assert_eq!(sibling_probe.authority_snapshot().hook_invocations(), 1);
+    assert_eq!(sibling_probe.authority_snapshot().rejections(), 0);
+
+    let rematerialized = sink(
+        fixture.connection(),
+        &fixture.schema,
+        "authority_values",
+        "(id, value) VALUES ($1, $2)",
+        IdValueBinder,
+        probe.clone(),
+    );
+    let (mut rematerialized, rematerialized_writer_id) = open_adapter(rematerialized)
+        .await
+        .expect("a replay-style rematerialisation creates fresh authority state");
+    let rematerialized_snapshot = probe.authority_snapshot();
+    assert_eq!(rematerialized_snapshot.hook_invocations(), 3);
+    let (rematerialized_probe_writer, rematerialized_pid) =
+        *rematerialized_snapshot.sessions().last().unwrap();
+    assert_ne!(rematerialized_probe_writer, primary_probe_writer);
+    assert_ne!(rematerialized_pid, rejected_pid);
+    consume(
+        &mut rematerialized,
+        rematerialized_writer_id,
+        DriverInput {
+            id: 3,
+            value: "fresh-authority".to_string(),
+        },
+    )
+    .await
+    .expect("fresh materialisation is not poisoned by a prior writer verdict");
+
+    let receipt = consume(
+        &mut primary,
+        primary_writer_id,
+        DriverInput {
+            id: 2,
+            value: "compatible-replacement".to_string(),
+        },
+    )
+    .await
+    .expect("a later compatible replacement can mutate and settle");
+    assert!(matches!(receipt.result, DeliveryResult::Success { .. }));
+    let final_snapshot = probe.authority_snapshot();
+    assert_eq!(final_snapshot.hook_invocations(), 4);
+    assert_eq!(final_snapshot.sessions().len(), 4);
+    assert_eq!(final_snapshot.rejections(), 1);
+    let (compatible_writer, compatible_pid) = *final_snapshot.sessions().last().unwrap();
+    assert_eq!(compatible_writer, primary_probe_writer);
+    assert_ne!(compatible_pid, rejected_pid);
+    assert_eq!(
+        final_snapshot
+            .preparations()
+            .iter()
+            .filter(|writer| **writer == primary_probe_writer)
+            .count(),
+        1,
+        "replacement sessions must not repeat eager open preparation"
+    );
+
+    let rows: Vec<(i64, String)> = sqlx::query_as(&format!(
+        "SELECT id, value FROM {}.authority_values ORDER BY id",
+        fixture.schema
+    ))
+    .fetch_all(&fixture.pool)
+    .await
+    .expect("inspect authorized session mutations");
+    assert_eq!(
+        rows,
+        vec![
+            (2, "compatible-replacement".to_string()),
+            (3, "fresh-authority".to_string()),
+            (9, "fan-out-isolated".to_string()),
+        ]
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replacement_authority_query_failures_and_timeouts_close_unverified_sessions() {
+    let fixture = Fixture::new("authority_failure").await;
+    sqlx::query(&format!(
+        "CREATE TABLE {}.authority_failures (id BIGINT PRIMARY KEY, value TEXT NOT NULL)",
+        fixture.schema
+    ))
+    .execute(&fixture.pool)
+    .await
+    .expect("create authority-failure target");
+
+    let failure_probe = PostgresTestProbe::default();
+    let query_failure = sink(
+        fixture.connection(),
+        &fixture.schema,
+        "authority_failures",
+        "(id, value) VALUES ($1, $2)",
+        IdValueBinder,
+        failure_probe.clone(),
+    );
+    let (mut query_failure, query_failure_writer_id) = open_adapter(query_failure)
+        .await
+        .expect("authority-query failure writer opens initially");
+    terminate_backend(&fixture.pool, latest_authority_backend(&failure_probe)).await;
+    failure_probe.fail_authority_query_once();
+    let error = consume(
+        &mut query_failure,
+        query_failure_writer_id,
+        DriverInput {
+            id: 10,
+            value: "query-failure".to_string(),
+        },
+    )
+    .await
+    .expect_err("a failed replacement authority query rejects the session");
+    match error {
+        HandlerError::SinkWrite(failure) => {
+            assert_eq!(failure.phase(), SinkWritePhase::Acquire);
+            assert_eq!(
+                failure.disposition(),
+                SinkWriteFailureDisposition::CurrentOnly
+            );
+            assert_eq!(failure.error().kind(), ErrorKind::Remote);
+            assert_eq!(sqlstate(failure.error()), None);
+            assert!(!failure.error().detail().contains("current_setting"));
+            assert!(!failure.error().detail().contains("authority-query"));
+        }
+        other => panic!("expected typed authority-query failure, got {other:?}"),
+    }
+    let failure_snapshot = failure_probe.authority_snapshot();
+    assert_eq!(failure_snapshot.hook_invocations(), 2);
+    assert_eq!(failure_snapshot.rejections(), 1);
+    let failed_query_pid = latest_authority_backend(&failure_probe);
+    assert_backend_closed(&fixture.pool, failed_query_pid).await;
+    assert_eq!(
+        failure_probe.snapshot().count(SinkExternalCallKind::Begin),
+        0
+    );
+
+    consume(
+        &mut query_failure,
+        query_failure_writer_id,
+        DriverInput {
+            id: 11,
+            value: "query-recovered".to_string(),
+        },
+    )
+    .await
+    .expect("a later call may establish a new compatible session");
+    assert_eq!(failure_probe.authority_snapshot().hook_invocations(), 3);
+
+    let timeout_probe = PostgresTestProbe::default();
+    let authority_timeout = sink(
+        fixture
+            .connection()
+            .with_operation_timeout(Duration::from_secs(1)),
+        &fixture.schema,
+        "authority_failures",
+        "(id, value) VALUES ($1, $2)",
+        IdValueBinder,
+        timeout_probe.clone(),
+    );
+    let (mut authority_timeout, authority_timeout_writer_id) = open_adapter(authority_timeout)
+        .await
+        .expect("authority-timeout writer opens initially");
+    terminate_backend(&fixture.pool, latest_authority_backend(&timeout_probe)).await;
+    timeout_probe.delay_once(PostgresDelayPoint::Authority, Duration::from_secs(3));
+    let error = consume(
+        &mut authority_timeout,
+        authority_timeout_writer_id,
+        DriverInput {
+            id: 12,
+            value: "authority-timeout".to_string(),
+        },
+    )
+    .await
+    .expect_err("an unfinalised replacement authority check times out closed");
+    match error {
+        HandlerError::SinkWrite(failure) => {
+            assert_eq!(failure.phase(), SinkWritePhase::Acquire);
+            assert_eq!(
+                failure.disposition(),
+                SinkWriteFailureDisposition::CurrentOnly
+            );
+            assert_eq!(failure.error().kind(), ErrorKind::Timeout);
+            assert_eq!(sqlstate(failure.error()), None);
+            assert!(!failure.error().detail().contains("current_setting"));
+        }
+        other => panic!("expected typed authority timeout, got {other:?}"),
+    }
+    let timeout_snapshot = timeout_probe.authority_snapshot();
+    assert_eq!(timeout_snapshot.hook_invocations(), 2);
+    assert_eq!(timeout_snapshot.sessions().len(), 2);
+    assert_eq!(timeout_snapshot.rejections(), 0);
+    let timed_out_pid = latest_authority_backend(&timeout_probe);
+    assert_backend_closed(&fixture.pool, timed_out_pid).await;
+    let timeout_calls = timeout_probe.snapshot();
+    assert_eq!(timeout_calls.count(SinkExternalCallKind::Begin), 0);
+    assert_eq!(timeout_calls.count(SinkExternalCallKind::Execute), 0);
+    assert_eq!(timeout_calls.count(SinkExternalCallKind::Commit), 0);
+
+    let rows: Vec<(i64, String)> = sqlx::query_as(&format!(
+        "SELECT id, value FROM {}.authority_failures ORDER BY id",
+        fixture.schema
+    ))
+    .fetch_all(&fixture.pool)
+    .await
+    .expect("inspect query-failure and timeout destination");
+    assert_eq!(rows, vec![(11, "query-recovered".to_string())]);
+    fixture.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_flush_and_drain_rejection_settle_nothing() {
+    let fixture = Fixture::new("authority_lifecycle").await;
+    sqlx::query(&format!(
+        "CREATE TABLE {}.authority_lifecycle (id BIGINT PRIMARY KEY, value TEXT NOT NULL)",
+        fixture.schema
+    ))
+    .execute(&fixture.pool)
+    .await
+    .expect("create authority lifecycle target");
+
+    let flush_probe = PostgresTestProbe::default();
+    let flush_sink = PostgresSink::<DriverInput>::builder()
+        .connection(fixture.connection())
+        .insert_into(
+            &fixture.schema,
+            "authority_lifecycle",
+            "(id, value) VALUES ($1, $2)",
+        )
+        .expect("flush target and body pass local validation")
+        .batch_size(3)
+        .expect("flush batch size is valid")
+        .bind_with(IdValueBinder)
+        .test_probe(flush_probe.clone())
+        .build()
+        .expect("flush sink builds without I/O");
+    let (mut flush_adapter, flush_writer_id) =
+        open_adapter(flush_sink).await.expect("flush writer opens");
+    let buffered = consume(
+        &mut flush_adapter,
+        flush_writer_id,
+        DriverInput {
+            id: 20,
+            value: "flush-pending".to_string(),
+        },
+    )
+    .await
+    .expect("flush input remains buffered");
+    assert!(matches!(buffered.result, DeliveryResult::Buffered { .. }));
+    terminate_backend(&fixture.pool, latest_authority_backend(&flush_probe)).await;
+    flush_probe.authority_limit_once(8);
+    let error = flush_adapter
+        .flush_report()
+        .await
+        .expect_err("flush rejects an unauthorized replacement session");
+    match error {
+        HandlerError::SinkOperation(error) => {
+            assert_eq!(error.kind(), ErrorKind::PermanentFailure);
+            assert_eq!(sqlstate(&error), None);
+        }
+        other => panic!("expected typed flush operation failure, got {other:?}"),
+    }
+    let flush_snapshot = flush_probe.authority_snapshot();
+    assert_eq!(flush_snapshot.hook_invocations(), 2);
+    assert_eq!(flush_snapshot.rejections(), 1);
+    assert_backend_closed(&fixture.pool, latest_authority_backend(&flush_probe)).await;
+    let flush_calls = flush_probe.snapshot();
+    assert_eq!(flush_calls.count(SinkExternalCallKind::Flush), 1);
+    assert_eq!(flush_calls.count(SinkExternalCallKind::Begin), 0);
+    assert_eq!(flush_calls.count(SinkExternalCallKind::Execute), 0);
+    assert_eq!(flush_calls.count(SinkExternalCallKind::Commit), 0);
+
+    let drain_probe = PostgresTestProbe::default();
+    let drain_sink = PostgresSink::<DriverInput>::builder()
+        .connection(fixture.connection())
+        .insert_into(
+            &fixture.schema,
+            "authority_lifecycle",
+            "(id, value) VALUES ($1, $2)",
+        )
+        .expect("drain target and body pass local validation")
+        .batch_size(3)
+        .expect("drain batch size is valid")
+        .bind_with(IdValueBinder)
+        .test_probe(drain_probe.clone())
+        .build()
+        .expect("drain sink builds without I/O");
+    let (mut drain_adapter, drain_writer_id) =
+        open_adapter(drain_sink).await.expect("drain writer opens");
+    let buffered = consume(
+        &mut drain_adapter,
+        drain_writer_id,
+        DriverInput {
+            id: 21,
+            value: "drain-pending".to_string(),
+        },
+    )
+    .await
+    .expect("drain input remains buffered");
+    assert!(matches!(buffered.result, DeliveryResult::Buffered { .. }));
+    terminate_backend(&fixture.pool, latest_authority_backend(&drain_probe)).await;
+    drain_probe.authority_limit_once(8);
+    let error = drain_adapter
+        .drain_report()
+        .await
+        .expect_err("drain rejects an unauthorized replacement session");
+    match error {
+        HandlerError::SinkOperation(error) => {
+            assert_eq!(error.kind(), ErrorKind::PermanentFailure);
+            assert_eq!(sqlstate(&error), None);
+        }
+        other => panic!("expected typed drain operation failure, got {other:?}"),
+    }
+    let drain_snapshot = drain_probe.authority_snapshot();
+    assert_eq!(drain_snapshot.hook_invocations(), 2);
+    assert_eq!(drain_snapshot.rejections(), 1);
+    assert_backend_closed(&fixture.pool, latest_authority_backend(&drain_probe)).await;
+    let drain_calls = drain_probe.snapshot();
+    assert_eq!(drain_calls.count(SinkExternalCallKind::Drain), 1);
+    assert_eq!(drain_calls.count(SinkExternalCallKind::Begin), 0);
+    assert_eq!(drain_calls.count(SinkExternalCallKind::Execute), 0);
+    assert_eq!(drain_calls.count(SinkExternalCallKind::Commit), 0);
+
+    let rows: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {}.authority_lifecycle",
+        fixture.schema
+    ))
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("inspect lifecycle rejection destination");
+    assert_eq!(rows, 0);
     fixture.cleanup().await;
 }
 

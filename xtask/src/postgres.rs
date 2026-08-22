@@ -488,10 +488,13 @@ const REQUIRED_TEST_TARGETS: &[RequiredTestTarget] = &[
         ],
         expected_tests: &[
             "binding_is_parameterised_and_readiness_remains_point_in_time",
+            "buffered_flush_and_drain_rejection_settle_nothing",
             "open_is_non_mutating_and_postgres_owns_statement_authority",
             "operation_deadlines_preserve_only_acknowledged_transaction_truth",
             "postgres_tls_uses_native_root_loader_in_an_isolated_process",
             "real_postgres_locks_bound_preparation_rollback_and_quarantine",
+            "replacement_authority_query_failures_and_timeouts_close_unverified_sessions",
+            "replacement_sessions_reestablish_target_authority_before_begin",
             "server_cancellation_remains_remote_postgres_evidence",
             "typed_transport_proves_plaintext_and_tls_failure_matrix",
         ],

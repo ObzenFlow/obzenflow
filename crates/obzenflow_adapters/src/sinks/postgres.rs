@@ -6,8 +6,9 @@
 //!
 //! Configuration and statement validation are synchronous and perform no I/O.
 //! Each call to [`SinkConnector::open`](obzenflow_runtime::stages::sink::SinkConnector::open)
-//! creates an isolated writer and verifies its pool. Values enter the fixed
-//! INSERT statement only through [`PostgresBind`].
+//! creates an isolated writer, verifies its initial session, and installs a
+//! fail-closed authority check for every replacement session. Values enter the
+//! fixed INSERT statement only through [`PostgresBind`].
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
@@ -26,6 +27,7 @@ use sqlx::{ConnectOptions as _, Executor as _, PgPool, Postgres};
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::time::{timeout, timeout_at, Instant};
@@ -43,6 +45,7 @@ const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_ROLLBACK_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BATCH_SIZE: usize = 100_000;
 const PORTABLE_IDENTIFIER_LIMIT: usize = 63;
+const POSTGRES_WRITER_POOL_SIZE: u32 = 1;
 const POSTGRES_SQLSTATE_NAMESPACE: &str = "postgresql.sqlstate";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -503,6 +506,7 @@ pub mod testing {
     /// Connector-specific deterministic delay seams for deadline proof.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum PostgresDelayPoint {
+        Authority,
         Prepare,
         Begin,
         Execute,
@@ -510,10 +514,43 @@ pub mod testing {
         CommitAcknowledgement,
     }
 
+    /// Test-only observation of physical-session authority checks.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct PostgresAuthoritySnapshot {
+        hook_invocations: u64,
+        sessions: Vec<(u64, i32)>,
+        rejections: u64,
+        preparations: Vec<u64>,
+    }
+
+    impl PostgresAuthoritySnapshot {
+        pub fn hook_invocations(&self) -> u64 {
+            self.hook_invocations
+        }
+
+        pub fn sessions(&self) -> &[(u64, i32)] {
+            &self.sessions
+        }
+
+        pub fn rejections(&self) -> u64 {
+            self.rejections
+        }
+
+        pub fn preparations(&self) -> &[u64] {
+            &self.preparations
+        }
+    }
+
     #[derive(Default)]
     struct ProbeState {
         armed: Option<SinkFault>,
         delay: Option<(PostgresDelayPoint, Duration)>,
+        authority_limit: Option<i32>,
+        authority_query_failure: bool,
+        authority_hook_invocations: u64,
+        authority_sessions: Vec<(u64, i32)>,
+        authority_rejections: u64,
+        preparations: Vec<u64>,
         next_writer: u64,
         next_sequence: u64,
         calls: Vec<SinkExternalCall>,
@@ -549,6 +586,12 @@ pub mod testing {
             let mut state = self.state();
             state.armed = None;
             state.delay = None;
+            state.authority_limit = None;
+            state.authority_query_failure = false;
+            state.authority_hook_invocations = 0;
+            state.authority_sessions.clear();
+            state.authority_rejections = 0;
+            state.preparations.clear();
             state.calls.clear();
             state.next_sequence = 0;
         }
@@ -559,6 +602,28 @@ pub mod testing {
 
         pub fn delay_once(&self, point: PostgresDelayPoint, duration: Duration) {
             self.state().delay = Some((point, duration));
+        }
+
+        /// Override the server-reported identifier limit for the next newly
+        /// created physical session.
+        pub fn authority_limit_once(&self, limit: i32) {
+            self.state().authority_limit = Some(limit);
+        }
+
+        /// Replace the next successful authority query with a redacted
+        /// protocol failure after the physical backend has been identified.
+        pub fn fail_authority_query_once(&self) {
+            self.state().authority_query_failure = true;
+        }
+
+        pub fn authority_snapshot(&self) -> PostgresAuthoritySnapshot {
+            let state = self.state();
+            PostgresAuthoritySnapshot {
+                hook_invocations: state.authority_hook_invocations,
+                sessions: state.authority_sessions.clone(),
+                rejections: state.authority_rejections,
+                preparations: state.preparations.clone(),
+            }
         }
 
         pub(crate) fn new_writer(&self) -> u64 {
@@ -598,6 +663,31 @@ pub mod testing {
             } else {
                 None
             }
+        }
+
+        pub(crate) fn record_authority_hook(&self) {
+            self.state().authority_hook_invocations += 1;
+        }
+
+        pub(crate) fn record_authority_session(&self, writer: u64, backend_pid: i32) {
+            self.state().authority_sessions.push((writer, backend_pid));
+        }
+
+        pub(crate) fn record_authority_rejection(&self) {
+            self.state().authority_rejections += 1;
+        }
+
+        pub(crate) fn record_preparation(&self, writer: u64) {
+            self.state().preparations.push(writer);
+        }
+
+        pub(crate) fn take_authority_limit(&self) -> Option<i32> {
+            self.state().authority_limit.take()
+        }
+
+        pub(crate) fn take_authority_query_failure(&self) -> bool {
+            let mut state = self.state();
+            std::mem::take(&mut state.authority_query_failure)
         }
     }
 }
@@ -721,6 +811,63 @@ impl WriterProbe {
         self.record(obzenflow_runtime::testing::sink::SinkExternalCallKind::Drop);
     }
 
+    fn record_authority_hook(&self) {
+        #[cfg(feature = "test-support")]
+        if let Some(probe) = &self.probe {
+            probe.record_authority_hook();
+        }
+    }
+
+    fn record_authority_session(&self, backend_pid: i32) {
+        #[cfg(feature = "test-support")]
+        if let Some(probe) = &self.probe {
+            probe.record_authority_session(self.writer, backend_pid);
+        }
+        #[cfg(not(feature = "test-support"))]
+        let _ = backend_pid;
+    }
+
+    fn record_authority_rejection(&self) {
+        #[cfg(feature = "test-support")]
+        if let Some(probe) = &self.probe {
+            probe.record_authority_rejection();
+        }
+    }
+
+    fn record_preparation(&self) {
+        #[cfg(feature = "test-support")]
+        if let Some(probe) = &self.probe {
+            probe.record_preparation(self.writer);
+        }
+    }
+
+    fn authority_limit(&self, observed: i32) -> i32 {
+        #[cfg(feature = "test-support")]
+        {
+            self.probe
+                .as_ref()
+                .and_then(testing::PostgresTestProbe::take_authority_limit)
+                .unwrap_or(observed)
+        }
+        #[cfg(not(feature = "test-support"))]
+        {
+            observed
+        }
+    }
+
+    fn fault_authority_query(&self) -> bool {
+        #[cfg(feature = "test-support")]
+        {
+            self.probe.as_ref().is_some_and(|probe| {
+                testing::PostgresTestProbe::take_authority_query_failure(probe)
+            })
+        }
+        #[cfg(not(feature = "test-support"))]
+        {
+            false
+        }
+    }
+
     writer_probe_fault_method!(fault_open, Open);
     writer_probe_fault_method!(fault_encode, Encode);
     writer_probe_fault_method!(fault_acquire, Acquire);
@@ -733,6 +880,141 @@ impl WriterProbe {
     writer_probe_fault_method!(fault_post_commit, PostCommitPreAcknowledgement);
     writer_probe_fault_method!(fault_flush, Flush);
     writer_probe_fault_method!(fault_drain, Drain);
+}
+
+#[derive(Clone)]
+struct PostgresSessionAuthority {
+    verdict: Arc<Mutex<PostgresSessionAuthorityVerdict>>,
+}
+
+#[derive(Clone)]
+enum PostgresSessionAuthorityVerdict {
+    Unverified,
+    Ready,
+    Rejected(SinkOperationError),
+}
+
+impl PostgresSessionAuthority {
+    fn new() -> Self {
+        Self {
+            verdict: Arc::new(Mutex::new(PostgresSessionAuthorityVerdict::Unverified)),
+        }
+    }
+
+    fn verdict(&self) -> MutexGuard<'_, PostgresSessionAuthorityVerdict> {
+        match self.verdict.lock() {
+            Ok(verdict) => verdict,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn mark_unverified(&self) {
+        *self.verdict() = PostgresSessionAuthorityVerdict::Unverified;
+    }
+
+    fn mark_ready(&self) {
+        *self.verdict() = PostgresSessionAuthorityVerdict::Ready;
+    }
+
+    fn mark_rejected(&self, error: SinkOperationError) {
+        *self.verdict() = PostgresSessionAuthorityVerdict::Rejected(error);
+    }
+
+    fn snapshot(&self) -> PostgresSessionAuthorityVerdict {
+        self.verdict().clone()
+    }
+}
+
+/// The only production path to a writer's physical PostgreSQL connection.
+///
+/// The shared verdict is sound only because this private pool is permanently
+/// capped at one connection and the writer is serially borrowed. Every new
+/// physical connection finalises the verdict before SQLx can expose it.
+struct PostgresSessionPool {
+    pool: PgPool,
+    authority: PostgresSessionAuthority,
+}
+
+impl PostgresSessionPool {
+    fn new(
+        options: PgConnectOptions,
+        acquire_timeout: Duration,
+        destination: PostgresTable,
+        probe: WriterProbe,
+    ) -> Self {
+        let authority = PostgresSessionAuthority::new();
+        let hook_authority = authority.clone();
+        let pool = PgPoolOptions::new()
+            .max_connections(POSTGRES_WRITER_POOL_SIZE)
+            .min_connections(0)
+            .acquire_timeout(acquire_timeout)
+            .after_connect(move |connection, _metadata| {
+                let destination = destination.clone();
+                let authority = hook_authority.clone();
+                let probe = probe.clone();
+                Box::pin(async move {
+                    authority.mark_unverified();
+                    probe.record_authority_hook();
+                    let verdict = async {
+                        let (max_identifier_length, backend_pid): (i32, i32) = sqlx::query_as(
+                            "SELECT current_setting('max_identifier_length')::integer, \
+                                 pg_backend_pid()",
+                        )
+                        .fetch_one(&mut *connection)
+                        .await
+                        .map_err(operation_error)?;
+                        probe.record_authority_session(backend_pid);
+                        #[cfg(feature = "test-support")]
+                        probe.delay(testing::PostgresDelayPoint::Authority).await;
+                        if probe.fault_authority_query() {
+                            return Err(operation_error(sqlx::Error::Protocol(
+                                "injected PostgreSQL authority-query failure".into(),
+                            )));
+                        }
+                        destination
+                            .validate_server_limit(probe.authority_limit(max_identifier_length))
+                    }
+                    .await;
+
+                    match verdict {
+                        Ok(()) => authority.mark_ready(),
+                        Err(error) => {
+                            probe.record_authority_rejection();
+                            authority.mark_rejected(error);
+                        }
+                    }
+
+                    // SQLx retries and logs after_connect errors. The wrapper
+                    // must observe the exact rejection instead, so the hook
+                    // deliberately exposes the connection for fail-closed
+                    // inspection and never returns its adapter verdict here.
+                    Ok(())
+                })
+            })
+            // Pool construction remains inside open and the immediately
+            // following authorized acquisition performs all external I/O.
+            // With min_connections(0), no background connection can race the
+            // single shared verdict.
+            .connect_lazy_with(options);
+        Self { pool, authority }
+    }
+
+    async fn acquire_authorized(&self) -> SinkOperationResult<PoolConnection<Postgres>> {
+        let mut connection = self.pool.acquire().await.map_err(operation_error)?;
+        match self.authority.snapshot() {
+            PostgresSessionAuthorityVerdict::Ready => Ok(connection),
+            PostgresSessionAuthorityVerdict::Rejected(error) => {
+                connection.close_on_drop();
+                Err(error)
+            }
+            PostgresSessionAuthorityVerdict::Unverified => {
+                connection.close_on_drop();
+                Err(SinkOperationError::other(
+                    "PostgreSQL session target authority was not established",
+                ))
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -771,24 +1053,13 @@ where
             ));
         }
         let deadline = Instant::now() + self.connection.operation_timeout;
-        let pool = timeout_at(
-            deadline,
-            PgPoolOptions::new()
-                .max_connections(1)
-                .acquire_timeout(self.connection.acquire_timeout)
-                .connect_with(self.connection.options.clone()),
-        )
-        .await
-        .map_err(|_| {
-            destination_operation_error(
-                &self.destination,
-                SinkOperationError::timeout("PostgreSQL open timed out"),
-            )
-        })?
-        .map_err(operation_error)
-        .map_err(|error| destination_operation_error(&self.destination, error))?;
-
-        let mut connection = timeout_at(deadline, pool.acquire())
+        let pool = PostgresSessionPool::new(
+            self.connection.options.clone(),
+            self.connection.acquire_timeout,
+            self.destination.clone(),
+            probe.clone(),
+        );
+        let mut connection = timeout_at(deadline, pool.acquire_authorized())
             .await
             .map_err(|_| {
                 destination_operation_error(
@@ -796,18 +1067,11 @@ where
                     SinkOperationError::timeout("PostgreSQL open timed out"),
                 )
             })?
-            .map_err(operation_error)
             .map_err(|error| destination_operation_error(&self.destination, error))?;
         let preparation = timeout_at(deadline, async {
-            let max_identifier_length: i32 =
-                sqlx::query_scalar("SELECT current_setting('max_identifier_length')::integer")
-                    .fetch_one(&mut *connection)
-                    .await
-                    .map_err(operation_error)?;
-            self.destination
-                .validate_server_limit(max_identifier_length)?;
             #[cfg(feature = "test-support")]
             probe.delay(testing::PostgresDelayPoint::Prepare).await;
+            probe.record_preparation();
             (&mut *connection)
                 .prepare(&self.statement)
                 .await
@@ -850,7 +1114,7 @@ struct BufferedRow<T> {
 }
 
 pub struct PostgresWriter<T, B> {
-    pool: PgPool,
+    pool: PostgresSessionPool,
     destination: PostgresTable,
     statement: String,
     binder: B,
@@ -996,17 +1260,16 @@ where
     let rollback_timeout = writer.rollback_timeout;
     let probe = &writer.probe;
     let deadline = Instant::now() + operation_timeout;
-    probe.record_begin();
     if probe.fault_acquire() {
         return Err(TransactionFailure::Acquire(test_operation_error(
             "injected PostgreSQL acquisition failure",
             None,
         )));
     }
-    let connection = match timeout_at(deadline, pool.acquire()).await {
+    let connection = match timeout_at(deadline, pool.acquire_authorized()).await {
         Ok(Ok(connection)) => connection,
         Ok(Err(error)) => {
-            return Err(TransactionFailure::Acquire(operation_error(error)));
+            return Err(TransactionFailure::Acquire(error));
         }
         Err(_) => {
             return Err(TransactionFailure::Acquire(SinkOperationError::timeout(
@@ -1019,6 +1282,7 @@ where
     let begin = timeout_at(deadline, async {
         #[cfg(feature = "test-support")]
         probe.delay(testing::PostgresDelayPoint::Begin).await;
+        probe.record_begin();
         sqlx::query("BEGIN")
             .execute(&mut *connection.connection)
             .await
@@ -1788,18 +2052,25 @@ mod tests {
             .await
             .expect("second writer opens");
 
-        let mut lease_a = writer_a.pool.acquire().await.expect("writer A lease");
+        let mut lease_a = writer_a
+            .pool
+            .acquire_authorized()
+            .await
+            .expect("writer A lease");
         let pid_a: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *lease_a)
             .await
             .expect("writer A backend id");
         assert!(
-            timeout(Duration::from_millis(30), writer_a.pool.acquire())
-                .await
-                .is_err(),
+            timeout(
+                Duration::from_millis(30),
+                writer_a.pool.acquire_authorized(),
+            )
+            .await
+            .is_err(),
             "one held lease must exhaust only writer A's one-slot pool"
         );
-        let mut lease_b = timeout(Duration::from_secs(1), writer_b.pool.acquire())
+        let mut lease_b = timeout(Duration::from_secs(1), writer_b.pool.acquire_authorized())
             .await
             .expect("writer B is not blocked by writer A")
             .expect("writer B lease");
