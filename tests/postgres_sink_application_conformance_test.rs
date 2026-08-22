@@ -9,7 +9,7 @@ mod replay_testkit;
 use async_trait::async_trait;
 use obzenflow::sinks::postgres::testing::{PostgresTestProbe, POSTGRES_SQLSTATE_NAMESPACE};
 use obzenflow::sinks::postgres::{
-    PostgresBind, PostgresConnection, PostgresQuery, PostgresSink, PostgresTransport,
+    PostgresBind, PostgresBindings, PostgresConnection, PostgresSink, PostgresTransport,
 };
 use obzenflow::sources;
 use obzenflow::testing::sink::{
@@ -68,8 +68,8 @@ impl TypedPayload for Payment {
 struct PaymentBinder;
 
 impl PostgresBind<Payment> for PaymentBinder {
-    fn bind<'q>(&self, query: PostgresQuery<'q>, input: &'q Payment) -> PostgresQuery<'q> {
-        query.bind(input.id).bind(input.amount_cents)
+    fn bind(&self, bindings: &mut PostgresBindings, input: &Payment) {
+        bindings.bind(input.id).bind(input.amount_cents);
     }
 }
 

@@ -6,7 +6,7 @@
 
 use obzenflow_adapters::sinks::postgres::testing::{PostgresDelayPoint, PostgresTestProbe};
 use obzenflow_adapters::sinks::postgres::{
-    PostgresBind, PostgresConnection, PostgresQuery, PostgresSink, PostgresTransport,
+    PostgresBind, PostgresBindings, PostgresConnection, PostgresSink, PostgresTransport,
     PostgresWriter,
 };
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
@@ -21,7 +21,10 @@ use obzenflow_runtime::stages::sink::{
 };
 use obzenflow_runtime::testing::sink::{SinkExternalCallKind, SinkFault};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::encode::IsNull;
+use sqlx::error::BoxDynError;
+use sqlx::postgres::{PgArgumentBuffer, PgTypeInfo};
+use sqlx::{Encode, PgPool, Postgres, Type};
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,8 +47,8 @@ impl TypedPayload for DriverInput {
 struct IdValueBinder;
 
 impl PostgresBind<DriverInput> for IdValueBinder {
-    fn bind<'q>(&self, query: PostgresQuery<'q>, input: &'q DriverInput) -> PostgresQuery<'q> {
-        query.bind(input.id).bind(&input.value)
+    fn bind(&self, bindings: &mut PostgresBindings, input: &DriverInput) {
+        bindings.bind(input.id).bind(&input.value);
     }
 }
 
@@ -53,8 +56,8 @@ impl PostgresBind<DriverInput> for IdValueBinder {
 struct ValueBinder;
 
 impl PostgresBind<DriverInput> for ValueBinder {
-    fn bind<'q>(&self, query: PostgresQuery<'q>, input: &'q DriverInput) -> PostgresQuery<'q> {
-        query.bind(&input.value)
+    fn bind(&self, bindings: &mut PostgresBindings, input: &DriverInput) {
+        bindings.bind(&input.value);
     }
 }
 
@@ -62,8 +65,8 @@ impl PostgresBind<DriverInput> for ValueBinder {
 struct IdOnlyBinder;
 
 impl PostgresBind<DriverInput> for IdOnlyBinder {
-    fn bind<'q>(&self, query: PostgresQuery<'q>, input: &'q DriverInput) -> PostgresQuery<'q> {
-        query.bind(input.id)
+    fn bind(&self, bindings: &mut PostgresBindings, input: &DriverInput) {
+        bindings.bind(input.id);
     }
 }
 
@@ -71,8 +74,47 @@ impl PostgresBind<DriverInput> for IdOnlyBinder {
 struct NoBinder;
 
 impl PostgresBind<DriverInput> for NoBinder {
-    fn bind<'q>(&self, query: PostgresQuery<'q>, _input: &'q DriverInput) -> PostgresQuery<'q> {
-        query
+    fn bind(&self, _bindings: &mut PostgresBindings, _input: &DriverInput) {}
+}
+
+#[derive(Clone, Debug)]
+struct ExtraBinder;
+
+impl PostgresBind<DriverInput> for ExtraBinder {
+    fn bind(&self, bindings: &mut PostgresBindings, input: &DriverInput) {
+        bindings.bind(input.id).bind(&input.value).bind(input.id);
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WrongTypeBinder;
+
+impl PostgresBind<DriverInput> for WrongTypeBinder {
+    fn bind(&self, bindings: &mut PostgresBindings, input: &DriverInput) {
+        bindings.bind(&input.value).bind(&input.value);
+    }
+}
+
+struct DriverEncodingFailure;
+
+impl Type<Postgres> for DriverEncodingFailure {
+    fn type_info() -> PgTypeInfo {
+        <String as Type<Postgres>>::type_info()
+    }
+}
+
+impl<'q> Encode<'q, Postgres> for DriverEncodingFailure {
+    fn encode_by_ref(&self, _buffer: &mut PgArgumentBuffer) -> Result<IsNull, BoxDynError> {
+        Err(std::io::Error::other("injected PostgreSQL parameter encoding failure").into())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct EncodingFailureBinder;
+
+impl PostgresBind<DriverInput> for EncodingFailureBinder {
+    fn bind(&self, bindings: &mut PostgresBindings, input: &DriverInput) {
+        bindings.bind(input.id).bind(DriverEncodingFailure);
     }
 }
 
@@ -239,6 +281,60 @@ where
         .test_probe(probe)
         .build()
         .expect("driver sink builds without I/O")
+}
+
+async fn assert_binding_failure<B>(
+    fixture: &Fixture,
+    table: &str,
+    binder: B,
+    expected_kind: ErrorKind,
+) where
+    B: PostgresBind<DriverInput>,
+{
+    let probe = PostgresTestProbe::default();
+    let connector = sink(
+        fixture.connection(),
+        &fixture.schema,
+        table,
+        "(id, value) VALUES ($1, $2)",
+        binder,
+        probe.clone(),
+    );
+    let (mut adapter, writer_id) = open_adapter(connector)
+        .await
+        .expect("statement preparation does not execute the binder");
+    let error = consume(
+        &mut adapter,
+        writer_id,
+        DriverInput {
+            id: 99,
+            value: "binding-failure-sentinel".to_string(),
+        },
+    )
+    .await
+    .expect_err("invalid bindings fail during write");
+    match error {
+        HandlerError::SinkWrite(failure) => {
+            assert_eq!(failure.phase(), SinkWritePhase::Execute);
+            assert_eq!(
+                failure.disposition(),
+                SinkWriteFailureDisposition::ConfirmedRollback
+            );
+            assert_eq!(failure.error().kind(), expected_kind);
+            assert!(!failure
+                .error()
+                .detail()
+                .contains("binding-failure-sentinel"));
+        }
+        other => panic!("expected typed sink write failure, got {other:?}"),
+    }
+    assert_eq!(probe.snapshot().count(SinkExternalCallKind::Commit), 0);
+    let count: i64 =
+        sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {}.{table}", fixture.schema))
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("read binding failure table");
+    assert_eq!(count, 0);
 }
 
 fn url_with_root(url: &str, root: &Path) -> String {
@@ -482,6 +578,20 @@ async fn binding_is_parameterised_and_readiness_remains_point_in_time() {
     .execute(&fixture.pool)
     .await
     .expect("create binding table");
+    sqlx::query(&format!(
+        "CREATE TABLE {}.unrelated_sentinel (id BIGINT PRIMARY KEY, marker TEXT NOT NULL)",
+        fixture.schema
+    ))
+    .execute(&fixture.pool)
+    .await
+    .expect("create unrelated authority sentinel table");
+    sqlx::query(&format!(
+        "INSERT INTO {}.unrelated_sentinel (id, marker) VALUES (1, 'unchanged')",
+        fixture.schema
+    ))
+    .execute(&fixture.pool)
+    .await
+    .expect("seed unrelated authority sentinel table");
 
     let correct = sink(
         fixture.connection(),
@@ -519,6 +629,14 @@ async fn binding_is_parameterised_and_readiness_remains_point_in_time() {
     .await
     .expect("read adversarial value literally");
     assert_eq!(stored, adversarial);
+    let unrelated_marker: String = sqlx::query_scalar(&format!(
+        "SELECT marker FROM {}.unrelated_sentinel WHERE id = 1",
+        fixture.schema
+    ))
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("read unrelated authority sentinel");
+    assert_eq!(unrelated_marker, "unchanged");
 
     sqlx::query(&format!(
         "CREATE TABLE {}.arity_table (id BIGINT, value TEXT)",
@@ -527,36 +645,16 @@ async fn binding_is_parameterised_and_readiness_remains_point_in_time() {
     .execute(&fixture.pool)
     .await
     .expect("create binder-arity table");
-    let arity = sink(
-        fixture.connection(),
-        &fixture.schema,
+    assert_binding_failure(&fixture, "arity_table", IdOnlyBinder, ErrorKind::Remote).await;
+    assert_binding_failure(&fixture, "arity_table", ExtraBinder, ErrorKind::Remote).await;
+    assert_binding_failure(&fixture, "arity_table", WrongTypeBinder, ErrorKind::Remote).await;
+    assert_binding_failure(
+        &fixture,
         "arity_table",
-        "(id, value) VALUES ($1, $2)",
-        IdOnlyBinder,
-        PostgresTestProbe::default(),
-    );
-    let (mut arity_adapter, arity_writer_id) = open_adapter(arity)
-        .await
-        .expect("preparation does not execute the binder");
-    let error = consume(
-        &mut arity_adapter,
-        arity_writer_id,
-        DriverInput {
-            id: 2,
-            value: "not-bound".to_string(),
-        },
+        EncodingFailureBinder,
+        ErrorKind::Deserialization,
     )
-    .await
-    .expect_err("binder arity is a write-time fact");
-    assert!(matches!(error, HandlerError::SinkWrite(_)));
-    let arity_count: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM {}.arity_table",
-        fixture.schema
-    ))
-    .fetch_one(&fixture.pool)
-    .await
-    .expect("read arity table");
-    assert_eq!(arity_count, 0);
+    .await;
 
     let drift = sink(
         fixture.connection(),

@@ -2,13 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Downstream-style compile witness for the root PostgreSQL facade.
+//! Downstream-style consumer coverage for the root PostgreSQL facade.
 //!
-//! This source intentionally imports no SQLx name. `PostgresQuery` is the
-//! adapter-owned query carrier a consumer needs to implement its binder.
+//! This source intentionally names no driver query or argument type. The
+//! adapter-owned accumulator is the complete binder capability.
 
 use obzenflow::sinks::postgres::{
-    PostgresBind, PostgresConnection, PostgresQuery, PostgresSink, PostgresTransport,
+    PostgresBind, PostgresBindings, PostgresConnection, PostgresSink, PostgresTransport,
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::sink;
@@ -27,17 +27,13 @@ impl TypedPayload for ConsumerPayment {
 struct ConsumerBinder;
 
 impl PostgresBind<ConsumerPayment> for ConsumerBinder {
-    fn bind<'q>(
-        &self,
-        query: PostgresQuery<'q>,
-        payment: &'q ConsumerPayment,
-    ) -> PostgresQuery<'q> {
-        query.bind(payment.id)
+    fn bind(&self, bindings: &mut PostgresBindings, payment: &ConsumerPayment) {
+        bindings.bind(payment.id);
     }
 }
 
 #[test]
-fn root_feature_exposes_a_sink_macro_compatible_connector_without_sqlx_imports() {
+fn root_feature_exposes_a_sink_macro_compatible_value_binder() {
     let connection = PostgresConnection::from_url(
         "postgres://consumer:sentinel@localhost/consumer?sslmode=disable",
         PostgresTransport::ExternallyProtectedPlaintext,

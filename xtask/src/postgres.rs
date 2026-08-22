@@ -462,9 +462,11 @@ const REQUIRED_TEST_TARGETS: &[RequiredTestTarget] = &[
             "--lib",
         ],
         expected_tests: &[
+            "sinks::postgres::tests::bindings_retain_only_the_first_encoding_error_for_query_execution",
             "sinks::postgres::tests::build_is_local_and_debug_is_redacted",
             "sinks::postgres::tests::configuration_rejects_unsafe_shapes",
             "sinks::postgres::tests::connector_input_witness_is_the_builder_payload",
+            "sinks::postgres::tests::private_assembler_retains_configured_statement_authority",
             "sinks::postgres::tests::real_driver_sqlstates_and_transport_absence_map_without_text_parsing",
             "sinks::postgres::tests::real_writers_own_distinct_one_slot_pools",
             "sinks::postgres::tests::sqlstate_codes_use_the_typed_bounded_carrier",
@@ -547,9 +549,7 @@ const REQUIRED_TEST_TARGETS: &[RequiredTestTarget] = &[
             "--test",
             "postgres_public_consumer_test",
         ],
-        expected_tests: &[
-            "root_feature_exposes_a_sink_macro_compatible_connector_without_sqlx_imports",
-        ],
+        expected_tests: &["root_feature_exposes_a_sink_macro_compatible_value_binder"],
         inventory_prefix: None,
     },
     RequiredTestTarget {

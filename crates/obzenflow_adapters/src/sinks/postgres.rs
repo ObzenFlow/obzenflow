@@ -20,10 +20,12 @@ use obzenflow_runtime::stages::sink::{
     SinkWriteFailure, SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter,
     SinkWriterInitContext, SinkWriterLifecycleReport,
 };
+use sqlx::__query_with_result as query_with_result;
+use sqlx::error::BoxDynError;
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgArguments, PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::query::Query;
-use sqlx::{ConnectOptions as _, Executor as _, PgPool, Postgres};
+use sqlx::{Arguments as _, ConnectOptions as _, Encode, Executor as _, PgPool, Postgres, Type};
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
@@ -32,12 +34,6 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::time::{timeout, timeout_at, Instant};
 use url::Url;
-
-/// Adapter-owned PostgreSQL query carrier accepted by [`PostgresBind`].
-///
-/// Connector authors do not need a direct SQLx dependency merely to bind
-/// domain values to the configured statement.
-pub type PostgresQuery<'q> = Query<'q, Postgres, PgArguments>;
 
 const DEFAULT_BATCH_SIZE: usize = 1;
 const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -312,17 +308,71 @@ fn validate_insert_body(value: &str) -> Result<String, PostgresConfigError> {
     Ok(trimmed.to_string())
 }
 
+/// An opaque accumulator for PostgreSQL parameter values.
+///
+/// Its fields, constructor, and finaliser are private so a binder can append
+/// values without receiving the adapter-owned statement, query, transaction, or
+/// raw SQLx arguments.
+pub struct PostgresBindings {
+    arguments: Result<PgArguments, BoxDynError>,
+    parameter_count: usize,
+}
+
+impl PostgresBindings {
+    fn new() -> Self {
+        Self {
+            arguments: Ok(PgArguments::default()),
+            parameter_count: 0,
+        }
+    }
+
+    /// Appends one value to the configured statement's PostgreSQL arguments.
+    ///
+    /// Encoding happens immediately. As with SQLx's query binder, the first
+    /// encoding error is retained and surfaced when the writer executes the
+    /// assembled query; later calls do not replace it.
+    pub fn bind<'q, V>(&mut self, value: V) -> &mut Self
+    where
+        V: 'q + Encode<'q, Postgres> + Type<Postgres>,
+    {
+        let argument_number = self.parameter_count + 1;
+        let result = match &mut self.arguments {
+            Ok(arguments) => arguments.add(value),
+            Err(_) => return self,
+        };
+
+        match result {
+            Ok(()) => self.parameter_count = argument_number,
+            Err(error) => {
+                self.arguments =
+                    Err(format!("Encoding argument ${argument_number} failed: {error}").into());
+            }
+        }
+        self
+    }
+
+    fn finish(self) -> Result<PgArguments, BoxDynError> {
+        self.arguments
+    }
+}
+
+impl fmt::Debug for PostgresBindings {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PostgresBindings { .. }")
+    }
+}
+
 /// A separate, clonable mapping from one domain input to PostgreSQL parameters.
 ///
-/// `validate` is the writer's explicit encode phase. `bind` receives a query
-/// created from the fixed configuration statement, so payload data cannot alter
-/// SQL structure.
+/// `validate` performs optional input validation. `bind` receives only a
+/// private-field value accumulator, so it cannot replace or execute the fixed
+/// configuration statement through this API.
 pub trait PostgresBind<T>: Clone + Send + Sync + 'static {
     fn validate(&self, _input: &T) -> SinkOperationResult<()> {
         Ok(())
     }
 
-    fn bind<'q>(&self, query: PostgresQuery<'q>, input: &'q T) -> PostgresQuery<'q>;
+    fn bind(&self, bindings: &mut PostgresBindings, input: &T);
 }
 
 #[doc(hidden)]
@@ -1244,6 +1294,19 @@ async fn rollback_transaction(
     }
 }
 
+fn assemble_query<'q, T, B>(
+    statement: &'q str,
+    binder: &B,
+    input: &'q T,
+) -> Query<'q, Postgres, PgArguments>
+where
+    B: PostgresBind<T>,
+{
+    let mut bindings = PostgresBindings::new();
+    binder.bind(&mut bindings, input);
+    query_with_result(statement, bindings.finish())
+}
+
 async fn execute_transaction<T, B>(
     writer: &PostgresWriter<T, B>,
     current: Option<&T>,
@@ -1318,7 +1381,7 @@ where
             });
         }
         probe.record_execute();
-        let query = binder.bind(sqlx::query(statement), input);
+        let query = assemble_query(statement, binder, input);
         let execution = timeout_at(deadline, async {
             #[cfg(feature = "test-support")]
             probe.delay(testing::PostgresDelayPoint::Execute).await;
@@ -1660,6 +1723,9 @@ fn sqlstate_code(value: &str) -> Option<SinkDestinationErrorCode> {
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
+    use sqlx::encode::IsNull;
+    use sqlx::postgres::{PgArgumentBuffer, PgTypeInfo};
+    use sqlx::Execute as _;
 
     #[derive(Debug, Serialize, Deserialize)]
     struct Input {
@@ -1674,8 +1740,22 @@ mod tests {
     struct Binder;
 
     impl PostgresBind<Input> for Binder {
-        fn bind<'q>(&self, query: PostgresQuery<'q>, input: &'q Input) -> PostgresQuery<'q> {
-            query.bind(&input.value)
+        fn bind(&self, bindings: &mut PostgresBindings, input: &Input) {
+            bindings.bind(&input.value);
+        }
+    }
+
+    struct EncodingFailure(&'static str);
+
+    impl Type<Postgres> for EncodingFailure {
+        fn type_info() -> PgTypeInfo {
+            <String as Type<Postgres>>::type_info()
+        }
+    }
+
+    impl<'q> Encode<'q, Postgres> for EncodingFailure {
+        fn encode_by_ref(&self, _buffer: &mut PgArgumentBuffer) -> Result<IsNull, BoxDynError> {
+            Err(std::io::Error::other(self.0).into())
         }
     }
 
@@ -1692,6 +1772,44 @@ mod tests {
         fn assert_input<C: SinkConnector<Input = Input>>() {}
 
         assert_input::<PostgresSink<Input, Binder>>();
+    }
+
+    #[test]
+    fn private_assembler_retains_configured_statement_authority() {
+        let input = Input {
+            value: "binder-value-sentinel".to_string(),
+        };
+        let statement = "INSERT INTO \"public\".\"configured\" (value) VALUES ($1)";
+        let query = assemble_query(statement, &Binder, &input);
+
+        assert_eq!(query.sql(), statement);
+
+        let mut bindings = PostgresBindings::new();
+        bindings.bind(&input.value);
+        assert_eq!(format!("{bindings:?}"), "PostgresBindings { .. }");
+        assert!(!format!("{bindings:?}").contains("binder-value-sentinel"));
+    }
+
+    #[test]
+    fn bindings_retain_only_the_first_encoding_error_for_query_execution() {
+        let mut bindings = PostgresBindings::new();
+        bindings
+            .bind(EncodingFailure("first injected encoding failure"))
+            .bind(EncodingFailure("second injected encoding failure"));
+        let formatted = format!("{bindings:?}");
+        assert_eq!(formatted, "PostgresBindings { .. }");
+        assert!(!formatted.contains("injected encoding failure"));
+        let mut query: Query<'_, Postgres, PgArguments> =
+            query_with_result("SELECT $1::text", bindings.finish());
+
+        assert_eq!(query.sql(), "SELECT $1::text");
+        let error = query
+            .take_arguments()
+            .expect_err("encoding failure remains deferred on the query");
+        let detail = error.to_string();
+        assert!(detail.contains("Encoding argument $1 failed"));
+        assert!(detail.contains("first injected encoding failure"));
+        assert!(!detail.contains("second injected encoding failure"));
     }
 
     #[test]

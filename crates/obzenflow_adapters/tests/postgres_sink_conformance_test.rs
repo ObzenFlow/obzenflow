@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use obzenflow_adapters::sinks::postgres::testing::PostgresTestProbe;
 use obzenflow_adapters::sinks::postgres::{
-    PostgresBind, PostgresConnection, PostgresQuery, PostgresSink, PostgresTransport,
+    PostgresBind, PostgresBindings, PostgresConnection, PostgresSink, PostgresTransport,
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::sink::SinkWriteFailureDisposition;
@@ -34,8 +34,8 @@ impl TypedPayload for Payment {
 struct PaymentBinder;
 
 impl PostgresBind<Payment> for PaymentBinder {
-    fn bind<'q>(&self, query: PostgresQuery<'q>, input: &'q Payment) -> PostgresQuery<'q> {
-        query.bind(input.id).bind(input.amount_cents)
+    fn bind(&self, bindings: &mut PostgresBindings, input: &Payment) {
+        bindings.bind(input.id).bind(input.amount_cents);
     }
 }
 
