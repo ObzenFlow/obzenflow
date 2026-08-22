@@ -35,7 +35,7 @@
 //!         }
 //!     })
 //! })
-//! ```ignore
+//! ```
 //!
 //! Both `placeholder!()` and `placeholder!("reason")` remain valid sketch
 //! markers. Async-source poll timeout is handler configuration exposed through
