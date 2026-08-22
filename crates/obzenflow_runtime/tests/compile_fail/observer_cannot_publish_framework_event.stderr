@@ -1,5 +1,0 @@
-error[E0599]: no method named `publish` found for reference `&HandlerObserverContext<'_>` in the current scope
-  --> tests/compile_fail/observer_cannot_publish_framework_event.rs:12:13
-   |
-12 |         ctx.publish(outputs[0].clone());
-   |             ^^^^^^^ method not found in `&HandlerObserverContext<'_>`

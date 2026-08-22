@@ -23,8 +23,7 @@ pub struct ChatTransformBuilder {
     response_format: Option<ChatResponseFormat>,
 }
 
-// `Default` is intentionally absent and pinned by the retired standalone-AI
-// surface compile-fail contract; `new` is the sole empty-builder entry point.
+// `Default` is intentionally absent; `new` is the sole empty-builder entry point.
 #[allow(clippy::new_without_default)]
 impl ChatTransformBuilder {
     pub fn new() -> Self {

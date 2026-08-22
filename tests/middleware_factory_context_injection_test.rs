@@ -33,7 +33,7 @@ impl TransformHandler for TestTransform {
 }
 
 #[test]
-fn test_flowip_054_middleware_factory_integration() {
+fn middleware_factory_receives_stage_context() {
     // FLOWIP-054 Goal: Middleware receives proper stage context
 
     // 1. Create a stage descriptor with middleware factory

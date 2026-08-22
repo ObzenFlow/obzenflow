@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-133f lightweight root-facade source-shape tripwire.
+//! Root-facade source-shape and ownership tripwires.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -87,5 +87,28 @@ fn root_library_source_contains_only_facade_items() {
         violations.is_empty(),
         "root library source contains implementation-bearing items:\n{}",
         violations.join("\n")
+    );
+}
+
+#[test]
+fn root_facades_export_the_owned_authoring_surfaces() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let ai_facade =
+        fs::read_to_string(root.join("src/ai.rs")).expect("AI facade module should be readable");
+    assert!(
+        ai_facade.contains("pub use obzenflow_runtime::stages::InferenceHandler;"),
+        "obzenflow::ai must remain the root facade for the InferenceHandler trait"
+    );
+    assert!(
+        !ai_facade.contains("inference_handler"),
+        "the retired free inference factory must not return"
+    );
+
+    let source_facade = fs::read_to_string(root.join("src/sources.rs"))
+        .expect("source facade module should be readable");
+    assert!(
+        source_facade.contains("pub use obzenflow_adapters::sources"),
+        "obzenflow::sources must re-export its constructors from adapters"
     );
 }

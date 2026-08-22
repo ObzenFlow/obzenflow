@@ -1,8 +1,0 @@
-error[E0432]: unresolved import `obzenflow::ai::inference_handler`
- --> tests/compile_fail/flowip_133e_free_inference_factory_removed.rs:5:5
-  |
-5 | use obzenflow::ai::inference_handler;
-  |     ^^^^^^^^^^^^^^^-----------------
-  |     |              |
-  |     |              help: a similar name exists in the module: `InferenceHandler`
-  |     no `inference_handler` in `ai`

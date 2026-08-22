@@ -1,8 +1,0 @@
-error[E0432]: unresolved import `obzenflow_runtime::stages::common::handlers::StatefulHandler`
- --> tests/compile_fail/effectful_stateful_raw_handler.rs:8:5
-  |
-8 | use obzenflow_runtime::stages::common::handlers::StatefulHandler;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^---------------
-  |     |                                            |
-  |     |                                            help: a similar name exists in the module: `TypedStatefulHandler`
-  |     no `StatefulHandler` in `stages::common::handlers`

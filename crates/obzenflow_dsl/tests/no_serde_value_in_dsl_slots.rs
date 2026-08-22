@@ -36,18 +36,12 @@ use std::path::{Path, PathBuf};
 /// (path_suffix, reason). A file matches if any line in its repository
 /// path ends with `path_suffix`. The reason is required so that allowlist
 /// growth shows up in code review.
-const ALLOWLIST: &[(&str, &str)] = &[
-    (
-        "crates/obzenflow_infra/src/application/flow_application.rs",
-        "runtime lifecycle test (server_auto_double_run_regression) exercising \
+const ALLOWLIST: &[(&str, &str)] = &[(
+    "crates/obzenflow_infra/src/application/flow_application.rs",
+    "runtime lifecycle test (server_auto_double_run_regression) exercising \
          FlowApplication launch mechanics, not typed authoring; handlers are \
          payload-agnostic by design",
-    ),
-    (
-        "tests/compile_fail/sink_witness/csv_value_witness.rs",
-        "FLOWIP-134h compile-fail fixture proving CsvSink rejects Value witnesses",
-    ),
-];
+)];
 
 /// DSL macros whose type slots are subject to the lint.
 const DSL_MACROS: &[&str] = &[

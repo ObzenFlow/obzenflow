@@ -196,6 +196,28 @@ impl HandlerSupervised for TestHandlerSupervisor {
     }
 }
 
+#[test]
+fn supervision_traits_remain_obzenflow_fsm_backed() {
+    fn handler_contract<S: HandlerSupervised>(
+        supervisor: &S,
+        initial_state: S::State,
+    ) -> StateMachine<S::State, S::Event, S::Context, S::Action> {
+        <S as Supervisor>::build_state_machine(supervisor, initial_state)
+    }
+
+    fn self_contract<S: SelfSupervised>(
+        supervisor: &S,
+        initial_state: S::State,
+    ) -> StateMachine<S::State, S::Event, S::Context, S::Action> {
+        <S as Supervisor>::build_state_machine(supervisor, initial_state)
+    }
+
+    // FLOWIP-137a B1: merely instantiating these function items proves that
+    // both supervision traits still imply the FSM-backed base contract.
+    let _handler_contract = handler_contract::<TestHandlerSupervisor>;
+    let _self_contract = self_contract::<TestSelfSupervisor>;
+}
+
 #[tokio::test]
 async fn dispatch_state_error_drives_fsm_failure_path_self_supervised() {
     let completion_writes = Arc::new(AtomicUsize::new(0));

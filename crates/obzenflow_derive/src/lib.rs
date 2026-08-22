@@ -406,3 +406,25 @@ fn expand_struct(
         #stage_fact_set
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effect_outcome_rejects_duplicate_member_types() {
+        let input: DeriveInput = syn::parse_quote! {
+            enum Outcome {
+                First(Fact),
+                Second(Fact),
+            }
+        };
+
+        let error = expand(&input).expect_err("duplicate members must be rejected");
+
+        assert!(
+            error.to_string().contains("duplicate member type `Fact`"),
+            "unexpected error: {error}"
+        );
+    }
+}

@@ -1,5 +1,0 @@
-error[E0432]: unresolved import `obzenflow_adapters::ai::effects::GeneratedAiMapHandler`
- --> tests/compile_fail/ai_map_reduce_generated_handlers_are_private.rs:5:5
-  |
-5 | use obzenflow_adapters::ai::effects::GeneratedAiMapHandler;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `GeneratedAiMapHandler` in `ai::effects`

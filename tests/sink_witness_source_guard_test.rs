@@ -19,7 +19,7 @@ const RETIRED_IDENTIFIERS: &[&str] = &[
     "__obzenflow_sink_untyped",
 ];
 
-const RAW_ALLOWLIST: &str = include_str!("fixtures/flowip_134h_raw_sink_handler_allowlist.txt");
+const RAW_ALLOWLIST: &str = include_str!("fixtures/raw_sink_handler_allowlist.txt");
 
 fn rust_sources_under(path: &Path, output: &mut Vec<PathBuf>) {
     if !path.is_dir() {
@@ -29,9 +29,6 @@ fn rust_sources_under(path: &Path, output: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(path).expect("read source directory") {
         let path = entry.expect("read source entry").path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|name| name == "compile_fail") {
-                continue;
-            }
             rust_sources_under(&path, output);
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             output.push(path);

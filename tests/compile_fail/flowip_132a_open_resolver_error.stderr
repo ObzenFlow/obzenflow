@@ -1,5 +1,0 @@
-error[E0599]: no variant or associated item named `Other` found for enum `EffectPortResolutionError` in the current scope
- --> tests/compile_fail/flowip_132a_open_resolver_error.rs:8:40
-  |
-8 |     let _ = EffectPortResolutionError::Other("credential-canary".to_string());
-  |                                        ^^^^^ variant or associated item not found in `EffectPortResolutionError`

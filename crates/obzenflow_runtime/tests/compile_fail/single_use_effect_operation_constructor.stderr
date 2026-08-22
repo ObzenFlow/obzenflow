@@ -1,5 +1,0 @@
-error[E0599]: no function or associated item named `new` found for struct `SingleUseEffectOperation` in the current scope
- --> tests/compile_fail/single_use_effect_operation_constructor.rs:9:48
-  |
-9 |     let _operation = SingleUseEffectOperation::new(|| async {
-  |                                                ^^^ function or associated item not found in `SingleUseEffectOperation`
