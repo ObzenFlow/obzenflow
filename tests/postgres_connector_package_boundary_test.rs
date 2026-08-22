@@ -49,6 +49,40 @@ fn postgres_stays_in_the_feature_gated_adapter_boundary() {
         .find(|dependency| dependency["name"] == "sqlx")
         .expect("adapters declares SQLx");
     assert_eq!(sqlx["optional"], true, "SQLx must remain optional");
+    assert_eq!(
+        sqlx["uses_default_features"], false,
+        "SQLx default features must remain disabled"
+    );
+    let sqlx_features = sqlx["features"]
+        .as_array()
+        .expect("SQLx dependency features")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        sqlx_features.contains(&"runtime-tokio")
+            && sqlx_features.contains(&"postgres")
+            && sqlx_features.contains(&"tls-rustls-ring-native-roots"),
+        "SQLx must use Tokio, PostgreSQL, and Rustls native roots"
+    );
+    assert!(
+        sqlx_features
+            .iter()
+            .all(|feature| !feature.contains("webpki")),
+        "the PostgreSQL feature path must not select embedded WebPKI roots"
+    );
+    let consumer_source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/postgres_public_consumer_test.rs"),
+    )
+    .expect("read public PostgreSQL consumer fixture");
+    assert!(
+        !consumer_source.lines().any(|line| {
+            let code = line.split("//").next().unwrap_or_default();
+            code.contains("sqlx::") || code.contains("extern crate sqlx")
+        }),
+        "the public consumer fixture must not import SQLx"
+    );
 
     let root = packages
         .iter()

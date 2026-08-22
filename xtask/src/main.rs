@@ -16,6 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod postgres;
+
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const STUDIO_FEATURE: &str = "obzenflow_infra/studio-registration";
@@ -126,6 +128,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         [cmd, rest @ ..] if cmd == "studio-jobs" => run_studio_jobs(rest),
+        [cmd, rest @ ..] if cmd == "postgres" => postgres::run(rest),
         _ => Err(error(format!("unknown xtask command: {}", args.join(" ")))),
     }
 }
@@ -761,7 +764,9 @@ fn print_started_table(states: &[JobState]) {
 }
 
 fn print_help() {
-    println!("usage: cargo xtask studio-jobs <up|down|status>");
+    println!("usage:");
+    println!("  cargo xtask studio-jobs <up|down|status>");
+    println!("  cargo xtask postgres <up|status|run|test|logs|down>");
 }
 
 fn print_studio_jobs_help() {

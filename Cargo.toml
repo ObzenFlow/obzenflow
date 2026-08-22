@@ -330,3 +330,8 @@ required-features = ["test-support"]
 name = "postgres_sink_application_conformance_test"
 path = "tests/postgres_sink_application_conformance_test.rs"
 required-features = ["postgres", "test-support"]
+
+[[test]]
+name = "postgres_public_consumer_test"
+path = "tests/postgres_public_consumer_test.rs"
+required-features = ["postgres"]

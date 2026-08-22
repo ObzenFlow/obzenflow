@@ -69,6 +69,14 @@ These examples don't have tutorials, but they demonstrate concrete framework con
   - Run with metrics: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
   - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)
 
+- **`postgres_sink_payments`** — A real PostgreSQL 17 sink session with deterministic UPSERT delivery, destination inspection, and verified archive redelivery across separate processes.
+  - Start the persistent service: `cargo xtask postgres up`
+  - Run live: `cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_payments`
+  - Replay: rerun the same command with `-- --replay-from <live-run-dir> --verify`
+  - Stop while retaining rows: `cargo xtask postgres down`; add `--volumes` only to discard the development database
+  - `SafeToRepeat` here certifies convergence for this same compiled target, SQL body, binder, flow, and fixture semantics. It does not certify compatibility after code or schema changes.
+  - Code: [`examples/postgres_sink_payments.rs`](postgres_sink_payments.rs)
+
 - **`ecommerce_top_products`** — Bounded-memory ranked aggregation over event streams with source-intake rate limiting. Use this for a realistic Top-N-by-score pattern.
   - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [operational batteries](https://obzenflow.dev/product/how-obzenflow-works/#run-it)
   - Run: `cargo run -p obzenflow --example ecommerce_top_products`

@@ -6,7 +6,9 @@
 
 use async_trait::async_trait;
 use obzenflow::sinks::postgres::testing::{PostgresTestProbe, POSTGRES_SQLSTATE_NAMESPACE};
-use obzenflow::sinks::postgres::{PostgresBind, PostgresConnection, PostgresQuery, PostgresSink};
+use obzenflow::sinks::postgres::{
+    PostgresBind, PostgresConnection, PostgresQuery, PostgresSink, PostgresTransport,
+};
 use obzenflow::sources;
 use obzenflow::testing::sink::{
     run_application_conformance, SinkApplicationBuildCase, SinkApplicationConformanceFixture,
@@ -177,12 +179,12 @@ fn build_sink(
 ) -> Result<PaymentSink, Box<FlowBuildError>> {
     let builder = PostgresSink::<Payment>::builder()
         .connection(connection)
-        .table(schema, "payments")
-        .map_err(flow_error)?
-        .statement(format!(
-            "INSERT INTO {schema}.payments (id, amount_cents) VALUES ($1, $2) \
-             ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents"
-        ))
+        .insert_into(
+            schema,
+            "payments",
+            "(id, amount_cents) VALUES ($1, $2) \
+             ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents",
+        )
         .map_err(flow_error)?
         .batch_size(2)
         .map_err(flow_error)?
@@ -499,12 +501,23 @@ impl PostgresApplicationFixture {
     async fn connect(url: &str) -> Result<Self, SinkFixtureError> {
         let temp = tempfile::tempdir().map_err(|error| SinkFixtureError::new(error.to_string()))?;
         let root = temp.path().join("journals");
-        let connection = PostgresConnection::from_url(url)
-            .map_err(|error| SinkFixtureError::new(error.to_string()))?;
+        let connection =
+            PostgresConnection::from_url(url, PostgresTransport::ExternallyProtectedPlaintext)
+                .map_err(|error| SinkFixtureError::new(error.to_string()))?;
         let pool = PgPool::connect(url)
             .await
             .map_err(|error| SinkFixtureError::new(error.to_string()))?;
-        let schema = format!("obz122a_app_{}", std::process::id());
+        let run_id = std::env::var("OBZENFLOW_POSTGRES_TEST_RUN_ID").map_err(|_| {
+            SinkFixtureError::new(
+                "OBZENFLOW_POSTGRES_TEST_RUN_ID is required from `cargo xtask postgres test`",
+            )
+        })?;
+        if run_id.len() != 32 || !run_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(SinkFixtureError::new(
+                "OBZENFLOW_POSTGRES_TEST_RUN_ID is not a canonical run token",
+            ));
+        }
+        let schema = format!("obz083c_application_{run_id}");
         sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             .execute(&pool)
             .await
@@ -585,7 +598,7 @@ impl SinkApplicationConformanceFixture for PostgresApplicationFixture {
             SINK_CONFORMANCE_PROTOCOL_VERSION,
             SinkSettlementMode::Buffered { batch_size: 2 },
         )
-        .with_credential_sentinel("obzenflow-secret-122a")
+        .with_credential_sentinel("obzenflow-secret-083c")
     }
 
     async fn reset_destination(&mut self) -> Result<(), SinkFixtureError> {
