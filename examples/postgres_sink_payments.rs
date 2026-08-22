@@ -13,7 +13,9 @@
 
 use anyhow::{ensure, Context, Result};
 use clap::Parser;
-use obzenflow::sinks::postgres::{PostgresBind, PostgresConnection, PostgresQuery, PostgresSink};
+use obzenflow::sinks::postgres::{
+    PostgresBind, PostgresConnection, PostgresQuery, PostgresSink, PostgresTransport,
+};
 use obzenflow::sources;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowBuildFailure, FlowDefinition};
@@ -22,7 +24,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
@@ -49,6 +51,30 @@ fn build_error(error: impl std::fmt::Display) -> FlowBuildError {
     FlowBuildError::StageResourcesFailed(format!("PostgreSQL sink configuration failed: {error}"))
 }
 
+fn quote_fixture_identifier(value: &str) -> Result<String> {
+    let bytes = value.as_bytes();
+    ensure!(
+        !bytes.is_empty()
+            && bytes.len() <= 63
+            && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+            && bytes[1..]
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$'),
+        "OBZENFLOW_POSTGRES_SCHEMA must match [A-Za-z_][A-Za-z0-9_$]* and be at most 63 bytes"
+    );
+    Ok(format!("\"{}\"", value.replace('"', "\"\"")))
+}
+
+fn latest_run_dir(root: &Path) -> Result<PathBuf> {
+    let mut runs = std::fs::read_dir(root.join("flows"))
+        .context("read PostgreSQL example flow archives")?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.join("run_manifest.json").is_file())
+        .collect::<Vec<_>>();
+    runs.sort();
+    runs.pop().context("locate PostgreSQL example run archive")
+}
+
 fn configured_payment_flow(
     journals: PathBuf,
     connection: PostgresConnection,
@@ -67,12 +93,12 @@ fn configured_payment_flow(
         ]);
         let postgres = PostgresSink::<Payment>::builder()
             .connection(connection)
-            .table(&schema, "payments")
-            .map_err(build_error)?
-            .statement(format!(
-                "INSERT INTO {schema}.payments (id, amount_cents) VALUES ($1, $2) \
-                 ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents"
-            ))
+            .insert_into(
+                &schema,
+                "payments",
+                "(id, amount_cents) VALUES ($1, $2) \
+                 ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents",
+            )
             .map_err(build_error)?
             .batch_size(2)
             .map_err(build_error)?
@@ -98,6 +124,7 @@ fn configured_payment_flow(
 }
 
 async fn prepare_destination(url: &str, schema: &str) -> Result<i64> {
+    let schema = quote_fixture_identifier(schema)?;
     let pool = PgPool::connect(url)
         .await
         .context("connect to PostgreSQL for example setup")?;
@@ -186,12 +213,15 @@ async fn main() -> Result<()> {
         .context("set OBZENFLOW_POSTGRES_URL to a PostgreSQL connection URL")?;
     let schema = std::env::var("OBZENFLOW_POSTGRES_SCHEMA")
         .unwrap_or_else(|_| "obzenflow_example".to_string());
+    let quoted_schema = quote_fixture_identifier(&schema)?;
     let journals = std::env::var_os("OBZENFLOW_JOURNAL_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/postgres-sink-payments"));
+    let journal_root = journals.clone();
 
     let connection =
-        PostgresConnection::from_url(&url).context("parse PostgreSQL connection configuration")?;
+        PostgresConnection::from_url(&url, PostgresTransport::ExternallyProtectedPlaintext)
+            .context("parse PostgreSQL connection configuration")?;
     let audit_baseline = Arc::new(AtomicI64::new(-1));
     FlowApplication::builder()
         .with_cli_args(cli_args)
@@ -208,7 +238,7 @@ async fn main() -> Result<()> {
         .await
         .context("connect to PostgreSQL for example verification")?;
     let rows = sqlx::query(&format!(
-        "SELECT id, amount_cents FROM {schema}.payments \
+        "SELECT id, amount_cents FROM {quoted_schema}.payments \
          WHERE id IN (1001, 1002) ORDER BY id"
     ))
     .fetch_all(&pool)
@@ -224,7 +254,7 @@ async fn main() -> Result<()> {
     );
 
     let audit_after: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM {schema}.payment_delivery_audit"
+        "SELECT COUNT(*) FROM {quoted_schema}.payment_delivery_audit"
     ))
     .fetch_one(&pool)
     .await
@@ -242,6 +272,18 @@ async fn main() -> Result<()> {
         );
     } else {
         println!("Verified converged rows {rows:?} and two PostgreSQL sink mutations.");
+    }
+    let run_directory = latest_run_dir(&journal_root)?;
+    println!("Run directory: {}", run_directory.display());
+    println!("Logical destination: postgres.{schema}.payments");
+    println!(
+        "Inspect rows safely through the active session: cargo xtask postgres run -- psql \"$OBZENFLOW_POSTGRES_URL\" -c 'TABLE {quoted_schema}.payments'"
+    );
+    if !verifies_archive {
+        println!(
+            "Verify redelivery with the same compiled operation: cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_payments -- --replay-from {} --verify",
+            run_directory.display()
+        );
     }
     Ok(())
 }

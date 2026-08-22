@@ -27,6 +27,9 @@ pub use obzenflow_adapters::sinks::{
 };
 
 /// Feature-gated PostgreSQL sink and its typed parameter-binding surface.
+///
+/// The connector witnesses its exact input type, so the generic `sink!` arm
+/// proves arrow equality before erasing the writer.
 #[cfg(feature = "postgres")]
 pub mod postgres {
     pub use obzenflow_adapters::sinks::postgres::*;

@@ -2499,15 +2499,15 @@ pub fn validate_order_observer_deterministic_input_order(
         }
     }
 
-    let mut inbound: HashMap<StageId, Vec<StageId>> = HashMap::new();
+    let mut forward_inbound: HashMap<StageId, Vec<StageId>> = HashMap::new();
+    let mut all_inbound: HashMap<StageId, Vec<StageId>> = HashMap::new();
     for edge in topology.edges() {
-        if edge.kind != EdgeKind::Forward {
-            continue;
+        let to = StageId::from_ulid(edge.to.ulid());
+        let from = StageId::from_ulid(edge.from.ulid());
+        all_inbound.entry(to).or_default().push(from);
+        if edge.kind == EdgeKind::Forward {
+            forward_inbound.entry(to).or_default().push(from);
         }
-        inbound
-            .entry(StageId::from_ulid(edge.to.ulid()))
-            .or_default()
-            .push(StageId::from_ulid(edge.from.ulid()));
     }
 
     fn deterministic_for_stage(
@@ -2550,7 +2550,6 @@ pub fn validate_order_observer_deterministic_input_order(
         deterministic
     }
 
-    let mut memo = HashMap::new();
     let mut stage_ids: Vec<StageId> = id_to_descriptor.keys().copied().collect();
     stage_ids.sort();
 
@@ -2564,10 +2563,21 @@ pub fn validate_order_observer_deterministic_input_order(
             continue;
         }
 
+        // Cycle members are governed by the runtime's bounded cycle protocol,
+        // so retain their established forward-edge validation. An observer
+        // outside the cycle must additionally see `<|` feedback edges in its
+        // upstream induction; otherwise a cycle-fed order-sensitive sink can
+        // look linear and proceed to resource opening.
+        let inbound = if topology.is_in_cycle(stage_id.to_topology_id()) {
+            &forward_inbound
+        } else {
+            &all_inbound
+        };
+        let mut memo = HashMap::new();
         let mut visiting = HashSet::new();
         if !deterministic_for_stage(
             stage_id,
-            &inbound,
+            inbound,
             &id_to_descriptor,
             &mut memo,
             &mut visiting,

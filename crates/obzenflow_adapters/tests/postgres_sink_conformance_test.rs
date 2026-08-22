@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use obzenflow_adapters::sinks::postgres::testing::PostgresTestProbe;
 use obzenflow_adapters::sinks::postgres::{
-    PostgresBind, PostgresConnection, PostgresQuery, PostgresSink,
+    PostgresBind, PostgresConnection, PostgresQuery, PostgresSink, PostgresTransport,
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::sink::SinkWriteFailureDisposition;
@@ -50,12 +50,23 @@ struct PostgresFixture {
 
 impl PostgresFixture {
     async fn connect(url: &str) -> Result<Self, SinkFixtureError> {
-        let connection = PostgresConnection::from_url(url)
-            .map_err(|error| SinkFixtureError::new(error.to_string()))?;
+        let connection =
+            PostgresConnection::from_url(url, PostgresTransport::ExternallyProtectedPlaintext)
+                .map_err(|error| SinkFixtureError::new(error.to_string()))?;
         let pool = PgPool::connect(url)
             .await
             .map_err(|error| SinkFixtureError::new(error.to_string()))?;
-        let schema = format!("obz122a_{}", std::process::id());
+        let run_id = std::env::var("OBZENFLOW_POSTGRES_TEST_RUN_ID").map_err(|_| {
+            SinkFixtureError::new(
+                "OBZENFLOW_POSTGRES_TEST_RUN_ID is required from `cargo xtask postgres test`",
+            )
+        })?;
+        if run_id.len() != 32 || !run_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(SinkFixtureError::new(
+                "OBZENFLOW_POSTGRES_TEST_RUN_ID is not a canonical run token",
+            ));
+        }
+        let schema = format!("obz083c_writer_{run_id}");
         sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             .execute(&pool)
             .await
@@ -96,7 +107,7 @@ impl SinkWriterConformanceFixture for PostgresFixture {
             SINK_CONFORMANCE_PROTOCOL_VERSION,
             SinkSettlementMode::Buffered { batch_size: 2 },
         )
-        .with_credential_sentinel("obzenflow-secret-122a")
+        .with_credential_sentinel("obzenflow-secret-083c")
         .with_fault(SinkFaultCase::operation(SinkFault::Open))
         .with_fault(SinkFaultCase::write(SinkFault::Encode, CurrentOnly))
         .with_fault(SinkFaultCase::write(SinkFault::Acquire, CurrentOnly))
@@ -131,12 +142,12 @@ impl SinkWriterConformanceFixture for PostgresFixture {
             SinkBuildCase::valid("postgres-valid", move || {
                 PostgresSink::<Payment>::builder()
                     .connection(connection.clone())
-                    .table(&schema, "payments")
-                    .map_err(|error| SinkFixtureError::new(error.to_string()))?
-                    .statement(format!(
-                        "INSERT INTO {schema}.payments (id, amount_cents) VALUES ($1, $2) \
-                         ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents"
-                    ))
+                    .insert_into(
+                        &schema,
+                        "payments",
+                        "(id, amount_cents) VALUES ($1, $2) \
+                         ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents",
+                    )
                     .map_err(|error| SinkFixtureError::new(error.to_string()))?
                     .batch_size(2)
                     .map_err(|error| SinkFixtureError::new(error.to_string()))?

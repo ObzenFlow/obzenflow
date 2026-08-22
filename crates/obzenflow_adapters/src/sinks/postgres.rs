@@ -6,8 +6,9 @@
 //!
 //! Configuration and statement validation are synchronous and perform no I/O.
 //! Each call to [`SinkConnector::open`](obzenflow_runtime::stages::sink::SinkConnector::open)
-//! creates an isolated writer and verifies its pool. Values enter the fixed
-//! INSERT statement only through [`PostgresBind`].
+//! creates an isolated writer, verifies its initial session, and installs a
+//! fail-closed authority check for every replacement session. Values enter the
+//! fixed INSERT statement only through [`PostgresBind`].
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
@@ -19,14 +20,18 @@ use obzenflow_runtime::stages::sink::{
     SinkWriteFailure, SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter,
     SinkWriterInitContext, SinkWriterLifecycleReport,
 };
+use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgArguments, PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::query::Query;
-use sqlx::{ConnectOptions as _, PgPool, Postgres};
+use sqlx::{ConnectOptions as _, Executor as _, PgPool, Postgres};
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use thiserror::Error;
+use tokio::time::{timeout, timeout_at, Instant};
+use url::Url;
 
 /// Adapter-owned PostgreSQL query carrier accepted by [`PostgresBind`].
 ///
@@ -36,7 +41,11 @@ pub type PostgresQuery<'q> = Query<'q, Postgres, PgArguments>;
 
 const DEFAULT_BATCH_SIZE: usize = 1;
 const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_ROLLBACK_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BATCH_SIZE: usize = 100_000;
+const PORTABLE_IDENTIFIER_LIMIT: usize = 63;
+const POSTGRES_WRITER_POOL_SIZE: u32 = 1;
 const POSTGRES_SQLSTATE_NAMESPACE: &str = "postgresql.sqlstate";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -47,55 +56,94 @@ pub enum PostgresConfigError {
     MissingEnvironment(String),
     #[error("PostgreSQL connection options are invalid")]
     InvalidConnection,
-    #[error(
-        "PostgreSQL sslmode must be explicitly set to 'verify-full' for authenticated TLS or 'disable' for a separately protected local transport"
-    )]
-    UnsafeSslMode,
+    #[error("PostgreSQL URL transport mode conflicts with the explicit transport policy")]
+    ConflictingTransport,
     #[error("PostgreSQL schema or table identifier is invalid")]
     InvalidIdentifier,
-    #[error("PostgreSQL INSERT statement is missing")]
-    MissingStatement,
-    #[error("PostgreSQL statement must be exactly one INSERT statement")]
-    InvalidStatement,
-    #[error("PostgreSQL INSERT target must match the configured schema and table")]
-    StatementDestinationMismatch,
+    #[error("PostgreSQL INSERT body is missing")]
+    MissingInsertBody,
+    #[error("PostgreSQL INSERT body is invalid")]
+    InvalidInsertBody,
     #[error("PostgreSQL batch size must be in 1..={MAX_BATCH_SIZE}")]
     InvalidBatchSize,
     #[error("PostgreSQL parameter binder is missing")]
     MissingBinder,
+    #[error("PostgreSQL timeouts must be strictly positive")]
+    InvalidTimeout,
+}
+
+/// Application-owned PostgreSQL transport assurance.
+///
+/// The policy is required independently of URL or SQLx option provenance. It
+/// always normalises the retained driver mode to one of the two assurances the
+/// connector can state honestly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PostgresTransport {
+    /// Require certificate-chain and hostname verification.
+    VerifiedTls,
+    /// Use plaintext because the application asserts that another local
+    /// boundary, such as loopback, a Unix socket, sidecar, or tunnel, protects
+    /// the connection.
+    ExternallyProtectedPlaintext,
+}
+
+impl PostgresTransport {
+    fn ssl_mode(self) -> PgSslMode {
+        match self {
+            Self::VerifiedTls => PgSslMode::VerifyFull,
+            Self::ExternallyProtectedPlaintext => PgSslMode::Disable,
+        }
+    }
+
+    fn agrees_with(self, mode: PgSslMode) -> bool {
+        matches!(
+            (self, mode),
+            (Self::VerifiedTls, PgSslMode::VerifyFull)
+                | (Self::ExternallyProtectedPlaintext, PgSslMode::Disable)
+        )
+    }
 }
 
 /// Parsed connection options whose formatting never reveals the URL or password.
 #[derive(Clone)]
 pub struct PostgresConnection {
     options: PgConnectOptions,
+    transport: PostgresTransport,
     acquire_timeout: Duration,
+    operation_timeout: Duration,
+    rollback_timeout: Duration,
 }
 
 impl PostgresConnection {
-    pub fn from_env(name: impl AsRef<str>) -> Result<Self, PostgresConfigError> {
+    pub fn from_env(
+        name: impl AsRef<str>,
+        transport: PostgresTransport,
+    ) -> Result<Self, PostgresConfigError> {
         let name = name.as_ref();
         let value = std::env::var(name)
             .map_err(|_| PostgresConfigError::MissingEnvironment(name.to_string()))?;
-        Self::from_url(&value)
+        Self::from_url(&value, transport)
     }
 
-    pub fn from_url(url: &str) -> Result<Self, PostgresConfigError> {
+    pub fn from_url(url: &str, transport: PostgresTransport) -> Result<Self, PostgresConfigError> {
+        preflight_url(url, transport)?;
         let options =
             PgConnectOptions::from_str(url).map_err(|_| PostgresConfigError::InvalidConnection)?;
-        Self::from_options(options)
+        Self::from_options(options, transport)
     }
 
-    pub fn from_options(options: PgConnectOptions) -> Result<Self, PostgresConfigError> {
-        match options.get_ssl_mode() {
-            PgSslMode::Disable | PgSslMode::VerifyFull => {}
-            PgSslMode::Allow | PgSslMode::Prefer | PgSslMode::Require | PgSslMode::VerifyCa => {
-                return Err(PostgresConfigError::UnsafeSslMode);
-            }
-        }
+    pub fn from_options(
+        options: PgConnectOptions,
+        transport: PostgresTransport,
+    ) -> Result<Self, PostgresConfigError> {
         Ok(Self {
-            options: options.disable_statement_logging(),
+            options: options
+                .ssl_mode(transport.ssl_mode())
+                .disable_statement_logging(),
+            transport,
             acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
+            operation_timeout: DEFAULT_OPERATION_TIMEOUT,
+            rollback_timeout: DEFAULT_ROLLBACK_TIMEOUT,
         })
     }
 
@@ -104,19 +152,87 @@ impl PostgresConnection {
         self.acquire_timeout = acquire_timeout;
         self
     }
+
+    /// Override the absolute budget for one external open or transaction.
+    pub fn with_operation_timeout(mut self, operation_timeout: Duration) -> Self {
+        self.operation_timeout = operation_timeout;
+        self
+    }
+
+    /// Override the fresh budget for explicit rollback confirmation.
+    pub fn with_rollback_timeout(mut self, rollback_timeout: Duration) -> Self {
+        self.rollback_timeout = rollback_timeout;
+        self
+    }
+
+    fn validate(&self) -> Result<(), PostgresConfigError> {
+        if self.acquire_timeout.is_zero()
+            || self.operation_timeout.is_zero()
+            || self.rollback_timeout.is_zero()
+        {
+            return Err(PostgresConfigError::InvalidTimeout);
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for PostgresConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PostgresConnection")
             .field("configured", &true)
+            .field("transport", &self.transport)
             .field("acquire_timeout", &self.acquire_timeout)
+            .field("operation_timeout", &self.operation_timeout)
+            .field("rollback_timeout", &self.rollback_timeout)
             .finish()
     }
 }
 
+fn preflight_url(url: &str, transport: PostgresTransport) -> Result<(), PostgresConfigError> {
+    let parsed = Url::parse(url).map_err(|_| PostgresConfigError::InvalidConnection)?;
+    if !matches!(parsed.scheme(), "postgres" | "postgresql") {
+        return Err(PostgresConfigError::InvalidConnection);
+    }
+
+    for (key, value) in parsed.query_pairs() {
+        let supported = matches!(
+            key.as_ref(),
+            "sslmode"
+                | "ssl-mode"
+                | "sslrootcert"
+                | "ssl-root-cert"
+                | "ssl-ca"
+                | "sslcert"
+                | "ssl-cert"
+                | "sslkey"
+                | "ssl-key"
+                | "statement-cache-capacity"
+                | "host"
+                | "hostaddr"
+                | "port"
+                | "dbname"
+                | "user"
+                | "password"
+                | "application_name"
+                | "options"
+        ) || (key.starts_with("options[") && key.ends_with(']'));
+        if !supported {
+            return Err(PostgresConfigError::InvalidConnection);
+        }
+
+        if matches!(key.as_ref(), "sslmode" | "ssl-mode") {
+            let mode = PgSslMode::from_str(value.as_ref())
+                .map_err(|_| PostgresConfigError::InvalidConnection)?;
+            if !transport.agrees_with(mode) {
+                return Err(PostgresConfigError::ConflictingTransport);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, PartialEq, Eq)]
-struct PostgresTable {
+pub struct PostgresTable {
     schema: String,
     table: String,
 }
@@ -138,6 +254,28 @@ impl PostgresTable {
         format!("{}.{}", self.schema, self.table)
     }
 
+    fn quoted_target(&self) -> String {
+        format!(
+            "{}.{}",
+            quote_identifier(&self.schema),
+            quote_identifier(&self.table)
+        )
+    }
+
+    fn statement(&self, body: &str) -> String {
+        format!("INSERT INTO {} {body}", self.quoted_target())
+    }
+
+    fn validate_server_limit(&self, limit: i32) -> SinkOperationResult<()> {
+        let limit = usize::try_from(limit).unwrap_or_default();
+        if limit == 0 || self.schema.len() > limit || self.table.len() > limit {
+            return Err(SinkOperationError::permanent(
+                "PostgreSQL destination identifier exceeds the server limit",
+            ));
+        }
+        Ok(())
+    }
+
     fn logical_destination(&self) -> String {
         format!("postgres.{}", self.qualified())
     }
@@ -152,37 +290,26 @@ impl fmt::Debug for PostgresTable {
 fn valid_identifier(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
-        && bytes.len() <= 63
+        && bytes.len() <= PORTABLE_IDENTIFIER_LIMIT
         && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
         && bytes[1..]
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$')
 }
 
-fn validate_statement(value: &str) -> Result<String, PostgresConfigError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(PostgresConfigError::MissingStatement);
-    }
-    let without_trailing = trimmed.strip_suffix(';').unwrap_or(trimmed).trim_end();
-    if without_trailing.contains(';')
-        || without_trailing
-            .split_ascii_whitespace()
-            .next()
-            .is_none_or(|keyword| !keyword.eq_ignore_ascii_case("insert"))
-    {
-        return Err(PostgresConfigError::InvalidStatement);
-    }
-    Ok(without_trailing.to_string())
+fn quote_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
-fn statement_destination(value: &str) -> Option<&str> {
-    let mut tokens = value.split_ascii_whitespace();
-    let insert = tokens.next()?;
-    let into = tokens.next()?;
-    let destination = tokens.next()?;
-    (insert.eq_ignore_ascii_case("insert") && into.eq_ignore_ascii_case("into"))
-        .then_some(destination)
+fn validate_insert_body(value: &str) -> Result<String, PostgresConfigError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(PostgresConfigError::MissingInsertBody);
+    }
+    if trimmed.contains('\0') {
+        return Err(PostgresConfigError::InvalidInsertBody);
+    }
+    Ok(trimmed.to_string())
 }
 
 /// A separate, clonable mapping from one domain input to PostgreSQL parameters.
@@ -206,6 +333,7 @@ pub struct MissingPostgresBinder;
 pub struct PostgresSink<T, B = MissingPostgresBinder> {
     connection: PostgresConnection,
     destination: PostgresTable,
+    _insert_body: String,
     statement: String,
     binder: B,
     batch_size: usize,
@@ -231,10 +359,10 @@ impl<T> PostgresSink<T, MissingPostgresBinder> {
         PostgresSinkBuilder {
             connection: None,
             destination: None,
-            statement: None,
+            insert_body: None,
             binder: None,
             batch_size: DEFAULT_BATCH_SIZE,
-            redelivery_safety: Some(SinkRedeliverySafety::DuplicateSensitive),
+            redelivery_safety: None,
             #[cfg(feature = "test-support")]
             test_probe: None,
             _input: PhantomData,
@@ -245,7 +373,7 @@ impl<T> PostgresSink<T, MissingPostgresBinder> {
 pub struct PostgresSinkBuilder<T, B> {
     connection: Option<PostgresConnection>,
     destination: Option<PostgresTable>,
-    statement: Option<String>,
+    insert_body: Option<String>,
     binder: Option<B>,
     batch_size: usize,
     redelivery_safety: Option<SinkRedeliverySafety>,
@@ -259,7 +387,7 @@ impl<T, B> fmt::Debug for PostgresSinkBuilder<T, B> {
         f.debug_struct("PostgresSinkBuilder")
             .field("connection_configured", &self.connection.is_some())
             .field("destination", &self.destination)
-            .field("statement_configured", &self.statement.is_some())
+            .field("insert_configured", &self.insert_body.is_some())
             .field("binder_configured", &self.binder.is_some())
             .field("batch_size", &self.batch_size)
             .field("redelivery_safety", &self.redelivery_safety)
@@ -273,17 +401,14 @@ impl<T, B> PostgresSinkBuilder<T, B> {
         self
     }
 
-    pub fn table(
+    pub fn insert_into(
         mut self,
         schema: impl Into<String>,
         table: impl Into<String>,
+        body: impl AsRef<str>,
     ) -> Result<Self, PostgresConfigError> {
         self.destination = Some(PostgresTable::try_new(schema, table)?);
-        Ok(self)
-    }
-
-    pub fn statement(mut self, statement: impl AsRef<str>) -> Result<Self, PostgresConfigError> {
-        self.statement = Some(validate_statement(statement.as_ref())?);
+        self.insert_body = Some(validate_insert_body(body.as_ref())?);
         Ok(self)
     }
 
@@ -295,6 +420,12 @@ impl<T, B> PostgresSinkBuilder<T, B> {
         Ok(self)
     }
 
+    /// Classify archive redelivery for this exact configured operation.
+    ///
+    /// `SafeToRepeat` claims convergence only while the compiled target, SQL
+    /// body, binder behaviour, batch configuration, upstream flow, schema,
+    /// and relevant secondary effects remain the same. It is not a
+    /// cross-version compatibility promise or a pre-write migration gate.
     pub fn redelivery_safety(mut self, safety: SinkRedeliverySafety) -> Self {
         self.redelivery_safety = Some(safety);
         self
@@ -319,7 +450,7 @@ impl<T, B> PostgresSinkBuilder<T, B> {
         PostgresSinkBuilder {
             connection: self.connection,
             destination: self.destination,
-            statement: self.statement,
+            insert_body: self.insert_body,
             binder: Some(binder),
             batch_size: self.batch_size,
             redelivery_safety: self.redelivery_safety,
@@ -338,19 +469,18 @@ where
         let destination = self
             .destination
             .ok_or(PostgresConfigError::InvalidIdentifier)?;
-        let statement = self
-            .statement
-            .ok_or(PostgresConfigError::MissingStatement)?;
-        if statement_destination(&statement)
-            .is_none_or(|target| !target.eq_ignore_ascii_case(&destination.qualified()))
-        {
-            return Err(PostgresConfigError::StatementDestinationMismatch);
-        }
+        let insert_body = self
+            .insert_body
+            .ok_or(PostgresConfigError::MissingInsertBody)?;
+        let statement = destination.statement(&insert_body);
+        let connection = self
+            .connection
+            .ok_or(PostgresConfigError::MissingConnection)?;
+        connection.validate()?;
         Ok(PostgresSink {
-            connection: self
-                .connection
-                .ok_or(PostgresConfigError::MissingConnection)?,
+            connection,
             destination,
+            _insert_body: insert_body,
             statement,
             binder: self.binder.ok_or(PostgresConfigError::MissingBinder)?,
             batch_size: self.batch_size,
@@ -368,13 +498,59 @@ pub mod testing {
         SinkExternalCall, SinkExternalCallKind, SinkExternalCallSnapshot, SinkFault,
     };
     use std::sync::{Arc, Mutex, MutexGuard};
+    use std::time::Duration;
 
     /// Connector-owned namespace for projected PostgreSQL SQLSTATE diagnostics.
     pub const POSTGRES_SQLSTATE_NAMESPACE: &str = super::POSTGRES_SQLSTATE_NAMESPACE;
 
+    /// Connector-specific deterministic delay seams for deadline proof.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum PostgresDelayPoint {
+        Authority,
+        Prepare,
+        Begin,
+        Execute,
+        Rollback,
+        CommitAcknowledgement,
+    }
+
+    /// Test-only observation of physical-session authority checks.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct PostgresAuthoritySnapshot {
+        hook_invocations: u64,
+        sessions: Vec<(u64, i32)>,
+        rejections: u64,
+        preparations: Vec<u64>,
+    }
+
+    impl PostgresAuthoritySnapshot {
+        pub fn hook_invocations(&self) -> u64 {
+            self.hook_invocations
+        }
+
+        pub fn sessions(&self) -> &[(u64, i32)] {
+            &self.sessions
+        }
+
+        pub fn rejections(&self) -> u64 {
+            self.rejections
+        }
+
+        pub fn preparations(&self) -> &[u64] {
+            &self.preparations
+        }
+    }
+
     #[derive(Default)]
     struct ProbeState {
         armed: Option<SinkFault>,
+        delay: Option<(PostgresDelayPoint, Duration)>,
+        authority_limit: Option<i32>,
+        authority_query_failure: bool,
+        authority_hook_invocations: u64,
+        authority_sessions: Vec<(u64, i32)>,
+        authority_rejections: u64,
+        preparations: Vec<u64>,
         next_writer: u64,
         next_sequence: u64,
         calls: Vec<SinkExternalCall>,
@@ -409,12 +585,45 @@ pub mod testing {
         pub fn clear(&self) {
             let mut state = self.state();
             state.armed = None;
+            state.delay = None;
+            state.authority_limit = None;
+            state.authority_query_failure = false;
+            state.authority_hook_invocations = 0;
+            state.authority_sessions.clear();
+            state.authority_rejections = 0;
+            state.preparations.clear();
             state.calls.clear();
             state.next_sequence = 0;
         }
 
         pub fn snapshot(&self) -> SinkExternalCallSnapshot {
             SinkExternalCallSnapshot::new(self.state().calls.clone())
+        }
+
+        pub fn delay_once(&self, point: PostgresDelayPoint, duration: Duration) {
+            self.state().delay = Some((point, duration));
+        }
+
+        /// Override the server-reported identifier limit for the next newly
+        /// created physical session.
+        pub fn authority_limit_once(&self, limit: i32) {
+            self.state().authority_limit = Some(limit);
+        }
+
+        /// Replace the next successful authority query with a redacted
+        /// protocol failure after the physical backend has been identified.
+        pub fn fail_authority_query_once(&self) {
+            self.state().authority_query_failure = true;
+        }
+
+        pub fn authority_snapshot(&self) -> PostgresAuthoritySnapshot {
+            let state = self.state();
+            PostgresAuthoritySnapshot {
+                hook_invocations: state.authority_hook_invocations,
+                sessions: state.authority_sessions.clone(),
+                rejections: state.authority_rejections,
+                preparations: state.preparations.clone(),
+            }
         }
 
         pub(crate) fn new_writer(&self) -> u64 {
@@ -441,6 +650,44 @@ pub mod testing {
             } else {
                 false
             }
+        }
+
+        pub(crate) fn is_armed(&self, fault: SinkFault) -> bool {
+            self.state().armed == Some(fault)
+        }
+
+        pub(crate) fn take_delay(&self, point: PostgresDelayPoint) -> Option<Duration> {
+            let mut state = self.state();
+            if state.delay.is_some_and(|(candidate, _)| candidate == point) {
+                state.delay.take().map(|(_, duration)| duration)
+            } else {
+                None
+            }
+        }
+
+        pub(crate) fn record_authority_hook(&self) {
+            self.state().authority_hook_invocations += 1;
+        }
+
+        pub(crate) fn record_authority_session(&self, writer: u64, backend_pid: i32) {
+            self.state().authority_sessions.push((writer, backend_pid));
+        }
+
+        pub(crate) fn record_authority_rejection(&self) {
+            self.state().authority_rejections += 1;
+        }
+
+        pub(crate) fn record_preparation(&self, writer: u64) {
+            self.state().preparations.push(writer);
+        }
+
+        pub(crate) fn take_authority_limit(&self) -> Option<i32> {
+            self.state().authority_limit.take()
+        }
+
+        pub(crate) fn take_authority_query_failure(&self) -> bool {
+            let mut state = self.state();
+            std::mem::take(&mut state.authority_query_failure)
         }
     }
 }
@@ -495,6 +742,30 @@ impl WriterProbe {
         self.probe.as_ref().is_some_and(|probe| probe.take(fault))
     }
 
+    fn rollback_fault_armed(&self) -> bool {
+        #[cfg(feature = "test-support")]
+        {
+            self.probe.as_ref().is_some_and(|probe| {
+                probe.is_armed(obzenflow_runtime::testing::sink::SinkFault::Rollback)
+            })
+        }
+        #[cfg(not(feature = "test-support"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    async fn delay(&self, point: testing::PostgresDelayPoint) {
+        if let Some(duration) = self
+            .probe
+            .as_ref()
+            .and_then(|probe| probe.take_delay(point))
+        {
+            tokio::time::sleep(duration).await;
+        }
+    }
+
     fn record_open(&self) {
         #[cfg(feature = "test-support")]
         self.record(obzenflow_runtime::testing::sink::SinkExternalCallKind::Open);
@@ -540,6 +811,63 @@ impl WriterProbe {
         self.record(obzenflow_runtime::testing::sink::SinkExternalCallKind::Drop);
     }
 
+    fn record_authority_hook(&self) {
+        #[cfg(feature = "test-support")]
+        if let Some(probe) = &self.probe {
+            probe.record_authority_hook();
+        }
+    }
+
+    fn record_authority_session(&self, backend_pid: i32) {
+        #[cfg(feature = "test-support")]
+        if let Some(probe) = &self.probe {
+            probe.record_authority_session(self.writer, backend_pid);
+        }
+        #[cfg(not(feature = "test-support"))]
+        let _ = backend_pid;
+    }
+
+    fn record_authority_rejection(&self) {
+        #[cfg(feature = "test-support")]
+        if let Some(probe) = &self.probe {
+            probe.record_authority_rejection();
+        }
+    }
+
+    fn record_preparation(&self) {
+        #[cfg(feature = "test-support")]
+        if let Some(probe) = &self.probe {
+            probe.record_preparation(self.writer);
+        }
+    }
+
+    fn authority_limit(&self, observed: i32) -> i32 {
+        #[cfg(feature = "test-support")]
+        {
+            self.probe
+                .as_ref()
+                .and_then(testing::PostgresTestProbe::take_authority_limit)
+                .unwrap_or(observed)
+        }
+        #[cfg(not(feature = "test-support"))]
+        {
+            observed
+        }
+    }
+
+    fn fault_authority_query(&self) -> bool {
+        #[cfg(feature = "test-support")]
+        {
+            self.probe.as_ref().is_some_and(|probe| {
+                testing::PostgresTestProbe::take_authority_query_failure(probe)
+            })
+        }
+        #[cfg(not(feature = "test-support"))]
+        {
+            false
+        }
+    }
+
     writer_probe_fault_method!(fault_open, Open);
     writer_probe_fault_method!(fault_encode, Encode);
     writer_probe_fault_method!(fault_acquire, Acquire);
@@ -552,6 +880,141 @@ impl WriterProbe {
     writer_probe_fault_method!(fault_post_commit, PostCommitPreAcknowledgement);
     writer_probe_fault_method!(fault_flush, Flush);
     writer_probe_fault_method!(fault_drain, Drain);
+}
+
+#[derive(Clone)]
+struct PostgresSessionAuthority {
+    verdict: Arc<Mutex<PostgresSessionAuthorityVerdict>>,
+}
+
+#[derive(Clone)]
+enum PostgresSessionAuthorityVerdict {
+    Unverified,
+    Ready,
+    Rejected(SinkOperationError),
+}
+
+impl PostgresSessionAuthority {
+    fn new() -> Self {
+        Self {
+            verdict: Arc::new(Mutex::new(PostgresSessionAuthorityVerdict::Unverified)),
+        }
+    }
+
+    fn verdict(&self) -> MutexGuard<'_, PostgresSessionAuthorityVerdict> {
+        match self.verdict.lock() {
+            Ok(verdict) => verdict,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn mark_unverified(&self) {
+        *self.verdict() = PostgresSessionAuthorityVerdict::Unverified;
+    }
+
+    fn mark_ready(&self) {
+        *self.verdict() = PostgresSessionAuthorityVerdict::Ready;
+    }
+
+    fn mark_rejected(&self, error: SinkOperationError) {
+        *self.verdict() = PostgresSessionAuthorityVerdict::Rejected(error);
+    }
+
+    fn snapshot(&self) -> PostgresSessionAuthorityVerdict {
+        self.verdict().clone()
+    }
+}
+
+/// The only production path to a writer's physical PostgreSQL connection.
+///
+/// The shared verdict is sound only because this private pool is permanently
+/// capped at one connection and the writer is serially borrowed. Every new
+/// physical connection finalises the verdict before SQLx can expose it.
+struct PostgresSessionPool {
+    pool: PgPool,
+    authority: PostgresSessionAuthority,
+}
+
+impl PostgresSessionPool {
+    fn new(
+        options: PgConnectOptions,
+        acquire_timeout: Duration,
+        destination: PostgresTable,
+        probe: WriterProbe,
+    ) -> Self {
+        let authority = PostgresSessionAuthority::new();
+        let hook_authority = authority.clone();
+        let pool = PgPoolOptions::new()
+            .max_connections(POSTGRES_WRITER_POOL_SIZE)
+            .min_connections(0)
+            .acquire_timeout(acquire_timeout)
+            .after_connect(move |connection, _metadata| {
+                let destination = destination.clone();
+                let authority = hook_authority.clone();
+                let probe = probe.clone();
+                Box::pin(async move {
+                    authority.mark_unverified();
+                    probe.record_authority_hook();
+                    let verdict = async {
+                        let (max_identifier_length, backend_pid): (i32, i32) = sqlx::query_as(
+                            "SELECT current_setting('max_identifier_length')::integer, \
+                                 pg_backend_pid()",
+                        )
+                        .fetch_one(&mut *connection)
+                        .await
+                        .map_err(operation_error)?;
+                        probe.record_authority_session(backend_pid);
+                        #[cfg(feature = "test-support")]
+                        probe.delay(testing::PostgresDelayPoint::Authority).await;
+                        if probe.fault_authority_query() {
+                            return Err(operation_error(sqlx::Error::Protocol(
+                                "injected PostgreSQL authority-query failure".into(),
+                            )));
+                        }
+                        destination
+                            .validate_server_limit(probe.authority_limit(max_identifier_length))
+                    }
+                    .await;
+
+                    match verdict {
+                        Ok(()) => authority.mark_ready(),
+                        Err(error) => {
+                            probe.record_authority_rejection();
+                            authority.mark_rejected(error);
+                        }
+                    }
+
+                    // SQLx retries and logs after_connect errors. The wrapper
+                    // must observe the exact rejection instead, so the hook
+                    // deliberately exposes the connection for fail-closed
+                    // inspection and never returns its adapter verdict here.
+                    Ok(())
+                })
+            })
+            // Pool construction remains inside open and the immediately
+            // following authorized acquisition performs all external I/O.
+            // With min_connections(0), no background connection can race the
+            // single shared verdict.
+            .connect_lazy_with(options);
+        Self { pool, authority }
+    }
+
+    async fn acquire_authorized(&self) -> SinkOperationResult<PoolConnection<Postgres>> {
+        let mut connection = self.pool.acquire().await.map_err(operation_error)?;
+        match self.authority.snapshot() {
+            PostgresSessionAuthorityVerdict::Ready => Ok(connection),
+            PostgresSessionAuthorityVerdict::Rejected(error) => {
+                connection.close_on_drop();
+                Err(error)
+            }
+            PostgresSessionAuthorityVerdict::Unverified => {
+                connection.close_on_drop();
+                Err(SinkOperationError::other(
+                    "PostgreSQL session target authority was not established",
+                ))
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -584,24 +1047,61 @@ where
         let probe = WriterProbe::new();
         probe.record_open();
         if probe.fault_open() {
-            return Err(test_operation_error(
-                "injected PostgreSQL open failure",
-                None,
+            return Err(destination_operation_error(
+                &self.destination,
+                test_operation_error("injected PostgreSQL open failure", None),
             ));
         }
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(self.connection.acquire_timeout)
-            .connect_with(self.connection.options.clone())
+        let deadline = Instant::now() + self.connection.operation_timeout;
+        let pool = PostgresSessionPool::new(
+            self.connection.options.clone(),
+            self.connection.acquire_timeout,
+            self.destination.clone(),
+            probe.clone(),
+        );
+        let mut connection = timeout_at(deadline, pool.acquire_authorized())
             .await
-            .map_err(operation_error)?;
-        pool.acquire().await.map_err(operation_error)?;
+            .map_err(|_| {
+                destination_operation_error(
+                    &self.destination,
+                    SinkOperationError::timeout("PostgreSQL open timed out"),
+                )
+            })?
+            .map_err(|error| destination_operation_error(&self.destination, error))?;
+        let preparation = timeout_at(deadline, async {
+            #[cfg(feature = "test-support")]
+            probe.delay(testing::PostgresDelayPoint::Prepare).await;
+            probe.record_preparation();
+            (&mut *connection)
+                .prepare(&self.statement)
+                .await
+                .map_err(operation_error)?;
+            Ok::<(), SinkOperationError>(())
+        })
+        .await;
+        match preparation {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                connection.close_on_drop();
+                return Err(destination_operation_error(&self.destination, error));
+            }
+            Err(_) => {
+                connection.close_on_drop();
+                return Err(destination_operation_error(
+                    &self.destination,
+                    SinkOperationError::timeout("PostgreSQL open timed out"),
+                ));
+            }
+        }
+        drop(connection);
         Ok(PostgresWriter {
             pool,
             destination: self.destination.clone(),
             statement: self.statement.clone(),
             binder: self.binder.clone(),
             batch_size: self.batch_size,
+            operation_timeout: self.connection.operation_timeout,
+            rollback_timeout: self.connection.rollback_timeout,
             pending: Vec::new(),
             probe,
         })
@@ -614,11 +1114,13 @@ struct BufferedRow<T> {
 }
 
 pub struct PostgresWriter<T, B> {
-    pool: PgPool,
+    pool: PostgresSessionPool,
     destination: PostgresTable,
     statement: String,
     binder: B,
     batch_size: usize,
+    operation_timeout: Duration,
+    rollback_timeout: Duration,
     pending: Vec<BufferedRow<T>>,
     probe: WriterProbe,
 }
@@ -654,29 +1156,149 @@ enum TransactionFailure {
     PostCommit(SinkOperationError),
 }
 
-async fn execute_transaction<T, B>(
-    pool: &PgPool,
-    statement: &str,
-    binder: &B,
-    buffered: &[BufferedRow<T>],
-    current: Option<&T>,
+impl TransactionFailure {
+    fn with_destination(self, destination: &PostgresTable) -> Self {
+        match self {
+            Self::Acquire(error) => Self::Acquire(destination_operation_error(destination, error)),
+            Self::Execute {
+                operation,
+                rollback,
+            } => Self::Execute {
+                operation: destination_operation_error(destination, operation),
+                rollback: rollback.map(|error| destination_operation_error(destination, error)),
+            },
+            Self::PreCommit {
+                operation,
+                rollback,
+            } => Self::PreCommit {
+                operation: destination_operation_error(destination, operation),
+                rollback: rollback.map(|error| destination_operation_error(destination, error)),
+            },
+            Self::Commit(error) => Self::Commit(destination_operation_error(destination, error)),
+            Self::PostCommit(error) => {
+                Self::PostCommit(destination_operation_error(destination, error))
+            }
+        }
+    }
+}
+
+struct TransactionConnection {
+    connection: PoolConnection<Postgres>,
+    reusable: bool,
+}
+
+impl TransactionConnection {
+    fn new(connection: PoolConnection<Postgres>) -> Self {
+        Self {
+            connection,
+            reusable: false,
+        }
+    }
+
+    fn mark_reusable(&mut self) {
+        self.reusable = true;
+    }
+}
+
+impl Drop for TransactionConnection {
+    fn drop(&mut self) {
+        if !self.reusable {
+            self.connection.close_on_drop();
+        }
+    }
+}
+
+async fn rollback_transaction(
+    connection: &mut TransactionConnection,
+    rollback_timeout: Duration,
     probe: &WriterProbe,
+) -> Result<(), SinkOperationError> {
+    probe.record_rollback();
+    let injected_failure = probe.fault_rollback();
+    let result = timeout(rollback_timeout, async {
+        #[cfg(feature = "test-support")]
+        probe.delay(testing::PostgresDelayPoint::Rollback).await;
+        sqlx::query("ROLLBACK")
+            .execute(&mut *connection.connection)
+            .await
+            .map(|_| ())
+            .map_err(operation_error)
+    })
+    .await;
+
+    if injected_failure {
+        return Err(test_operation_error(
+            "injected PostgreSQL rollback failure",
+            Some("08007"),
+        ));
+    }
+    match result {
+        Ok(Ok(())) => {
+            connection.mark_reusable();
+            Ok(())
+        }
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(SinkOperationError::timeout(
+            "PostgreSQL rollback confirmation timed out",
+        )),
+    }
+}
+
+async fn execute_transaction<T, B>(
+    writer: &PostgresWriter<T, B>,
+    current: Option<&T>,
 ) -> Result<(), TransactionFailure>
 where
     T: Send + Sync,
     B: PostgresBind<T>,
 {
-    probe.record_begin();
+    let pool = &writer.pool;
+    let statement = writer.statement.as_str();
+    let binder = &writer.binder;
+    let buffered = writer.pending.as_slice();
+    let operation_timeout = writer.operation_timeout;
+    let rollback_timeout = writer.rollback_timeout;
+    let probe = &writer.probe;
+    let deadline = Instant::now() + operation_timeout;
     if probe.fault_acquire() {
         return Err(TransactionFailure::Acquire(test_operation_error(
             "injected PostgreSQL acquisition failure",
             None,
         )));
     }
-    let mut transaction = pool
-        .begin()
-        .await
-        .map_err(|error| TransactionFailure::Acquire(operation_error(error)))?;
+    let connection = match timeout_at(deadline, pool.acquire_authorized()).await {
+        Ok(Ok(connection)) => connection,
+        Ok(Err(error)) => {
+            return Err(TransactionFailure::Acquire(error));
+        }
+        Err(_) => {
+            return Err(TransactionFailure::Acquire(SinkOperationError::timeout(
+                "PostgreSQL transaction acquisition timed out",
+            )));
+        }
+    };
+
+    let mut connection = TransactionConnection::new(connection);
+    let begin = timeout_at(deadline, async {
+        #[cfg(feature = "test-support")]
+        probe.delay(testing::PostgresDelayPoint::Begin).await;
+        probe.record_begin();
+        sqlx::query("BEGIN")
+            .execute(&mut *connection.connection)
+            .await
+            .map(|_| ())
+            .map_err(operation_error)
+    })
+    .await;
+    match begin {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(TransactionFailure::Acquire(error)),
+        Err(_) => {
+            return Err(TransactionFailure::Acquire(SinkOperationError::timeout(
+                "PostgreSQL transaction begin timed out",
+            )));
+        }
+    }
 
     for (index, input) in buffered
         .iter()
@@ -687,44 +1309,61 @@ where
         if probe.fault_destination_execution() || (index > 0 && probe.fault_mid_batch_mutation()) {
             let operation =
                 test_operation_error("injected PostgreSQL execution failure", Some("23505"));
-            probe.record_rollback();
-            let rollback = transaction.rollback().await.err().map(operation_error);
+            let rollback = rollback_transaction(&mut connection, rollback_timeout, probe)
+                .await
+                .err();
             return Err(TransactionFailure::Execute {
                 operation,
                 rollback,
-            });
-        }
-        if probe.fault_rollback() {
-            let operation =
-                test_operation_error("injected PostgreSQL execution failure", Some("23505"));
-            probe.record_rollback();
-            let _ = transaction.rollback().await;
-            return Err(TransactionFailure::Execute {
-                operation,
-                rollback: Some(test_operation_error(
-                    "injected PostgreSQL rollback failure",
-                    Some("08007"),
-                )),
             });
         }
         probe.record_execute();
         let query = binder.bind(sqlx::query(statement), input);
-        if let Err(error) = query.execute(&mut *transaction).await {
-            let operation = operation_error(error);
-            probe.record_rollback();
-            let rollback = transaction.rollback().await.err().map(operation_error);
-            return Err(TransactionFailure::Execute {
-                operation,
-                rollback,
-            });
-        }
+        let execution = timeout_at(deadline, async {
+            #[cfg(feature = "test-support")]
+            probe.delay(testing::PostgresDelayPoint::Execute).await;
+            query
+                .execute(&mut *connection.connection)
+                .await
+                .map(|_| ())
+                .map_err(operation_error)
+        })
+        .await;
+        let operation = match execution {
+            Ok(Ok(())) => continue,
+            Ok(Err(error)) => error,
+            Err(_) => SinkOperationError::timeout("PostgreSQL transaction execution timed out"),
+        };
+        let rollback = rollback_transaction(&mut connection, rollback_timeout, probe)
+            .await
+            .err();
+        return Err(TransactionFailure::Execute {
+            operation,
+            rollback,
+        });
     }
 
-    if probe.fault_pre_commit() {
-        let operation =
-            test_operation_error("injected PostgreSQL pre-commit failure", Some("23505"));
-        probe.record_rollback();
-        let rollback = transaction.rollback().await.err().map(operation_error);
+    let pre_commit_failure = if probe.rollback_fault_armed() {
+        Some(test_operation_error(
+            "injected PostgreSQL failure requiring rollback",
+            Some("23505"),
+        ))
+    } else if probe.fault_pre_commit() {
+        Some(test_operation_error(
+            "injected PostgreSQL pre-commit failure",
+            Some("23505"),
+        ))
+    } else if Instant::now() >= deadline {
+        Some(SinkOperationError::timeout(
+            "PostgreSQL transaction timed out before commit",
+        ))
+    } else {
+        None
+    };
+    if let Some(operation) = pre_commit_failure {
+        let rollback = rollback_transaction(&mut connection, rollback_timeout, probe)
+            .await
+            .err();
         return Err(TransactionFailure::PreCommit {
             operation,
             rollback,
@@ -732,16 +1371,36 @@ where
     }
 
     probe.record_commit();
-    transaction
-        .commit()
-        .await
-        .map_err(|error| TransactionFailure::Commit(operation_error(error)))?;
+    let commit = timeout_at(deadline, async {
+        sqlx::query("COMMIT")
+            .execute(&mut *connection.connection)
+            .await
+            .map_err(operation_error)?;
+        #[cfg(feature = "test-support")]
+        probe
+            .delay(testing::PostgresDelayPoint::CommitAcknowledgement)
+            .await;
+        Ok::<(), SinkOperationError>(())
+    })
+    .await;
+    match commit {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            return Err(TransactionFailure::Commit(error));
+        }
+        Err(_) => {
+            return Err(TransactionFailure::Commit(SinkOperationError::timeout(
+                "PostgreSQL commit acknowledgement timed out",
+            )));
+        }
+    }
     if probe.fault_post_commit() {
         return Err(TransactionFailure::PostCommit(test_operation_error(
             "injected PostgreSQL acknowledgement ambiguity",
             Some("08007"),
         )));
     }
+    connection.mark_reusable();
     Ok(())
 }
 
@@ -823,24 +1482,22 @@ where
         if self.probe.fault_encode() {
             return Err(SinkWriteFailure::current_only(
                 SinkWritePhase::Encode,
-                test_operation_error("injected PostgreSQL encode failure", None),
+                destination_operation_error(
+                    &self.destination,
+                    test_operation_error("injected PostgreSQL encode failure", None),
+                ),
             ));
         }
         self.binder
             .validate(&input)
+            .map_err(|error| destination_operation_error(&self.destination, error))
             .map_err(|error| SinkWriteFailure::current_only(SinkWritePhase::Encode, error))?;
 
         if self.batch_size == 1 {
-            execute_transaction(
-                &self.pool,
-                &self.statement,
-                &self.binder,
-                &self.pending,
-                Some(&input),
-                &self.probe,
-            )
-            .await
-            .map_err(map_write_failure)?;
+            execute_transaction(self, Some(&input))
+                .await
+                .map_err(|failure| failure.with_destination(&self.destination))
+                .map_err(map_write_failure)?;
             return Ok(SinkWriteReport::terminal(terminal_outcome()));
         }
 
@@ -848,14 +1505,20 @@ where
             if self.probe.fault_before_deferral() {
                 return Err(SinkWriteFailure::current_only(
                     SinkWritePhase::Execute,
-                    test_operation_error("injected PostgreSQL pre-deferral failure", None),
+                    destination_operation_error(
+                        &self.destination,
+                        test_operation_error("injected PostgreSQL pre-deferral failure", None),
+                    ),
                 ));
             }
             let pending = context.defer();
             if self.probe.fault_after_deferral() {
                 return Err(SinkWriteFailure::current_only(
                     SinkWritePhase::Execute,
-                    test_operation_error("injected PostgreSQL post-deferral failure", None),
+                    destination_operation_error(
+                        &self.destination,
+                        test_operation_error("injected PostgreSQL post-deferral failure", None),
+                    ),
                 ));
             }
             self.pending.push(BufferedRow { input, pending });
@@ -865,16 +1528,10 @@ where
         }
 
         let current_pending = context.defer();
-        execute_transaction(
-            &self.pool,
-            &self.statement,
-            &self.binder,
-            &self.pending,
-            Some(&input),
-            &self.probe,
-        )
-        .await
-        .map_err(map_write_failure)?;
+        execute_transaction(self, Some(&input))
+            .await
+            .map_err(|failure| failure.with_destination(&self.destination))
+            .map_err(map_write_failure)?;
 
         let mut receipts = committed_receipts(&mut self.pending);
         receipts.push(SinkCommitReceipt::new(current_pending, terminal_outcome()));
@@ -887,9 +1544,9 @@ where
     async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
         self.probe.record_flush();
         if self.probe.fault_flush() {
-            return Err(test_operation_error(
-                "injected PostgreSQL flush failure",
-                None,
+            return Err(destination_operation_error(
+                &self.destination,
+                test_operation_error("injected PostgreSQL flush failure", None),
             ));
         }
         self.settle_pending().await
@@ -898,9 +1555,9 @@ where
     async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
         self.probe.record_drain();
         if self.probe.fault_drain() {
-            return Err(test_operation_error(
-                "injected PostgreSQL drain failure",
-                None,
+            return Err(destination_operation_error(
+                &self.destination,
+                test_operation_error("injected PostgreSQL drain failure", None),
             ));
         }
         self.settle_pending().await
@@ -916,16 +1573,10 @@ where
         if self.pending.is_empty() {
             return Ok(SinkWriterLifecycleReport::default());
         }
-        execute_transaction(
-            &self.pool,
-            &self.statement,
-            &self.binder,
-            &self.pending,
-            None,
-            &self.probe,
-        )
-        .await
-        .map_err(map_lifecycle_failure)?;
+        execute_transaction(self, None)
+            .await
+            .map_err(|failure| failure.with_destination(&self.destination))
+            .map_err(map_lifecycle_failure)?;
         Ok(SinkWriterLifecycleReport::default()
             .with_commit_receipts(committed_receipts(&mut self.pending)))
     }
@@ -962,6 +1613,34 @@ fn operation_error(error: sqlx::Error) -> SinkOperationError {
     match destination_code {
         Some(code) => operation.with_destination_error_code(code),
         None => operation,
+    }
+}
+
+fn destination_operation_error(
+    destination: &PostgresTable,
+    error: SinkOperationError,
+) -> SinkOperationError {
+    use obzenflow_core::event::status::processing_status::ErrorKind;
+
+    let code = error.destination_error_code().cloned();
+    let detail = format!(
+        "PostgreSQL destination {}: {}",
+        destination.logical_destination(),
+        error.detail()
+    );
+    let contextual = match error.kind() {
+        ErrorKind::Timeout => SinkOperationError::timeout(detail),
+        ErrorKind::Remote => SinkOperationError::remote(detail),
+        ErrorKind::RateLimited => SinkOperationError::rate_limited(detail, error.retry_after()),
+        ErrorKind::PermanentFailure => SinkOperationError::permanent(detail),
+        ErrorKind::Deserialization => SinkOperationError::deserialization(detail),
+        ErrorKind::Validation => SinkOperationError::validation(detail),
+        ErrorKind::Domain => SinkOperationError::domain(detail),
+        ErrorKind::Unknown => SinkOperationError::other(detail),
+    };
+    match code {
+        Some(code) => contextual.with_destination_error_code(code),
+        None => contextual,
     }
 }
 
@@ -1003,50 +1682,169 @@ mod tests {
     fn connection() -> PostgresConnection {
         PostgresConnection::from_url(
             "postgres://sentinel-user:sentinel-password@localhost/test?sslmode=disable",
+            PostgresTransport::ExternallyProtectedPlaintext,
         )
         .expect("test URL parses without I/O")
     }
 
     #[test]
-    fn connection_requires_an_explicit_safe_transport_mode() {
+    fn connector_input_witness_is_the_builder_payload() {
+        fn assert_input<C: SinkConnector<Input = Input>>() {}
+
+        assert_input::<PostgresSink<Input, Binder>>();
+    }
+
+    #[test]
+    fn typed_transport_is_authoritative_over_urls_and_options() {
         let base = "postgres://sentinel-user:sentinel-password@localhost/test";
 
+        let tls = PostgresConnection::from_url(base, PostgresTransport::VerifiedTls)
+            .expect("omitted URL mode is normalised by typed policy");
+        assert!(matches!(tls.options.get_ssl_mode(), PgSslMode::VerifyFull));
+        let plaintext =
+            PostgresConnection::from_url(base, PostgresTransport::ExternallyProtectedPlaintext)
+                .expect("omitted URL mode is normalised by typed policy");
         assert!(matches!(
-            PostgresConnection::from_url(base),
-            Err(PostgresConfigError::UnsafeSslMode)
+            plaintext.options.get_ssl_mode(),
+            PgSslMode::Disable
         ));
-        assert!(matches!(
-            PostgresConnection::from_options(PgConnectOptions::new()),
-            Err(PostgresConfigError::UnsafeSslMode)
-        ));
-        for mode in ["allow", "prefer", "require", "verify-ca"] {
+
+        PostgresConnection::from_url(
+            &format!("{base}?sslmode=disable"),
+            PostgresTransport::ExternallyProtectedPlaintext,
+        )
+        .expect("matching explicit plaintext is accepted");
+        PostgresConnection::from_url(
+            &format!("{base}?sslmode=verify-full"),
+            PostgresTransport::VerifiedTls,
+        )
+        .expect("matching hostname-verified TLS is accepted");
+        for mode in ["allow", "prefer", "require", "verify-ca", "disable"] {
             assert!(matches!(
-                PostgresConnection::from_url(&format!("{base}?sslmode={mode}")),
-                Err(PostgresConfigError::UnsafeSslMode)
+                PostgresConnection::from_url(
+                    &format!("{base}?sslmode={mode}"),
+                    PostgresTransport::VerifiedTls,
+                ),
+                Err(PostgresConfigError::ConflictingTransport)
             ));
         }
 
-        PostgresConnection::from_url(&format!("{base}?sslmode=disable"))
-            .expect("explicit plaintext is permitted for a separately protected transport");
-        PostgresConnection::from_url(&format!("{base}?sslmode=verify-full"))
-            .expect("hostname-verified TLS is permitted");
-        PostgresConnection::from_options(PgConnectOptions::new().ssl_mode(PgSslMode::VerifyFull))
-            .expect("programmatic hostname-verified TLS is permitted");
-        PostgresConnection::from_options(PgConnectOptions::new().ssl_mode(PgSslMode::Disable))
-            .expect("programmatic explicit plaintext is permitted");
+        let options = PostgresConnection::from_options(
+            PgConnectOptions::new().ssl_mode(PgSslMode::Prefer),
+            PostgresTransport::VerifiedTls,
+        )
+        .expect("typed policy overwrites provenance-unknown options");
+        assert!(matches!(
+            options.options.get_ssl_mode(),
+            PgSslMode::VerifyFull
+        ));
+        let options = PostgresConnection::from_options(
+            PgConnectOptions::new().ssl_mode(PgSslMode::VerifyFull),
+            PostgresTransport::ExternallyProtectedPlaintext,
+        )
+        .expect("typed plaintext policy overwrites provenance-unknown options");
+        assert!(matches!(options.options.get_ssl_mode(), PgSslMode::Disable));
+
+        for incoming in [
+            PgSslMode::Disable,
+            PgSslMode::Allow,
+            PgSslMode::Prefer,
+            PgSslMode::Require,
+            PgSslMode::VerifyCa,
+            PgSslMode::VerifyFull,
+        ] {
+            let tls = PostgresConnection::from_options(
+                PgConnectOptions::new().ssl_mode(incoming),
+                PostgresTransport::VerifiedTls,
+            )
+            .expect("typed TLS policy normalises every incoming SQLx mode");
+            assert!(matches!(tls.options.get_ssl_mode(), PgSslMode::VerifyFull));
+            let plaintext = PostgresConnection::from_options(
+                PgConnectOptions::new().ssl_mode(incoming),
+                PostgresTransport::ExternallyProtectedPlaintext,
+            )
+            .expect("typed plaintext policy normalises every incoming SQLx mode");
+            assert!(matches!(
+                plaintext.options.get_ssl_mode(),
+                PgSslMode::Disable
+            ));
+        }
+
+        for mode in ["allow", "prefer", "require", "verify-ca", "verify-full"] {
+            assert!(matches!(
+                PostgresConnection::from_url(
+                    &format!("{base}?sslmode={mode}"),
+                    PostgresTransport::ExternallyProtectedPlaintext,
+                ),
+                Err(PostgresConfigError::ConflictingTransport)
+            ));
+        }
+
+        assert!(matches!(
+            PostgresConnection::from_url(
+                &format!("{base}?unknown=sentinel-secret"),
+                PostgresTransport::VerifiedTls,
+            ),
+            Err(PostgresConfigError::InvalidConnection)
+        ));
+    }
+
+    #[test]
+    fn typed_transport_ignores_ambient_pgsslmode() {
+        const CHILD: &str = "OBZENFLOW_POSTGRES_PGSSLMODE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let base = "postgres://sentinel-user:sentinel-password@localhost/test";
+            let tls = PostgresConnection::from_url(base, PostgresTransport::VerifiedTls)
+                .expect("typed TLS policy overrides ambient PGSSLMODE");
+            assert!(matches!(tls.options.get_ssl_mode(), PgSslMode::VerifyFull));
+            let plaintext =
+                PostgresConnection::from_url(base, PostgresTransport::ExternallyProtectedPlaintext)
+                    .expect("typed plaintext policy overrides ambient PGSSLMODE");
+            assert!(matches!(
+                plaintext.options.get_ssl_mode(),
+                PgSslMode::Disable
+            ));
+            return;
+        }
+
+        let test_name = "sinks::postgres::tests::typed_transport_ignores_ambient_pgsslmode";
+        for mode in [None, Some("disable"), Some("verify-full"), Some("prefer")] {
+            let mut command = std::process::Command::new(
+                std::env::current_exe().expect("locate adapter unit-test executable"),
+            );
+            command
+                .args(["--exact", test_name, "--nocapture"])
+                .env(CHILD, "1");
+            match mode {
+                Some(mode) => {
+                    command.env("PGSSLMODE", mode);
+                }
+                None => {
+                    command.env_remove("PGSSLMODE");
+                }
+            }
+            let output = command.output().expect("launch isolated PGSSLMODE proof");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "isolated PGSSLMODE proof did not execute exactly one passing test: stdout={stdout} stderr={stderr}"
+            );
+            assert!(!stdout.contains("sentinel-password"));
+            assert!(!stderr.contains("sentinel-password"));
+        }
     }
 
     #[test]
     fn build_is_local_and_debug_is_redacted() {
         let sink = PostgresSink::<Input>::builder()
             .connection(connection())
-            .table("public", "items")
-            .unwrap()
-            .statement("INSERT INTO public.items (value) VALUES ($1)")
+            .insert_into("public", "items", "(value) VALUES ($1)")
             .unwrap()
             .bind_with(Binder)
             .batch_size(16)
             .unwrap()
+            .redelivery_safety(SinkRedeliverySafety::DuplicateSensitive)
             .build()
             .unwrap();
         let formatted = format!("{sink:?}");
@@ -1070,26 +1868,66 @@ mod tests {
     #[test]
     fn configuration_rejects_unsafe_shapes() {
         assert!(PostgresSink::<Input>::builder()
-            .table("public;drop", "items")
+            .insert_into("public;drop", "items", "(value) VALUES ($1)")
             .is_err());
         assert!(PostgresSink::<Input>::builder()
-            .statement("DELETE FROM public.items")
+            .insert_into("public", "items", "")
             .is_err());
         assert!(PostgresSink::<Input>::builder()
-            .statement("INSERT INTO a VALUES ($1); DROP TABLE a")
+            .insert_into("public", "items", "(value) VALUES ('bad\0value')")
             .is_err());
         assert!(PostgresSink::<Input>::builder().batch_size(0).is_err());
         assert!(matches!(
             PostgresSink::<Input>::builder()
-                .connection(connection())
-                .table("public", "items")
-                .unwrap()
-                .statement("INSERT INTO public.other_items (value) VALUES ($1)")
+                .connection(connection().with_operation_timeout(Duration::ZERO))
+                .insert_into("public", "items", "(value) VALUES ($1)")
                 .unwrap()
                 .bind_with(Binder)
                 .build(),
-            Err(PostgresConfigError::StatementDestinationMismatch)
+            Err(PostgresConfigError::InvalidTimeout)
         ));
+    }
+
+    #[test]
+    fn target_generation_is_exact_and_does_not_parse_the_body() {
+        let sixty_three = format!("a{}", "b".repeat(62));
+        assert!(valid_identifier(&sixty_three));
+        assert!(!valid_identifier(&format!("a{}", "b".repeat(63))));
+        assert_eq!(quote_identifier("a\"b"), "\"a\"\"b\"");
+
+        let sink = PostgresSink::<Input>::builder()
+            .connection(connection())
+            .insert_into(
+                "Public",
+                "Items",
+                "(value) VALUES ('a;b') ON CONFLICT DO NOTHING",
+            )
+            .unwrap()
+            .bind_with(Binder)
+            .build()
+            .unwrap();
+        assert_eq!(
+            sink.statement,
+            "INSERT INTO \"Public\".\"Items\" (value) VALUES ('a;b') ON CONFLICT DO NOTHING"
+        );
+        assert_eq!(
+            sink._insert_body,
+            "(value) VALUES ('a;b') ON CONFLICT DO NOTHING"
+        );
+        assert_eq!(
+            sink.describe().destination_name(),
+            Some("postgres.Public.Items")
+        );
+        assert_eq!(sink.describe().redelivery_safety(), None);
+
+        let table = PostgresTable::try_new("public", "portable_name").unwrap();
+        let error = table
+            .validate_server_limit(8)
+            .expect_err("a smaller custom server limit rejects before preparation");
+        assert_eq!(
+            error.kind(),
+            obzenflow_core::event::status::processing_status::ErrorKind::PermanentFailure
+        );
     }
 
     #[test]
@@ -1110,7 +1948,10 @@ mod tests {
             "OBZENFLOW_POSTGRES_TEST_URL is required: the real-driver SQLSTATE proof must not pass without PostgreSQL",
         );
         let pool = PgPool::connect(&url).await.expect("PostgreSQL test pool");
-        let schema = format!("obz122a_codes_{}", std::process::id());
+        let run_id = std::env::var("OBZENFLOW_POSTGRES_TEST_RUN_ID")
+            .expect("OBZENFLOW_POSTGRES_TEST_RUN_ID is required from `cargo xtask postgres test`");
+        assert!(run_id.len() == 32 && run_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let schema = format!("obz083c_codes_{run_id}");
         sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             .execute(&pool)
             .await
@@ -1162,5 +2003,89 @@ mod tests {
             .execute(&pool)
             .await
             .expect("code-test schema drops");
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn real_writers_own_distinct_one_slot_pools() {
+        let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL").expect(
+            "OBZENFLOW_POSTGRES_TEST_URL is required: pool isolation must use real PostgreSQL",
+        );
+        let run_id = std::env::var("OBZENFLOW_POSTGRES_TEST_RUN_ID")
+            .expect("OBZENFLOW_POSTGRES_TEST_RUN_ID is required from `cargo xtask postgres test`");
+        assert!(run_id.len() == 32 && run_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let schema = format!("obz083c_pools_{run_id}");
+        let setup = PgPool::connect(&url).await.expect("PostgreSQL setup pool");
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&setup)
+            .await
+            .expect("pool-test schema creates");
+        sqlx::query(&format!("CREATE TABLE {schema}.values_table (value TEXT)"))
+            .execute(&setup)
+            .await
+            .expect("pool-test table creates");
+
+        let sink = PostgresSink::<Input>::builder()
+            .connection(
+                PostgresConnection::from_url(&url, PostgresTransport::ExternallyProtectedPlaintext)
+                    .expect("test URL parses"),
+            )
+            .insert_into(&schema, "values_table", "(value) VALUES ($1)")
+            .unwrap()
+            .bind_with(Binder)
+            .build()
+            .unwrap();
+        let writer_a = sink
+            .open(SinkWriterInitContext::new(
+                obzenflow_core::StageId::new(),
+                "writer-a".to_string(),
+                "pool-isolation".to_string(),
+            ))
+            .await
+            .expect("first writer opens");
+        let writer_b = sink
+            .open(SinkWriterInitContext::new(
+                obzenflow_core::StageId::new(),
+                "writer-b".to_string(),
+                "pool-isolation".to_string(),
+            ))
+            .await
+            .expect("second writer opens");
+
+        let mut lease_a = writer_a
+            .pool
+            .acquire_authorized()
+            .await
+            .expect("writer A lease");
+        let pid_a: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *lease_a)
+            .await
+            .expect("writer A backend id");
+        assert!(
+            timeout(
+                Duration::from_millis(30),
+                writer_a.pool.acquire_authorized(),
+            )
+            .await
+            .is_err(),
+            "one held lease must exhaust only writer A's one-slot pool"
+        );
+        let mut lease_b = timeout(Duration::from_secs(1), writer_b.pool.acquire_authorized())
+            .await
+            .expect("writer B is not blocked by writer A")
+            .expect("writer B lease");
+        let pid_b: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *lease_b)
+            .await
+            .expect("writer B backend id");
+        assert_ne!(pid_a, pid_b, "writers must not share a physical session");
+        drop(lease_a);
+        drop(lease_b);
+        drop(writer_a);
+        drop(writer_b);
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&setup)
+            .await
+            .expect("pool-test schema drops");
     }
 }

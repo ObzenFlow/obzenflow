@@ -4,9 +4,13 @@
 
 #![cfg(all(feature = "postgres", feature = "test-support"))]
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow::sinks::postgres::testing::{PostgresTestProbe, POSTGRES_SQLSTATE_NAMESPACE};
-use obzenflow::sinks::postgres::{PostgresBind, PostgresConnection, PostgresQuery, PostgresSink};
+use obzenflow::sinks::postgres::{
+    PostgresBind, PostgresConnection, PostgresQuery, PostgresSink, PostgresTransport,
+};
 use obzenflow::sources;
 use obzenflow::testing::sink::{
     run_application_conformance, SinkApplicationBuildCase, SinkApplicationConformanceFixture,
@@ -22,17 +26,19 @@ use obzenflow_adapters::middleware::{
     SourcePollOutcome,
 };
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::{SinkOperationPhase, SinkWritePhase};
+use obzenflow_core::event::{SinkOperationPhase, SinkWritePhase, StageActivity};
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, transform, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
+use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::run_context::FlowBuildContext;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::source::strategies::{
     CompletionContext, CompletionDecision, CompletionGate,
 };
-use obzenflow_runtime::stages::{SourceError, TypedFiniteSourceHandler};
+use obzenflow_runtime::stages::{SourceError, TypedFiniteSourceHandler, TypedTransformHandler};
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use obzenflow_runtime::testing::sink::{
     SinkConformanceProfile, SinkDiagnosticSample, SinkDiagnosticSurface, SinkExternalCallKind,
@@ -45,6 +51,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
+static POSTGRES_APPLICATION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Payment {
@@ -146,6 +154,66 @@ struct StallingPayments {
     next: i64,
 }
 
+#[derive(Clone, Debug)]
+struct DelayedPayments {
+    payments: Vec<Payment>,
+    next: usize,
+    initial_delay: Duration,
+}
+
+impl DelayedPayments {
+    fn new(payments: Vec<Payment>, initial_delay: Duration) -> Self {
+        Self {
+            payments,
+            next: 0,
+            initial_delay,
+        }
+    }
+}
+
+impl TypedFiniteSourceHandler for DelayedPayments {
+    type Output = Payment;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        if self.next >= self.payments.len() {
+            return Ok(None);
+        }
+        if self.next == 0 && !self.initial_delay.is_zero() {
+            std::thread::sleep(self.initial_delay);
+        }
+        let payment = self.payments[self.next].clone();
+        self.next += 1;
+        Ok(Some(vec![payment]))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DelayedPaymentTap {
+    delay: Duration,
+}
+
+impl TypedTransformHandler for DelayedPaymentTap {
+    type Input = Payment;
+    type Output = Payment;
+
+    fn process(&self, input: Payment) -> Result<Payment, HandlerError> {
+        std::thread::sleep(self.delay);
+        Ok(input)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct IdentityPayment;
+
+impl TypedTransformHandler for IdentityPayment {
+    type Input = Payment;
+    type Output = Payment;
+
+    fn process(&self, input: Payment) -> Result<Payment, HandlerError> {
+        Ok(input)
+    }
+}
+
 impl TypedFiniteSourceHandler for StallingPayments {
     type Output = Payment;
 
@@ -177,12 +245,12 @@ fn build_sink(
 ) -> Result<PaymentSink, Box<FlowBuildError>> {
     let builder = PostgresSink::<Payment>::builder()
         .connection(connection)
-        .table(schema, "payments")
-        .map_err(flow_error)?
-        .statement(format!(
-            "INSERT INTO {schema}.payments (id, amount_cents) VALUES ($1, $2) \
-             ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents"
-        ))
+        .insert_into(
+            schema,
+            "payments",
+            "(id, amount_cents) VALUES ($1, $2) \
+             ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents",
+        )
         .map_err(flow_error)?
         .batch_size(2)
         .map_err(flow_error)?
@@ -277,6 +345,145 @@ fn fan_in_flow(
     })
 }
 
+fn ordered_source_fan_in_flow(
+    journal_root: PathBuf,
+    connection: PostgresConnection,
+    schema: String,
+    probe: PostgresTestProbe,
+    right_initial_delay: Duration,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let postgres = build_sink(
+            connection,
+            &schema,
+            probe,
+            SinkDestinationClass::SafeToRepeat,
+        )
+        .map_err(|error| *error)?;
+        let left = DelayedPayments::new(
+            vec![
+                Payment {
+                    id: 9_101,
+                    amount_cents: 100,
+                },
+                Payment {
+                    id: 9_101,
+                    amount_cents: 300,
+                },
+            ],
+            Duration::ZERO,
+        );
+        let right = DelayedPayments::new(
+            vec![
+                Payment {
+                    id: 9_101,
+                    amount_cents: 200,
+                },
+                Payment {
+                    id: 9_101,
+                    amount_cents: 400,
+                },
+            ],
+            right_initial_delay,
+        );
+        Ok(flow! {
+            name: "postgres_order_sensitive_source_fan_in",
+            journals: disk_journals(journal_root),
+
+            stages: {
+                left = source!(Payment => left);
+                right = source!(Payment => right);
+                postgres = sink!(Payment => postgres);
+            },
+
+            topology: {
+                left |> postgres;
+                right |> postgres;
+            }
+        })
+    })
+}
+
+fn ordered_derived_fan_in_flow(
+    journal_root: PathBuf,
+    connection: PostgresConnection,
+    schema: String,
+    probe: PostgresTestProbe,
+    delay: Duration,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let payments = sources::finite([Payment {
+            id: 9_102,
+            amount_cents: 1_250,
+        }]);
+        let delayed = DelayedPaymentTap { delay };
+        let postgres = build_sink(
+            connection,
+            &schema,
+            probe,
+            SinkDestinationClass::SafeToRepeat,
+        )
+        .map_err(|error| *error)?;
+        Ok(flow! {
+            name: "postgres_order_sensitive_derived_fan_in",
+            journals: disk_journals(journal_root),
+
+            stages: {
+                payments = source!(Payment => payments);
+                delayed = transform!(Payment -> Payment => delayed);
+                postgres = sink!(Payment => postgres);
+            },
+
+            topology: {
+                payments |> delayed;
+                payments |> postgres;
+                delayed |> postgres;
+            }
+        })
+    })
+}
+
+fn ordered_cycle_fan_in_flow(
+    journal_root: PathBuf,
+    connection: PostgresConnection,
+    schema: String,
+    probe: PostgresTestProbe,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let payments = sources::finite([Payment {
+            id: 9_103,
+            amount_cents: 500,
+        }]);
+        let cycle_a = IdentityPayment;
+        let cycle_b = IdentityPayment;
+        let postgres = build_sink(
+            connection,
+            &schema,
+            probe,
+            SinkDestinationClass::SafeToRepeat,
+        )
+        .map_err(|error| *error)?;
+        Ok(flow! {
+            name: "postgres_order_sensitive_cycle_fan_in",
+            journals: disk_journals(journal_root),
+
+            stages: {
+                payments = source!(Payment => payments);
+                cycle_a = transform!(Payment -> Payment => cycle_a);
+                cycle_b = transform!(Payment -> Payment => cycle_b);
+                postgres = sink!(Payment => postgres);
+            },
+
+            topology: {
+                payments |> cycle_a;
+                cycle_a |> cycle_b;
+                cycle_a <| cycle_b;
+                cycle_b |> postgres;
+            }
+        })
+    })
+}
+
 fn fan_out_flow(
     journal_root: PathBuf,
     connection: PostgresConnection,
@@ -356,6 +563,100 @@ fn latest_run_dir(root: &Path) -> PathBuf {
         .collect::<Vec<_>>();
     runs.sort();
     runs.pop().expect("durable run archive")
+}
+
+struct OrderingDatabase {
+    pool: PgPool,
+    connection: PostgresConnection,
+    schema: String,
+}
+
+impl OrderingDatabase {
+    async fn connect(url: &str, label: &str) -> Self {
+        let run_id = std::env::var("OBZENFLOW_POSTGRES_TEST_RUN_ID")
+            .expect("OBZENFLOW_POSTGRES_TEST_RUN_ID comes from cargo xtask postgres test");
+        assert!(
+            run_id.len() == 32 && run_id.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "PostgreSQL ordering proof requires a canonical run token"
+        );
+        let schema = format!("obz083c_order_{label}_{run_id}");
+        assert!(
+            schema.len() <= 63,
+            "ordering schema fits PostgreSQL's bound"
+        );
+        let pool = PgPool::connect(url)
+            .await
+            .expect("ordering proof connects to PostgreSQL");
+        sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .expect("reset ordering schema");
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&pool)
+            .await
+            .expect("create ordering schema");
+        sqlx::query(&format!(
+            "CREATE TABLE {schema}.payments (id BIGINT PRIMARY KEY, amount_cents BIGINT NOT NULL)"
+        ))
+        .execute(&pool)
+        .await
+        .expect("create ordering destination");
+        let connection =
+            PostgresConnection::from_url(url, PostgresTransport::ExternallyProtectedPlaintext)
+                .expect("build ordering connection");
+        Self {
+            pool,
+            connection,
+            schema,
+        }
+    }
+
+    async fn amount(&self, id: i64) -> Option<i64> {
+        sqlx::query_scalar(&format!(
+            "SELECT amount_cents FROM {}.payments WHERE id = $1",
+            self.schema
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .expect("read ordering destination")
+    }
+
+    async fn cleanup(&self) {
+        sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema))
+            .execute(&self.pool)
+            .await
+            .expect("drop ordering schema");
+    }
+}
+
+fn same_key_payment_word(sequence: &[(String, u64)]) -> Vec<i64> {
+    sequence
+        .iter()
+        .map(|(stage, ordinal)| match (stage.as_str(), *ordinal) {
+            ("left", 1) => 100,
+            ("left", 2) => 300,
+            ("right", 1) => 200,
+            ("right", 2) => 400,
+            other => panic!("unexpected same-key input coordinate: {other:?}"),
+        })
+        .collect()
+}
+
+fn assert_postgres_ordered_delivery(run: &Path, expected_inbound: &[&str]) {
+    let manifest = replay_testkit::archive_manifest(run);
+    assert_eq!(
+        manifest["stages"]["postgres"]["ordered_delivery"],
+        serde_json::Value::Bool(true),
+        "the real PostgreSQL sink must record deterministic input delivery"
+    );
+    let inbound = manifest["stages"]["postgres"]["inbound"]
+        .as_array()
+        .expect("PostgreSQL manifest records inbound stages")
+        .iter()
+        .map(|value| value.as_str().expect("inbound stage key"))
+        .collect::<Vec<_>>();
+    assert_eq!(inbound, expected_inbound);
 }
 
 async fn truncate(pool: &PgPool, schema: &str) -> Result<(), SinkFixtureError> {
@@ -499,12 +800,23 @@ impl PostgresApplicationFixture {
     async fn connect(url: &str) -> Result<Self, SinkFixtureError> {
         let temp = tempfile::tempdir().map_err(|error| SinkFixtureError::new(error.to_string()))?;
         let root = temp.path().join("journals");
-        let connection = PostgresConnection::from_url(url)
-            .map_err(|error| SinkFixtureError::new(error.to_string()))?;
+        let connection =
+            PostgresConnection::from_url(url, PostgresTransport::ExternallyProtectedPlaintext)
+                .map_err(|error| SinkFixtureError::new(error.to_string()))?;
         let pool = PgPool::connect(url)
             .await
             .map_err(|error| SinkFixtureError::new(error.to_string()))?;
-        let schema = format!("obz122a_app_{}", std::process::id());
+        let run_id = std::env::var("OBZENFLOW_POSTGRES_TEST_RUN_ID").map_err(|_| {
+            SinkFixtureError::new(
+                "OBZENFLOW_POSTGRES_TEST_RUN_ID is required from `cargo xtask postgres test`",
+            )
+        })?;
+        if run_id.len() != 32 || !run_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(SinkFixtureError::new(
+                "OBZENFLOW_POSTGRES_TEST_RUN_ID is not a canonical run token",
+            ));
+        }
+        let schema = format!("obz083c_application_{run_id}");
         sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             .execute(&pool)
             .await
@@ -585,7 +897,7 @@ impl SinkApplicationConformanceFixture for PostgresApplicationFixture {
             SINK_CONFORMANCE_PROTOCOL_VERSION,
             SinkSettlementMode::Buffered { batch_size: 2 },
         )
-        .with_credential_sentinel("obzenflow-secret-122a")
+        .with_credential_sentinel("obzenflow-secret-083c")
     }
 
     async fn reset_destination(&mut self) -> Result<(), SinkFixtureError> {
@@ -683,8 +995,219 @@ impl SinkApplicationConformanceFixture for PostgresApplicationFixture {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row() {
+    let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
+    let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL")
+        .expect("OBZENFLOW_POSTGRES_TEST_URL comes from cargo xtask postgres test");
+    let database = OrderingDatabase::connect(&url, "source").await;
+    let temp = tempfile::tempdir().expect("source fan-in journal directory");
+    let journal_root = temp.path().join("journals");
+    let delay = Duration::from_secs(4);
+    let live_probe = PostgresTestProbe::default();
+
+    let handle = ordered_source_fan_in_flow(
+        journal_root.clone(),
+        database.connection.clone(),
+        database.schema.clone(),
+        live_probe.clone(),
+        delay,
+    )
+    .build(FlowBuildContext::for_tests())
+    .await
+    .expect("source-fed PostgreSQL fan-in builds");
+
+    let early_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if database.amount(9_101).await == Some(300) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < early_deadline,
+            "source-fed PostgreSQL fan-in waited on the quiet right source instead of committing the two admitted left inputs"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    tokio::time::timeout(Duration::from_secs(12), handle.wait_for_completion())
+        .await
+        .expect("source-fed PostgreSQL fan-in completes")
+        .expect("source-fed PostgreSQL fan-in succeeds");
+    let live_authority = live_probe.authority_snapshot();
+    assert_eq!(live_authority.hook_invocations(), 1);
+    assert_eq!(live_authority.sessions().len(), 1);
+    assert_eq!(live_authority.preparations().len(), 1);
+    let live_run = replay_testkit::latest_run_dir(&journal_root);
+    assert_postgres_ordered_delivery(&live_run, &["left", "right"]);
+    let live_projection =
+        replay_testkit::project_delivered_order(&live_run, "postgres", &["left", "right"]).await;
+    let live_sequence = live_projection.consumption_sequence();
+    let live_word = same_key_payment_word(&live_sequence);
+    assert_eq!(live_word.len(), 4, "all same-key inputs reach PostgreSQL");
+    assert_eq!(
+        database.amount(9_101).await,
+        live_word.last().copied(),
+        "the live destination row is the final delivered value"
+    );
+
+    let replay_probe = PostgresTestProbe::default();
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            live_run.as_os_str().to_os_string(),
+            OsString::from("--verify"),
+        ])
+        .run_async(ordered_source_fan_in_flow(
+            journal_root.clone(),
+            database.connection.clone(),
+            database.schema.clone(),
+            replay_probe.clone(),
+            delay,
+        ))
+        .await
+        .expect("same-key PostgreSQL fan-in redelivers with verified journals");
+    let replay_authority = replay_probe.authority_snapshot();
+    assert_eq!(replay_authority.hook_invocations(), 1);
+    assert_eq!(replay_authority.sessions().len(), 1);
+    assert_eq!(replay_authority.preparations().len(), 1);
+    let replay_run = replay_testkit::latest_run_dir(&journal_root);
+    assert_ne!(replay_run, live_run);
+    assert_postgres_ordered_delivery(&replay_run, &["left", "right"]);
+    replay_testkit::assert_same_delivered_order(
+        &live_run,
+        &replay_run,
+        "postgres",
+        &["left", "right"],
+    )
+    .await;
+    let replay_word = same_key_payment_word(
+        &replay_testkit::project_delivered_order(&replay_run, "postgres", &["left", "right"])
+            .await
+            .consumption_sequence(),
+    );
+    assert_eq!(replay_word, live_word, "replay reproduces the sink word");
+    assert_eq!(
+        database.amount(9_101).await,
+        live_word.last().copied(),
+        "archive redelivery converges to the same final destination row"
+    );
+    database.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_order_sensitive_derived_fan_in_reports_named_quiet_input() {
+    let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
+    let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL")
+        .expect("OBZENFLOW_POSTGRES_TEST_URL comes from cargo xtask postgres test");
+    let database = OrderingDatabase::connect(&url, "derived").await;
+    let temp = tempfile::tempdir().expect("derived fan-in journal directory");
+    let journal_root = temp.path().join("journals");
+    let handle = ordered_derived_fan_in_flow(
+        journal_root.clone(),
+        database.connection.clone(),
+        database.schema.clone(),
+        PostgresTestProbe::default(),
+        Duration::from_secs(3),
+    )
+    .build(FlowBuildContext::for_tests())
+    .await
+    .expect("derived-fed PostgreSQL fan-in builds");
+    let topology = handle.topology().expect("flow exposes its topology");
+    let snapshots = handle
+        .liveness_snapshots()
+        .expect("flow exposes liveness snapshots");
+
+    let quiet_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let quiet_upstream = loop {
+        if let Some(upstream) = snapshots.with_read(|all| {
+            all.values().find_map(|snapshot| {
+                if snapshot.stage_name != "postgres" {
+                    return None;
+                }
+                match snapshot.activity {
+                    StageActivity::WaitingOnQuietInput {
+                        upstream: Some(upstream),
+                    } => Some(upstream),
+                    _ => None,
+                }
+            })
+        }) {
+            break upstream;
+        }
+        assert!(
+            tokio::time::Instant::now() < quiet_deadline,
+            "derived-fed PostgreSQL fan-in never reported its canonical Kahn quiet input"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(
+        topology.stage_name(quiet_upstream.to_topology_id()),
+        Some("delayed"),
+        "the Kahn wait identifies the delayed derived upstream"
+    );
+
+    tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+        .await
+        .expect("derived-fed PostgreSQL fan-in completes")
+        .expect("derived-fed PostgreSQL fan-in succeeds");
+    let run = replay_testkit::latest_run_dir(&journal_root);
+    assert_postgres_ordered_delivery(&run, &["delayed", "payments"]);
+    let sequence =
+        replay_testkit::project_delivered_order(&run, "postgres", &["payments", "delayed"])
+            .await
+            .consumption_sequence();
+    assert_eq!(
+        sequence,
+        vec![("payments".to_string(), 1), ("delayed".to_string(), 1)],
+        "canonical Kahn delivery preserves the direct event before its derived sibling"
+    );
+    assert_eq!(database.amount(9_102).await, Some(1_250));
+    database.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn postgres_order_sensitive_cycle_fan_in_is_rejected_before_open() {
+    let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
+    let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL")
+        .expect("OBZENFLOW_POSTGRES_TEST_URL comes from cargo xtask postgres test");
+    let run_id = std::env::var("OBZENFLOW_POSTGRES_TEST_RUN_ID")
+        .expect("OBZENFLOW_POSTGRES_TEST_RUN_ID comes from cargo xtask postgres test");
+    let connection =
+        PostgresConnection::from_url(&url, PostgresTransport::ExternallyProtectedPlaintext)
+            .expect("build cycle proof connection");
+    let probe = PostgresTestProbe::default();
+    let temp = tempfile::tempdir().expect("cycle fan-in journal directory");
+    let result = ordered_cycle_fan_in_flow(
+        temp.path().join("journals"),
+        connection,
+        format!("obz083c_cycle_{run_id}"),
+        probe.clone(),
+    )
+    .build(FlowBuildContext::for_tests())
+    .await;
+    let failure = match result {
+        Err(failure) => failure,
+        Ok(handle) => {
+            let _ = handle.stop().await;
+            panic!("cycle-fed order-sensitive PostgreSQL sink must fail construction");
+        }
+    };
+    match failure.error {
+        FlowBuildError::OrderObserverFanInRequiresDeterministicOrder { stage_name } => {
+            assert_eq!(stage_name, "postgres");
+        }
+        other => panic!("unexpected cycle-fed PostgreSQL build failure: {other:?}"),
+    }
+    assert!(
+        probe.snapshot().calls().is_empty(),
+        "cycle rejection occurs before the PostgreSQL sink opens a writer"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn postgres_passes_live_redelivery_gate_and_archived_failure_projection() {
+    let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
     let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL").expect(
         "OBZENFLOW_POSTGRES_TEST_URL is required: PostgreSQL application conformance must not pass without a real database",
     );
