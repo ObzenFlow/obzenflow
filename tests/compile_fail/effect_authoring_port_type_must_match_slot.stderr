@@ -1,0 +1,7 @@
+error[E0277]: the trait bound `(): ChatClient` is not satisfied
+  --> tests/compile_fail/effect_authoring_port_type_must_match_slot.rs:14:13
+   |
+14 |             Arc::new(()),
+   |             ^^^^^^^^^^^^ the trait `ChatClient` is not implemented for `()`
+   |
+   = note: required for the cast from `Arc<()>` to `Arc<dyn ChatClient>`

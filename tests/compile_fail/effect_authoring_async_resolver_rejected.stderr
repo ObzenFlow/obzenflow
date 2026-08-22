@@ -1,0 +1,18 @@
+error[E0271]: expected `{closure@effect_authoring_async_resolver_rejected.rs:15:29}` to return `Result<Arc<P>, EffectPortResolutionError>`, but it returns `{async block@$DIR/tests/compile_fail/effect_authoring_async_resolver_rejected.rs:15:32: 15:37}`
+  --> tests/compile_fail/effect_authoring_async_resolver_rejected.rs:15:32
+   |
+15 |       let resolver = Arc::new(|| async {
+   |  _____________________________--_^
+   | |                             |
+   | |                             this closure
+16 | |         Err::<Arc<P>, EffectPortResolutionError>(
+17 | |             EffectPortResolutionError::ClientConstructionFailed,
+18 | |         )
+19 | |     });
+   | |_____^ expected `Result<Arc<P>, ...>`, found `async` block
+20 |       let _ = builder.bind_deferred(slot, resolver);
+   |                                           -------- closure used here
+   |
+   = note:       expected enum `Result<Arc<P>, EffectPortResolutionError>`
+           found `async` block `{async block@$DIR/tests/compile_fail/effect_authoring_async_resolver_rejected.rs:15:32: 15:37}`
+   = note: required for the cast from `Arc<{closure@$DIR/tests/compile_fail/effect_authoring_async_resolver_rejected.rs:15:29: 15:31}>` to `Arc<(dyn Fn() -> Result<Arc<P>, EffectPortResolutionError> + Send + Sync + 'static)>`

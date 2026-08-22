@@ -1,0 +1,5 @@
+error[E0599]: no method named `port` found for reference `&EffectPortMetadataContext` in the current scope
+ --> tests/compile_fail/effect_authoring_metadata_context_cannot_resolve_ports.rs:9:21
+  |
+9 |     let _ = context.port(CHAT_CLIENT);
+  |                     ^^^^ method not found in `&EffectPortMetadataContext`

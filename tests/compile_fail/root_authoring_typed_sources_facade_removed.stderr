@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `obzenflow::typed`
+ --> tests/compile_fail/root_authoring_typed_sources_facade_removed.rs:5:16
+  |
+5 | use obzenflow::typed::sources;
+  |                ^^^^^ could not find `typed` in `obzenflow`

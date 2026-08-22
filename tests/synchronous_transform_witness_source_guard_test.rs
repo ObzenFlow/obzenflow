@@ -25,8 +25,7 @@ const RETIRED_IDENTIFIERS: &[&str] = &[
     "__obzenflow_transform_untyped",
 ];
 
-const RAW_ALLOWLIST: &str =
-    include_str!("fixtures/flowip_134b_raw_transform_handler_allowlist.txt");
+const RAW_ALLOWLIST: &str = include_str!("fixtures/raw_transform_handler_allowlist.txt");
 
 fn rust_sources_under(path: &Path, output: &mut Vec<PathBuf>) {
     if !path.is_dir() {

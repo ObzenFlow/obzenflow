@@ -1,0 +1,23 @@
+error: an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)
+  --> tests/compile_fail/middleware_attachment_effect_policy_collections_removed.rs:13:13
+   |
+13 |       let _ = obzenflow_dsl::effectful_transform!(
+   |  _____________^
+14 | |         Input -> Output uses Effect with [first] => Handler,
+15 | |         observers: []
+16 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_effect_policy_syntax_gate` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: an effect's 'with' takes one policy expression; write 'with <policy>'; braced policy sets await FLOWIP-132b (FLOWIP-115s)
+  --> tests/compile_fail/middleware_attachment_effect_policy_collections_removed.rs:17:13
+   |
+17 |       let _ = obzenflow_dsl::effectful_transform!(
+   |  _____________^
+18 | |         Input -> Output uses Effect with { first, second } => Handler,
+19 | |         observers: []
+20 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `$crate::__obzenflow_effect_policy_syntax_gate` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)

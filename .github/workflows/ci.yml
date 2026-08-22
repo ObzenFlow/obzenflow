@@ -458,7 +458,7 @@ jobs:
           ! grep -n '^pub mod base;' crates/obzenflow_runtime/src/supervised_base/mod.rs
           ! grep -n 'pub use base::Supervisor' crates/obzenflow_runtime/src/supervised_base/mod.rs
 
-      - name: Guard against barrier sleeps in migrated tests (FLOWIP-114n)
+      - name: Guard against barrier sleeps in synchronisation-sensitive tests
         run: |
           set -euo pipefail
 
@@ -490,7 +490,7 @@ jobs:
 
           echo "OK: all tokio::time::sleep(...) calls are annotated with // hang-guard:."
 
-      - name: Guard the runtime execution strategy (FLOWIP-120r)
+      - name: Guard the runtime execution strategy
         run: |
           set -euo pipefail
 

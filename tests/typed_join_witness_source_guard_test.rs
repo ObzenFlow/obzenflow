@@ -16,7 +16,7 @@ const RETIRED_IDENTIFIERS: &[&str] = &[
     "__obzenflow_join_untyped",
 ];
 
-const ERASED_IMPL_ALLOWLIST: &str = include_str!("fixtures/flowip_134f_erased_join_allowlist.txt");
+const ERASED_IMPL_ALLOWLIST: &str = include_str!("fixtures/erased_join_allowlist.txt");
 
 fn erased_impl_allowlist() -> Vec<(String, String)> {
     ERASED_IMPL_ALLOWLIST

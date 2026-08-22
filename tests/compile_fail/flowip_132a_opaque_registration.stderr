@@ -1,8 +1,0 @@
-error[E0432]: unresolved import `obzenflow_runtime::effects::EffectRegistration`
- --> tests/compile_fail/flowip_132a_opaque_registration.rs:5:34
-  |
-5 | use obzenflow_runtime::effects::{EffectRegistration, NamedEffect};
-  |                                  ^^^^^^^^^^^^^^^^^^
-  |                                  |
-  |                                  no `EffectRegistration` in `effects`
-  |                                  help: a similar name exists in the module: `EffectDeclaration`

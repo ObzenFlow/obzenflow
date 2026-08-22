@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-132a grammar and typed-binding rejection matrix.
+//! Effect grammar and typed-binding rejection matrix.
 
 #[test]
 fn retired_effect_grammar_and_incoherent_bindings_do_not_compile() {
     let tests = trybuild::TestCases::new();
-    tests.compile_fail("tests/compile_fail/flowip_132a_*.rs");
+    tests.compile_fail("tests/compile_fail/effect_authoring_*.rs");
 }
 
 #[test]

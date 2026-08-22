@@ -9,7 +9,7 @@ fn retired_flow_bindings_section_has_a_teaching_diagnostic() {
 }
 
 #[test]
-fn flow_middleware_slot_matrix_has_the_flowip_115r_diagnostic() {
+fn flow_middleware_slot_matrix_reports_its_removal() {
     let tests = trybuild::TestCases::new();
     tests.compile_fail("tests/compile_fail/flow_middleware_removed_matrix.rs");
 }
@@ -23,7 +23,7 @@ fn retired_test_flow_bindings_section_has_a_teaching_diagnostic() {
 
 #[cfg(feature = "test-support")]
 #[test]
-fn test_flow_middleware_slot_matrix_has_the_flowip_115r_diagnostic() {
+fn test_flow_middleware_slot_matrix_reports_its_removal() {
     let tests = trybuild::TestCases::new();
     tests.compile_fail("tests/compile_fail/test_flow_middleware_removed_matrix.rs");
 }

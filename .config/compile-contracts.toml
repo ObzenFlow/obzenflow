@@ -1,0 +1,43 @@
+schema = 1
+
+[[suite]]
+name = "root-default"
+owner-manifest = "Cargo.toml"
+default-features = true
+features = []
+
+[[suite]]
+name = "root-ai"
+owner-manifest = "Cargo.toml"
+default-features = true
+features = ["ai"]
+
+[[suite]]
+name = "root-test-support"
+owner-manifest = "Cargo.toml"
+default-features = true
+features = ["test-support"]
+
+[[suite]]
+name = "core-default"
+owner-manifest = "crates/obzenflow_core/Cargo.toml"
+default-features = true
+features = []
+
+[[suite]]
+name = "runtime-default"
+owner-manifest = "crates/obzenflow_runtime/Cargo.toml"
+default-features = true
+features = []
+
+[[suite]]
+name = "runtime-test-support"
+owner-manifest = "crates/obzenflow_runtime/Cargo.toml"
+default-features = true
+features = ["test-support"]
+
+[[suite]]
+name = "adapters-default"
+owner-manifest = "crates/obzenflow_adapters/Cargo.toml"
+default-features = true
+features = []

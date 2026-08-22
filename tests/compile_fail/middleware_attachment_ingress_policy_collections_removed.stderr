@@ -1,0 +1,79 @@
+error: an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)
+  --> tests/compile_fail/middleware_attachment_ingress_policy_collections_removed.rs:10:13
+   |
+10 |     let _ = obzenflow_dsl::source!(Output => Handler, ingress with [policy]);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `obzenflow_dsl::source` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)
+  --> tests/compile_fail/middleware_attachment_ingress_policy_collections_removed.rs:11:13
+   |
+11 |     let _ = obzenflow_dsl::async_source!(Output => Handler, ingress with [policy]);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `obzenflow_dsl::async_source` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)
+  --> tests/compile_fail/middleware_attachment_ingress_policy_collections_removed.rs:12:13
+   |
+12 |     let _ = obzenflow_dsl::infinite_source!(Output => Handler, ingress with [policy]);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `obzenflow_dsl::infinite_source` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)
+  --> tests/compile_fail/middleware_attachment_ingress_policy_collections_removed.rs:13:13
+   |
+13 |     let _ = obzenflow_dsl::async_infinite_source!(Output => Handler, ingress with [policy]);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `obzenflow_dsl::async_infinite_source` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)
+  --> tests/compile_fail/middleware_attachment_ingress_policy_collections_removed.rs:16:13
+   |
+16 |       let _ = obzenflow_dsl::source!(
+   |  _____________^
+17 | |         Output => Handler with [source_policy],
+18 | |         ingress with [policy]
+19 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `obzenflow_dsl::source` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)
+  --> tests/compile_fail/middleware_attachment_ingress_policy_collections_removed.rs:20:13
+   |
+20 |       let _ = obzenflow_dsl::async_source!(
+   |  _____________^
+21 | |         Output => Handler with [source_policy],
+22 | |         ingress with [policy]
+23 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `obzenflow_dsl::async_source` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)
+  --> tests/compile_fail/middleware_attachment_ingress_policy_collections_removed.rs:24:13
+   |
+24 |       let _ = obzenflow_dsl::infinite_source!(
+   |  _____________^
+25 | |         Output => Handler with [source_policy],
+26 | |         ingress with [policy]
+27 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `obzenflow_dsl::infinite_source` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: an ingress 'with' takes one policy expression in this release; write 'ingress with <policy>'; ordered ingress chains await FLOWIP-115t (FLOWIP-115s)
+  --> tests/compile_fail/middleware_attachment_ingress_policy_collections_removed.rs:28:13
+   |
+28 |       let _ = obzenflow_dsl::async_infinite_source!(
+   |  _____________^
+29 | |         Output => Handler with [source_policy],
+30 | |         ingress with [policy]
+31 | |     );
+   | |_____^
+   |
+   = note: this error originates in the macro `obzenflow_dsl::async_infinite_source` (in Nightly builds, run with -Z macro-backtrace for more info)
