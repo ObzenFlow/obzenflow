@@ -35,6 +35,7 @@ use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::sink::SinkConnector;
 use obzenflow_runtime::stages::source::strategies::{
     CompletionContext, CompletionDecision, CompletionGate,
 };
@@ -46,13 +47,213 @@ use obzenflow_runtime::testing::sink::{
     SINK_CONFORMANCE_PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Row};
+use sqlx::postgres::PgConnectOptions;
+use sqlx::{ConnectOptions as _, PgPool, Row};
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 static POSTGRES_APPLICATION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+const POSTGRES_SQL_EVIDENCE_CANARY: &str = "obz083c_sql_body_canary_7f3c91a6";
+const POSTGRES_DURABLE_ONLY_VALUES: &[&str] = &[
+    "VerifiedTls",
+    "ExternallyProtectedPlaintext",
+    "sslrootcert",
+    "max_identifier_length",
+    "statement_fingerprint",
+];
+const POSTGRES_FORBIDDEN_EVIDENCE_KEYS: &[&str] = &[
+    "certificate",
+    "certificate_path",
+    "compose_project",
+    "connection_url",
+    "container_id",
+    "health",
+    "identifier_limit",
+    "max_identifier_length",
+    "port",
+    "postgres_url",
+    "sql",
+    "sslrootcert",
+    "statement",
+    "statement_fingerprint",
+    "transport",
+    "trust_store",
+];
+
+#[derive(Clone, Default)]
+struct TraceCapture {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl TraceCapture {
+    fn clear(&self) {
+        self.bytes.lock().expect("trace capture lock").clear();
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes.lock().expect("trace capture lock")).into_owned()
+    }
+}
+
+impl Write for TraceCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes
+            .lock()
+            .map_err(|_| std::io::Error::other("trace capture lock poisoned"))?
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn trace_capture() -> &'static TraceCapture {
+    static CAPTURE: OnceLock<TraceCapture> = OnceLock::new();
+    CAPTURE.get_or_init(|| {
+        let capture = TraceCapture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("install PostgreSQL evidence trace capture");
+        capture
+    })
+}
+
+#[derive(Clone, Debug)]
+struct PostgresEvidenceCanaries {
+    forbidden_everywhere: Vec<String>,
+    forbidden_port: u16,
+}
+
+impl PostgresEvidenceCanaries {
+    fn apply_to_profile(&self, profile: SinkConformanceProfile) -> SinkConformanceProfile {
+        self.forbidden_everywhere
+            .iter()
+            .cloned()
+            .fold(profile, SinkConformanceProfile::with_credential_sentinel)
+    }
+
+    fn reject_text(
+        &self,
+        surface: &str,
+        text: &str,
+        include_durable_only: bool,
+    ) -> Result<(), SinkFixtureError> {
+        for (index, value) in self.forbidden_everywhere.iter().enumerate() {
+            if !value.is_empty() && text.contains(value) {
+                return Err(SinkFixtureError::new(format!(
+                    "PostgreSQL evidence surface {surface} contains forbidden canary #{index}"
+                )));
+            }
+        }
+        if include_durable_only {
+            for (index, value) in POSTGRES_DURABLE_ONLY_VALUES.iter().enumerate() {
+                if text.contains(value) {
+                    return Err(SinkFixtureError::new(format!(
+                        "PostgreSQL durable evidence surface {surface} contains forbidden policy value #{index}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn scan_tree(&self, root: &Path) -> Result<(), SinkFixtureError> {
+        if !root.exists() {
+            return Ok(());
+        }
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                for entry in std::fs::read_dir(&path)
+                    .map_err(|error| SinkFixtureError::new(error.to_string()))?
+                {
+                    pending.push(
+                        entry
+                            .map_err(|error| SinkFixtureError::new(error.to_string()))?
+                            .path(),
+                    );
+                }
+                continue;
+            }
+            let bytes =
+                std::fs::read(&path).map_err(|error| SinkFixtureError::new(error.to_string()))?;
+            self.reject_text(
+                &path.display().to_string(),
+                &String::from_utf8_lossy(&bytes),
+                true,
+            )?;
+            if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
+                let value: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(|error| SinkFixtureError::new(error.to_string()))?;
+                self.reject_json(&path, &value)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn reject_json(&self, path: &Path, value: &serde_json::Value) -> Result<(), SinkFixtureError> {
+        match value {
+            serde_json::Value::Object(fields) => {
+                for (key, value) in fields {
+                    let normalized = key.to_ascii_lowercase().replace('-', "_");
+                    if POSTGRES_FORBIDDEN_EVIDENCE_KEYS.contains(&normalized.as_str()) {
+                        return Err(SinkFixtureError::new(format!(
+                            "PostgreSQL durable JSON {} contains forbidden field `{key}`",
+                            path.display()
+                        )));
+                    }
+                    self.reject_json(path, value)?;
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    self.reject_json(path, value)?;
+                }
+            }
+            serde_json::Value::Number(number)
+                if number.as_u64() == Some(u64::from(self.forbidden_port)) =>
+            {
+                return Err(SinkFixtureError::new(format!(
+                    "PostgreSQL durable JSON {} contains the proof-service port",
+                    path.display()
+                )));
+            }
+            serde_json::Value::String(value) if value == &self.forbidden_port.to_string() => {
+                return Err(SinkFixtureError::new(format!(
+                    "PostgreSQL durable JSON {} contains the proof-service port",
+                    path.display()
+                )));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+fn assert_postgres_evidence_is_confined(
+    fixture: &PostgresApplicationFixture,
+    report: &obzenflow::testing::sink::SinkConformanceReport,
+    trace: &str,
+) -> Result<(), SinkFixtureError> {
+    fixture.evidence.reject_text("trace", trace, true)?;
+    fixture
+        .evidence
+        .reject_text("conformance-report", &format!("{report:?}"), true)?;
+    fixture.evidence.scan_tree(&fixture.root)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Payment {
@@ -248,8 +449,11 @@ fn build_sink(
         .insert_into(
             schema,
             "payments",
-            "(id, amount_cents) VALUES ($1, $2) \
-             ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents",
+            format!(
+                "(id, amount_cents) VALUES ($1, $2) \
+                 ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents \
+                 /* {POSTGRES_SQL_EVIDENCE_CANARY} */"
+            ),
         )
         .map_err(flow_error)?
         .batch_size(2)
@@ -788,6 +992,7 @@ struct PostgresApplicationFixture {
     _temp: tempfile::TempDir,
     root: PathBuf,
     connection: PostgresConnection,
+    evidence: PostgresEvidenceCanaries,
     verifier: PostgresVerifier,
     duplicate_archive: PathBuf,
     unspecified_archive: PathBuf,
@@ -800,9 +1005,62 @@ impl PostgresApplicationFixture {
     async fn connect(url: &str) -> Result<Self, SinkFixtureError> {
         let temp = tempfile::tempdir().map_err(|error| SinkFixtureError::new(error.to_string()))?;
         let root = temp.path().join("journals");
-        let connection =
-            PostgresConnection::from_url(url, PostgresTransport::ExternallyProtectedPlaintext)
-                .map_err(|error| SinkFixtureError::new(error.to_string()))?;
+        let tls_url = std::env::var("OBZENFLOW_POSTGRES_TEST_TLS_URL").map_err(|_| {
+            SinkFixtureError::new(
+                "OBZENFLOW_POSTGRES_TEST_TLS_URL is required from `cargo xtask postgres test`",
+            )
+        })?;
+        let ca_cert = std::env::var("OBZENFLOW_POSTGRES_TEST_CA_CERT").map_err(|_| {
+            SinkFixtureError::new(
+                "OBZENFLOW_POSTGRES_TEST_CA_CERT is required from `cargo xtask postgres test`",
+            )
+        })?;
+        let project = std::env::var("OBZENFLOW_POSTGRES_TEST_PROJECT").map_err(|_| {
+            SinkFixtureError::new(
+                "OBZENFLOW_POSTGRES_TEST_PROJECT is required from `cargo xtask postgres test`",
+            )
+        })?;
+        let container_id = std::env::var("OBZENFLOW_POSTGRES_TEST_CONTAINER_ID").map_err(|_| {
+            SinkFixtureError::new(
+                "OBZENFLOW_POSTGRES_TEST_CONTAINER_ID is required from `cargo xtask postgres test`",
+            )
+        })?;
+        let tls_directory = std::env::var("OBZENFLOW_POSTGRES_TEST_TLS_DIR").map_err(|_| {
+            SinkFixtureError::new(
+                "OBZENFLOW_POSTGRES_TEST_TLS_DIR is required from `cargo xtask postgres test`",
+            )
+        })?;
+        let port = std::env::var("OBZENFLOW_POSTGRES_TEST_PORT")
+            .map_err(|_| {
+                SinkFixtureError::new(
+                    "OBZENFLOW_POSTGRES_TEST_PORT is required from `cargo xtask postgres test`",
+                )
+            })?
+            .parse::<u16>()
+            .map_err(|_| SinkFixtureError::new("invalid PostgreSQL proof-service port"))?;
+        let options = PgConnectOptions::from_str(&tls_url)
+            .map_err(|error| SinkFixtureError::new(error.to_string()))?
+            .ssl_root_cert(&ca_cert)
+            .log_statements("trace".parse().expect("trace log level parses"))
+            .log_slow_statements(
+                "trace".parse().expect("trace log level parses"),
+                Duration::ZERO,
+            );
+        let connection = PostgresConnection::from_options(options, PostgresTransport::VerifiedTls)
+            .map_err(|error| SinkFixtureError::new(error.to_string()))?;
+        let evidence = PostgresEvidenceCanaries {
+            forbidden_everywhere: vec![
+                "obzenflow-secret-083c".to_string(),
+                url.to_string(),
+                tls_url,
+                ca_cert,
+                project,
+                container_id,
+                tls_directory,
+                POSTGRES_SQL_EVIDENCE_CANARY.to_string(),
+            ],
+            forbidden_port: port,
+        };
         let pool = PgPool::connect(url)
             .await
             .map_err(|error| SinkFixtureError::new(error.to_string()))?;
@@ -865,6 +1123,7 @@ impl PostgresApplicationFixture {
             _temp: temp,
             root,
             connection,
+            evidence,
             verifier: PostgresVerifier {
                 pool,
                 schema,
@@ -893,11 +1152,10 @@ impl SinkApplicationConformanceFixture for PostgresApplicationFixture {
     type Verifier = PostgresVerifier;
 
     fn profile(&self) -> SinkConformanceProfile {
-        SinkConformanceProfile::new(
+        self.evidence.apply_to_profile(SinkConformanceProfile::new(
             SINK_CONFORMANCE_PROTOCOL_VERSION,
             SinkSettlementMode::Buffered { batch_size: 2 },
-        )
-        .with_credential_sentinel("obzenflow-secret-083c")
+        ))
     }
 
     async fn reset_destination(&mut self) -> Result<(), SinkFixtureError> {
@@ -982,10 +1240,22 @@ impl SinkApplicationConformanceFixture for PostgresApplicationFixture {
     }
 
     fn diagnostic_samples(&self) -> Result<Vec<SinkDiagnosticSample>, SinkFixtureError> {
+        let sink = build_sink(
+            self.connection.clone(),
+            &self.verifier.schema,
+            self.verifier.probe.clone(),
+            SinkDestinationClass::SafeToRepeat,
+        )
+        .map_err(|error| SinkFixtureError::new(error.to_string()))?;
         Ok(vec![
             SinkDiagnosticSample::new(
                 SinkDiagnosticSurface::Debug,
                 format!("{:?}", self.connection),
+            ),
+            SinkDiagnosticSample::new(SinkDiagnosticSurface::Debug, format!("{sink:?}")),
+            SinkDiagnosticSample::new(
+                SinkDiagnosticSurface::Snapshot,
+                format!("{:?}", sink.describe()),
             ),
             SinkDiagnosticSample::new(
                 SinkDiagnosticSurface::Verifier,
@@ -998,6 +1268,7 @@ impl SinkApplicationConformanceFixture for PostgresApplicationFixture {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row() {
     let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
+    let _ = trace_capture();
     let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL")
         .expect("OBZENFLOW_POSTGRES_TEST_URL comes from cargo xtask postgres test");
     let database = OrderingDatabase::connect(&url, "source").await;
@@ -1098,6 +1369,7 @@ async fn postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_order_sensitive_derived_fan_in_reports_named_quiet_input() {
     let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
+    let _ = trace_capture();
     let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL")
         .expect("OBZENFLOW_POSTGRES_TEST_URL comes from cargo xtask postgres test");
     let database = OrderingDatabase::connect(&url, "derived").await;
@@ -1169,6 +1441,7 @@ async fn postgres_order_sensitive_derived_fan_in_reports_named_quiet_input() {
 #[tokio::test(flavor = "multi_thread")]
 async fn postgres_order_sensitive_cycle_fan_in_is_rejected_before_open() {
     let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
+    let _ = trace_capture();
     let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL")
         .expect("OBZENFLOW_POSTGRES_TEST_URL comes from cargo xtask postgres test");
     let run_id = std::env::var("OBZENFLOW_POSTGRES_TEST_RUN_ID")
@@ -1208,6 +1481,8 @@ async fn postgres_order_sensitive_cycle_fan_in_is_rejected_before_open() {
 #[tokio::test(flavor = "multi_thread")]
 async fn postgres_passes_live_redelivery_gate_and_archived_failure_projection() {
     let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
+    let trace = trace_capture().clone();
+    trace.clear();
     let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL").expect(
         "OBZENFLOW_POSTGRES_TEST_URL is required: PostgreSQL application conformance must not pass without a real database",
     );
@@ -1296,6 +1571,10 @@ async fn postgres_passes_live_redelivery_gate_and_archived_failure_projection() 
                 report_failures.push("failure chain is missing route -> lifecycle".to_string());
             }
         }
+    }
+
+    if let Err(error) = assert_postgres_evidence_is_confined(&fixture, &report, &trace.text()) {
+        report_failures.push(error.to_string());
     }
 
     fixture.cleanup().await;

@@ -8,4 +8,5 @@ publish = false
 
 [dependencies]
 libc = { workspace = true }
+serde_json = { workspace = true }
 uuid = { workspace = true }

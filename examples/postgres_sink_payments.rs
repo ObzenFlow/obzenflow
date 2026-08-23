@@ -28,6 +28,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+const POSTGRES_SQL_EVIDENCE_CANARY: &str = "obz083c_sql_body_canary_7f3c91a6";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Payment {
     id: i64,
@@ -96,8 +98,11 @@ fn configured_payment_flow(
             .insert_into(
                 &schema,
                 "payments",
-                "(id, amount_cents) VALUES ($1, $2) \
-                 ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents",
+                format!(
+                    "(id, amount_cents) VALUES ($1, $2) \
+                     ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents \
+                     /* {POSTGRES_SQL_EVIDENCE_CANARY} */"
+                ),
             )
             .map_err(build_error)?
             .batch_size(2)
@@ -177,6 +182,43 @@ async fn prepare_destination(url: &str, schema: &str) -> Result<i64> {
     .context("read the delivery-audit baseline")
 }
 
+#[derive(Debug)]
+struct PaymentDestinationSnapshot {
+    rows: Vec<(i64, i64)>,
+    delivery_audit: i64,
+}
+
+async fn inspect_destination(url: &str, schema: &str) -> Result<PaymentDestinationSnapshot> {
+    let quoted_schema = quote_fixture_identifier(schema)?;
+    let pool = PgPool::connect(url)
+        .await
+        .context("connect to PostgreSQL for example verification")?;
+    let rows = sqlx::query(&format!(
+        "SELECT id, amount_cents FROM {quoted_schema}.payments \
+         WHERE id IN (1001, 1002) ORDER BY id"
+    ))
+    .fetch_all(&pool)
+    .await
+    .context("verify converged payment rows")?
+    .into_iter()
+    .map(|row| (row.get::<i64, _>("id"), row.get::<i64, _>("amount_cents")))
+    .collect::<Vec<_>>();
+    ensure!(
+        rows == vec![(1001, 12_500), (1002, 8_750)],
+        "payment destination did not converge: {rows:?}"
+    );
+    let delivery_audit = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {quoted_schema}.payment_delivery_audit"
+    ))
+    .fetch_one(&pool)
+    .await
+    .context("verify PostgreSQL delivery calls")?;
+    Ok(PaymentDestinationSnapshot {
+        rows,
+        delivery_audit,
+    })
+}
+
 fn payment_flow(
     journals: PathBuf,
     connection: PostgresConnection,
@@ -200,6 +242,23 @@ fn payment_flow(
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli_args = std::env::args_os().collect::<Vec<_>>();
+    let inspect_only = cli_args.get(1).is_some_and(|arg| arg == "--inspect");
+    if inspect_only {
+        ensure!(
+            cli_args.len() == 2,
+            "--inspect accepts no additional arguments"
+        );
+        let url = std::env::var("OBZENFLOW_POSTGRES_URL")
+            .context("set OBZENFLOW_POSTGRES_URL to a PostgreSQL connection URL")?;
+        let schema = std::env::var("OBZENFLOW_POSTGRES_SCHEMA")
+            .unwrap_or_else(|_| "obzenflow_example".to_string());
+        let snapshot = inspect_destination(&url, &schema).await?;
+        println!(
+            "Inspected converged rows {:?}; delivery_audit={}",
+            snapshot.rows, snapshot.delivery_audit
+        );
+        return Ok(());
+    }
     let cli = FlowConfig::try_parse_from(cli_args.clone()).context("parse example arguments")?;
     let verifies_archive = cli.replay_from.is_some();
     if verifies_archive {
@@ -213,7 +272,6 @@ async fn main() -> Result<()> {
         .context("set OBZENFLOW_POSTGRES_URL to a PostgreSQL connection URL")?;
     let schema = std::env::var("OBZENFLOW_POSTGRES_SCHEMA")
         .unwrap_or_else(|_| "obzenflow_example".to_string());
-    let quoted_schema = quote_fixture_identifier(&schema)?;
     let journals = std::env::var_os("OBZENFLOW_JOURNAL_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/postgres-sink-payments"));
@@ -234,46 +292,27 @@ async fn main() -> Result<()> {
         ))
         .await?;
 
-    let pool = PgPool::connect(&url)
-        .await
-        .context("connect to PostgreSQL for example verification")?;
-    let rows = sqlx::query(&format!(
-        "SELECT id, amount_cents FROM {quoted_schema}.payments \
-         WHERE id IN (1001, 1002) ORDER BY id"
-    ))
-    .fetch_all(&pool)
-    .await
-    .context("verify converged payment rows")?;
-    let rows = rows
-        .into_iter()
-        .map(|row| (row.get::<i64, _>("id"), row.get::<i64, _>("amount_cents")))
-        .collect::<Vec<_>>();
-    ensure!(
-        rows == vec![(1001, 12_500), (1002, 8_750)],
-        "payment destination did not converge: {rows:?}"
-    );
-
-    let audit_after: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM {quoted_schema}.payment_delivery_audit"
-    ))
-    .fetch_one(&pool)
-    .await
-    .context("verify PostgreSQL delivery calls")?;
+    let snapshot = inspect_destination(&url, &schema).await?;
     let baseline = audit_baseline.load(Ordering::Acquire);
     ensure!(baseline >= 0, "delivery-audit baseline was not captured");
     ensure!(
-        audit_after - baseline == 2,
+        snapshot.delivery_audit - baseline == 2,
         "expected two PostgreSQL sink mutations, observed {}",
-        audit_after - baseline
+        snapshot.delivery_audit - baseline
     );
     if verifies_archive {
         println!(
-            "Verified converged rows {rows:?}, two PostgreSQL sink mutations, and matching replay journals."
+            "Verified converged rows {:?}, two PostgreSQL sink mutations, and matching replay journals.",
+            snapshot.rows
         );
     } else {
-        println!("Verified converged rows {rows:?} and two PostgreSQL sink mutations.");
+        println!(
+            "Verified converged rows {:?} and two PostgreSQL sink mutations.",
+            snapshot.rows
+        );
     }
     let run_directory = latest_run_dir(&journal_root)?;
+    let quoted_schema = quote_fixture_identifier(&schema)?;
     println!("Run directory: {}", run_directory.display());
     println!("Logical destination: postgres.{schema}.payments");
     println!(

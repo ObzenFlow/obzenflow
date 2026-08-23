@@ -262,6 +262,8 @@ impl PostgresTable {
         format!("INSERT INTO {} {body}", self.quoted_target())
     }
 
+    // Keep server-authority failures in the sink protocol's typed error.
+    #[allow(clippy::result_large_err)]
     fn validate_server_limit(&self, limit: i32) -> SinkOperationResult<()> {
         let limit = usize::try_from(limit).unwrap_or_default();
         if limit == 0 || self.schema.len() > limit || self.table.len() > limit {
@@ -368,6 +370,9 @@ impl fmt::Debug for PostgresBindings {
 /// private-field value accumulator, so it cannot replace or execute the fixed
 /// configuration statement through this API.
 pub trait PostgresBind<T>: Clone + Send + Sync + 'static {
+    // Binder validation is part of the sink protocol and therefore returns
+    // its by-value operational error rather than an adapter-local box.
+    #[allow(clippy::result_large_err)]
     fn validate(&self, _input: &T) -> SinkOperationResult<()> {
         Ok(())
     }
@@ -1858,6 +1863,12 @@ mod tests {
         assert!(detail.contains("Encoding argument $1 failed"));
         assert!(detail.contains("first injected encoding failure"));
         assert!(!detail.contains("second injected encoding failure"));
+
+        let mapped = operation_error(sqlx::Error::Encode(error));
+        assert_eq!(
+            mapped.kind(),
+            obzenflow_core::event::status::processing_status::ErrorKind::Deserialization
+        );
     }
 
     #[test]
