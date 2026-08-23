@@ -183,6 +183,13 @@ struct DevelopmentSessionIdentity {
     project: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TestSessionIdentity {
+    directory: PathBuf,
+    project: String,
+    run_id: String,
+}
+
 trait DockerProbe {
     fn succeeds(&mut self, program: &str, args: &[&str]) -> bool;
     fn stdout(&mut self, program: &str, args: &[&str]) -> Option<String>;
@@ -446,7 +453,7 @@ fn prove_persistent(flags: &[String]) -> Result<()> {
         "-p",
         "obzenflow",
         "--features",
-        "postgres",
+        "postgres,test-support",
         "--example",
         "postgres_sink_payments",
     ]);
@@ -457,7 +464,6 @@ fn prove_persistent(flags: &[String]) -> Result<()> {
         )));
     }
     let binary = example_binary(&root);
-    let binary_before = executable_identity(&binary)?;
     let proof_command_environment = vec![(
         PERSISTENT_PROOF_SESSION_ENV.to_string(),
         OsString::from(&proof_session_id),
@@ -493,7 +499,9 @@ fn prove_persistent(flags: &[String]) -> Result<()> {
         let binary_arg = binary
             .to_str()
             .ok_or_else(|| error("PostgreSQL example path is not valid Unicode"))?;
-        run_public_postgres_command(&root, &["run", "--", binary_arg], &example_environment)?;
+        let live_output =
+            run_public_postgres_command(&root, &["run", "--", binary_arg], &example_environment)?;
+        require_output_contains(&live_output, "PostgreSQL proof calls: execute=2 commit=1")?;
         let live_runs = example_run_directories(&journal_root)?;
         let [live_run] = live_runs.as_slice() else {
             return Err(error(format!(
@@ -506,7 +514,7 @@ fn prove_persistent(flags: &[String]) -> Result<()> {
             &["run", "--", binary_arg, "--inspect"],
             &example_environment,
         )?;
-        require_output_contains(&live_inspection, "delivery_audit=2")?;
+        require_output_contains(&live_inspection, "secondary_state=converged")?;
 
         run_public_postgres_command(&root, &["test"], &proof_command_environment)?;
         let after_ephemeral = run_public_postgres_command(
@@ -514,12 +522,12 @@ fn prove_persistent(flags: &[String]) -> Result<()> {
             &["run", "--", binary_arg, "--inspect"],
             &example_environment,
         )?;
-        require_output_contains(&after_ephemeral, "delivery_audit=2")?;
+        require_output_contains(&after_ephemeral, "secondary_state=converged")?;
 
         let live_run_arg = live_run
             .to_str()
             .ok_or_else(|| error("PostgreSQL live archive path is not valid Unicode"))?;
-        run_public_postgres_command(
+        let redelivery_output = run_public_postgres_command(
             &root,
             &[
                 "run",
@@ -531,18 +539,22 @@ fn prove_persistent(flags: &[String]) -> Result<()> {
             ],
             &example_environment,
         )?;
-        let replay_runs = example_run_directories(&journal_root)?;
-        if replay_runs.len() != 2 || !replay_runs.contains(live_run) {
+        require_output_contains(
+            &redelivery_output,
+            "PostgreSQL proof calls: execute=2 commit=1",
+        )?;
+        let redelivery_runs = example_run_directories(&journal_root)?;
+        if redelivery_runs.len() != 2 || !redelivery_runs.contains(live_run) {
             return Err(error(
-                "persistent replay proof did not preserve live evidence and create one replay archive",
+                "persistent archive-redelivery proof did not preserve live evidence and create one treatment archive",
             ));
         }
-        let replay_inspection = run_public_postgres_command(
+        let redelivery_inspection = run_public_postgres_command(
             &root,
             &["run", "--", binary_arg, "--inspect"],
             &example_environment,
         )?;
-        require_output_contains(&replay_inspection, "delivery_audit=4")?;
+        require_output_contains(&redelivery_inspection, "secondary_state=converged")?;
         run_public_postgres_command(&root, &["logs"], &proof_command_environment)?;
 
         let initial_witness = active_persistent_session_at(&root, &compose, &state_path)?
@@ -568,13 +580,7 @@ fn prove_persistent(flags: &[String]) -> Result<()> {
             &["run", "--", binary_arg, "--inspect"],
             &example_environment,
         )?;
-        require_output_contains(&retained_inspection, "delivery_audit=4")?;
-        if executable_identity(&binary)? != binary_before {
-            return Err(error(
-                "the PostgreSQL example executable changed during the persistent proof",
-            ));
-        }
-
+        require_output_contains(&retained_inspection, "secondary_state=converged")?;
         let mut forbidden = vec![
             POSTGRES_PASSWORD.to_string(),
             plaintext_url(initial_witness.state.port),
@@ -754,26 +760,35 @@ fn cleanup(flags: &[String]) -> Result<()> {
     let [run_id] = flags else {
         return Err(error("postgres cleanup requires one reported test run id"));
     };
-    if run_id.is_empty()
-        || !run_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
-        return Err(error("invalid PostgreSQL test run id"));
-    }
     let root = super::workspace_root()?;
-    let directory = root.join(SESSION_ROOT).join(run_id);
-    let state_path = directory.join(STATE_FILE);
+    let identity = test_session_identity(&root, run_id)?;
+    require_test_cleanup_path_authority(&root, &identity)?;
+    let state_path = identity.directory.join(STATE_FILE);
     let state = read_state(&state_path)?;
-    if state.mode != SessionMode::Test || state.run_id != *run_id {
-        return Err(error("refusing to clean a non-test PostgreSQL session"));
-    }
+    require_test_session_authority(&state, &identity)?;
+    let authoritative_state = SessionState {
+        project: identity.project.clone(),
+        run_id: identity.run_id.clone(),
+        port: state.port,
+        mode: SessionMode::Test,
+    };
     let compose = preflight_docker()?;
-    let _ = capture_logs(&root, &compose, &directory, &state);
-    stop_session(&root, &compose, &directory, &state, true)?;
-    remove_ephemeral_keys(&directory)?;
+    if let Some(container_id) =
+        container_id(&root, &compose, &identity.directory, &authoritative_state)?
+    {
+        require_compose_container_authority(&container_id, &identity.project)?;
+    }
+    let _ = capture_logs(&root, &compose, &identity.directory, &authoritative_state);
+    stop_session(
+        &root,
+        &compose,
+        &identity.directory,
+        &authoritative_state,
+        true,
+    )?;
+    remove_ephemeral_keys(&identity.directory)?;
     fs::remove_file(state_path)?;
-    println!("PostgreSQL test project '{}' cleaned", state.project);
+    println!("PostgreSQL test project '{}' cleaned", identity.project);
     Ok(())
 }
 
@@ -789,6 +804,7 @@ const REQUIRED_TEST_TARGETS: &[RequiredTestTarget] = &[
         label: "xtask PostgreSQL lifecycle",
         cargo_args: &["test", "--locked", "-p", "xtask"],
         expected_tests: &[
+            "postgres::tests::cleanup_authority_is_derived_and_fail_closed",
             "postgres::tests::docker_preflight_matrix_is_bounded_context_aware_and_redacted",
             "postgres::tests::postgres_evidence_scanner_is_surface_aware",
             "postgres::tests::published_port_parser_accepts_only_loopback_dynamic_mapping",
@@ -889,9 +905,11 @@ const REQUIRED_TEST_TARGETS: &[RequiredTestTarget] = &[
             "postgres_sink_application_conformance_test",
         ],
         expected_tests: &[
+            "postgres_eof_flush_failure_archive_redelivery_retries_unresolved_input_without_drain",
+            "postgres_open_failures_traverse_full_application_lifecycle",
             "postgres_order_sensitive_cycle_fan_in_is_rejected_before_open",
             "postgres_order_sensitive_derived_fan_in_reports_named_quiet_input",
-            "postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row",
+            "postgres_order_sensitive_source_fan_in_archive_redelivery_reproduces_same_word_and_final_row",
             "postgres_passes_live_redelivery_gate_and_archived_failure_projection",
         ],
         inventory_prefix: None,
@@ -1089,7 +1107,7 @@ fn run_cross_process_example(
         "-p",
         "obzenflow",
         "--features",
-        "postgres",
+        "postgres,test-support",
         "--example",
         "postgres_sink_payments",
     ]);
@@ -1101,7 +1119,6 @@ fn run_cross_process_example(
     }
 
     let binary = example_binary(root);
-    let before = executable_identity(&binary)?;
     let journal_root = directory.join("example-journals");
     let schema = format!("obz083c_example_{}", state.run_id);
     let forbidden = proof_forbidden_values(directory, state, service_evidence);
@@ -1123,7 +1140,7 @@ fn run_cross_process_example(
     };
 
     check_signal()?;
-    let replay_args = vec![
+    let redelivery_args = vec![
         OsString::from("--replay-from"),
         live_run.as_os_str().to_os_string(),
         OsString::from("--verify"),
@@ -1134,25 +1151,19 @@ fn run_cross_process_example(
         &journal_root,
         &schema,
         state,
-        &replay_args,
+        &redelivery_args,
         &forbidden,
     )?;
     let final_runs = example_run_directories(&journal_root)?;
     if final_runs.len() != 2 || !final_runs.contains(live_run) {
         return Err(error(format!(
-            "verified PostgreSQL replay must preserve the live archive and create one replay archive; found {} archives",
+            "verified PostgreSQL archive redelivery must preserve the live archive and create one treatment archive; found {} archives",
             final_runs.len()
         )));
     }
-    let after = executable_identity(&binary)?;
-    if after != before {
-        return Err(error(
-            "the PostgreSQL example executable changed between live and replay processes",
-        ));
-    }
     assert_tree_excludes(&journal_root, &forbidden, state.port)?;
     println!(
-        "PostgreSQL example passed live and verified replay in separate processes using {}",
+        "PostgreSQL example passed live and verified archive redelivery in separate processes using {}",
         binary.display()
     );
     Ok(())
@@ -1173,16 +1184,6 @@ fn example_binary(root: &Path) -> PathBuf {
         .join("debug")
         .join("examples")
         .join(format!("postgres_sink_payments{}", env::consts::EXE_SUFFIX))
-}
-
-fn executable_identity(path: &Path) -> Result<(u64, std::time::SystemTime)> {
-    let metadata = fs::metadata(path).map_err(|_| {
-        error(format!(
-            "compiled PostgreSQL example was not found at {}",
-            path.display()
-        ))
-    })?;
-    Ok((metadata.len(), metadata.modified()?))
 }
 
 fn run_example_process(
@@ -1206,7 +1207,13 @@ fn run_example_process(
     assert_output_excludes("PostgreSQL example stdout", &output.stdout, forbidden)?;
     assert_output_excludes("PostgreSQL example stderr", &output.stderr, forbidden)?;
     if output.status.success() {
-        print!("{}", String::from_utf8_lossy(&output.stdout));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !stdout.contains("PostgreSQL proof calls: execute=2 commit=1") {
+            return Err(error(
+                "PostgreSQL example did not emit its proof-owned physical-call evidence",
+            ));
+        }
+        print!("{stdout}");
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
         Ok(())
     } else {
@@ -1743,6 +1750,39 @@ fn container_id(
     Ok(Some(id))
 }
 
+fn require_compose_container_authority(container_id: &str, project: &str) -> Result<()> {
+    let output = Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{ index .Config.Labels \"com.docker.compose.project\" }}\t{{ index .Config.Labels \"com.docker.compose.service\" }}",
+            container_id,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(error(
+            "refusing PostgreSQL cleanup because container authority could not be verified",
+        ));
+    }
+    validate_compose_container_authority(&String::from_utf8_lossy(&output.stdout), project)
+}
+
+fn validate_compose_container_authority(labels: &str, project: &str) -> Result<()> {
+    let Some((actual_project, service)) = labels.trim().split_once('\t') else {
+        return Err(error(
+            "refusing PostgreSQL cleanup because container labels are incomplete",
+        ));
+    };
+    if actual_project != project || service != "postgres" {
+        return Err(error(
+            "refusing PostgreSQL cleanup because container labels do not match the derived test-session authority",
+        ));
+    }
+    Ok(())
+}
+
 fn proof_service_evidence(
     root: &Path,
     compose: &ComposeCommand,
@@ -2137,6 +2177,72 @@ fn report_stale_test_sessions(root: &Path, compose: Option<&ComposeCommand>) -> 
     Ok(())
 }
 
+fn test_session_identity(root: &Path, run_id: &str) -> Result<TestSessionIdentity> {
+    if run_id.len() != 32
+        || !run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(error("invalid PostgreSQL test run id"));
+    }
+    Ok(TestSessionIdentity {
+        directory: root.join(SESSION_ROOT).join(run_id),
+        project: format!("obzenflow-test-{run_id}"),
+        run_id: run_id.to_string(),
+    })
+}
+
+fn require_test_cleanup_path_authority(root: &Path, identity: &TestSessionIdentity) -> Result<()> {
+    let session_root = root.join(SESSION_ROOT);
+    let canonical_session_root = session_root
+        .canonicalize()
+        .map_err(|_| error("PostgreSQL test session root is unavailable"))?;
+    let metadata = fs::symlink_metadata(&identity.directory)
+        .map_err(|_| error("PostgreSQL test session directory is unavailable"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(error(
+            "refusing PostgreSQL cleanup because the test session directory is not an owned directory",
+        ));
+    }
+    let canonical_directory = identity
+        .directory
+        .canonicalize()
+        .map_err(|_| error("PostgreSQL test session directory is unavailable"))?;
+    if canonical_directory.parent() != Some(canonical_session_root.as_path())
+        || canonical_directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(identity.run_id.as_str())
+    {
+        return Err(error(
+            "refusing PostgreSQL cleanup because the test session path escaped its authority root",
+        ));
+    }
+    let state_metadata = fs::symlink_metadata(identity.directory.join(STATE_FILE))
+        .map_err(|_| error("PostgreSQL test session state is unavailable"))?;
+    if !state_metadata.is_file() || state_metadata.file_type().is_symlink() {
+        return Err(error(
+            "refusing PostgreSQL cleanup because the test session state is not an owned file",
+        ));
+    }
+    Ok(())
+}
+
+fn require_test_session_authority(
+    state: &SessionState,
+    identity: &TestSessionIdentity,
+) -> Result<()> {
+    if state.mode != SessionMode::Test
+        || state.run_id != identity.run_id
+        || state.project != identity.project
+    {
+        return Err(error(
+            "refusing to clean PostgreSQL state that does not match the derived test-session authority",
+        ));
+    }
+    Ok(())
+}
+
 fn proof_development_session(
     root: &Path,
     proof_session_id: &str,
@@ -2483,6 +2589,71 @@ mod tests {
         assert_eq!(restored.port, state.port);
         assert_eq!(restored.mode, state.mode);
         fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn cleanup_authority_is_derived_and_fail_closed() {
+        let root = env::temp_dir().join(format!(
+            "obzenflow-postgres-cleanup-authority-{}",
+            unique_run_id()
+        ));
+        let run_id = "0123456789abcdef0123456789abcdef";
+        let identity = test_session_identity(&root, run_id).expect("canonical test identity");
+        assert_eq!(identity.project, format!("obzenflow-test-{run_id}"));
+        assert_eq!(identity.directory, root.join(SESSION_ROOT).join(run_id));
+        assert!(test_session_identity(&root, "not-a-test-run").is_err());
+        assert!(test_session_identity(&root, "0123456789ABCDEF0123456789ABCDEF").is_err());
+        assert!(test_session_identity(&root, "0123456789abcdef0123456789abcdeg").is_err());
+
+        fs::create_dir_all(&identity.directory).expect("create canonical test directory");
+        let state_path = identity.directory.join(STATE_FILE);
+        let state = SessionState {
+            project: identity.project.clone(),
+            run_id: identity.run_id.clone(),
+            port: 15432,
+            mode: SessionMode::Test,
+        };
+        write_state(&state_path, &state).expect("write canonical state");
+        require_test_cleanup_path_authority(&root, &identity).expect("canonical path owns cleanup");
+        require_test_session_authority(&state, &identity).expect("canonical state owns cleanup");
+
+        let mut redirected = state.clone();
+        redirected.project = "another-compose-project".to_string();
+        assert!(require_test_session_authority(&redirected, &identity).is_err());
+        redirected = state.clone();
+        redirected.run_id = "fedcba9876543210fedcba9876543210".to_string();
+        assert!(require_test_session_authority(&redirected, &identity).is_err());
+        redirected = state.clone();
+        redirected.mode = SessionMode::Development;
+        assert!(require_test_session_authority(&redirected, &identity).is_err());
+
+        validate_compose_container_authority(
+            &format!("{}\tpostgres\n", identity.project),
+            &identity.project,
+        )
+        .expect("exact Compose labels own cleanup");
+        assert!(validate_compose_container_authority(
+            "another-compose-project\tpostgres\n",
+            &identity.project,
+        )
+        .is_err());
+        assert!(validate_compose_container_authority(
+            &format!("{}\tdatabase\n", identity.project),
+            &identity.project,
+        )
+        .is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let owned_state = identity.directory.join("owned-state.tsv");
+            fs::rename(&state_path, &owned_state).expect("move owned state");
+            symlink(&owned_state, &state_path).expect("replace state with symlink");
+            assert!(require_test_cleanup_path_authority(&root, &identity).is_err());
+        }
+
+        fs::remove_dir_all(root).expect("remove cleanup authority fixture");
     }
 
     #[test]

@@ -25,12 +25,19 @@ use obzenflow_adapters::middleware::{
     MiddlewareSurfaceKind, SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollAttachment,
     SourcePollOutcome,
 };
+use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::{SinkOperationPhase, SinkWritePhase, StageActivity};
-use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, transform, FlowBuildError, FlowDefinition};
+use obzenflow_core::event::status::processing_status::ErrorKind;
+use obzenflow_core::event::{
+    ChainEvent, ChainEventContent, SinkOperationFailed, SinkOperationPhase, SinkWritePhase,
+    StageActivity, StageLifecycleEvent, SystemEvent, SystemEventType,
+};
+use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::Journal;
+use obzenflow_core::{EventEnvelope, StageId, SystemId, TypedPayload};
+use obzenflow_dsl::{async_source, flow, sink, source, transform, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk_journals;
+use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::run_context::FlowBuildContext;
@@ -39,7 +46,9 @@ use obzenflow_runtime::stages::sink::SinkConnector;
 use obzenflow_runtime::stages::source::strategies::{
     CompletionContext, CompletionDecision, CompletionGate,
 };
-use obzenflow_runtime::stages::{SourceError, TypedFiniteSourceHandler, TypedTransformHandler};
+use obzenflow_runtime::stages::{
+    SourceError, TypedAsyncFiniteSourceHandler, TypedFiniteSourceHandler, TypedTransformHandler,
+};
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use obzenflow_runtime::testing::sink::{
     SinkConformanceProfile, SinkDiagnosticSample, SinkDiagnosticSurface, SinkExternalCallKind,
@@ -53,7 +62,8 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 static POSTGRES_APPLICATION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -372,15 +382,16 @@ impl GatedPayments {
     }
 }
 
-impl TypedFiniteSourceHandler for GatedPayments {
+#[async_trait]
+impl TypedAsyncFiniteSourceHandler for GatedPayments {
     type Output = Payment;
 
-    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+    async fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next >= self.payments.len() {
             return Ok(None);
         }
         if let (0, Some(gate)) = (self.next, &self.initial_gate) {
-            gate.wait_until_released();
+            gate.wait_until_released().await;
         }
         let payment = self.payments[self.next].clone();
         self.next += 1;
@@ -388,35 +399,55 @@ impl TypedFiniteSourceHandler for GatedPayments {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct SourceGateState {
-    waiting: bool,
-    released: bool,
+    waiting: AtomicBool,
+    released: AtomicBool,
+    waiting_changed: tokio::sync::Notify,
+    release_changed: tokio::sync::Notify,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 struct SourceGate {
-    state: Arc<(Mutex<SourceGateState>, Condvar)>,
+    state: Arc<SourceGateState>,
+}
+
+impl std::fmt::Debug for SourceGate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceGate")
+            .field("waiting", &self.state.waiting.load(Ordering::Acquire))
+            .field("released", &self.state.released.load(Ordering::Acquire))
+            .finish()
+    }
 }
 
 impl SourceGate {
-    fn wait_until_released(&self) {
-        let (lock, release) = &*self.state;
-        let mut state = lock.lock().expect("source gate lock");
-        state.waiting = true;
-        while !state.released {
-            state = release.wait(state).expect("source gate wait");
+    async fn wait_until_released(&self) {
+        self.state.waiting.store(true, Ordering::Release);
+        self.state.waiting_changed.notify_waiters();
+        loop {
+            let released = self.state.release_changed.notified();
+            if self.state.released.load(Ordering::Acquire) {
+                return;
+            }
+            released.await;
         }
     }
 
-    fn is_waiting(&self) -> bool {
-        self.state.0.lock().expect("source gate lock").waiting
+    async fn wait_until_waiting(&self) {
+        loop {
+            let waiting = self.state.waiting_changed.notified();
+            if self.state.waiting.load(Ordering::Acquire) {
+                return;
+            }
+            waiting.await;
+        }
     }
 
     fn release(&self) {
-        let (lock, release) = &*self.state;
-        lock.lock().expect("source gate lock").released = true;
-        release.notify_all();
+        self.state.released.store(true, Ordering::Release);
+        self.state.release_changed.notify_waiters();
     }
 }
 
@@ -425,21 +456,6 @@ struct ReleaseSourceGateOnDrop(SourceGate);
 impl Drop for ReleaseSourceGateOnDrop {
     fn drop(&mut self) {
         self.0.release();
-    }
-}
-
-#[derive(Clone, Debug)]
-struct DelayedPaymentTap {
-    delay: Duration,
-}
-
-impl TypedTransformHandler for DelayedPaymentTap {
-    type Input = Payment;
-    type Output = Payment;
-
-    fn process(&self, input: Payment) -> Result<Payment, HandlerError> {
-        std::thread::sleep(self.delay);
-        Ok(input)
     }
 }
 
@@ -510,6 +526,68 @@ fn build_sink(
         SinkDestinationClass::Unspecified => builder.test_redelivery_unspecified(),
     };
     builder.build().map_err(flow_error)
+}
+
+fn build_custom_sink(
+    connection: PostgresConnection,
+    schema: &str,
+    table: &str,
+    body: &str,
+    batch_size: usize,
+    probe: PostgresTestProbe,
+) -> Result<PaymentSink, Box<FlowBuildError>> {
+    PostgresSink::<Payment>::builder()
+        .connection(connection)
+        .insert_into(schema, table, body)
+        .map_err(flow_error)?
+        .batch_size(batch_size)
+        .map_err(flow_error)?
+        .redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+        .bind_with(PaymentBinder)
+        .test_probe(probe)
+        .build()
+        .map_err(flow_error)
+}
+
+struct CustomPostgresFlowSpec {
+    table: String,
+    body: String,
+    batch_size: usize,
+    payments: Vec<Payment>,
+}
+
+fn custom_postgres_flow(
+    journal_root: PathBuf,
+    connection: PostgresConnection,
+    schema: String,
+    probe: PostgresTestProbe,
+    spec: CustomPostgresFlowSpec,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let postgres = build_custom_sink(
+            connection,
+            &schema,
+            &spec.table,
+            &spec.body,
+            spec.batch_size,
+            probe,
+        )
+        .map_err(|error| *error)?;
+        let payments = sources::finite(spec.payments);
+        Ok(flow! {
+            name: "postgres_full_flow_failure",
+            journals: disk_journals(journal_root),
+
+            stages: {
+                payments = source!(Payment => payments);
+                postgres = sink!(Payment => postgres);
+            },
+
+            topology: {
+                payments |> postgres;
+            }
+        })
+    })
 }
 
 fn single_flow(
@@ -635,8 +713,8 @@ fn ordered_source_fan_in_flow(
             journals: disk_journals(journal_root),
 
             stages: {
-                left = source!(Payment => left);
-                right = source!(Payment => right);
+                left = async_source!(Payment => left);
+                right = async_source!(Payment => right);
                 postgres = sink!(Payment => postgres);
             },
 
@@ -653,14 +731,16 @@ fn ordered_derived_fan_in_flow(
     connection: PostgresConnection,
     schema: String,
     probe: PostgresTestProbe,
-    delay: Duration,
+    delayed_gate: SourceGate,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
-        let payments = sources::finite([Payment {
+        let payment = Payment {
             id: 9_102,
             amount_cents: 1_250,
-        }]);
-        let delayed = DelayedPaymentTap { delay };
+        };
+        let payments = sources::finite([payment.clone()]);
+        let delayed_input = GatedPayments::new(vec![payment], Some(delayed_gate));
+        let delayed = IdentityPayment;
         let postgres = build_sink(
             connection,
             &schema,
@@ -674,13 +754,14 @@ fn ordered_derived_fan_in_flow(
 
             stages: {
                 payments = source!(Payment => payments);
+                delayed_input = async_source!(Payment => delayed_input);
                 delayed = transform!(Payment -> Payment => delayed);
                 postgres = sink!(Payment => postgres);
             },
 
             topology: {
-                payments |> delayed;
                 payments |> postgres;
+                delayed_input |> delayed;
                 delayed |> postgres;
             }
         })
@@ -807,6 +888,153 @@ fn latest_run_dir(root: &Path) -> PathBuf {
         .collect::<Vec<_>>();
     runs.sort();
     runs.pop().expect("durable run archive")
+}
+
+async fn read_stage_journal(
+    run: &Path,
+    stage: &str,
+    field: &str,
+) -> Vec<EventEnvelope<ChainEvent>> {
+    let manifest = replay_testkit::archive_manifest(run);
+    let file = manifest["stages"][stage][field]
+        .as_str()
+        .expect("manifest contains the PostgreSQL stage journal");
+    let journal =
+        DiskJournal::<ChainEvent>::with_owner(run.join(file), JournalOwner::stage(StageId::new()))
+            .expect("PostgreSQL stage journal opens");
+    journal
+        .read_causally_ordered()
+        .await
+        .expect("PostgreSQL stage journal reads")
+}
+
+async fn read_system_journal(run: &Path) -> Vec<EventEnvelope<SystemEvent>> {
+    let manifest = replay_testkit::archive_manifest(run);
+    let file = manifest["system_journal_file"]
+        .as_str()
+        .expect("manifest contains the system journal");
+    let journal = DiskJournal::<SystemEvent>::with_owner(
+        run.join(file),
+        JournalOwner::system(SystemId::new()),
+    )
+    .expect("PostgreSQL system journal opens");
+    journal
+        .read_causally_ordered()
+        .await
+        .expect("PostgreSQL system journal reads")
+}
+
+async fn assert_operation_failure_lifecycle(
+    run: &Path,
+    expected_phase: SinkOperationPhase,
+    expected_code: Option<&str>,
+    expected_subject: Option<obzenflow_core::EventId>,
+) -> SinkOperationFailed {
+    let errors = read_stage_journal(run, "postgres", "error_journal_file").await;
+    let operations = errors
+        .iter()
+        .filter_map(|envelope| {
+            SinkOperationFailed::from_event(&envelope.event)
+                .map(|operation| (envelope.event.id, operation))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        operations.len(),
+        1,
+        "one connector failure authors one durable operation fact"
+    );
+    let (operation_event_id, operation) = &operations[0];
+    assert_eq!(operation.phase, expected_phase);
+    assert_eq!(operation.kind, ErrorKind::Remote);
+    assert_eq!(operation.operation_subject_event_id, expected_subject);
+    assert_eq!(
+        operation
+            .destination_error_code
+            .as_ref()
+            .map(|code| (code.namespace(), code.value())),
+        expected_code.map(|code| (POSTGRES_SQLSTATE_NAMESPACE, code))
+    );
+
+    let system = read_system_journal(run).await;
+    let tied_failures = system
+        .iter()
+        .filter_map(|envelope| match &envelope.event.event {
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event:
+                    StageLifecycleEvent::Failed {
+                        causal_event_id, ..
+                    },
+            } if *stage_id == operation.stage_id => *causal_event_id,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tied_failures,
+        vec![*operation_event_id],
+        "the real connector failure is the sink lifecycle's exact durable cause"
+    );
+    assert!(
+        !system.iter().any(|envelope| matches!(
+            &envelope.event.event,
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Completed { .. },
+            } if *stage_id == operation.stage_id
+        )),
+        "a failed PostgreSQL lifecycle cannot claim completion"
+    );
+    operation.clone()
+}
+
+async fn assert_eof_flush_failure_evidence(
+    run: &Path,
+    probe: &PostgresTestProbe,
+    database: &OrderingDatabase,
+) {
+    let source = read_stage_journal(run, "payments", "data_journal_file").await;
+    let subject = source
+        .iter()
+        .find_map(|envelope| Payment::from_event(&envelope.event).map(|_| envelope.event.id))
+        .expect("the unresolved PostgreSQL input remains in the source archive");
+    let operation =
+        assert_operation_failure_lifecycle(run, SinkOperationPhase::Flush, None, Some(subject))
+            .await;
+    assert_eq!(operation.causal_event_id, None);
+    assert_eq!(operation.input_position, None);
+    assert_eq!(operation.failed_delivery_event_id, None);
+
+    let sink_data = read_stage_journal(run, "postgres", "data_journal_file").await;
+    let outcomes = sink_data
+        .iter()
+        .filter_map(|envelope| match &envelope.event.content {
+            ChainEventContent::Delivery(payload) => Some(&payload.result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes.len(), 1, "the deferred input is recorded once");
+    assert!(matches!(outcomes[0], DeliveryResult::Buffered { .. }));
+    assert!(
+        !outcomes.iter().any(|outcome| matches!(
+            outcome,
+            DeliveryResult::Success { .. } | DeliveryResult::Failed { .. }
+        )),
+        "failed EOF flush must not manufacture terminal settlement"
+    );
+
+    let calls = probe.snapshot();
+    assert_eq!(calls.count(SinkExternalCallKind::Open), 1);
+    assert_eq!(calls.count(SinkExternalCallKind::Write), 1);
+    assert_eq!(calls.count(SinkExternalCallKind::Flush), 1);
+    assert_eq!(calls.count(SinkExternalCallKind::Drain), 0);
+    assert_eq!(calls.count(SinkExternalCallKind::Begin), 0);
+    assert_eq!(calls.count(SinkExternalCallKind::Execute), 0);
+    assert_eq!(calls.count(SinkExternalCallKind::Commit), 0);
+    assert_eq!(
+        database.amount(10_001).await,
+        None,
+        "the unresolved buffered input never reached PostgreSQL"
+    );
 }
 
 struct OrderingDatabase {
@@ -1306,7 +1534,8 @@ impl SinkApplicationConformanceFixture for PostgresApplicationFixture {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row() {
+async fn postgres_order_sensitive_source_fan_in_archive_redelivery_reproduces_same_word_and_final_row(
+) {
     let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
     let _ = trace_capture();
     let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL")
@@ -1329,26 +1558,20 @@ async fn postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row(
     .await
     .expect("source-fed PostgreSQL fan-in builds");
 
-    let gate_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !right_gate.is_waiting() {
-        assert!(
-            tokio::time::Instant::now() < gate_deadline,
-            "right source did not reach its deterministic fan-in gate"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    let commit_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if database.amount(9_101).await == Some(300) {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < commit_deadline,
-            "source-fed PostgreSQL fan-in did not commit the two admitted left inputs while the right source was explicitly gated"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    tokio::time::timeout(Duration::from_secs(10), right_gate.wait_until_waiting())
+        .await
+        .expect("right source reaches its deterministic asynchronous fan-in gate");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        live_probe.wait_for_calls(SinkExternalCallKind::Commit, 1),
+    )
+    .await
+    .expect("the left-only threshold transaction commits while the right source is gated");
+    assert_eq!(
+        database.amount(9_101).await,
+        Some(300),
+        "the observed commit contains exactly the two admitted left inputs"
+    );
     right_gate.release();
 
     tokio::time::timeout(Duration::from_secs(12), handle.wait_for_completion())
@@ -1408,7 +1631,10 @@ async fn postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row(
             .await
             .consumption_sequence(),
     );
-    assert_eq!(replay_word, live_word, "replay reproduces the sink word");
+    assert_eq!(
+        replay_word, live_word,
+        "archive redelivery reproduces the sink word"
+    );
     assert_eq!(
         database.amount(9_101).await,
         live_word.last().copied(),
@@ -1426,12 +1652,14 @@ async fn postgres_order_sensitive_derived_fan_in_reports_named_quiet_input() {
     let database = OrderingDatabase::connect(&url, "derived").await;
     let temp = tempfile::tempdir().expect("derived fan-in journal directory");
     let journal_root = temp.path().join("journals");
+    let delayed_gate = SourceGate::default();
+    let _release_delayed_on_drop = ReleaseSourceGateOnDrop(delayed_gate.clone());
     let handle = ordered_derived_fan_in_flow(
         journal_root.clone(),
         database.connection.clone(),
         database.schema.clone(),
         PostgresTestProbe::default(),
-        Duration::from_secs(3),
+        delayed_gate.clone(),
     )
     .build(FlowBuildContext::for_tests())
     .await
@@ -1440,6 +1668,10 @@ async fn postgres_order_sensitive_derived_fan_in_reports_named_quiet_input() {
     let snapshots = handle
         .liveness_snapshots()
         .expect("flow exposes liveness snapshots");
+
+    tokio::time::timeout(Duration::from_secs(5), delayed_gate.wait_until_waiting())
+        .await
+        .expect("the derived input reaches its deterministic asynchronous gate");
 
     let quiet_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let quiet_upstream = loop {
@@ -1469,6 +1701,7 @@ async fn postgres_order_sensitive_derived_fan_in_reports_named_quiet_input() {
         Some("delayed"),
         "the Kahn wait identifies the delayed derived upstream"
     );
+    delayed_gate.release();
 
     tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
         .await
@@ -1482,10 +1715,190 @@ async fn postgres_order_sensitive_derived_fan_in_reports_named_quiet_input() {
             .consumption_sequence();
     assert_eq!(
         sequence,
-        vec![("payments".to_string(), 1), ("delayed".to_string(), 1)],
-        "canonical Kahn delivery preserves the direct event before its derived sibling"
+        vec![("delayed".to_string(), 1), ("payments".to_string(), 1)],
+        "canonical Kahn delivery uses its stable reader tiebreak even though the derived input arrived later"
     );
     assert_eq!(database.amount(9_102).await, Some(1_250));
+    database.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn postgres_open_failures_traverse_full_application_lifecycle() {
+    let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
+    trace_capture().clear();
+    let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL")
+        .expect("OBZENFLOW_POSTGRES_TEST_URL comes from cargo xtask postgres test");
+    let database = OrderingDatabase::connect(&url, "open_failure").await;
+    sqlx::query(&format!(
+        "CREATE TABLE {}.forms (id BIGINT PRIMARY KEY, value TEXT)",
+        database.schema
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("create full-flow open-failure target");
+
+    let invalid = [
+        ("syntax", "forms", "(value VALUES ($1)", "42601"),
+        (
+            "missing_relation",
+            "missing_relation",
+            "(value) VALUES ($1)",
+            "42P01",
+        ),
+        ("missing_column", "forms", "(missing) VALUES ($1)", "42703"),
+        (
+            "indeterminate_parameter",
+            "forms",
+            "(value) VALUES ('fixed') RETURNING $1 IS NULL",
+            "42P18",
+        ),
+    ];
+
+    for (label, table, body, expected_code) in invalid {
+        let temp = tempfile::tempdir().expect("open-failure journal directory");
+        let journals = temp.path().join(label);
+        let probe = PostgresTestProbe::default();
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            FlowApplication::builder()
+                .with_cli_args(["obzenflow"])
+                .run_async(custom_postgres_flow(
+                    journals.clone(),
+                    database.connection.clone(),
+                    database.schema.clone(),
+                    probe.clone(),
+                    CustomPostgresFlowSpec {
+                        table: table.to_string(),
+                        body: body.to_string(),
+                        batch_size: 1,
+                        payments: vec![Payment {
+                            id: 10_000,
+                            amount_cents: 500,
+                        }],
+                    },
+                )),
+        )
+        .await
+        .expect("real PostgreSQL open failure terminates promptly");
+        result.expect_err("server-invalid PostgreSQL statement fails the application");
+
+        let run = latest_run_dir(&journals);
+        let operation = assert_operation_failure_lifecycle(
+            &run,
+            SinkOperationPhase::Open,
+            Some(expected_code),
+            None,
+        )
+        .await;
+        assert_eq!(operation.causal_event_id, None, "case={label}");
+        assert_eq!(operation.input_position, None, "case={label}");
+        assert_eq!(operation.failed_delivery_event_id, None, "case={label}");
+        assert!(!operation.detail.contains(&url), "case={label}");
+        assert!(!operation.detail.contains(body), "case={label}");
+        assert!(!operation.detail.contains("obzenflow-secret-083c"));
+
+        let sink_data = read_stage_journal(&run, "postgres", "data_journal_file").await;
+        assert!(
+            sink_data
+                .iter()
+                .all(|envelope| !matches!(envelope.event.content, ChainEventContent::Delivery(_))),
+            "open failure creates no input receipt; case={label}"
+        );
+        let calls = probe.snapshot();
+        assert_eq!(calls.count(SinkExternalCallKind::Open), 1, "case={label}");
+        assert_eq!(calls.count(SinkExternalCallKind::Write), 0, "case={label}");
+        assert_eq!(
+            calls.count(SinkExternalCallKind::Execute),
+            0,
+            "case={label}"
+        );
+        assert_eq!(calls.count(SinkExternalCallKind::Commit), 0, "case={label}");
+        let row_count: i64 =
+            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {}.forms", database.schema))
+                .fetch_one(&database.pool)
+                .await
+                .expect("open failure leaves destination readable");
+        assert_eq!(row_count, 0, "open failure cannot mutate; case={label}");
+    }
+
+    database.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn postgres_eof_flush_failure_archive_redelivery_retries_unresolved_input_without_drain() {
+    let _guard = POSTGRES_APPLICATION_TEST_LOCK.lock().await;
+    trace_capture().clear();
+    let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL")
+        .expect("OBZENFLOW_POSTGRES_TEST_URL comes from cargo xtask postgres test");
+    let database = OrderingDatabase::connect(&url, "flush_failure").await;
+    let temp = tempfile::tempdir().expect("flush-failure journal directory");
+    let journals = temp.path().join("journals");
+    let body = format!(
+        "(id, amount_cents) VALUES ($1, $2) \
+         ON CONFLICT (id) DO UPDATE SET amount_cents = EXCLUDED.amount_cents \
+         /* {POSTGRES_SQL_EVIDENCE_CANARY} */"
+    );
+    let input = Payment {
+        id: 10_001,
+        amount_cents: 750,
+    };
+
+    let live_probe = PostgresTestProbe::default();
+    live_probe.arm(SinkFault::Flush);
+    let live_result = tokio::time::timeout(
+        Duration::from_secs(30),
+        FlowApplication::builder()
+            .with_cli_args(["obzenflow"])
+            .run_async(custom_postgres_flow(
+                journals.clone(),
+                database.connection.clone(),
+                database.schema.clone(),
+                live_probe.clone(),
+                CustomPostgresFlowSpec {
+                    table: "payments".to_string(),
+                    body: body.clone(),
+                    batch_size: 2,
+                    payments: vec![input.clone()],
+                },
+            )),
+    )
+    .await
+    .expect("real PostgreSQL EOF-flush failure terminates promptly");
+    live_result.expect_err("live EOF flush fault fails the application");
+    let live_run = latest_run_dir(&journals);
+    assert_eof_flush_failure_evidence(&live_run, &live_probe, &database).await;
+
+    let replay_probe = PostgresTestProbe::default();
+    replay_probe.arm(SinkFault::Flush);
+    let replay_result = tokio::time::timeout(
+        Duration::from_secs(30),
+        FlowApplication::builder()
+            .with_cli_args(vec![
+                OsString::from("obzenflow"),
+                OsString::from("--replay-from"),
+                live_run.as_os_str().to_os_string(),
+                OsString::from("--allow-incomplete-archive"),
+            ])
+            .run_async(custom_postgres_flow(
+                journals.clone(),
+                database.connection.clone(),
+                database.schema.clone(),
+                replay_probe.clone(),
+                CustomPostgresFlowSpec {
+                    table: "payments".to_string(),
+                    body,
+                    batch_size: 2,
+                    payments: vec![input],
+                },
+            )),
+    )
+    .await
+    .expect("real PostgreSQL archive-redelivery flush failure terminates promptly");
+    replay_result.expect_err("archive treatment encounters the unresolved flush fault again");
+    let replay_run = latest_run_dir(&journals);
+    assert_ne!(replay_run, live_run);
+    assert_eof_flush_failure_evidence(&replay_run, &replay_probe, &database).await;
+
     database.cleanup().await;
 }
 

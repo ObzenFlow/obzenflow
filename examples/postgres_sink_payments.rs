@@ -6,13 +6,16 @@
 //!
 //! Set `OBZENFLOW_POSTGRES_URL`, run once, then pass the printed archive back
 //! with `--replay-from <run-directory> --verify`. The deterministic UPSERT
-//! converges to the same rows while the checked witness requires matching
-//! journals and exactly two real PostgreSQL mutations in each treatment.
+//! converges to the same complete destination state. The repository proof
+//! builds this example with `test-support` and separately observes exactly two
+//! real PostgreSQL executions in each archive treatment.
 
 // allow-sink-io: live PostgreSQL witness intentionally exercises and verifies destination I/O
 
 use anyhow::{ensure, Context, Result};
 use clap::Parser;
+#[cfg(feature = "test-support")]
+use obzenflow::sinks::postgres::testing::PostgresTestProbe;
 use obzenflow::sinks::postgres::{
     PostgresBind, PostgresBindings, PostgresConnection, PostgresSink, PostgresTransport,
 };
@@ -22,11 +25,11 @@ use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowBuildFailure, FlowDe
 use obzenflow_infra::application::{FlowApplication, FlowConfig};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
+#[cfg(feature = "test-support")]
+use obzenflow_runtime::testing::sink::SinkExternalCallKind;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
 
 const POSTGRES_SQL_EVIDENCE_CANARY: &str = "obz083c_sql_body_canary_7f3c91a6";
 
@@ -81,6 +84,7 @@ fn configured_payment_flow(
     journals: PathBuf,
     connection: PostgresConnection,
     schema: String,
+    #[cfg(feature = "test-support")] probe: PostgresTestProbe,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let payments = sources::finite([
@@ -107,7 +111,10 @@ fn configured_payment_flow(
             .map_err(build_error)?
             .batch_size(2)
             .map_err(build_error)?
-            .redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
+            .redelivery_safety(SinkRedeliverySafety::SafeToRepeat);
+        #[cfg(feature = "test-support")]
+        let postgres = postgres.test_probe(probe);
+        let postgres = postgres
             .bind_with(PaymentBinder)
             .build()
             .map_err(build_error)?;
@@ -128,7 +135,7 @@ fn configured_payment_flow(
     })
 }
 
-async fn prepare_destination(url: &str, schema: &str) -> Result<i64> {
+async fn prepare_destination(url: &str, schema: &str) -> Result<()> {
     let schema = quote_fixture_identifier(schema)?;
     let pool = PgPool::connect(url)
         .await
@@ -144,48 +151,33 @@ async fn prepare_destination(url: &str, schema: &str) -> Result<i64> {
     .execute(&pool)
     .await
     .context("create example payment table")?;
-    sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {schema}.payment_delivery_audit (\
-         call_id BIGSERIAL PRIMARY KEY, payment_id BIGINT NOT NULL)"
-    ))
-    .execute(&pool)
-    .await
-    .context("create example delivery-audit table")?;
-    sqlx::query(&format!(
-        "CREATE OR REPLACE FUNCTION {schema}.record_payment_delivery() \
-         RETURNS trigger AS $$ BEGIN \
-         INSERT INTO {schema}.payment_delivery_audit (payment_id) VALUES (NEW.id); \
-         RETURN NEW; END; $$ LANGUAGE plpgsql"
-    ))
-    .execute(&pool)
-    .await
-    .context("create example delivery-audit function")?;
+    // Remove the pre-conformance audit fixture if an older persistent proof
+    // left it behind. Physical-call evidence belongs to the proof probe, not
+    // to a duplicate-sensitive destination trigger.
     sqlx::query(&format!(
         "DROP TRIGGER IF EXISTS record_payment_delivery ON {schema}.payments"
     ))
     .execute(&pool)
     .await
-    .context("reset example delivery-audit trigger")?;
+    .context("remove legacy delivery-audit trigger")?;
     sqlx::query(&format!(
-        "CREATE TRIGGER record_payment_delivery AFTER INSERT OR UPDATE \
-         ON {schema}.payments FOR EACH ROW \
-         EXECUTE FUNCTION {schema}.record_payment_delivery()"
+        "DROP FUNCTION IF EXISTS {schema}.record_payment_delivery()"
     ))
     .execute(&pool)
     .await
-    .context("create example delivery-audit trigger")?;
-    sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM {schema}.payment_delivery_audit"
+    .context("remove legacy delivery-audit function")?;
+    sqlx::query(&format!(
+        "DROP TABLE IF EXISTS {schema}.payment_delivery_audit"
     ))
-    .fetch_one(&pool)
+    .execute(&pool)
     .await
-    .context("read the delivery-audit baseline")
+    .context("remove legacy delivery-audit table")?;
+    Ok(())
 }
 
 #[derive(Debug)]
 struct PaymentDestinationSnapshot {
     rows: Vec<(i64, i64)>,
-    delivery_audit: i64,
 }
 
 async fn inspect_destination(url: &str, schema: &str) -> Result<PaymentDestinationSnapshot> {
@@ -207,16 +199,46 @@ async fn inspect_destination(url: &str, schema: &str) -> Result<PaymentDestinati
         rows == vec![(1001, 12_500), (1002, 8_750)],
         "payment destination did not converge: {rows:?}"
     );
-    let delivery_audit = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM {quoted_schema}.payment_delivery_audit"
-    ))
+    let relations = sqlx::query_scalar::<_, String>(
+        "SELECT c.relname::text FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') ORDER BY c.relname",
+    )
+    .bind(schema)
+    .fetch_all(&pool)
+    .await
+    .context("verify destination relations")?;
+    ensure!(
+        relations == vec!["payments"],
+        "payment destination contains unexpected relations: {relations:?}"
+    );
+    let user_triggers = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pg_trigger t \
+         JOIN pg_class c ON c.oid = t.tgrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND NOT t.tgisinternal",
+    )
+    .bind(schema)
     .fetch_one(&pool)
     .await
-    .context("verify PostgreSQL delivery calls")?;
-    Ok(PaymentDestinationSnapshot {
-        rows,
-        delivery_audit,
-    })
+    .context("verify destination triggers")?;
+    ensure!(
+        user_triggers == 0,
+        "payment destination contains duplicate-sensitive user triggers"
+    );
+    let functions = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pg_proc p \
+         JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1",
+    )
+    .bind(schema)
+    .fetch_one(&pool)
+    .await
+    .context("verify destination functions")?;
+    ensure!(
+        functions == 0,
+        "payment destination contains unexpected user functions"
+    );
+    Ok(PaymentDestinationSnapshot { rows })
 }
 
 fn payment_flow(
@@ -224,17 +246,22 @@ fn payment_flow(
     connection: PostgresConnection,
     url: String,
     schema: String,
-    audit_baseline: Arc<AtomicI64>,
+    #[cfg(feature = "test-support")] probe: PostgresTestProbe,
 ) -> FlowDefinition {
-    // FlowApplication opens and validates any replay archive before invoking
+    // FlowApplication opens and validates any archive selected for treatment before invoking
     // this build closure. Keeping destination setup here is what proves a bad
     // raw manifest cannot cause PostgreSQL I/O.
     FlowDefinition::new(move |build_context| async move {
-        let flow = configured_payment_flow(journals, connection, schema.clone());
-        let baseline = prepare_destination(&url, &schema)
+        let flow = configured_payment_flow(
+            journals,
+            connection,
+            schema.clone(),
+            #[cfg(feature = "test-support")]
+            probe,
+        );
+        prepare_destination(&url, &schema)
             .await
             .map_err(|error| FlowBuildFailure::from(build_error(error)))?;
-        audit_baseline.store(baseline, Ordering::Release);
         flow.build(build_context).await
     })
 }
@@ -254,8 +281,8 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|_| "obzenflow_example".to_string());
         let snapshot = inspect_destination(&url, &schema).await?;
         println!(
-            "Inspected converged rows {:?}; delivery_audit={}",
-            snapshot.rows, snapshot.delivery_audit
+            "Inspected converged rows {:?}; secondary_state=converged",
+            snapshot.rows
         );
         return Ok(());
     }
@@ -280,7 +307,8 @@ async fn main() -> Result<()> {
     let connection =
         PostgresConnection::from_url(&url, PostgresTransport::ExternallyProtectedPlaintext)
             .context("parse PostgreSQL connection configuration")?;
-    let audit_baseline = Arc::new(AtomicI64::new(-1));
+    #[cfg(feature = "test-support")]
+    let probe = PostgresTestProbe::default();
     FlowApplication::builder()
         .with_cli_args(cli_args)
         .run_async(payment_flow(
@@ -288,26 +316,35 @@ async fn main() -> Result<()> {
             connection,
             url.clone(),
             schema.clone(),
-            audit_baseline.clone(),
+            #[cfg(feature = "test-support")]
+            probe.clone(),
         ))
         .await?;
 
     let snapshot = inspect_destination(&url, &schema).await?;
-    let baseline = audit_baseline.load(Ordering::Acquire);
-    ensure!(baseline >= 0, "delivery-audit baseline was not captured");
-    ensure!(
-        snapshot.delivery_audit - baseline == 2,
-        "expected two PostgreSQL sink mutations, observed {}",
-        snapshot.delivery_audit - baseline
-    );
+    #[cfg(feature = "test-support")]
+    {
+        let calls = probe.snapshot();
+        ensure!(
+            calls.count(SinkExternalCallKind::Execute) == 2,
+            "expected exactly two PostgreSQL executions, observed {}",
+            calls.count(SinkExternalCallKind::Execute)
+        );
+        ensure!(
+            calls.count(SinkExternalCallKind::Commit) == 1,
+            "expected exactly one PostgreSQL commit, observed {}",
+            calls.count(SinkExternalCallKind::Commit)
+        );
+        println!("PostgreSQL proof calls: execute=2 commit=1");
+    }
     if verifies_archive {
         println!(
-            "Verified converged rows {:?}, two PostgreSQL sink mutations, and matching replay journals.",
+            "Verified converged rows {:?}, converged secondary state, and matching archive-redelivery journals.",
             snapshot.rows
         );
     } else {
         println!(
-            "Verified converged rows {:?} and two PostgreSQL sink mutations.",
+            "Verified converged rows {:?} and converged secondary state.",
             snapshot.rows
         );
     }
@@ -320,7 +357,7 @@ async fn main() -> Result<()> {
     );
     if !verifies_archive {
         println!(
-            "Verify redelivery with the same compiled operation: cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_payments -- --replay-from {} --verify",
+            "After confirming the current operation is safe, authorize archive redelivery: cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_payments -- --replay-from {} --verify",
             run_directory.display()
         );
     }

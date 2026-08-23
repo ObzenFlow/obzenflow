@@ -44,26 +44,41 @@ const PORTABLE_IDENTIFIER_LIMIT: usize = 63;
 const POSTGRES_WRITER_POOL_SIZE: u32 = 1;
 const POSTGRES_SQLSTATE_NAMESPACE: &str = "postgresql.sqlstate";
 
+/// A locally detected PostgreSQL connector configuration error.
+///
+/// These errors are produced without opening a socket or consulting a
+/// PostgreSQL server. Server and transport failures surface later through the
+/// sink operation protocol when a writer is opened.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PostgresConfigError {
+    /// No connection configuration was supplied to the builder.
     #[error("PostgreSQL connection configuration is missing")]
     MissingConnection,
+    /// The named environment variable was absent or was not valid Unicode.
     #[error("PostgreSQL environment variable '{0}' is missing or is not valid Unicode")]
     MissingEnvironment(String),
+    /// The connection URL or parsed driver options were invalid.
     #[error("PostgreSQL connection options are invalid")]
     InvalidConnection,
+    /// URL options contradicted the application-selected transport policy.
     #[error("PostgreSQL URL transport mode conflicts with the explicit transport policy")]
     ConflictingTransport,
+    /// A schema or table identifier was empty, malformed, or too long.
     #[error("PostgreSQL schema or table identifier is invalid")]
     InvalidIdentifier,
+    /// No SQL body following the generated `INSERT INTO` target was supplied.
     #[error("PostgreSQL INSERT body is missing")]
     MissingInsertBody,
+    /// The supplied INSERT body failed local safety validation.
     #[error("PostgreSQL INSERT body is invalid")]
     InvalidInsertBody,
+    /// The configured batch size was outside the supported finite range.
     #[error("PostgreSQL batch size must be in 1..={MAX_BATCH_SIZE}")]
     InvalidBatchSize,
+    /// No typed parameter binder was supplied.
     #[error("PostgreSQL parameter binder is missing")]
     MissingBinder,
+    /// At least one configured timeout was zero.
     #[error("PostgreSQL timeouts must be strictly positive")]
     InvalidTimeout,
 }
@@ -111,6 +126,10 @@ pub struct PostgresConnection {
 }
 
 impl PostgresConnection {
+    /// Read a PostgreSQL URL from `name` without opening a connection.
+    ///
+    /// The explicit `transport` policy remains authoritative over URL options
+    /// and ambient PostgreSQL environment variables.
     pub fn from_env(
         name: impl AsRef<str>,
         transport: PostgresTransport,
@@ -121,6 +140,9 @@ impl PostgresConnection {
         Self::from_url(&value, transport)
     }
 
+    /// Parse a PostgreSQL URL without DNS, authentication, or socket I/O.
+    ///
+    /// Unsupported URL options and transport-policy conflicts fail locally.
     pub fn from_url(url: &str, transport: PostgresTransport) -> Result<Self, PostgresConfigError> {
         preflight_url(url, transport)?;
         let options =
@@ -128,6 +150,10 @@ impl PostgresConnection {
         Self::from_options(options, transport)
     }
 
+    /// Retain parsed SQLx connection options under an explicit transport policy.
+    ///
+    /// Statement logging is disabled and the policy overwrites the driver SSL
+    /// mode. No connection is opened until [`SinkConnector::open`].
     pub fn from_options(
         options: PgConnectOptions,
         transport: PostgresTransport,
@@ -228,7 +254,7 @@ fn preflight_url(url: &str, transport: PostgresTransport) -> Result<(), Postgres
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub struct PostgresTable {
+struct PostgresTable {
     schema: String,
     table: String,
 }
@@ -370,6 +396,10 @@ impl fmt::Debug for PostgresBindings {
 /// private-field value accumulator, so it cannot replace or execute the fixed
 /// configuration statement through this API.
 pub trait PostgresBind<T>: Clone + Send + Sync + 'static {
+    /// Validate one input before any parameters are assembled or SQL executes.
+    ///
+    /// The default accepts every input. Returning an operational error fails
+    /// the current delivery without granting retry authority.
     // Binder validation is part of the sink protocol and therefore returns
     // its by-value operational error rather than an adapter-local box.
     #[allow(clippy::result_large_err)]
@@ -377,6 +407,7 @@ pub trait PostgresBind<T>: Clone + Send + Sync + 'static {
         Ok(())
     }
 
+    /// Append this input's parameter values in statement order.
     fn bind(&self, bindings: &mut PostgresBindings, input: &T);
 }
 
@@ -410,6 +441,7 @@ impl<T, B> fmt::Debug for PostgresSink<T, B> {
 }
 
 impl<T> PostgresSink<T, MissingPostgresBinder> {
+    /// Begin an I/O-free builder for inputs of type `T`.
     pub fn builder() -> PostgresSinkBuilder<T, MissingPostgresBinder> {
         PostgresSinkBuilder {
             connection: None,
@@ -425,6 +457,10 @@ impl<T> PostgresSink<T, MissingPostgresBinder> {
     }
 }
 
+/// An I/O-free builder for a fixed, typed PostgreSQL INSERT or UPSERT sink.
+///
+/// The builder validates only local configuration. PostgreSQL owns statement
+/// preparation and destination acceptance when the connector opens a writer.
 pub struct PostgresSinkBuilder<T, B> {
     connection: Option<PostgresConnection>,
     destination: Option<PostgresTable>,
@@ -451,11 +487,17 @@ impl<T, B> fmt::Debug for PostgresSinkBuilder<T, B> {
 }
 
 impl<T, B> PostgresSinkBuilder<T, B> {
+    /// Set the cold, redacted connection configuration.
     pub fn connection(mut self, connection: PostgresConnection) -> Self {
         self.connection = Some(connection);
         self
     }
 
+    /// Configure the sole generated INSERT target and its post-target SQL body.
+    ///
+    /// `schema` and `table` are validated and quoted by the adapter. `body`
+    /// begins immediately after `INSERT INTO "schema"."table"`; callers
+    /// cannot supply a second primary target through this method.
     pub fn insert_into(
         mut self,
         schema: impl Into<String>,
@@ -467,6 +509,10 @@ impl<T, B> PostgresSinkBuilder<T, B> {
         Ok(self)
     }
 
+    /// Set the transaction threshold for committed delivery receipts.
+    ///
+    /// A value of one commits each input immediately. Larger values defer
+    /// settlement until the threshold or a lifecycle flush is reached.
     pub fn batch_size(mut self, batch_size: usize) -> Result<Self, PostgresConfigError> {
         if !(1..=MAX_BATCH_SIZE).contains(&batch_size) {
             return Err(PostgresConfigError::InvalidBatchSize);
@@ -501,6 +547,7 @@ impl<T, B> PostgresSinkBuilder<T, B> {
         self
     }
 
+    /// Install the typed value-only parameter binder.
     pub fn bind_with<B2>(self, binder: B2) -> PostgresSinkBuilder<T, B2> {
         PostgresSinkBuilder {
             connection: self.connection,
@@ -520,6 +567,10 @@ impl<T, B> PostgresSinkBuilder<T, B>
 where
     B: PostgresBind<T>,
 {
+    /// Finish local validation and return immutable connector configuration.
+    ///
+    /// This method performs no DNS, authentication, schema, preparation, or
+    /// destination I/O.
     pub fn build(self) -> Result<PostgresSink<T, B>, PostgresConfigError> {
         let destination = self
             .destination
@@ -548,6 +599,7 @@ where
 }
 
 #[cfg(feature = "test-support")]
+#[doc(hidden)]
 pub mod testing {
     use obzenflow_runtime::testing::sink::{
         SinkExternalCall, SinkExternalCallKind, SinkExternalCallSnapshot, SinkFault,
@@ -615,6 +667,7 @@ pub mod testing {
     #[derive(Clone, Default)]
     pub struct PostgresTestProbe {
         state: Arc<Mutex<ProbeState>>,
+        changed: Arc<tokio::sync::Notify>,
     }
 
     impl std::fmt::Debug for PostgresTestProbe {
@@ -649,10 +702,27 @@ pub mod testing {
             state.preparations.clear();
             state.calls.clear();
             state.next_sequence = 0;
+            drop(state);
+            self.changed.notify_waiters();
         }
 
         pub fn snapshot(&self) -> SinkExternalCallSnapshot {
             SinkExternalCallSnapshot::new(self.state().calls.clone())
+        }
+
+        /// Wait until at least `minimum` calls of `kind` have been observed.
+        ///
+        /// This is a test-only scheduling seam. Callers should place their own
+        /// diagnostic timeout around the wait rather than use elapsed time as
+        /// the observation oracle.
+        pub async fn wait_for_calls(&self, kind: SinkExternalCallKind, minimum: usize) {
+            loop {
+                let changed = self.changed.notified();
+                if self.snapshot().count(kind) >= minimum {
+                    return;
+                }
+                changed.await;
+            }
         }
 
         pub fn delay_once(&self, point: PostgresDelayPoint, duration: Duration) {
@@ -689,12 +759,15 @@ pub mod testing {
         }
 
         pub(crate) fn record(&self, writer: u64, kind: SinkExternalCallKind) {
-            let mut state = self.state();
-            let sequence = state.next_sequence;
-            state.next_sequence += 1;
-            state
-                .calls
-                .push(SinkExternalCall::new(writer, sequence, kind));
+            {
+                let mut state = self.state();
+                let sequence = state.next_sequence;
+                state.next_sequence += 1;
+                state
+                    .calls
+                    .push(SinkExternalCall::new(writer, sequence, kind));
+            }
+            self.changed.notify_one();
         }
 
         pub(crate) fn take(&self, fault: SinkFault) -> bool {
@@ -1168,6 +1241,11 @@ struct BufferedRow<T> {
     pending: PendingSinkInput,
 }
 
+/// A stage-local PostgreSQL writer created exclusively by [`PostgresSink`].
+///
+/// Each writer owns its one-slot session pool, transaction and batching state,
+/// pending capabilities, deadlines, and failure lifecycle. Applications pass
+/// the connector to `sink!`; they do not construct writers directly.
 pub struct PostgresWriter<T, B> {
     pool: PostgresSessionPool,
     destination: PostgresTable,
@@ -1584,6 +1662,16 @@ fn map_lifecycle_failure<T>(
     }
 }
 
+fn with_first_deferred_subject<T>(
+    operation: SinkOperationError,
+    pending: &[BufferedRow<T>],
+) -> SinkOperationError {
+    match pending.first() {
+        Some(row) => operation.with_deferred_operation_subject(&row.pending),
+        None => operation,
+    }
+}
+
 #[async_trait]
 impl<T, B> SinkWriter for PostgresWriter<T, B>
 where
@@ -1659,10 +1747,11 @@ where
     async fn flush(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
         self.probe.record_flush();
         if self.probe.fault_flush() {
-            return Err(destination_operation_error(
+            let operation = destination_operation_error(
                 &self.destination,
                 test_operation_error("injected PostgreSQL flush failure", None),
-            ));
+            );
+            return Err(with_first_deferred_subject(operation, &self.pending));
         }
         self.settle_pending().await
     }
@@ -1670,10 +1759,11 @@ where
     async fn drain(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
         self.probe.record_drain();
         if self.probe.fault_drain() {
-            return Err(destination_operation_error(
+            let operation = destination_operation_error(
                 &self.destination,
                 test_operation_error("injected PostgreSQL drain failure", None),
-            ));
+            );
+            return Err(with_first_deferred_subject(operation, &self.pending));
         }
         self.settle_pending().await
     }
