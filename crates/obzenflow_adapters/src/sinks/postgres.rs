@@ -1482,7 +1482,11 @@ where
             query
                 .execute(&mut *connection.connection)
                 .await
-                .map(|_| ())
+                // PostgreSQL command-tag row counts describe physical row effects,
+                // not ObzenFlow input settlement. A successful
+                // `ON CONFLICT DO NOTHING` can report zero, so the connector
+                // intentionally discards the count.
+                .map(|_command_result| ())
                 .map_err(operation_error)
         })
         .await;

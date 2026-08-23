@@ -716,6 +716,75 @@ async fn binding_is_parameterised_and_readiness_remains_point_in_time() {
     fixture.cleanup().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn successful_do_nothing_settles_inputs_not_destination_rows() {
+    let fixture = Fixture::new("do_nothing").await;
+    sqlx::query(&format!(
+        "CREATE TABLE {}.command_result_values (id BIGINT PRIMARY KEY, value TEXT NOT NULL)",
+        fixture.schema
+    ))
+    .execute(&fixture.pool)
+    .await
+    .expect("create command-result settlement target");
+
+    let probe = PostgresTestProbe::default();
+    let connector = sink(
+        fixture.connection(),
+        &fixture.schema,
+        "command_result_values",
+        "(id, value) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING",
+        IdValueBinder,
+        probe.clone(),
+    );
+    let (mut adapter, writer_id) = open_adapter(connector)
+        .await
+        .expect("DO NOTHING writer opens");
+
+    let first = consume(
+        &mut adapter,
+        writer_id,
+        DriverInput {
+            id: 1,
+            value: "first".to_string(),
+        },
+    )
+    .await
+    .expect("first input inserts and commits");
+    let duplicate = consume(
+        &mut adapter,
+        writer_id,
+        DriverInput {
+            id: 1,
+            value: "duplicate".to_string(),
+        },
+    )
+    .await
+    .expect("duplicate input completes successfully with no row insertion");
+
+    for receipt in [&first, &duplicate] {
+        assert!(matches!(&receipt.result, DeliveryResult::Success { .. }));
+        assert_eq!(receipt.items_delivered, Some(1));
+        assert!(
+            receipt.middleware_context.is_none(),
+            "PostgreSQL command-tag counts are not delivery evidence"
+        );
+    }
+
+    let rows: Vec<(i64, String)> = sqlx::query_as(&format!(
+        "SELECT id, value FROM {}.command_result_values ORDER BY id",
+        fixture.schema
+    ))
+    .fetch_all(&fixture.pool)
+    .await
+    .expect("inspect DO NOTHING destination state");
+    assert_eq!(rows, vec![(1, "first".to_string())]);
+
+    let calls = probe.snapshot();
+    assert_eq!(calls.count(SinkExternalCallKind::Execute), 2);
+    assert_eq!(calls.count(SinkExternalCallKind::Commit), 2);
+    fixture.cleanup().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures_remain_reusable() {
     const OPERATION_TIMEOUT: Duration = Duration::from_millis(300);

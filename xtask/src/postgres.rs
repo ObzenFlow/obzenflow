@@ -235,7 +235,6 @@ pub(super) fn run(args: &[String]) -> Result<()> {
         "status" => status(flags),
         "run" => run_child(flags),
         "test" => test(flags),
-        "prove-persistent" => prove_persistent(flags),
         "logs" => logs(flags),
         "down" => down(flags),
         "cleanup" => cleanup(flags),
@@ -295,7 +294,7 @@ fn status(flags: &[String]) -> Result<()> {
     let state_path = selected_development_state_path(&root)?;
     if !state_path.is_file() {
         println!("no PostgreSQL development session state found");
-        report_stale_test_sessions(&root, Some(&compose))?;
+        report_existing_test_sessions(&root, Some(&compose))?;
         return Ok(());
     }
     let mut state = read_state(&state_path)?;
@@ -309,7 +308,7 @@ fn status(flags: &[String]) -> Result<()> {
         write_state(&state_path, &state)?;
     }
     print_status(&state, &health);
-    report_stale_test_sessions(&root, Some(&compose))
+    report_existing_test_sessions(&root, Some(&compose))
 }
 
 fn run_child(flags: &[String]) -> Result<()> {
@@ -361,8 +360,11 @@ fn test(flags: &[String]) -> Result<()> {
     let _signal_guard = SignalGuard::install()?;
     let root = super::workspace_root()?;
     let compose = preflight_docker()?;
-    report_stale_test_sessions(&root, Some(&compose))?;
+    report_existing_test_sessions(&root, Some(&compose))?;
+    run_persistent_acceptance(root, compose)
+}
 
+fn run_ephemeral_acceptance(root: PathBuf, compose: ComposeCommand) -> Result<()> {
     let run_id = unique_run_id();
     let directory = root.join(SESSION_ROOT).join(&run_id);
     fs::create_dir_all(&directory)?;
@@ -419,11 +421,7 @@ fn test(flags: &[String]) -> Result<()> {
     }
 }
 
-fn prove_persistent(flags: &[String]) -> Result<()> {
-    reject_flags("postgres prove-persistent", flags)?;
-    let _signal_guard = SignalGuard::install()?;
-    let root = super::workspace_root()?;
-    let compose = preflight_docker()?;
+fn run_persistent_acceptance(root: PathBuf, compose: ComposeCommand) -> Result<()> {
     let proof_session_id = unique_run_id();
     let identity = proof_development_session(&root, &proof_session_id)?;
     let directory = identity.directory.clone();
@@ -516,7 +514,7 @@ fn prove_persistent(flags: &[String]) -> Result<()> {
         )?;
         require_output_contains(&live_inspection, "secondary_state=converged")?;
 
-        run_public_postgres_command(&root, &["test"], &proof_command_environment)?;
+        run_ephemeral_acceptance(root.clone(), compose.clone())?;
         let after_ephemeral = run_public_postgres_command(
             &root,
             &["run", "--", binary_arg, "--inspect"],
@@ -778,6 +776,10 @@ fn cleanup(flags: &[String]) -> Result<()> {
     {
         require_compose_container_authority(&container_id, &identity.project)?;
     }
+    println!(
+        "removing disposable PostgreSQL test project '{}' and its data volume",
+        identity.project
+    );
     let _ = capture_logs(&root, &compose, &identity.directory, &authoritative_state);
     stop_session(
         &root,
@@ -806,6 +808,7 @@ const REQUIRED_TEST_TARGETS: &[RequiredTestTarget] = &[
         expected_tests: &[
             "postgres::tests::cleanup_authority_is_derived_and_fail_closed",
             "postgres::tests::docker_preflight_matrix_is_bounded_context_aware_and_redacted",
+            "postgres::tests::persistent_acceptance_has_no_separate_cli_command",
             "postgres::tests::postgres_evidence_scanner_is_surface_aware",
             "postgres::tests::published_port_parser_accepts_only_loopback_dynamic_mapping",
             "postgres::tests::required_test_inventory_rejects_missing_or_unexpected_tests",
@@ -873,6 +876,7 @@ const REQUIRED_TEST_TARGETS: &[RequiredTestTarget] = &[
             "replacement_authority_query_failures_and_timeouts_close_unverified_sessions",
             "replacement_sessions_reestablish_target_authority_before_begin",
             "server_cancellation_remains_remote_postgres_evidence",
+            "successful_do_nothing_settles_inputs_not_destination_rows",
             "typed_transport_proves_plaintext_and_tls_failure_matrix",
         ],
         inventory_prefix: None,
@@ -2137,7 +2141,7 @@ fn read_state(path: &Path) -> Result<SessionState> {
     })
 }
 
-fn report_stale_test_sessions(root: &Path, compose: Option<&ComposeCommand>) -> Result<()> {
+fn report_existing_test_sessions(root: &Path, compose: Option<&ComposeCommand>) -> Result<()> {
     let session_root = root.join(SESSION_ROOT);
     if !session_root.is_dir() {
         return Ok(());
@@ -2160,19 +2164,20 @@ fn report_stale_test_sessions(root: &Path, compose: Option<&ComposeCommand>) -> 
             Some(compose) => container_health(root, compose, &path, &state)?,
             None => "unknown".to_string(),
         };
-        if !matches!(health.as_str(), "stopped" | "unavailable") {
-            println!(
-                "stale PostgreSQL test project detected: project={} run_id={} health={}; exact state: {}",
-                state.project,
-                state.run_id,
-                health,
-                state_path.display()
-            );
-            println!(
-                "clean it with: cargo xtask postgres cleanup {}",
-                state.run_id
-            );
+        if matches!(health.as_str(), "stopped" | "unavailable") {
+            continue;
         }
+        println!(
+            "PostgreSQL test container remains present: project={} run_id={} health={}; exact state: {}",
+            state.project,
+            state.run_id,
+            health,
+            state_path.display()
+        );
+        println!(
+            "if its owning test process is no longer running, remove exactly this disposable project with: cargo xtask postgres cleanup {}",
+            state.run_id
+        );
     }
     Ok(())
 }
@@ -2366,13 +2371,17 @@ fn result_label(result: Result<()>) -> String {
 
 fn print_help() {
     println!("usage:");
+    println!("proof:");
+    println!("  cargo xtask postgres test");
+    println!();
+    println!("development session:");
     println!("  cargo xtask postgres up");
     println!("  cargo xtask postgres status");
     println!("  cargo xtask postgres run -- <command> [args...]");
-    println!("  cargo xtask postgres test");
-    println!("  cargo xtask postgres prove-persistent");
     println!("  cargo xtask postgres logs");
     println!("  cargo xtask postgres down [--volumes]");
+    println!();
+    println!("recovery for an operator-identified abandoned disposable test session:");
     println!("  cargo xtask postgres cleanup <reported-test-run-id>");
 }
 
@@ -2407,6 +2416,16 @@ mod tests {
                 _ => None,
             }
         }
+    }
+
+    #[test]
+    fn persistent_acceptance_has_no_separate_cli_command() {
+        let error = run(&["prove-persistent".to_string()])
+            .expect_err("persistent acceptance must not have a separate CLI command");
+        assert_eq!(
+            error.to_string(),
+            "unknown postgres command: prove-persistent"
+        );
     }
 
     #[test]
