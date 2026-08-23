@@ -113,10 +113,10 @@ impl SinkWriterConformanceFixture for PostgresFixture {
         .with_fault(SinkFaultCase::write(SinkFault::Acquire, CurrentOnly))
         .with_fault(SinkFaultCase::write(SinkFault::BeforeDeferral, CurrentOnly))
         .with_fault(SinkFaultCase::write(SinkFault::AfterDeferral, CurrentOnly))
-        .with_fault(SinkFaultCase::write(
-            SinkFault::DestinationExecution,
-            ConfirmedRollback,
-        ))
+        .with_fault(
+            SinkFaultCase::write(SinkFault::DestinationExecution, Poisoned)
+                .with_deferred_operation_subject(),
+        )
         .with_fault(SinkFaultCase::write(
             SinkFault::MidBatchMutation,
             ConfirmedRollback,

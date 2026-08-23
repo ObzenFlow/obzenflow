@@ -491,6 +491,7 @@ const REQUIRED_TEST_TARGETS: &[RequiredTestTarget] = &[
         expected_tests: &[
             "binding_is_parameterised_and_readiness_remains_point_in_time",
             "buffered_flush_and_drain_rejection_settle_nothing",
+            "deferred_origin_failures_poison_with_exact_subject_and_current_failures_remain_reusable",
             "open_is_non_mutating_and_postgres_owns_statement_authority",
             "operation_deadlines_preserve_only_acknowledged_transaction_truth",
             "postgres_tls_uses_native_root_loader_in_an_isolated_process",

@@ -1195,6 +1195,7 @@ impl<T, B> Drop for PostgresWriter<T, B> {
 enum TransactionFailure {
     Acquire(SinkOperationError),
     Execute {
+        subject: TransactionInputSubject,
         operation: SinkOperationError,
         rollback: Option<SinkOperationError>,
     },
@@ -1206,14 +1207,22 @@ enum TransactionFailure {
     PostCommit(SinkOperationError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionInputSubject {
+    Deferred(usize),
+    Current,
+}
+
 impl TransactionFailure {
     fn with_destination(self, destination: &PostgresTable) -> Self {
         match self {
             Self::Acquire(error) => Self::Acquire(destination_operation_error(destination, error)),
             Self::Execute {
+                subject,
                 operation,
                 rollback,
             } => Self::Execute {
+                subject,
                 operation: destination_operation_error(destination, operation),
                 rollback: rollback.map(|error| destination_operation_error(destination, error)),
             },
@@ -1363,10 +1372,11 @@ where
         }
     }
 
-    for (index, input) in buffered
+    for (index, (subject, input)) in buffered
         .iter()
-        .map(|row| &row.input)
-        .chain(current)
+        .enumerate()
+        .map(|(index, row)| (TransactionInputSubject::Deferred(index), &row.input))
+        .chain(current.map(|input| (TransactionInputSubject::Current, input)))
         .enumerate()
     {
         if probe.fault_destination_execution() || (index > 0 && probe.fault_mid_batch_mutation()) {
@@ -1376,6 +1386,7 @@ where
                 .await
                 .err();
             return Err(TransactionFailure::Execute {
+                subject,
                 operation,
                 rollback,
             });
@@ -1401,6 +1412,7 @@ where
             .await
             .err();
         return Err(TransactionFailure::Execute {
+            subject,
             operation,
             rollback,
         });
@@ -1478,12 +1490,33 @@ fn committed_receipts<T>(pending: &mut Vec<BufferedRow<T>>) -> Vec<SinkCommitRec
         .collect()
 }
 
-fn map_write_failure(failure: TransactionFailure) -> SinkWriteFailure {
+fn map_write_failure<T>(
+    failure: TransactionFailure,
+    pending: &[BufferedRow<T>],
+) -> SinkWriteFailure {
     match failure {
         TransactionFailure::Acquire(error) => {
             SinkWriteFailure::current_only(SinkWritePhase::Acquire, error)
         }
         TransactionFailure::Execute {
+            subject: TransactionInputSubject::Deferred(index),
+            operation,
+            rollback: None,
+        } => match pending.get(index) {
+            Some(row) => SinkWriteFailure::poisoned_by_deferred(
+                &row.pending,
+                SinkWritePhase::Execute,
+                operation,
+            ),
+            None => SinkWriteFailure::poisoned(
+                SinkWritePhase::Execute,
+                SinkOperationError::other(
+                    "PostgreSQL deferred operation subject index was invalid",
+                ),
+            ),
+        },
+        TransactionFailure::Execute {
+            subject: TransactionInputSubject::Current,
             operation,
             rollback: None,
         } => SinkWriteFailure::confirmed_rollback(SinkWritePhase::Execute, operation),
@@ -1508,12 +1541,26 @@ fn map_write_failure(failure: TransactionFailure) -> SinkWriteFailure {
     }
 }
 
-fn map_lifecycle_failure(failure: TransactionFailure) -> SinkOperationError {
+fn map_lifecycle_failure<T>(
+    failure: TransactionFailure,
+    pending: &[BufferedRow<T>],
+) -> SinkOperationError {
     match failure {
         TransactionFailure::Acquire(error)
         | TransactionFailure::Commit(error)
         | TransactionFailure::PostCommit(error) => error,
         TransactionFailure::Execute {
+            subject: TransactionInputSubject::Deferred(index),
+            operation,
+            rollback: None,
+        } => match pending.get(index) {
+            Some(row) => operation.with_deferred_operation_subject(&row.pending),
+            None => {
+                SinkOperationError::other("PostgreSQL deferred operation subject index was invalid")
+            }
+        },
+        TransactionFailure::Execute {
+            subject: TransactionInputSubject::Current,
             operation,
             rollback: None,
         } => operation,
@@ -1560,7 +1607,7 @@ where
             execute_transaction(self, Some(&input))
                 .await
                 .map_err(|failure| failure.with_destination(&self.destination))
-                .map_err(map_write_failure)?;
+                .map_err(|failure| map_write_failure(failure, &self.pending))?;
             return Ok(SinkWriteReport::terminal(terminal_outcome()));
         }
 
@@ -1594,7 +1641,7 @@ where
         execute_transaction(self, Some(&input))
             .await
             .map_err(|failure| failure.with_destination(&self.destination))
-            .map_err(map_write_failure)?;
+            .map_err(|failure| map_write_failure(failure, &self.pending))?;
 
         let mut receipts = committed_receipts(&mut self.pending);
         receipts.push(SinkCommitReceipt::new(current_pending, terminal_outcome()));
@@ -1639,7 +1686,7 @@ where
         execute_transaction(self, None)
             .await
             .map_err(|failure| failure.with_destination(&self.destination))
-            .map_err(map_lifecycle_failure)?;
+            .map_err(|failure| map_lifecycle_failure(failure, &self.pending))?;
         Ok(SinkWriterLifecycleReport::default()
             .with_commit_receipts(committed_receipts(&mut self.pending)))
     }
@@ -1668,7 +1715,8 @@ fn operation_error(error: sqlx::Error) -> SinkOperationError {
         }
         sqlx::Error::TypeNotFound { .. }
         | sqlx::Error::ColumnDecode { .. }
-        | sqlx::Error::Decode(_) => {
+        | sqlx::Error::Decode(_)
+        | sqlx::Error::Encode(_) => {
             SinkOperationError::deserialization("PostgreSQL value encoding or decoding failed")
         }
         _ => SinkOperationError::other("PostgreSQL operation failed"),

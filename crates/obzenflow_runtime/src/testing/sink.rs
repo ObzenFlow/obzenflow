@@ -79,6 +79,7 @@ impl SinkFault {
 pub struct SinkFaultCase {
     fault: SinkFault,
     disposition: Option<SinkWriteFailureDisposition>,
+    deferred_operation_subject: bool,
 }
 
 impl SinkFaultCase {
@@ -90,6 +91,7 @@ impl SinkFaultCase {
         Self {
             fault,
             disposition: None,
+            deferred_operation_subject: false,
         }
     }
 
@@ -101,7 +103,19 @@ impl SinkFaultCase {
         Self {
             fault,
             disposition: Some(disposition),
+            deferred_operation_subject: false,
         }
+    }
+
+    /// Require this poisoned write fault to identify an earlier deferred
+    /// input as its validated operation subject.
+    pub fn with_deferred_operation_subject(mut self) -> Self {
+        assert_eq!(
+            self.disposition,
+            Some(SinkWriteFailureDisposition::Poisoned)
+        );
+        self.deferred_operation_subject = true;
+        self
     }
 
     pub fn fault(&self) -> SinkFault {
@@ -114,6 +128,10 @@ impl SinkFaultCase {
 
     pub fn expected_disposition(&self) -> Option<SinkWriteFailureDisposition> {
         self.disposition
+    }
+
+    pub fn expects_deferred_operation_subject(&self) -> bool {
+        self.deferred_operation_subject
     }
 }
 
@@ -1452,6 +1470,19 @@ pub async fn run_writer_conformance<F: SinkWriterConformanceFixture>(
                             fault_case.expected_disposition(),
                             observed.phase(),
                             observed.disposition()
+                        ),
+                    ));
+                }
+                if observed.error().operation_subject_event_id().is_some()
+                    != fault_case.expects_deferred_operation_subject()
+                {
+                    return Err(failure(
+                        "failure",
+                        format!("{:?}", fault_case.fault),
+                        format!(
+                            "expected deferred operation subject={}, got {}",
+                            fault_case.expects_deferred_operation_subject(),
+                            observed.error().operation_subject_event_id().is_some()
                         ),
                     ));
                 }

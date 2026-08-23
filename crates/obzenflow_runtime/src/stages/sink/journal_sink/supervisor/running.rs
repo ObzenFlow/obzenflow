@@ -660,6 +660,7 @@ async fn journal_sink_operation_failure<
         causal_event_id: Some(input.id),
         input_position: input_position.map(|position| position.0),
         failed_delivery_event_id: Some(failed_receipt.event.id),
+        operation_subject_event_id: error.operation_subject_event_id(),
         phase,
         kind: error.kind(),
         destination_error_code: error.destination_error_code().cloned(),

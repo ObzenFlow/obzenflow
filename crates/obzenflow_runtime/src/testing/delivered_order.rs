@@ -18,7 +18,7 @@
 
 use obzenflow_core::event::{ChainEvent, EventEnvelope};
 use obzenflow_core::EventId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// One delivered-order row: an output of the fan-in stage attributed to the
 /// consumed input that produced it.
@@ -39,8 +39,8 @@ pub struct DeliveredOrderRow {
     pub parent_event_id: EventId,
 }
 
-/// The delivered-order projection of a fan-in stage: its data outputs in
-/// journal append order, attributed to consumed inputs.
+/// The delivered-order projection of a fan-in stage: its data outputs or sink
+/// delivery receipts in journal append order, attributed to consumed inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveredOrderProjection {
     pub rows: Vec<DeliveredOrderRow>,
@@ -72,7 +72,7 @@ impl DeliveredOrderProjection {
 
         for envelope in stage_outputs {
             let event = &envelope.event;
-            if !event.is_data() {
+            if !event.is_data() && !event.is_delivery() {
                 continue;
             }
             let Some(parent_id) = event.causality.parent_ids.first().copied() else {
@@ -94,6 +94,11 @@ impl DeliveredOrderProjection {
                 obzenflow_core::event::ChainEventContent::Data { payload, .. } => {
                     serde_json::to_string(payload).unwrap_or_default()
                 }
+                // Sink receipts include a fresh `processed_at` timestamp. The
+                // receipt's exact parent is the ordering witness; comparing
+                // its payload would turn wall-clock variance into a false
+                // replay-order divergence.
+                obzenflow_core::event::ChainEventContent::Delivery(_) => String::new(),
                 _ => String::new(),
             };
 
@@ -114,11 +119,10 @@ impl DeliveredOrderProjection {
     /// it produced).
     pub fn consumption_sequence(&self) -> Vec<(String, u64)> {
         let mut sequence = Vec::new();
-        let mut last: Option<EventId> = None;
+        let mut seen = HashSet::new();
         for row in &self.rows {
-            if last != Some(row.parent_event_id) {
+            if seen.insert(row.parent_event_id) {
                 sequence.push((row.upstream_stage_key.clone(), row.per_input_ordinal));
-                last = Some(row.parent_event_id);
             }
         }
         sequence

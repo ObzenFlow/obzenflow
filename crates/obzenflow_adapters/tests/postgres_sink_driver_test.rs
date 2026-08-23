@@ -12,7 +12,7 @@ use obzenflow_adapters::sinks::postgres::{
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
 use obzenflow_runtime::stages::common::handlers::sink::{SinkHandler, SinkWriterAdapter};
 use obzenflow_runtime::stages::common::HandlerError;
 use obzenflow_runtime::stages::sink::{
@@ -260,6 +260,24 @@ where
         ChainEventFactory::data_event_from(writer_id, DriverInput::versioned_event_type(), &input)
             .expect("driver input serialises");
     adapter.consume(event).await
+}
+
+async fn consume_with_event_id<B>(
+    adapter: &mut SinkWriterAdapter<PostgresWriter<DriverInput, B>>,
+    writer_id: WriterId,
+    input: DriverInput,
+) -> (
+    EventId,
+    Result<obzenflow_core::event::payloads::delivery_payload::DeliveryPayload, HandlerError>,
+)
+where
+    B: PostgresBind<DriverInput>,
+{
+    let event =
+        ChainEventFactory::data_event_from(writer_id, DriverInput::versioned_event_type(), &input)
+            .expect("driver input serialises");
+    let event_id = event.id;
+    (event_id, adapter.consume(event).await)
 }
 
 fn sink<B>(
@@ -695,6 +713,365 @@ async fn binding_is_parameterised_and_readiness_remains_point_in_time() {
         }
         other => panic!("expected typed sink write failure, got {other:?}"),
     }
+    fixture.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures_remain_reusable() {
+    const OPERATION_TIMEOUT: Duration = Duration::from_millis(300);
+    const ROLLBACK_TIMEOUT: Duration = Duration::from_secs(2);
+    const LOCK_RELEASE: Duration = Duration::from_millis(700);
+
+    let fixture = Fixture::new("deferred_origin").await;
+    for table in ["constraint_values", "encoding_values", "timeout_values"] {
+        let constraint = if table == "constraint_values" {
+            ", CHECK (id > 0)"
+        } else {
+            ""
+        };
+        sqlx::query(&format!(
+            "CREATE TABLE {}.{table} (id BIGINT PRIMARY KEY, value TEXT NOT NULL{constraint})",
+            fixture.schema
+        ))
+        .execute(&fixture.pool)
+        .await
+        .unwrap_or_else(|error| panic!("create {table}: {error}"));
+    }
+
+    let deferred_probe = PostgresTestProbe::default();
+    let deferred_constraint = PostgresSink::<DriverInput>::builder()
+        .connection(fixture.connection())
+        .insert_into(
+            &fixture.schema,
+            "constraint_values",
+            "(id, value) VALUES ($1, $2)",
+        )
+        .expect("deferred constraint target is valid")
+        .batch_size(2)
+        .expect("two-row batch is valid")
+        .bind_with(IdValueBinder)
+        .test_probe(deferred_probe.clone())
+        .build()
+        .expect("deferred constraint sink builds without I/O");
+    let (mut deferred_adapter, deferred_writer_id) = open_adapter(deferred_constraint)
+        .await
+        .expect("deferred constraint writer opens");
+    let (bad_deferred_id, buffered) = consume_with_event_id(
+        &mut deferred_adapter,
+        deferred_writer_id,
+        DriverInput {
+            id: -1,
+            value: "bad-deferred".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        buffered
+            .expect("bad row is deferred before threshold")
+            .result,
+        DeliveryResult::Buffered { .. }
+    ));
+    let (good_current_id, failure) = consume_with_event_id(
+        &mut deferred_adapter,
+        deferred_writer_id,
+        DriverInput {
+            id: 2,
+            value: "good-current".to_string(),
+        },
+    )
+    .await;
+    match failure.expect_err("the earlier deferred constraint violation poisons") {
+        HandlerError::SinkWrite(failure) => {
+            assert_eq!(failure.phase(), SinkWritePhase::Execute);
+            assert_eq!(failure.disposition(), SinkWriteFailureDisposition::Poisoned);
+            assert_eq!(sqlstate(failure.error()), Some("23514"));
+            assert_eq!(
+                failure.error().operation_subject_event_id(),
+                Some(bad_deferred_id)
+            );
+            assert_ne!(
+                failure.error().operation_subject_event_id(),
+                Some(good_current_id)
+            );
+        }
+        other => panic!("expected deferred-origin poison, got {other:?}"),
+    }
+    let constraint_count: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {}.constraint_values",
+        fixture.schema
+    ))
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("inspect rolled-back deferred constraint batch");
+    assert_eq!(constraint_count, 0);
+    drop(deferred_adapter);
+    let deferred_calls = deferred_probe.snapshot();
+    assert_eq!(deferred_calls.count(SinkExternalCallKind::Write), 2);
+    assert_eq!(deferred_calls.count(SinkExternalCallKind::Rollback), 1);
+    assert_eq!(deferred_calls.count(SinkExternalCallKind::Commit), 0);
+    assert_eq!(deferred_calls.count(SinkExternalCallKind::Flush), 0);
+    assert_eq!(deferred_calls.count(SinkExternalCallKind::Drain), 0);
+
+    let current_probe = PostgresTestProbe::default();
+    let current_constraint = PostgresSink::<DriverInput>::builder()
+        .connection(fixture.connection())
+        .insert_into(
+            &fixture.schema,
+            "constraint_values",
+            "(id, value) VALUES ($1, $2)",
+        )
+        .expect("current constraint target is valid")
+        .batch_size(2)
+        .expect("two-row batch is valid")
+        .bind_with(IdValueBinder)
+        .test_probe(current_probe)
+        .build()
+        .expect("current constraint sink builds without I/O");
+    let (mut current_adapter, current_writer_id) = open_adapter(current_constraint)
+        .await
+        .expect("current constraint writer opens");
+    consume(
+        &mut current_adapter,
+        current_writer_id,
+        DriverInput {
+            id: 1,
+            value: "good-deferred".to_string(),
+        },
+    )
+    .await
+    .expect("good earlier row is buffered");
+    let error = consume(
+        &mut current_adapter,
+        current_writer_id,
+        DriverInput {
+            id: -2,
+            value: "bad-current".to_string(),
+        },
+    )
+    .await
+    .expect_err("current constraint violation rolls the batch back");
+    match error {
+        HandlerError::SinkWrite(failure) => {
+            assert_eq!(failure.phase(), SinkWritePhase::Execute);
+            assert_eq!(
+                failure.disposition(),
+                SinkWriteFailureDisposition::ConfirmedRollback
+            );
+            assert_eq!(sqlstate(failure.error()), Some("23514"));
+            assert_eq!(failure.error().operation_subject_event_id(), None);
+        }
+        other => panic!("expected current-origin confirmed rollback, got {other:?}"),
+    }
+    consume(
+        &mut current_adapter,
+        current_writer_id,
+        DriverInput {
+            id: 3,
+            value: "later-current".to_string(),
+        },
+    )
+    .await
+    .expect("later current commits with the retained good row");
+    let recovered_rows: Vec<(i64, String)> = sqlx::query_as(&format!(
+        "SELECT id, value FROM {}.constraint_values ORDER BY id",
+        fixture.schema
+    ))
+    .fetch_all(&fixture.pool)
+    .await
+    .expect("inspect current-origin recovery");
+    assert_eq!(
+        recovered_rows,
+        vec![
+            (1, "good-deferred".to_string()),
+            (3, "later-current".to_string()),
+        ]
+    );
+    drop(current_adapter);
+
+    let encoding_probe = PostgresTestProbe::default();
+    let encoding = PostgresSink::<DriverInput>::builder()
+        .connection(fixture.connection())
+        .insert_into(
+            &fixture.schema,
+            "encoding_values",
+            "(id, value) VALUES ($1, $2)",
+        )
+        .expect("encoding target is valid")
+        .batch_size(2)
+        .expect("two-row batch is valid")
+        .bind_with(EncodingFailureBinder)
+        .test_probe(encoding_probe)
+        .build()
+        .expect("encoding sink builds without I/O");
+    let (mut encoding_adapter, encoding_writer_id) =
+        open_adapter(encoding).await.expect("encoding writer opens");
+    let (encoding_subject_id, buffered) = consume_with_event_id(
+        &mut encoding_adapter,
+        encoding_writer_id,
+        DriverInput {
+            id: 4,
+            value: "encoding-deferred".to_string(),
+        },
+    )
+    .await;
+    buffered.expect("encoding remains deferred below threshold");
+    let (_, failure) = consume_with_event_id(
+        &mut encoding_adapter,
+        encoding_writer_id,
+        DriverInput {
+            id: 5,
+            value: "encoding-current".to_string(),
+        },
+    )
+    .await;
+    match failure.expect_err("deferred encoding failure poisons") {
+        HandlerError::SinkWrite(failure) => {
+            assert_eq!(failure.phase(), SinkWritePhase::Execute);
+            assert_eq!(failure.disposition(), SinkWriteFailureDisposition::Poisoned);
+            assert_eq!(failure.error().kind(), ErrorKind::Deserialization);
+            assert_eq!(
+                failure.error().operation_subject_event_id(),
+                Some(encoding_subject_id)
+            );
+        }
+        other => panic!("expected deferred encoding poison, got {other:?}"),
+    }
+    drop(encoding_adapter);
+
+    let flush_encoding = PostgresSink::<DriverInput>::builder()
+        .connection(fixture.connection())
+        .insert_into(
+            &fixture.schema,
+            "encoding_values",
+            "(id, value) VALUES ($1, $2)",
+        )
+        .expect("flush encoding target is valid")
+        .batch_size(3)
+        .expect("three-row batch is valid")
+        .bind_with(EncodingFailureBinder)
+        .test_probe(PostgresTestProbe::default())
+        .build()
+        .expect("flush encoding sink builds without I/O");
+    let (mut flush_adapter, flush_writer_id) = open_adapter(flush_encoding)
+        .await
+        .expect("flush encoding writer opens");
+    let (flush_subject_id, buffered) = consume_with_event_id(
+        &mut flush_adapter,
+        flush_writer_id,
+        DriverInput {
+            id: 6,
+            value: "flush-deferred".to_string(),
+        },
+    )
+    .await;
+    buffered.expect("flush subject remains buffered");
+    match flush_adapter
+        .flush_report()
+        .await
+        .expect_err("flush reports the deferred encoding subject")
+    {
+        HandlerError::SinkOperation(error) => {
+            assert_eq!(error.kind(), ErrorKind::Deserialization);
+            assert_eq!(error.operation_subject_event_id(), Some(flush_subject_id));
+        }
+        other => panic!("expected deferred-origin flush failure, got {other:?}"),
+    }
+    drop(flush_adapter);
+
+    sqlx::query(&format!(
+        "INSERT INTO {}.timeout_values (id, value) VALUES (10, 'baseline')",
+        fixture.schema
+    ))
+    .execute(&fixture.pool)
+    .await
+    .expect("seed deferred timeout target");
+    let timeout_probe = PostgresTestProbe::default();
+    let timeout_sink = PostgresSink::<DriverInput>::builder()
+        .connection(
+            fixture
+                .connection()
+                .with_operation_timeout(OPERATION_TIMEOUT)
+                .with_rollback_timeout(ROLLBACK_TIMEOUT),
+        )
+        .insert_into(
+            &fixture.schema,
+            "timeout_values",
+            "(id, value) VALUES ($1, $2) \
+             ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .expect("timeout target is valid")
+        .batch_size(2)
+        .expect("two-row timeout batch is valid")
+        .bind_with(IdValueBinder)
+        .test_probe(timeout_probe)
+        .build()
+        .expect("timeout sink builds without I/O");
+    let (mut timeout_adapter, timeout_writer_id) = open_adapter(timeout_sink)
+        .await
+        .expect("timeout writer opens");
+    let (timeout_subject_id, buffered) = consume_with_event_id(
+        &mut timeout_adapter,
+        timeout_writer_id,
+        DriverInput {
+            id: 10,
+            value: "blocked-deferred".to_string(),
+        },
+    )
+    .await;
+    buffered.expect("locked row remains deferred until threshold");
+
+    let mut row_lock = fixture.pool.acquire().await.expect("acquire row lock");
+    sqlx::query("BEGIN")
+        .execute(&mut *row_lock)
+        .await
+        .expect("begin row-lock transaction");
+    sqlx::query(&format!(
+        "SELECT id FROM {}.timeout_values WHERE id = 10 FOR UPDATE",
+        fixture.schema
+    ))
+    .execute(&mut *row_lock)
+    .await
+    .expect("lock the deferred operation subject");
+    let release_lock = async {
+        tokio::time::sleep(LOCK_RELEASE).await;
+        sqlx::query("ROLLBACK")
+            .execute(&mut *row_lock)
+            .await
+            .expect("release lock within rollback confirmation budget");
+    };
+    let blocked = consume(
+        &mut timeout_adapter,
+        timeout_writer_id,
+        DriverInput {
+            id: 11,
+            value: "good-current".to_string(),
+        },
+    );
+    let (failure, ()) = tokio::join!(blocked, release_lock);
+    match failure.expect_err("deferred execution timeout poisons after rollback") {
+        HandlerError::SinkWrite(failure) => {
+            assert_eq!(failure.phase(), SinkWritePhase::Execute);
+            assert_eq!(failure.disposition(), SinkWriteFailureDisposition::Poisoned);
+            assert_eq!(failure.error().kind(), ErrorKind::Timeout);
+            assert_eq!(sqlstate(failure.error()), None);
+            assert_eq!(
+                failure.error().operation_subject_event_id(),
+                Some(timeout_subject_id)
+            );
+        }
+        other => panic!("expected deferred timeout poison, got {other:?}"),
+    }
+    drop(row_lock);
+    let timeout_rows: Vec<(i64, String)> = sqlx::query_as(&format!(
+        "SELECT id, value FROM {}.timeout_values ORDER BY id",
+        fixture.schema
+    ))
+    .fetch_all(&fixture.pool)
+    .await
+    .expect("inspect acknowledged deferred timeout rollback");
+    assert_eq!(timeout_rows, vec![(10, "baseline".to_string())]);
+    drop(timeout_adapter);
+
     fixture.cleanup().await;
 }
 
