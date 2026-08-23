@@ -53,7 +53,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 static POSTGRES_APPLICATION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -356,35 +356,75 @@ struct StallingPayments {
 }
 
 #[derive(Clone, Debug)]
-struct DelayedPayments {
+struct GatedPayments {
     payments: Vec<Payment>,
     next: usize,
-    initial_delay: Duration,
+    initial_gate: Option<SourceGate>,
 }
 
-impl DelayedPayments {
-    fn new(payments: Vec<Payment>, initial_delay: Duration) -> Self {
+impl GatedPayments {
+    fn new(payments: Vec<Payment>, initial_gate: Option<SourceGate>) -> Self {
         Self {
             payments,
             next: 0,
-            initial_delay,
+            initial_gate,
         }
     }
 }
 
-impl TypedFiniteSourceHandler for DelayedPayments {
+impl TypedFiniteSourceHandler for GatedPayments {
     type Output = Payment;
 
     fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         if self.next >= self.payments.len() {
             return Ok(None);
         }
-        if self.next == 0 && !self.initial_delay.is_zero() {
-            std::thread::sleep(self.initial_delay);
+        if let (0, Some(gate)) = (self.next, &self.initial_gate) {
+            gate.wait_until_released();
         }
         let payment = self.payments[self.next].clone();
         self.next += 1;
         Ok(Some(vec![payment]))
+    }
+}
+
+#[derive(Debug, Default)]
+struct SourceGateState {
+    waiting: bool,
+    released: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SourceGate {
+    state: Arc<(Mutex<SourceGateState>, Condvar)>,
+}
+
+impl SourceGate {
+    fn wait_until_released(&self) {
+        let (lock, release) = &*self.state;
+        let mut state = lock.lock().expect("source gate lock");
+        state.waiting = true;
+        while !state.released {
+            state = release.wait(state).expect("source gate wait");
+        }
+    }
+
+    fn is_waiting(&self) -> bool {
+        self.state.0.lock().expect("source gate lock").waiting
+    }
+
+    fn release(&self) {
+        let (lock, release) = &*self.state;
+        lock.lock().expect("source gate lock").released = true;
+        release.notify_all();
+    }
+}
+
+struct ReleaseSourceGateOnDrop(SourceGate);
+
+impl Drop for ReleaseSourceGateOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
     }
 }
 
@@ -554,7 +594,7 @@ fn ordered_source_fan_in_flow(
     connection: PostgresConnection,
     schema: String,
     probe: PostgresTestProbe,
-    right_initial_delay: Duration,
+    right_gate: SourceGate,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let postgres = build_sink(
@@ -564,7 +604,7 @@ fn ordered_source_fan_in_flow(
             SinkDestinationClass::SafeToRepeat,
         )
         .map_err(|error| *error)?;
-        let left = DelayedPayments::new(
+        let left = GatedPayments::new(
             vec![
                 Payment {
                     id: 9_101,
@@ -575,9 +615,9 @@ fn ordered_source_fan_in_flow(
                     amount_cents: 300,
                 },
             ],
-            Duration::ZERO,
+            None,
         );
-        let right = DelayedPayments::new(
+        let right = GatedPayments::new(
             vec![
                 Payment {
                     id: 9_101,
@@ -588,7 +628,7 @@ fn ordered_source_fan_in_flow(
                     amount_cents: 400,
                 },
             ],
-            right_initial_delay,
+            Some(right_gate),
         );
         Ok(flow! {
             name: "postgres_order_sensitive_source_fan_in",
@@ -1274,7 +1314,8 @@ async fn postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row(
     let database = OrderingDatabase::connect(&url, "source").await;
     let temp = tempfile::tempdir().expect("source fan-in journal directory");
     let journal_root = temp.path().join("journals");
-    let delay = Duration::from_secs(4);
+    let right_gate = SourceGate::default();
+    let _release_right_on_drop = ReleaseSourceGateOnDrop(right_gate.clone());
     let live_probe = PostgresTestProbe::default();
 
     let handle = ordered_source_fan_in_flow(
@@ -1282,23 +1323,33 @@ async fn postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row(
         database.connection.clone(),
         database.schema.clone(),
         live_probe.clone(),
-        delay,
+        right_gate.clone(),
     )
     .build(FlowBuildContext::for_tests())
     .await
     .expect("source-fed PostgreSQL fan-in builds");
 
-    let early_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let gate_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !right_gate.is_waiting() {
+        assert!(
+            tokio::time::Instant::now() < gate_deadline,
+            "right source did not reach its deterministic fan-in gate"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let commit_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         if database.amount(9_101).await == Some(300) {
             break;
         }
         assert!(
-            tokio::time::Instant::now() < early_deadline,
-            "source-fed PostgreSQL fan-in waited on the quiet right source instead of committing the two admitted left inputs"
+            tokio::time::Instant::now() < commit_deadline,
+            "source-fed PostgreSQL fan-in did not commit the two admitted left inputs while the right source was explicitly gated"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    right_gate.release();
 
     tokio::time::timeout(Duration::from_secs(12), handle.wait_for_completion())
         .await
@@ -1334,7 +1385,7 @@ async fn postgres_order_sensitive_source_fan_in_replays_same_word_and_final_row(
             database.connection.clone(),
             database.schema.clone(),
             replay_probe.clone(),
-            delay,
+            right_gate.clone(),
         ))
         .await
         .expect("same-key PostgreSQL fan-in redelivers with verified journals");

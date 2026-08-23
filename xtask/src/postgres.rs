@@ -157,6 +157,13 @@ enum SessionMode {
     Test,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadinessDisposition {
+    Ready,
+    Retry,
+    Failed,
+}
+
 #[derive(Clone, Debug)]
 struct ProofServiceEvidence {
     container_id: String,
@@ -1551,8 +1558,7 @@ fn start_session(
             directory.join(LOG_FILE).display()
         )));
     }
-    wait_healthy(root, compose, directory, state)?;
-    verify_server(root, compose, directory, state)?;
+    wait_ready(root, compose, directory, state)?;
     state.port = published_port(root, compose, directory, state)?;
     Ok(())
 }
@@ -1579,44 +1585,88 @@ fn stop_session(
     }
 }
 
-fn wait_healthy(
+fn wait_ready(
     root: &Path,
     compose: &ComposeCommand,
     directory: &Path,
     state: &SessionState,
 ) -> Result<()> {
     let deadline = Instant::now() + HEALTH_TIMEOUT;
+    let mut sql_preflight_attempts = 0_u32;
     loop {
         check_signal()?;
         let health = container_health(root, compose, directory, state)?;
-        if health == "healthy" {
-            return Ok(());
+        let preflight = if health == "healthy" {
+            sql_preflight_attempts += 1;
+            Some(server_preflight_output(root, compose, directory, state)?)
+        } else {
+            None
+        };
+        match readiness_disposition(
+            &health,
+            preflight.as_ref().map(|output| output.status.success()),
+            Instant::now() >= deadline,
+        ) {
+            ReadinessDisposition::Ready => {
+                let Some(output) = preflight else {
+                    return Err(error(
+                        "PostgreSQL readiness reached an inconsistent internal state",
+                    ));
+                };
+                return validate_server_preflight(&output.stdout);
+            }
+            ReadinessDisposition::Retry => thread::sleep(Duration::from_millis(250)),
+            ReadinessDisposition::Failed => {
+                let _ = capture_logs(root, compose, directory, state);
+                return Err(error(readiness_timeout_detail(
+                    directory,
+                    state,
+                    &health,
+                    sql_preflight_attempts,
+                )));
+            }
         }
-        if health == "unhealthy" || Instant::now() >= deadline {
-            let _ = capture_logs(root, compose, directory, state);
-            return Err(error(health_timeout_detail(directory, state)));
-        }
-        thread::sleep(Duration::from_millis(250));
     }
 }
 
-fn health_timeout_detail(directory: &Path, state: &SessionState) -> String {
+fn readiness_disposition(
+    health: &str,
+    sql_preflight_succeeded: Option<bool>,
+    deadline_reached: bool,
+) -> ReadinessDisposition {
+    if health == "healthy" && sql_preflight_succeeded == Some(true) {
+        ReadinessDisposition::Ready
+    } else if health == "unhealthy" || deadline_reached {
+        ReadinessDisposition::Failed
+    } else {
+        ReadinessDisposition::Retry
+    }
+}
+
+fn readiness_timeout_detail(
+    directory: &Path,
+    state: &SessionState,
+    health: &str,
+    sql_preflight_attempts: u32,
+) -> String {
     format!(
-        "PostgreSQL did not become healthy within {}s. project={} image={} port=dynamic captured logs: {}",
+        "PostgreSQL did not become SQL-ready within {}s. project={} image={} port=dynamic last_health={} sql_preflight_attempts={} captured logs: {}",
         HEALTH_TIMEOUT.as_secs(),
         state.project,
         IMAGE,
+        health,
+        sql_preflight_attempts,
         directory.join(LOG_FILE).display()
     )
 }
 
-fn verify_server(
+fn server_preflight_output(
     root: &Path,
     compose: &ComposeCommand,
     directory: &Path,
     state: &SessionState,
-) -> Result<()> {
-    let output = compose_output(
+) -> Result<Output> {
+    compose_output(
         root,
         compose,
         directory,
@@ -1633,11 +1683,11 @@ fn verify_server(
             "-Atqc",
             "SHOW server_version_num; SHOW fsync;",
         ],
-    )?;
-    if !output.status.success() {
-        return Err(error("PostgreSQL readiness preflight failed"));
-    }
-    let lines = String::from_utf8_lossy(&output.stdout)
+    )
+}
+
+fn validate_server_preflight(stdout: &[u8]) -> Result<()> {
+    let lines = String::from_utf8_lossy(stdout)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -2324,8 +2374,36 @@ mod tests {
             port: 49152,
             mode: SessionMode::Test,
         };
-        let detail = health_timeout_detail(Path::new("target/postgres-health-proof"), &state);
+        assert_eq!(
+            readiness_disposition("starting", None, false),
+            ReadinessDisposition::Retry
+        );
+        assert_eq!(
+            readiness_disposition("healthy", Some(false), false),
+            ReadinessDisposition::Retry,
+            "a transient SQL preflight failure after Docker health must be retried"
+        );
+        assert_eq!(
+            readiness_disposition("healthy", Some(true), false),
+            ReadinessDisposition::Ready
+        );
+        assert_eq!(
+            readiness_disposition("unhealthy", None, false),
+            ReadinessDisposition::Failed
+        );
+        assert_eq!(
+            readiness_disposition("starting", None, true),
+            ReadinessDisposition::Failed
+        );
+        let detail = readiness_timeout_detail(
+            Path::new("target/postgres-health-proof"),
+            &state,
+            "healthy",
+            3,
+        );
         assert!(detail.contains("within 30s"));
+        assert!(detail.contains("last_health=healthy"));
+        assert!(detail.contains("sql_preflight_attempts=3"));
         assert!(!detail.contains(POSTGRES_PASSWORD));
         assert!(!detail.contains("postgres://"));
     }

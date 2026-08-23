@@ -21,7 +21,7 @@ services:
         host_ip: 127.0.0.1
         protocol: tcp
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U obzenflow -d obzenflow"]
+      test: ["CMD-SHELL", "psql -U obzenflow -d obzenflow -Atqc 'SELECT 1'"]
       interval: 1s
       timeout: 3s
       retries: 30
