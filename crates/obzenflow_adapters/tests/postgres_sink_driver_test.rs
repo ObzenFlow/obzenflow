@@ -792,7 +792,12 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
     const LOCK_RELEASE: Duration = Duration::from_millis(700);
 
     let fixture = Fixture::new("deferred_origin").await;
-    for table in ["constraint_values", "encoding_values", "timeout_values"] {
+    for table in [
+        "constraint_values",
+        "encoding_values",
+        "timeout_values",
+        "rollback_failure_values",
+    ] {
         let constraint = if table == "constraint_values" {
             ", CHECK (id > 0)"
         } else {
@@ -1140,6 +1145,136 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
     .expect("inspect acknowledged deferred timeout rollback");
     assert_eq!(timeout_rows, vec![(10, "baseline".to_string())]);
     drop(timeout_adapter);
+
+    let rollback_failure_probe = PostgresTestProbe::default();
+    let rollback_failure = PostgresSink::<DriverInput>::builder()
+        .connection(
+            fixture
+                .connection()
+                .with_rollback_timeout(Duration::from_millis(50)),
+        )
+        .insert_into(
+            &fixture.schema,
+            "rollback_failure_values",
+            "(id, value) VALUES ($1, $2)",
+        )
+        .expect("rollback-failure target is valid")
+        .batch_size(2)
+        .expect("two-row rollback-failure batch is valid")
+        .bind_with(IdValueBinder)
+        .test_probe(rollback_failure_probe.clone())
+        .build()
+        .expect("rollback-failure sink builds without I/O");
+    let (mut rollback_failure_adapter, rollback_failure_writer_id) = open_adapter(rollback_failure)
+        .await
+        .expect("rollback-failure writer opens");
+    let (rollback_subject_id, buffered) = consume_with_event_id(
+        &mut rollback_failure_adapter,
+        rollback_failure_writer_id,
+        DriverInput {
+            id: 20,
+            value: "rollback-deferred".to_string(),
+        },
+    )
+    .await;
+    buffered.expect("rollback subject remains deferred before threshold");
+    rollback_failure_probe.arm(SinkFault::DestinationExecution);
+    rollback_failure_probe.delay_once(PostgresDelayPoint::Rollback, Duration::from_secs(1));
+    let (rollback_current_id, failure) = consume_with_event_id(
+        &mut rollback_failure_adapter,
+        rollback_failure_writer_id,
+        DriverInput {
+            id: 21,
+            value: "rollback-current".to_string(),
+        },
+    )
+    .await;
+    match failure.expect_err("rollback uncertainty preserves the deferred subject") {
+        HandlerError::SinkWrite(failure) => {
+            assert_eq!(failure.phase(), SinkWritePhase::Commit);
+            assert_eq!(failure.disposition(), SinkWriteFailureDisposition::Poisoned);
+            assert_eq!(failure.error().kind(), ErrorKind::Timeout);
+            assert_eq!(
+                failure.error().operation_subject_event_id(),
+                Some(rollback_subject_id)
+            );
+            assert_ne!(
+                failure.error().operation_subject_event_id(),
+                Some(rollback_current_id)
+            );
+        }
+        other => panic!("expected deferred rollback poison, got {other:?}"),
+    }
+    let rollback_rows: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {}.rollback_failure_values",
+        fixture.schema
+    ))
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("inspect rollback-uncertain threshold destination");
+    assert_eq!(rollback_rows, 0);
+    let rollback_calls = rollback_failure_probe.snapshot();
+    assert_eq!(rollback_calls.count(SinkExternalCallKind::Rollback), 1);
+    assert_eq!(rollback_calls.count(SinkExternalCallKind::Commit), 0);
+    drop(rollback_failure_adapter);
+
+    let lifecycle_rollback_probe = PostgresTestProbe::default();
+    let lifecycle_rollback = PostgresSink::<DriverInput>::builder()
+        .connection(
+            fixture
+                .connection()
+                .with_rollback_timeout(Duration::from_millis(50)),
+        )
+        .insert_into(
+            &fixture.schema,
+            "rollback_failure_values",
+            "(id, value) VALUES ($1, $2)",
+        )
+        .expect("lifecycle rollback-failure target is valid")
+        .batch_size(3)
+        .expect("three-row lifecycle batch is valid")
+        .bind_with(IdValueBinder)
+        .test_probe(lifecycle_rollback_probe.clone())
+        .build()
+        .expect("lifecycle rollback-failure sink builds without I/O");
+    let (mut lifecycle_adapter, lifecycle_writer_id) = open_adapter(lifecycle_rollback)
+        .await
+        .expect("lifecycle rollback-failure writer opens");
+    let (lifecycle_subject_id, buffered) = consume_with_event_id(
+        &mut lifecycle_adapter,
+        lifecycle_writer_id,
+        DriverInput {
+            id: 30,
+            value: "lifecycle-deferred".to_string(),
+        },
+    )
+    .await;
+    buffered.expect("lifecycle rollback subject remains deferred");
+    lifecycle_rollback_probe.arm(SinkFault::DestinationExecution);
+    lifecycle_rollback_probe.delay_once(PostgresDelayPoint::Rollback, Duration::from_secs(1));
+    match lifecycle_adapter
+        .flush_report()
+        .await
+        .expect_err("rollback uncertainty fails lifecycle flush")
+    {
+        HandlerError::SinkOperation(operation) => {
+            assert_eq!(operation.kind(), ErrorKind::Timeout);
+            assert_eq!(
+                operation.operation_subject_event_id(),
+                Some(lifecycle_subject_id)
+            );
+        }
+        other => panic!("expected deferred lifecycle rollback failure, got {other:?}"),
+    }
+    let lifecycle_rows: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {}.rollback_failure_values",
+        fixture.schema
+    ))
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("inspect rollback-uncertain lifecycle destination");
+    assert_eq!(lifecycle_rows, 0);
+    drop(lifecycle_adapter);
 
     fixture.cleanup().await;
 }

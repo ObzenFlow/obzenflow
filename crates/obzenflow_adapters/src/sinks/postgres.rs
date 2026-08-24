@@ -392,21 +392,9 @@ impl fmt::Debug for PostgresBindings {
 
 /// A separate, clonable mapping from one domain input to PostgreSQL parameters.
 ///
-/// `validate` performs optional input validation. `bind` receives only a
-/// private-field value accumulator, so it cannot replace or execute the fixed
-/// configuration statement through this API.
+/// `bind` receives only a private-field value accumulator, so it cannot replace
+/// or execute the fixed configuration statement through this API.
 pub trait PostgresBind<T>: Clone + Send + Sync + 'static {
-    /// Validate one input before any parameters are assembled or SQL executes.
-    ///
-    /// The default accepts every input. Returning an operational error fails
-    /// the current delivery without granting retry authority.
-    // Binder validation is part of the sink protocol and therefore returns
-    // its by-value operational error rather than an adapter-local box.
-    #[allow(clippy::result_large_err)]
-    fn validate(&self, _input: &T) -> SinkOperationResult<()> {
-        Ok(())
-    }
-
     /// Append this input's parameter values in statement order.
     fn bind(&self, bindings: &mut PostgresBindings, input: &T);
 }
@@ -1608,6 +1596,24 @@ fn map_write_failure<T>(
             rollback: None,
         } => SinkWriteFailure::confirmed_rollback(SinkWritePhase::Execute, operation),
         TransactionFailure::Execute {
+            subject: TransactionInputSubject::Deferred(index),
+            rollback: Some(rollback),
+            ..
+        } => match pending.get(index) {
+            Some(row) => SinkWriteFailure::poisoned_by_deferred(
+                &row.pending,
+                SinkWritePhase::Commit,
+                rollback,
+            ),
+            None => SinkWriteFailure::poisoned(
+                SinkWritePhase::Commit,
+                SinkOperationError::other(
+                    "PostgreSQL deferred operation subject index was invalid",
+                ),
+            ),
+        },
+        TransactionFailure::Execute {
+            subject: TransactionInputSubject::Current,
             rollback: Some(rollback),
             ..
         } => SinkWriteFailure::poisoned(SinkWritePhase::Commit, rollback),
@@ -1652,6 +1658,17 @@ fn map_lifecycle_failure<T>(
             rollback: None,
         } => operation,
         TransactionFailure::Execute {
+            subject: TransactionInputSubject::Deferred(index),
+            rollback: Some(rollback),
+            ..
+        } => match pending.get(index) {
+            Some(row) => rollback.with_deferred_operation_subject(&row.pending),
+            None => {
+                SinkOperationError::other("PostgreSQL deferred operation subject index was invalid")
+            }
+        },
+        TransactionFailure::Execute {
+            subject: TransactionInputSubject::Current,
             rollback: Some(rollback),
             ..
         } => rollback,
@@ -1695,11 +1712,6 @@ where
                 ),
             ));
         }
-        self.binder
-            .validate(&input)
-            .map_err(|error| destination_operation_error(&self.destination, error))
-            .map_err(|error| SinkWriteFailure::current_only(SinkWritePhase::Encode, error))?;
-
         if self.batch_size == 1 {
             execute_transaction(self, Some(&input))
                 .await

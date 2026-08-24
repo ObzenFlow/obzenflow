@@ -241,6 +241,11 @@ name = "postgres_sink_payments"
 path = "examples/postgres_sink_payments.rs"
 required-features = ["postgres"]
 
+[[example]]
+name = "postgres_sink_inventory"
+path = "examples/postgres_sink_inventory.rs"
+required-features = ["postgres"]
+
 [[test]]
 name = "stateful_metrics_integration_test"
 path = "tests/stateful_metrics_integration_test.rs"

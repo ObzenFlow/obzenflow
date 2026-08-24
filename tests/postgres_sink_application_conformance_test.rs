@@ -7,7 +7,9 @@
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow::sinks::postgres::testing::{PostgresTestProbe, POSTGRES_SQLSTATE_NAMESPACE};
+use obzenflow::sinks::postgres::testing::{
+    PostgresDelayPoint, PostgresTestProbe, POSTGRES_SQLSTATE_NAMESPACE,
+};
 use obzenflow::sinks::postgres::{
     PostgresBind, PostgresBindings, PostgresConnection, PostgresSink, PostgresTransport,
 };
@@ -927,6 +929,7 @@ async fn read_system_journal(run: &Path) -> Vec<EventEnvelope<SystemEvent>> {
 async fn assert_operation_failure_lifecycle(
     run: &Path,
     expected_phase: SinkOperationPhase,
+    expected_kind: ErrorKind,
     expected_code: Option<&str>,
     expected_subject: Option<obzenflow_core::EventId>,
 ) -> SinkOperationFailed {
@@ -945,7 +948,7 @@ async fn assert_operation_failure_lifecycle(
     );
     let (operation_event_id, operation) = &operations[0];
     assert_eq!(operation.phase, expected_phase);
-    assert_eq!(operation.kind, ErrorKind::Remote);
+    assert_eq!(operation.kind, expected_kind);
     assert_eq!(operation.operation_subject_event_id, expected_subject);
     assert_eq!(
         operation
@@ -997,9 +1000,14 @@ async fn assert_eof_flush_failure_evidence(
         .iter()
         .find_map(|envelope| Payment::from_event(&envelope.event).map(|_| envelope.event.id))
         .expect("the unresolved PostgreSQL input remains in the source archive");
-    let operation =
-        assert_operation_failure_lifecycle(run, SinkOperationPhase::Flush, None, Some(subject))
-            .await;
+    let operation = assert_operation_failure_lifecycle(
+        run,
+        SinkOperationPhase::Flush,
+        ErrorKind::Timeout,
+        None,
+        Some(subject),
+    )
+    .await;
     assert_eq!(operation.causal_event_id, None);
     assert_eq!(operation.input_position, None);
     assert_eq!(operation.failed_delivery_event_id, None);
@@ -1027,9 +1035,10 @@ async fn assert_eof_flush_failure_evidence(
     assert_eq!(calls.count(SinkExternalCallKind::Write), 1);
     assert_eq!(calls.count(SinkExternalCallKind::Flush), 1);
     assert_eq!(calls.count(SinkExternalCallKind::Drain), 0);
-    assert_eq!(calls.count(SinkExternalCallKind::Begin), 0);
+    assert_eq!(calls.count(SinkExternalCallKind::Begin), 1);
     assert_eq!(calls.count(SinkExternalCallKind::Execute), 0);
     assert_eq!(calls.count(SinkExternalCallKind::Commit), 0);
+    assert_eq!(calls.count(SinkExternalCallKind::Rollback), 1);
     assert_eq!(
         database.amount(10_001).await,
         None,
@@ -1786,6 +1795,7 @@ async fn postgres_open_failures_traverse_full_application_lifecycle() {
         let operation = assert_operation_failure_lifecycle(
             &run,
             SinkOperationPhase::Open,
+            ErrorKind::Remote,
             Some(expected_code),
             None,
         )
@@ -1844,14 +1854,18 @@ async fn postgres_eof_flush_failure_archive_redelivery_retries_unresolved_input_
     };
 
     let live_probe = PostgresTestProbe::default();
-    live_probe.arm(SinkFault::Flush);
+    live_probe.arm(SinkFault::DestinationExecution);
+    live_probe.delay_once(PostgresDelayPoint::Rollback, Duration::from_secs(1));
     let live_result = tokio::time::timeout(
         Duration::from_secs(30),
         FlowApplication::builder()
             .with_cli_args(["obzenflow"])
             .run_async(custom_postgres_flow(
                 journals.clone(),
-                database.connection.clone(),
+                database
+                    .connection
+                    .clone()
+                    .with_rollback_timeout(Duration::from_millis(50)),
                 database.schema.clone(),
                 live_probe.clone(),
                 CustomPostgresFlowSpec {
@@ -1869,7 +1883,8 @@ async fn postgres_eof_flush_failure_archive_redelivery_retries_unresolved_input_
     assert_eof_flush_failure_evidence(&live_run, &live_probe, &database).await;
 
     let replay_probe = PostgresTestProbe::default();
-    replay_probe.arm(SinkFault::Flush);
+    replay_probe.arm(SinkFault::DestinationExecution);
+    replay_probe.delay_once(PostgresDelayPoint::Rollback, Duration::from_secs(1));
     let replay_result = tokio::time::timeout(
         Duration::from_secs(30),
         FlowApplication::builder()
@@ -1881,7 +1896,10 @@ async fn postgres_eof_flush_failure_archive_redelivery_retries_unresolved_input_
             ])
             .run_async(custom_postgres_flow(
                 journals.clone(),
-                database.connection.clone(),
+                database
+                    .connection
+                    .clone()
+                    .with_rollback_timeout(Duration::from_millis(50)),
                 database.schema.clone(),
                 replay_probe.clone(),
                 CustomPostgresFlowSpec {

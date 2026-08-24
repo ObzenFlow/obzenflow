@@ -124,7 +124,7 @@ pub struct SinkOperationFailed {
 
 impl TypedPayload for SinkOperationFailed {
     const EVENT_TYPE: &'static str = "obzenflow.sink_operation_failed";
-    const SCHEMA_VERSION: u32 = 1;
+    const SCHEMA_VERSION: u32 = 2;
 }
 
 #[cfg(test)]
@@ -175,6 +175,11 @@ mod tests {
 
     #[test]
     fn destination_code_is_absent_for_none_and_round_trips_when_present() {
+        assert_eq!(SinkOperationFailed::SCHEMA_VERSION, 2);
+        assert_eq!(
+            SinkOperationFailed::versioned_event_type(),
+            "obzenflow.sink_operation_failed.v2"
+        );
         let without = serde_json::to_value(operation_failure(None)).unwrap();
         assert!(without.get("destination_error_code").is_none());
         assert!(without.get("operation_subject_event_id").is_none());

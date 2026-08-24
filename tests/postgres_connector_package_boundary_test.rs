@@ -84,6 +84,35 @@ fn postgres_stays_in_the_feature_gated_adapter_boundary() {
         "the public consumer fixture must not import SQLx"
     );
 
+    for example in [
+        "examples/postgres_sink_payments.rs",
+        "examples/postgres_sink_inventory.rs",
+    ] {
+        let source =
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(example))
+                .unwrap_or_else(|error| {
+                    panic!("read shipped PostgreSQL example {example}: {error}")
+                });
+        let source = source.to_ascii_uppercase();
+        for forbidden in [
+            "CREATE SCHEMA",
+            "CREATE TABLE",
+            "CREATE INDEX",
+            "CREATE FUNCTION",
+            "CREATE TRIGGER",
+            "ALTER TABLE",
+            "DROP TABLE",
+            "DROP FUNCTION",
+            "DROP TRIGGER",
+            "TRUNCATE TABLE",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "shipped PostgreSQL example {example} must not own DDL `{forbidden}`"
+            );
+        }
+    }
+
     let root = packages
         .iter()
         .find(|package| package["name"] == "obzenflow")

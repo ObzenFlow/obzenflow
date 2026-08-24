@@ -21,7 +21,7 @@ use obzenflow::sinks::postgres::{
 };
 use obzenflow::sources;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowBuildFailure, FlowDefinition};
+use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, FlowConfig};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
@@ -135,46 +135,6 @@ fn configured_payment_flow(
     })
 }
 
-async fn prepare_destination(url: &str, schema: &str) -> Result<()> {
-    let schema = quote_fixture_identifier(schema)?;
-    let pool = PgPool::connect(url)
-        .await
-        .context("connect to PostgreSQL for example setup")?;
-    sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
-        .execute(&pool)
-        .await
-        .context("create example schema")?;
-    sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {schema}.payments (\
-         id BIGINT PRIMARY KEY, amount_cents BIGINT NOT NULL)"
-    ))
-    .execute(&pool)
-    .await
-    .context("create example payment table")?;
-    // Remove the pre-conformance audit fixture if an older persistent proof
-    // left it behind. Physical-call evidence belongs to the proof probe, not
-    // to a duplicate-sensitive destination trigger.
-    sqlx::query(&format!(
-        "DROP TRIGGER IF EXISTS record_payment_delivery ON {schema}.payments"
-    ))
-    .execute(&pool)
-    .await
-    .context("remove legacy delivery-audit trigger")?;
-    sqlx::query(&format!(
-        "DROP FUNCTION IF EXISTS {schema}.record_payment_delivery()"
-    ))
-    .execute(&pool)
-    .await
-    .context("remove legacy delivery-audit function")?;
-    sqlx::query(&format!(
-        "DROP TABLE IF EXISTS {schema}.payment_delivery_audit"
-    ))
-    .execute(&pool)
-    .await
-    .context("remove legacy delivery-audit table")?;
-    Ok(())
-}
-
 #[derive(Debug)]
 struct PaymentDestinationSnapshot {
     rows: Vec<(i64, i64)>,
@@ -241,31 +201,6 @@ async fn inspect_destination(url: &str, schema: &str) -> Result<PaymentDestinati
     Ok(PaymentDestinationSnapshot { rows })
 }
 
-fn payment_flow(
-    journals: PathBuf,
-    connection: PostgresConnection,
-    url: String,
-    schema: String,
-    #[cfg(feature = "test-support")] probe: PostgresTestProbe,
-) -> FlowDefinition {
-    // FlowApplication opens and validates any archive selected for treatment before invoking
-    // this build closure. Keeping destination setup here is what proves a bad
-    // raw manifest cannot cause PostgreSQL I/O.
-    FlowDefinition::new(move |build_context| async move {
-        let flow = configured_payment_flow(
-            journals,
-            connection,
-            schema.clone(),
-            #[cfg(feature = "test-support")]
-            probe,
-        );
-        prepare_destination(&url, &schema)
-            .await
-            .map_err(|error| FlowBuildFailure::from(build_error(error)))?;
-        flow.build(build_context).await
-    })
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli_args = std::env::args_os().collect::<Vec<_>>();
@@ -311,10 +246,9 @@ async fn main() -> Result<()> {
     let probe = PostgresTestProbe::default();
     FlowApplication::builder()
         .with_cli_args(cli_args)
-        .run_async(payment_flow(
+        .run_async(configured_payment_flow(
             journals,
             connection,
-            url.clone(),
             schema.clone(),
             #[cfg(feature = "test-support")]
             probe.clone(),

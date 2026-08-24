@@ -788,6 +788,7 @@ impl CsvSinkInner {
     fn flush_buffer(
         &mut self,
         probe: &CsvWriterProbe,
+        current_index: Option<usize>,
     ) -> Result<Vec<SinkCommitReceipt>, CsvWriteError> {
         if self.buffer.is_empty() {
             return Ok(Vec::new());
@@ -804,16 +805,24 @@ impl CsvSinkInner {
         for (index, row) in self.buffer.iter().enumerate() {
             probe.record_execute();
             self.writer.write_record(&row.row).map_err(|error| {
-                CsvWriteError::poisoned(
-                    SinkWritePhase::Execute,
-                    SinkOperationError::other(format!("Failed to write CSV row: {error}")),
-                )
+                let operation =
+                    SinkOperationError::other(format!("Failed to write CSV row: {error}"));
+                let operation = if current_index == Some(index) {
+                    operation
+                } else {
+                    operation.with_deferred_operation_subject(&row.pending)
+                };
+                CsvWriteError::poisoned(SinkWritePhase::Execute, operation)
             })?;
             if index == 0 && probe.fault_mid_batch_mutation() {
-                return Err(CsvWriteError::poisoned(
-                    SinkWritePhase::Execute,
-                    SinkOperationError::other("injected CSV mid-batch mutation failure"),
-                ));
+                let operation =
+                    SinkOperationError::other("injected CSV mid-batch mutation failure");
+                let operation = if current_index == Some(index) {
+                    operation
+                } else {
+                    operation.with_deferred_operation_subject(&row.pending)
+                };
+                return Err(CsvWriteError::poisoned(SinkWritePhase::Execute, operation));
             }
         }
 
@@ -851,7 +860,8 @@ impl CsvSinkInner {
         &mut self,
         probe: &CsvWriterProbe,
     ) -> Result<Vec<SinkCommitReceipt>, CsvWriteError> {
-        match self.flush_buffer(probe) {
+        let current_index = self.buffer.len().checked_sub(1);
+        match self.flush_buffer(probe, current_index) {
             Ok(receipts) => Ok(receipts),
             Err(error) => {
                 let removed = self.buffer.pop();
@@ -970,7 +980,7 @@ impl CsvSinkInner {
                 .unwrap_or_else(|_| SinkOperationError::other("CSV header write failed"))
         })?;
         let commit_receipts = self
-            .flush_buffer(probe)
+            .flush_buffer(probe, None)
             .map_err(CsvWriteError::into_operation_error)?;
 
         let audit = if commit_receipts.is_empty() {
@@ -1280,6 +1290,83 @@ mod tests {
             .expect("the earlier buffered row remains settleable");
         assert_eq!(lifecycle.commit_receipts.len(), 1);
         assert_eq!(lifecycle.commit_receipts[0].parent_event_id, first.id);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn csv_threshold_failure_attributes_the_exact_deferred_row() {
+        use obzenflow_runtime::stages::sink::SinkWriteFailureDisposition;
+        use obzenflow_runtime::testing::sink::SinkFault;
+
+        let tmp = NamedTempFile::new().expect("temp file");
+        let probe = testing::CsvTestProbe::default();
+        let connector = CsvSink::<TestRow>::builder()
+            .path(tmp.path())
+            .buffer_size(2)
+            .auto_flush(false)
+            .test_probe(probe.clone())
+            .build()
+            .expect("CSV connector builds");
+        let mut sink = adapted(connector).await;
+        let deferred = event(1, 2);
+        let current = event(3, 4);
+
+        sink.consume_report(deferred.clone())
+            .await
+            .expect("first row buffers");
+        probe.arm(SinkFault::MidBatchMutation);
+        let error = sink
+            .consume_report(current.clone())
+            .await
+            .expect_err("deferred CSV row fails during threshold flush");
+        match error {
+            HandlerError::SinkWrite(failure) => {
+                assert_eq!(failure.phase(), SinkWritePhase::Execute);
+                assert_eq!(failure.disposition(), SinkWriteFailureDisposition::Poisoned);
+                assert_eq!(
+                    failure.error().operation_subject_event_id(),
+                    Some(deferred.id)
+                );
+                assert_ne!(
+                    failure.error().operation_subject_event_id(),
+                    Some(current.id)
+                );
+            }
+            other => panic!("expected typed CSV write failure, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn csv_lifecycle_failure_attributes_the_exact_deferred_row() {
+        use obzenflow_runtime::testing::sink::SinkFault;
+
+        let tmp = NamedTempFile::new().expect("temp file");
+        let probe = testing::CsvTestProbe::default();
+        let connector = CsvSink::<TestRow>::builder()
+            .path(tmp.path())
+            .buffer_size(10)
+            .auto_flush(false)
+            .test_probe(probe.clone())
+            .build()
+            .expect("CSV connector builds");
+        let mut sink = adapted(connector).await;
+        let deferred = event(5, 6);
+
+        sink.consume_report(deferred.clone())
+            .await
+            .expect("row buffers before lifecycle flush");
+        probe.arm(SinkFault::MidBatchMutation);
+        let error = sink
+            .flush_report()
+            .await
+            .expect_err("deferred CSV row fails during lifecycle flush");
+        match error {
+            HandlerError::SinkOperation(operation) => {
+                assert_eq!(operation.operation_subject_event_id(), Some(deferred.id));
+            }
+            other => panic!("expected typed CSV lifecycle failure, got {other:?}"),
+        }
     }
 
     #[tokio::test]

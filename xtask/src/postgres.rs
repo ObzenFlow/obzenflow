@@ -30,6 +30,10 @@ const POSTGRES_USER: &str = "obzenflow";
 const POSTGRES_DATABASE: &str = "obzenflow";
 const POSTGRES_PASSWORD: &str = "obzenflow-secret-083c";
 const POSTGRES_SQL_EVIDENCE_CANARY: &str = "obz083c_sql_body_canary_7f3c91a6";
+const PAYMENT_EXAMPLE: &str = "postgres_sink_payments";
+const INVENTORY_EXAMPLE: &str = "postgres_sink_inventory";
+const DEVELOPMENT_PAYMENT_SCHEMA: &str = "obzenflow_example";
+const DEVELOPMENT_INVENTORY_SCHEMA: &str = "obzenflow_inventory_example";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 const DURABLE_ONLY_EVIDENCE_VALUES: &[&str] = &[
     "VerifiedTls",
@@ -260,12 +264,28 @@ fn up(flags: &[String]) -> Result<()> {
         if container_health(&root, &compose, &directory, &state)? == "healthy" {
             state.port = published_port(&root, &compose, &directory, &state)?;
             write_state(&state_path, &state)?;
+            provision_example_destinations(
+                &root,
+                &compose,
+                &directory,
+                &state,
+                DEVELOPMENT_PAYMENT_SCHEMA,
+                DEVELOPMENT_INVENTORY_SCHEMA,
+            )?;
             print_status(&state, "healthy");
             return Ok(());
         }
         ensure_tls(&directory)?;
         start_session(&root, &compose, &directory, &mut state)?;
         write_state(&state_path, &state)?;
+        provision_example_destinations(
+            &root,
+            &compose,
+            &directory,
+            &state,
+            DEVELOPMENT_PAYMENT_SCHEMA,
+            DEVELOPMENT_INVENTORY_SCHEMA,
+        )?;
         print_status(&state, "healthy");
         return Ok(());
     }
@@ -282,6 +302,14 @@ fn up(flags: &[String]) -> Result<()> {
     write_state(&state_path, &state)?;
     start_session(&root, &compose, &directory, &mut state)?;
     write_state(&state_path, &state)?;
+    provision_example_destinations(
+        &root,
+        &compose,
+        &directory,
+        &state,
+        DEVELOPMENT_PAYMENT_SCHEMA,
+        DEVELOPMENT_INVENTORY_SCHEMA,
+    )?;
     print_status(&state, "healthy");
     println!("run a command with: cargo xtask postgres run -- <command> [args...]");
     Ok(())
@@ -388,7 +416,7 @@ fn run_ephemeral_acceptance(root: PathBuf, compose: ComposeCommand) -> Result<()
         check_signal()?;
         prove_concurrent_session_isolation(&root, &compose, &directory, &state)?;
         check_signal()?;
-        run_test_inventory(&root, &directory, &state, &service_evidence)?;
+        run_test_inventory(&root, &compose, &directory, &state, &service_evidence)?;
         check_signal()
     })();
     let _ = capture_logs(&root, &compose, &directory, &state);
@@ -453,7 +481,7 @@ fn run_persistent_acceptance(root: PathBuf, compose: ComposeCommand) -> Result<(
         "--features",
         "postgres,test-support",
         "--example",
-        "postgres_sink_payments",
+        PAYMENT_EXAMPLE,
     ]);
     let build_status = build.status()?;
     if !build_status.success() {
@@ -461,7 +489,7 @@ fn run_persistent_acceptance(root: PathBuf, compose: ComposeCommand) -> Result<(
             "PostgreSQL persistent example build failed with status {build_status}"
         )));
     }
-    let binary = example_binary(&root);
+    let binary = example_binary(&root, PAYMENT_EXAMPLE);
     let proof_command_environment = vec![(
         PERSISTENT_PROOF_SESSION_ENV.to_string(),
         OsString::from(&proof_session_id),
@@ -482,6 +510,7 @@ fn run_persistent_acceptance(root: PathBuf, compose: ComposeCommand) -> Result<(
         run_public_postgres_command(&root, &["status"], &proof_command_environment)?;
 
         let schema = format!("obz083c_persistent_{}", initial_state.run_id);
+        provision_payment_destination(&root, &compose, &directory, &initial_state, &schema)?;
         let journal_root = directory.join("persistent-example-journals");
         let mut example_environment = proof_command_environment.clone();
         example_environment.extend([
@@ -950,6 +979,7 @@ const REQUIRED_TEST_TARGETS: &[RequiredTestTarget] = &[
 
 fn run_test_inventory(
     root: &Path,
+    compose: &ComposeCommand,
     directory: &Path,
     state: &SessionState,
     service_evidence: &ProofServiceEvidence,
@@ -960,7 +990,7 @@ fn run_test_inventory(
         run_required_test_target(root, directory, state, service_evidence, target)?;
         check_signal()?;
     }
-    run_cross_process_example(root, directory, state, service_evidence)
+    run_cross_process_example(root, compose, directory, state, service_evidence)
 }
 
 fn configure_postgres_test_environment(
@@ -1099,6 +1129,7 @@ fn require_exact_test_inventory(
 
 fn run_cross_process_example(
     root: &Path,
+    compose: &ComposeCommand,
     directory: &Path,
     state: &SessionState,
     service_evidence: &ProofServiceEvidence,
@@ -1113,7 +1144,9 @@ fn run_cross_process_example(
         "--features",
         "postgres,test-support",
         "--example",
-        "postgres_sink_payments",
+        PAYMENT_EXAMPLE,
+        "--example",
+        INVENTORY_EXAMPLE,
     ]);
     let status = build.status()?;
     if !status.success() {
@@ -1122,20 +1155,42 @@ fn run_cross_process_example(
         )));
     }
 
-    let binary = example_binary(root);
-    let journal_root = directory.join("example-journals");
-    let schema = format!("obz083c_example_{}", state.run_id);
+    let payment_binary = example_binary(root, PAYMENT_EXAMPLE);
+    let payment_journal_root = directory.join("example-journals");
+    let payment_schema = format!("obz083c_example_{}", state.run_id);
+    let inventory_binary = example_binary(root, INVENTORY_EXAMPLE);
+    let inventory_journal_root = directory.join("inventory-example-journals");
+    let inventory_schema = format!("obz083c_inventory_{}", state.run_id);
+    provision_example_destinations(
+        root,
+        compose,
+        directory,
+        state,
+        &payment_schema,
+        &inventory_schema,
+    )?;
     let forbidden = proof_forbidden_values(directory, state, service_evidence);
+    let payment_environment = vec![
+        (
+            "OBZENFLOW_POSTGRES_SCHEMA".to_string(),
+            OsString::from(&payment_schema),
+        ),
+        (
+            "OBZENFLOW_JOURNAL_ROOT".to_string(),
+            payment_journal_root.as_os_str().to_os_string(),
+        ),
+    ];
     run_example_process(
         root,
-        &binary,
-        &journal_root,
-        &schema,
+        &payment_binary,
         state,
         &[],
         &forbidden,
+        &payment_environment,
+        "PostgreSQL payment example",
+        "PostgreSQL proof calls: execute=2 commit=1",
     )?;
-    let live_runs = example_run_directories(&journal_root)?;
+    let live_runs = example_run_directories(&payment_journal_root)?;
     let [live_run] = live_runs.as_slice() else {
         return Err(error(format!(
             "live PostgreSQL example must create exactly one archive, found {}",
@@ -1151,29 +1206,64 @@ fn run_cross_process_example(
     ];
     run_example_process(
         root,
-        &binary,
-        &journal_root,
-        &schema,
+        &payment_binary,
         state,
         &redelivery_args,
         &forbidden,
+        &payment_environment,
+        "PostgreSQL payment example",
+        "PostgreSQL proof calls: execute=2 commit=1",
     )?;
-    let final_runs = example_run_directories(&journal_root)?;
+    let final_runs = example_run_directories(&payment_journal_root)?;
     if final_runs.len() != 2 || !final_runs.contains(live_run) {
         return Err(error(format!(
             "verified PostgreSQL archive redelivery must preserve the live archive and create one treatment archive; found {} archives",
             final_runs.len()
         )));
     }
-    assert_tree_excludes(&journal_root, &forbidden, state.port)?;
+    assert_tree_excludes(&payment_journal_root, &forbidden, state.port)?;
     println!(
         "PostgreSQL example passed live and verified archive redelivery in separate processes using {}",
-        binary.display()
+        payment_binary.display()
+    );
+
+    check_signal()?;
+    let inventory_environment = vec![
+        (
+            "OBZENFLOW_POSTGRES_INVENTORY_SCHEMA".to_string(),
+            OsString::from(&inventory_schema),
+        ),
+        (
+            "OBZENFLOW_INVENTORY_JOURNAL_ROOT".to_string(),
+            inventory_journal_root.as_os_str().to_os_string(),
+        ),
+    ];
+    run_example_process(
+        root,
+        &inventory_binary,
+        state,
+        &[],
+        &forbidden,
+        &inventory_environment,
+        "PostgreSQL inventory example",
+        "Inventory PostgreSQL proof calls: execute=2 commit=2",
+    )?;
+    let inventory_runs = example_run_directories(&inventory_journal_root)?;
+    if inventory_runs.len() != 1 {
+        return Err(error(format!(
+            "live PostgreSQL inventory example must create exactly one archive, found {}",
+            inventory_runs.len()
+        )));
+    }
+    assert_tree_excludes(&inventory_journal_root, &forbidden, state.port)?;
+    println!(
+        "PostgreSQL heterogeneous inventory consumer passed in a separate process using {}",
+        inventory_binary.display()
     );
     Ok(())
 }
 
-fn example_binary(root: &Path) -> PathBuf {
+fn example_binary(root: &Path, example: &str) -> PathBuf {
     let target = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .map(|path| {
@@ -1187,42 +1277,42 @@ fn example_binary(root: &Path) -> PathBuf {
     target
         .join("debug")
         .join("examples")
-        .join(format!("postgres_sink_payments{}", env::consts::EXE_SUFFIX))
+        .join(format!("{example}{}", env::consts::EXE_SUFFIX))
 }
 
 fn run_example_process(
     root: &Path,
     binary: &Path,
-    journal_root: &Path,
-    schema: &str,
     state: &SessionState,
     args: &[OsString],
     forbidden: &[String],
+    environment: &[(String, OsString)],
+    label: &str,
+    expected_evidence: &str,
 ) -> Result<()> {
     let output = Command::new(binary)
         .current_dir(root)
         .args(args)
         .env("OBZENFLOW_POSTGRES_URL", plaintext_url(state.port))
-        .env("OBZENFLOW_POSTGRES_SCHEMA", schema)
-        .env("OBZENFLOW_JOURNAL_ROOT", journal_root)
+        .envs(environment.iter().map(|(key, value)| (key, value)))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()?;
-    assert_output_excludes("PostgreSQL example stdout", &output.stdout, forbidden)?;
-    assert_output_excludes("PostgreSQL example stderr", &output.stderr, forbidden)?;
+    assert_output_excludes(&format!("{label} stdout"), &output.stdout, forbidden)?;
+    assert_output_excludes(&format!("{label} stderr"), &output.stderr, forbidden)?;
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        if !stdout.contains("PostgreSQL proof calls: execute=2 commit=1") {
-            return Err(error(
-                "PostgreSQL example did not emit its proof-owned physical-call evidence",
-            ));
+        if !stdout.contains(expected_evidence) {
+            return Err(error(format!(
+                "{label} did not emit its proof-owned physical-call evidence"
+            )));
         }
         print!("{stdout}");
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
         Ok(())
     } else {
         Err(error(format!(
-            "PostgreSQL example process failed with status {}; stdout={}; stderr={}",
+            "{label} process failed with status {}; stdout={}; stderr={}",
             output.status,
             redact_proof_output(&output.stdout, state).trim(),
             redact_proof_output(&output.stderr, state).trim()
@@ -1715,6 +1805,107 @@ fn validate_server_preflight(stdout: &[u8]) -> Result<()> {
         return Err(error("PostgreSQL proof service must keep fsync enabled"));
     }
     Ok(())
+}
+
+fn quote_proof_identifier(value: &str) -> Result<String> {
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 63
+        || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        || !bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$')
+    {
+        return Err(error(
+            "PostgreSQL proof schema identifier is outside the owned identifier grammar",
+        ));
+    }
+    Ok(format!("\"{}\"", value.replace('"', "\"\"")))
+}
+
+fn execute_proof_sql(
+    root: &Path,
+    compose: &ComposeCommand,
+    directory: &Path,
+    state: &SessionState,
+    sql: &str,
+    label: &str,
+) -> Result<()> {
+    let output = compose_output(
+        root,
+        compose,
+        directory,
+        state,
+        &[
+            "exec",
+            "-T",
+            "postgres",
+            "psql",
+            "-U",
+            POSTGRES_USER,
+            "-d",
+            POSTGRES_DATABASE,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-Atqc",
+            sql,
+        ],
+    )?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(error(format!(
+            "PostgreSQL proof failed to provision its owned {label} destination"
+        )))
+    }
+}
+
+fn provision_payment_destination(
+    root: &Path,
+    compose: &ComposeCommand,
+    directory: &Path,
+    state: &SessionState,
+    schema: &str,
+) -> Result<()> {
+    let schema = quote_proof_identifier(schema)?;
+    let sql = format!(
+        "CREATE SCHEMA IF NOT EXISTS {schema}; \
+         CREATE TABLE IF NOT EXISTS {schema}.payments (\
+         id BIGINT PRIMARY KEY, amount_cents BIGINT NOT NULL); \
+         DROP TRIGGER IF EXISTS record_payment_delivery ON {schema}.payments; \
+         DROP FUNCTION IF EXISTS {schema}.record_payment_delivery(); \
+         DROP TABLE IF EXISTS {schema}.payment_delivery_audit"
+    );
+    execute_proof_sql(root, compose, directory, state, &sql, "payment")
+}
+
+fn provision_inventory_destination(
+    root: &Path,
+    compose: &ComposeCommand,
+    directory: &Path,
+    state: &SessionState,
+    schema: &str,
+) -> Result<()> {
+    let schema = quote_proof_identifier(schema)?;
+    let sql = format!(
+        "CREATE SCHEMA IF NOT EXISTS {schema}; \
+         CREATE TABLE IF NOT EXISTS {schema}.inventory_levels (\
+         warehouse TEXT NOT NULL, sku TEXT NOT NULL, available_units BIGINT NOT NULL, \
+         replenishment_due BOOLEAN NOT NULL, PRIMARY KEY (warehouse, sku))"
+    );
+    execute_proof_sql(root, compose, directory, state, &sql, "inventory")
+}
+
+fn provision_example_destinations(
+    root: &Path,
+    compose: &ComposeCommand,
+    directory: &Path,
+    state: &SessionState,
+    payment_schema: &str,
+    inventory_schema: &str,
+) -> Result<()> {
+    provision_payment_destination(root, compose, directory, state, payment_schema)?;
+    provision_inventory_destination(root, compose, directory, state, inventory_schema)
 }
 
 fn container_health(

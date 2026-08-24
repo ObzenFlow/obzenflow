@@ -50,10 +50,13 @@ impl SinkWriterConformanceFixture for CsvFixture {
             SinkFault::Encode,
             SinkWriteFailureDisposition::CurrentOnly,
         ))
-        .with_fault(SinkFaultCase::write(
-            SinkFault::MidBatchMutation,
-            SinkWriteFailureDisposition::Poisoned,
-        ))
+        .with_fault(
+            SinkFaultCase::write(
+                SinkFault::MidBatchMutation,
+                SinkWriteFailureDisposition::Poisoned,
+            )
+            .with_deferred_operation_subject(),
+        )
         .with_fault(SinkFaultCase::write(
             SinkFault::PreCommit,
             SinkWriteFailureDisposition::Poisoned,
