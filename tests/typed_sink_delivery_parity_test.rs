@@ -5,7 +5,7 @@
 //! FLOWIP-134h journal oracle for immediate and deferred typed sink settlement.
 
 use async_trait::async_trait;
-use obzenflow::sinks::CsvSink;
+use obzenflow::sinks::{CsvProjection, CsvSink};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{
     ChainEvent, ChainEventContent, EventEnvelope, StageFatalCode, StageFatalReason,
@@ -23,6 +23,7 @@ use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkBufferedOutcome, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
     SinkWriteReport, TypedFiniteSourceHandler,
 };
+use obzenflow_runtime::stages::common::HandlerError;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -46,6 +47,18 @@ struct SinkRecord {
 
 impl TypedPayload for SinkRecord {
     const EVENT_TYPE: &'static str = "flowip_134h.sink_record";
+}
+
+#[derive(Clone, Debug)]
+struct SinkRecordProjection;
+
+impl CsvProjection for SinkRecordProjection {
+    type Input = SinkRecord;
+    type Row = SinkRecord;
+
+    fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError> {
+        Ok(input)
+    }
 }
 
 fn fixtures() -> Vec<SinkRecord> {
@@ -145,7 +158,7 @@ fn connector_error(error: impl std::fmt::Display) -> FlowBuildError {
 fn build_parity_flow(journal_base: PathBuf, csv_path: PathBuf) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let records = ValuesSource::new();
-        let csv = CsvSink::<SinkRecord>::builder()
+        let csv = CsvSink::builder(SinkRecordProjection)
             .path(&csv_path)
             .columns(["id", "label", "nested", "tags", "optional"])
             .headers(["ID", "Label", "Nested", "Tags", "Optional"])

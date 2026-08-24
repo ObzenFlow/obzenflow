@@ -26,8 +26,10 @@ impl TypedPayload for ConsumerPayment {
 #[derive(Clone)]
 struct ConsumerBinder;
 
-impl PostgresBind<ConsumerPayment> for ConsumerBinder {
-    fn bind(&self, bindings: &mut PostgresBindings, payment: &ConsumerPayment) {
+impl PostgresBind for ConsumerBinder {
+    type Input = ConsumerPayment;
+
+    fn bind(&self, bindings: &mut PostgresBindings, payment: &Self::Input) {
         bindings.bind(payment.id);
     }
 }
@@ -39,11 +41,10 @@ fn root_feature_exposes_a_sink_macro_compatible_value_binder() {
         PostgresTransport::ExternallyProtectedPlaintext,
     )
     .expect("consumer URL parses without I/O");
-    let postgres = PostgresSink::<ConsumerPayment>::builder()
+    let postgres = PostgresSink::builder(ConsumerBinder)
         .connection(connection)
         .insert_into("public", "payments", "(id) VALUES ($1)")
         .expect("consumer target validates")
-        .bind_with(ConsumerBinder)
         .build()
         .expect("consumer connector builds without I/O");
     let _descriptor = sink!(ConsumerPayment => postgres);

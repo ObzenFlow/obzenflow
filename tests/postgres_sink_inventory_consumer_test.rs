@@ -35,8 +35,10 @@ impl TypedPayload for InventoryLevelChanged {
 #[derive(Clone, Debug)]
 struct InventoryBinder;
 
-impl PostgresBind<InventoryLevelChanged> for InventoryBinder {
-    fn bind(&self, bindings: &mut PostgresBindings, level: &InventoryLevelChanged) {
+impl PostgresBind for InventoryBinder {
+    type Input = InventoryLevelChanged;
+
+    fn bind(&self, bindings: &mut PostgresBindings, level: &Self::Input) {
         bindings
             .bind(&level.warehouse)
             .bind(&level.sku)
@@ -52,7 +54,7 @@ async fn independent_inventory_consumer_delivers_through_the_public_connector() 
     let temp = tempfile::tempdir().expect("create inventory consumer journal directory");
     let journal_root = temp.path().join("journals");
 
-    let postgres = PostgresSink::<InventoryLevelChanged>::builder()
+    let postgres = PostgresSink::builder(InventoryBinder)
         .connection(connection())
         .insert_into(
             &schema,
@@ -66,7 +68,6 @@ async fn independent_inventory_consumer_delivers_through_the_public_connector() 
         .batch_size(1)
         .expect("configure inventory batching")
         .redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-        .bind_with(InventoryBinder)
         .build()
         .expect("build the inventory connector without opening PostgreSQL");
 

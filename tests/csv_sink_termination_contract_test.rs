@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use futures::FutureExt;
-use obzenflow::sinks::CsvSink;
+use obzenflow::sinks::{CsvProjection, CsvSink};
 use obzenflow_adapters::middleware::{
     validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
@@ -22,6 +22,7 @@ use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
+use obzenflow_runtime::stages::common::HandlerError;
 use obzenflow_runtime::stages::source::strategies::{
     CompletionContext, CompletionDecision, CompletionGate,
 };
@@ -44,6 +45,18 @@ struct CsvRecord {
 
 impl TypedPayload for CsvRecord {
     const EVENT_TYPE: &'static str = "flowip_134h.csv_termination_record";
+}
+
+#[derive(Clone, Debug)]
+struct CsvRecordProjection;
+
+impl CsvProjection for CsvRecordProjection {
+    type Input = CsvRecord;
+    type Row = CsvRecord;
+
+    fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError> {
+        Ok(input)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -158,8 +171,8 @@ fn connector_error(error: impl std::fmt::Display) -> FlowBuildError {
     FlowBuildError::StageResourcesFailed(format!("failed to build typed CSV sink: {error}"))
 }
 
-fn csv_sink(path: &Path) -> Result<CsvSink<CsvRecord>, anyhow::Error> {
-    CsvSink::<CsvRecord>::builder()
+fn csv_sink(path: &Path) -> Result<CsvSink<CsvRecordProjection>, anyhow::Error> {
+    CsvSink::builder(CsvRecordProjection)
         .path(path)
         .columns(["id", "label"])
         .buffer_size(100)

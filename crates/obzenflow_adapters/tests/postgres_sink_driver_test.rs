@@ -46,8 +46,10 @@ impl TypedPayload for DriverInput {
 #[derive(Clone, Debug)]
 struct IdValueBinder;
 
-impl PostgresBind<DriverInput> for IdValueBinder {
-    fn bind(&self, bindings: &mut PostgresBindings, input: &DriverInput) {
+impl PostgresBind for IdValueBinder {
+    type Input = DriverInput;
+
+    fn bind(&self, bindings: &mut PostgresBindings, input: &Self::Input) {
         bindings.bind(input.id).bind(&input.value);
     }
 }
@@ -55,8 +57,10 @@ impl PostgresBind<DriverInput> for IdValueBinder {
 #[derive(Clone, Debug)]
 struct ValueBinder;
 
-impl PostgresBind<DriverInput> for ValueBinder {
-    fn bind(&self, bindings: &mut PostgresBindings, input: &DriverInput) {
+impl PostgresBind for ValueBinder {
+    type Input = DriverInput;
+
+    fn bind(&self, bindings: &mut PostgresBindings, input: &Self::Input) {
         bindings.bind(&input.value);
     }
 }
@@ -64,8 +68,10 @@ impl PostgresBind<DriverInput> for ValueBinder {
 #[derive(Clone, Debug)]
 struct IdOnlyBinder;
 
-impl PostgresBind<DriverInput> for IdOnlyBinder {
-    fn bind(&self, bindings: &mut PostgresBindings, input: &DriverInput) {
+impl PostgresBind for IdOnlyBinder {
+    type Input = DriverInput;
+
+    fn bind(&self, bindings: &mut PostgresBindings, input: &Self::Input) {
         bindings.bind(input.id);
     }
 }
@@ -73,15 +79,19 @@ impl PostgresBind<DriverInput> for IdOnlyBinder {
 #[derive(Clone, Debug)]
 struct NoBinder;
 
-impl PostgresBind<DriverInput> for NoBinder {
-    fn bind(&self, _bindings: &mut PostgresBindings, _input: &DriverInput) {}
+impl PostgresBind for NoBinder {
+    type Input = DriverInput;
+
+    fn bind(&self, _bindings: &mut PostgresBindings, _input: &Self::Input) {}
 }
 
 #[derive(Clone, Debug)]
 struct ExtraBinder;
 
-impl PostgresBind<DriverInput> for ExtraBinder {
-    fn bind(&self, bindings: &mut PostgresBindings, input: &DriverInput) {
+impl PostgresBind for ExtraBinder {
+    type Input = DriverInput;
+
+    fn bind(&self, bindings: &mut PostgresBindings, input: &Self::Input) {
         bindings.bind(input.id).bind(&input.value).bind(input.id);
     }
 }
@@ -89,8 +99,10 @@ impl PostgresBind<DriverInput> for ExtraBinder {
 #[derive(Clone, Debug)]
 struct WrongTypeBinder;
 
-impl PostgresBind<DriverInput> for WrongTypeBinder {
-    fn bind(&self, bindings: &mut PostgresBindings, input: &DriverInput) {
+impl PostgresBind for WrongTypeBinder {
+    type Input = DriverInput;
+
+    fn bind(&self, bindings: &mut PostgresBindings, input: &Self::Input) {
         bindings.bind(&input.value).bind(&input.value);
     }
 }
@@ -112,8 +124,10 @@ impl<'q> Encode<'q, Postgres> for DriverEncodingFailure {
 #[derive(Clone, Debug)]
 struct EncodingFailureBinder;
 
-impl PostgresBind<DriverInput> for EncodingFailureBinder {
-    fn bind(&self, bindings: &mut PostgresBindings, input: &DriverInput) {
+impl PostgresBind for EncodingFailureBinder {
+    type Input = DriverInput;
+
+    fn bind(&self, bindings: &mut PostgresBindings, input: &Self::Input) {
         bindings.bind(input.id).bind(DriverEncodingFailure);
     }
 }
@@ -209,11 +223,9 @@ async fn assert_backend_closed(pool: &PgPool, backend_pid: i32) {
     .expect("rejected or unverified PostgreSQL backend closes promptly");
 }
 
-async fn open_writer<B>(
-    sink: &PostgresSink<DriverInput, B>,
-) -> Result<PostgresWriter<DriverInput, B>, SinkOperationError>
+async fn open_writer<B>(sink: &PostgresSink<B>) -> Result<PostgresWriter<B>, SinkOperationError>
 where
-    B: PostgresBind<DriverInput>,
+    B: PostgresBind<Input = DriverInput>,
 {
     sink.open(SinkWriterInitContext::new(
         StageId::new(),
@@ -224,10 +236,10 @@ where
 }
 
 async fn open_adapter<B>(
-    sink: PostgresSink<DriverInput, B>,
-) -> Result<(SinkWriterAdapter<PostgresWriter<DriverInput, B>>, WriterId), SinkOperationError>
+    sink: PostgresSink<B>,
+) -> Result<(SinkWriterAdapter<PostgresWriter<B>>, WriterId), SinkOperationError>
 where
-    B: PostgresBind<DriverInput>,
+    B: PostgresBind<Input = DriverInput>,
 {
     let description = sink.describe();
     let stage_id = StageId::new();
@@ -249,12 +261,12 @@ where
 }
 
 async fn consume<B>(
-    adapter: &mut SinkWriterAdapter<PostgresWriter<DriverInput, B>>,
+    adapter: &mut SinkWriterAdapter<PostgresWriter<B>>,
     writer_id: WriterId,
     input: DriverInput,
 ) -> Result<obzenflow_core::event::payloads::delivery_payload::DeliveryPayload, HandlerError>
 where
-    B: PostgresBind<DriverInput>,
+    B: PostgresBind<Input = DriverInput>,
 {
     let event =
         ChainEventFactory::data_event_from(writer_id, DriverInput::versioned_event_type(), &input)
@@ -263,7 +275,7 @@ where
 }
 
 async fn consume_with_event_id<B>(
-    adapter: &mut SinkWriterAdapter<PostgresWriter<DriverInput, B>>,
+    adapter: &mut SinkWriterAdapter<PostgresWriter<B>>,
     writer_id: WriterId,
     input: DriverInput,
 ) -> (
@@ -271,7 +283,7 @@ async fn consume_with_event_id<B>(
     Result<obzenflow_core::event::payloads::delivery_payload::DeliveryPayload, HandlerError>,
 )
 where
-    B: PostgresBind<DriverInput>,
+    B: PostgresBind<Input = DriverInput>,
 {
     let event =
         ChainEventFactory::data_event_from(writer_id, DriverInput::versioned_event_type(), &input)
@@ -287,15 +299,14 @@ fn sink<B>(
     body: &str,
     binder: B,
     probe: PostgresTestProbe,
-) -> PostgresSink<DriverInput, B>
+) -> PostgresSink<B>
 where
-    B: PostgresBind<DriverInput>,
+    B: PostgresBind<Input = DriverInput>,
 {
-    PostgresSink::<DriverInput>::builder()
+    PostgresSink::builder(binder)
         .connection(connection)
         .insert_into(schema, table, body)
         .expect("driver target and body pass local validation")
-        .bind_with(binder)
         .test_probe(probe)
         .build()
         .expect("driver sink builds without I/O")
@@ -307,7 +318,7 @@ async fn assert_binding_failure<B>(
     binder: B,
     expected_kind: ErrorKind,
 ) where
-    B: PostgresBind<DriverInput>,
+    B: PostgresBind<Input = DriverInput>,
 {
     let probe = PostgresTestProbe::default();
     let connector = sink(
@@ -813,7 +824,7 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
     }
 
     let deferred_probe = PostgresTestProbe::default();
-    let deferred_constraint = PostgresSink::<DriverInput>::builder()
+    let deferred_constraint = PostgresSink::builder(IdValueBinder)
         .connection(fixture.connection())
         .insert_into(
             &fixture.schema,
@@ -823,7 +834,6 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
         .expect("deferred constraint target is valid")
         .batch_size(2)
         .expect("two-row batch is valid")
-        .bind_with(IdValueBinder)
         .test_probe(deferred_probe.clone())
         .build()
         .expect("deferred constraint sink builds without I/O");
@@ -887,7 +897,7 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
     assert_eq!(deferred_calls.count(SinkExternalCallKind::Drain), 0);
 
     let current_probe = PostgresTestProbe::default();
-    let current_constraint = PostgresSink::<DriverInput>::builder()
+    let current_constraint = PostgresSink::builder(IdValueBinder)
         .connection(fixture.connection())
         .insert_into(
             &fixture.schema,
@@ -897,7 +907,6 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
         .expect("current constraint target is valid")
         .batch_size(2)
         .expect("two-row batch is valid")
-        .bind_with(IdValueBinder)
         .test_probe(current_probe)
         .build()
         .expect("current constraint sink builds without I/O");
@@ -963,7 +972,7 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
     drop(current_adapter);
 
     let encoding_probe = PostgresTestProbe::default();
-    let encoding = PostgresSink::<DriverInput>::builder()
+    let encoding = PostgresSink::builder(EncodingFailureBinder)
         .connection(fixture.connection())
         .insert_into(
             &fixture.schema,
@@ -973,7 +982,6 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
         .expect("encoding target is valid")
         .batch_size(2)
         .expect("two-row batch is valid")
-        .bind_with(EncodingFailureBinder)
         .test_probe(encoding_probe)
         .build()
         .expect("encoding sink builds without I/O");
@@ -1012,7 +1020,7 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
     }
     drop(encoding_adapter);
 
-    let flush_encoding = PostgresSink::<DriverInput>::builder()
+    let flush_encoding = PostgresSink::builder(EncodingFailureBinder)
         .connection(fixture.connection())
         .insert_into(
             &fixture.schema,
@@ -1022,7 +1030,6 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
         .expect("flush encoding target is valid")
         .batch_size(3)
         .expect("three-row batch is valid")
-        .bind_with(EncodingFailureBinder)
         .test_probe(PostgresTestProbe::default())
         .build()
         .expect("flush encoding sink builds without I/O");
@@ -1060,7 +1067,7 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
     .await
     .expect("seed deferred timeout target");
     let timeout_probe = PostgresTestProbe::default();
-    let timeout_sink = PostgresSink::<DriverInput>::builder()
+    let timeout_sink = PostgresSink::builder(IdValueBinder)
         .connection(
             fixture
                 .connection()
@@ -1076,7 +1083,6 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
         .expect("timeout target is valid")
         .batch_size(2)
         .expect("two-row timeout batch is valid")
-        .bind_with(IdValueBinder)
         .test_probe(timeout_probe)
         .build()
         .expect("timeout sink builds without I/O");
@@ -1147,7 +1153,7 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
     drop(timeout_adapter);
 
     let rollback_failure_probe = PostgresTestProbe::default();
-    let rollback_failure = PostgresSink::<DriverInput>::builder()
+    let rollback_failure = PostgresSink::builder(IdValueBinder)
         .connection(
             fixture
                 .connection()
@@ -1161,7 +1167,6 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
         .expect("rollback-failure target is valid")
         .batch_size(2)
         .expect("two-row rollback-failure batch is valid")
-        .bind_with(IdValueBinder)
         .test_probe(rollback_failure_probe.clone())
         .build()
         .expect("rollback-failure sink builds without I/O");
@@ -1219,7 +1224,7 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
     drop(rollback_failure_adapter);
 
     let lifecycle_rollback_probe = PostgresTestProbe::default();
-    let lifecycle_rollback = PostgresSink::<DriverInput>::builder()
+    let lifecycle_rollback = PostgresSink::builder(IdValueBinder)
         .connection(
             fixture
                 .connection()
@@ -1233,7 +1238,6 @@ async fn deferred_origin_failures_poison_with_exact_subject_and_current_failures
         .expect("lifecycle rollback-failure target is valid")
         .batch_size(3)
         .expect("three-row lifecycle batch is valid")
-        .bind_with(IdValueBinder)
         .test_probe(lifecycle_rollback_probe.clone())
         .build()
         .expect("lifecycle rollback-failure sink builds without I/O");
@@ -1633,7 +1637,7 @@ async fn buffered_flush_and_drain_rejection_settle_nothing() {
     .expect("create authority lifecycle target");
 
     let flush_probe = PostgresTestProbe::default();
-    let flush_sink = PostgresSink::<DriverInput>::builder()
+    let flush_sink = PostgresSink::builder(IdValueBinder)
         .connection(fixture.connection())
         .insert_into(
             &fixture.schema,
@@ -1643,7 +1647,6 @@ async fn buffered_flush_and_drain_rejection_settle_nothing() {
         .expect("flush target and body pass local validation")
         .batch_size(3)
         .expect("flush batch size is valid")
-        .bind_with(IdValueBinder)
         .test_probe(flush_probe.clone())
         .build()
         .expect("flush sink builds without I/O");
@@ -1684,7 +1687,7 @@ async fn buffered_flush_and_drain_rejection_settle_nothing() {
     assert_eq!(flush_calls.count(SinkExternalCallKind::Commit), 0);
 
     let drain_probe = PostgresTestProbe::default();
-    let drain_sink = PostgresSink::<DriverInput>::builder()
+    let drain_sink = PostgresSink::builder(IdValueBinder)
         .connection(fixture.connection())
         .insert_into(
             &fixture.schema,
@@ -1694,7 +1697,6 @@ async fn buffered_flush_and_drain_rejection_settle_nothing() {
         .expect("drain target and body pass local validation")
         .batch_size(3)
         .expect("drain batch size is valid")
-        .bind_with(IdValueBinder)
         .test_probe(drain_probe.clone())
         .build()
         .expect("drain sink builds without I/O");
@@ -2027,7 +2029,7 @@ async fn real_postgres_locks_bound_preparation_rollback_and_quarantine() {
     .await
     .expect("seed acknowledged-rollback target");
     let rollback_probe = PostgresTestProbe::default();
-    let rollback = PostgresSink::<DriverInput>::builder()
+    let rollback = PostgresSink::builder(IdValueBinder)
         .connection(
             fixture
                 .connection()
@@ -2043,7 +2045,6 @@ async fn real_postgres_locks_bound_preparation_rollback_and_quarantine() {
         .expect("rollback target and body pass local validation")
         .batch_size(2)
         .expect("two-row batch is valid")
-        .bind_with(IdValueBinder)
         .test_probe(rollback_probe)
         .build()
         .expect("rollback sink builds without I/O");

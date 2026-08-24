@@ -6,8 +6,9 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::sinks::csv::testing::CsvTestProbe;
-use obzenflow_adapters::sinks::CsvSink;
+use obzenflow_adapters::sinks::{CsvProjection, CsvSink};
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::stages::common::HandlerError;
 use obzenflow_runtime::stages::sink::SinkWriteFailureDisposition;
 use obzenflow_runtime::testing::sink::{
     run_writer_conformance, SinkBuildCase, SinkConformanceProfile, SinkDiagnosticSample,
@@ -29,6 +30,18 @@ impl TypedPayload for Row {
     const EVENT_TYPE: &'static str = "sink.conformance.csv.row";
 }
 
+#[derive(Clone, Debug)]
+struct RowProjection;
+
+impl CsvProjection for RowProjection {
+    type Input = Row;
+    type Row = Row;
+
+    fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError> {
+        Ok(input)
+    }
+}
+
 struct CsvFixture {
     _temp: TempDir,
     path: PathBuf,
@@ -37,7 +50,7 @@ struct CsvFixture {
 
 #[async_trait]
 impl SinkWriterConformanceFixture for CsvFixture {
-    type Connector = CsvSink<Row>;
+    type Connector = CsvSink<RowProjection>;
     type DestinationSnapshot = Vec<u8>;
 
     fn profile(&self) -> SinkConformanceProfile {
@@ -71,7 +84,7 @@ impl SinkWriterConformanceFixture for CsvFixture {
         let probe = self.probe.clone();
         vec![
             SinkBuildCase::valid("csv-valid", move || {
-                CsvSink::<Row>::builder()
+                CsvSink::builder(RowProjection)
                     .path(&valid_path)
                     .columns(["id", "value"])
                     .buffer_size(2)
@@ -81,7 +94,7 @@ impl SinkWriterConformanceFixture for CsvFixture {
                     .map_err(|error| SinkFixtureError::new(error.to_string()))
             }),
             SinkBuildCase::invalid("csv-zero-buffer", move || {
-                CsvSink::<Row>::builder()
+                CsvSink::builder(RowProjection)
                     .path(&invalid_path)
                     .buffer_size(0)
                     .build()

@@ -280,13 +280,15 @@ impl TypedPayload for Payment {
 #[derive(Clone, Debug)]
 struct PaymentBinder;
 
-impl PostgresBind<Payment> for PaymentBinder {
-    fn bind(&self, bindings: &mut PostgresBindings, input: &Payment) {
+impl PostgresBind for PaymentBinder {
+    type Input = Payment;
+
+    fn bind(&self, bindings: &mut PostgresBindings, input: &Self::Input) {
         bindings.bind(input.id).bind(input.amount_cents);
     }
 }
 
-type PaymentSink = PostgresSink<Payment, PaymentBinder>;
+type PaymentSink = PostgresSink<PaymentBinder>;
 
 fn payments() -> Vec<Payment> {
     (1..=4)
@@ -502,7 +504,7 @@ fn build_sink(
     probe: PostgresTestProbe,
     class: SinkDestinationClass,
 ) -> Result<PaymentSink, Box<FlowBuildError>> {
-    let builder = PostgresSink::<Payment>::builder()
+    let builder = PostgresSink::builder(PaymentBinder)
         .connection(connection)
         .insert_into(
             schema,
@@ -516,7 +518,6 @@ fn build_sink(
         .map_err(flow_error)?
         .batch_size(2)
         .map_err(flow_error)?
-        .bind_with(PaymentBinder)
         .test_probe(probe);
     let builder = match class {
         SinkDestinationClass::SafeToRepeat => {
@@ -538,14 +539,13 @@ fn build_custom_sink(
     batch_size: usize,
     probe: PostgresTestProbe,
 ) -> Result<PaymentSink, Box<FlowBuildError>> {
-    PostgresSink::<Payment>::builder()
+    PostgresSink::builder(PaymentBinder)
         .connection(connection)
         .insert_into(schema, table, body)
         .map_err(flow_error)?
         .batch_size(batch_size)
         .map_err(flow_error)?
         .redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-        .bind_with(PaymentBinder)
         .test_probe(probe)
         .build()
         .map_err(flow_error)
@@ -1103,6 +1103,19 @@ impl OrderingDatabase {
         .expect("read ordering destination")
     }
 
+    async fn wait_for_amount(&self, id: i64, expected: i64) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if self.amount(id).await == Some(expected) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("expected value becomes visible in the ordering destination");
+    }
+
     async fn cleanup(&self) {
         sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema))
             .execute(&self.pool)
@@ -1576,11 +1589,7 @@ async fn postgres_order_sensitive_source_fan_in_archive_redelivery_reproduces_sa
     )
     .await
     .expect("the left-only threshold transaction commits while the right source is gated");
-    assert_eq!(
-        database.amount(9_101).await,
-        Some(300),
-        "the observed commit contains exactly the two admitted left inputs"
-    );
+    database.wait_for_amount(9_101, 300).await;
     right_gate.release();
 
     tokio::time::timeout(Duration::from_secs(12), handle.wait_for_completion())

@@ -8,7 +8,9 @@
 //! Each call to [`SinkConnector::open`](obzenflow_runtime::stages::sink::SinkConnector::open)
 //! creates an isolated writer, verifies its initial session, and installs a
 //! fail-closed authority check for every replacement session. Values enter the
-//! fixed INSERT statement only through [`PostgresBind`].
+//! fixed INSERT statement only through [`PostgresBind`]. The user-owned binder
+//! declares its input as an associated type and is passed directly to
+//! [`PostgresSink::builder`], matching the framework's handler convention.
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
@@ -27,7 +29,6 @@ use sqlx::postgres::{PgArguments, PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::query::Query;
 use sqlx::{Arguments as _, ConnectOptions as _, Encode, Executor as _, PgPool, Postgres, Type};
 use std::fmt;
-use std::marker::PhantomData;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -75,9 +76,6 @@ pub enum PostgresConfigError {
     /// The configured batch size was outside the supported finite range.
     #[error("PostgreSQL batch size must be in 1..={MAX_BATCH_SIZE}")]
     InvalidBatchSize,
-    /// No typed parameter binder was supplied.
-    #[error("PostgreSQL parameter binder is missing")]
-    MissingBinder,
     /// At least one configured timeout was zero.
     #[error("PostgreSQL timeouts must be strictly positive")]
     InvalidTimeout,
@@ -394,17 +392,16 @@ impl fmt::Debug for PostgresBindings {
 ///
 /// `bind` receives only a private-field value accumulator, so it cannot replace
 /// or execute the fixed configuration statement through this API.
-pub trait PostgresBind<T>: Clone + Send + Sync + 'static {
+pub trait PostgresBind: Clone + Send + Sync + 'static {
+    /// Domain input accepted by this parameter binder.
+    type Input: TypedPayload + Send + Sync + 'static;
+
     /// Append this input's parameter values in statement order.
-    fn bind(&self, bindings: &mut PostgresBindings, input: &T);
+    fn bind(&self, bindings: &mut PostgresBindings, input: &Self::Input);
 }
 
-#[doc(hidden)]
-#[derive(Clone, Copy, Debug)]
-pub struct MissingPostgresBinder;
-
 /// Reusable, I/O-free PostgreSQL sink configuration.
-pub struct PostgresSink<T, B = MissingPostgresBinder> {
+pub struct PostgresSink<B> {
     connection: PostgresConnection,
     destination: PostgresTable,
     _insert_body: String,
@@ -414,13 +411,15 @@ pub struct PostgresSink<T, B = MissingPostgresBinder> {
     redelivery_safety: Option<SinkRedeliverySafety>,
     #[cfg(feature = "test-support")]
     test_probe: Option<testing::PostgresTestProbe>,
-    _input: PhantomData<fn() -> T>,
 }
 
-impl<T, B> fmt::Debug for PostgresSink<T, B> {
+impl<B> fmt::Debug for PostgresSink<B>
+where
+    B: PostgresBind,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PostgresSink")
-            .field("input", &std::any::type_name::<T>())
+            .field("input", &std::any::type_name::<B::Input>())
             .field("destination", &self.destination)
             .field("batch_size", &self.batch_size)
             .field("redelivery_safety", &self.redelivery_safety)
@@ -428,19 +427,21 @@ impl<T, B> fmt::Debug for PostgresSink<T, B> {
     }
 }
 
-impl<T> PostgresSink<T, MissingPostgresBinder> {
-    /// Begin an I/O-free builder for inputs of type `T`.
-    pub fn builder() -> PostgresSinkBuilder<T, MissingPostgresBinder> {
+impl<B> PostgresSink<B>
+where
+    B: PostgresBind,
+{
+    /// Begin an I/O-free builder whose input contract is owned by `binder`.
+    pub fn builder(binder: B) -> PostgresSinkBuilder<B> {
         PostgresSinkBuilder {
             connection: None,
             destination: None,
             insert_body: None,
-            binder: None,
+            binder,
             batch_size: DEFAULT_BATCH_SIZE,
             redelivery_safety: None,
             #[cfg(feature = "test-support")]
             test_probe: None,
-            _input: PhantomData,
         }
     }
 }
@@ -449,32 +450,31 @@ impl<T> PostgresSink<T, MissingPostgresBinder> {
 ///
 /// The builder validates only local configuration. PostgreSQL owns statement
 /// preparation and destination acceptance when the connector opens a writer.
-pub struct PostgresSinkBuilder<T, B> {
+pub struct PostgresSinkBuilder<B> {
     connection: Option<PostgresConnection>,
     destination: Option<PostgresTable>,
     insert_body: Option<String>,
-    binder: Option<B>,
+    binder: B,
     batch_size: usize,
     redelivery_safety: Option<SinkRedeliverySafety>,
     #[cfg(feature = "test-support")]
     test_probe: Option<testing::PostgresTestProbe>,
-    _input: PhantomData<fn() -> T>,
 }
 
-impl<T, B> fmt::Debug for PostgresSinkBuilder<T, B> {
+impl<B> fmt::Debug for PostgresSinkBuilder<B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PostgresSinkBuilder")
             .field("connection_configured", &self.connection.is_some())
             .field("destination", &self.destination)
             .field("insert_configured", &self.insert_body.is_some())
-            .field("binder_configured", &self.binder.is_some())
+            .field("binder", &std::any::type_name::<B>())
             .field("batch_size", &self.batch_size)
             .field("redelivery_safety", &self.redelivery_safety)
             .finish()
     }
 }
 
-impl<T, B> PostgresSinkBuilder<T, B> {
+impl<B> PostgresSinkBuilder<B> {
     /// Set the cold, redacted connection configuration.
     pub fn connection(mut self, connection: PostgresConnection) -> Self {
         self.connection = Some(connection);
@@ -534,32 +534,17 @@ impl<T, B> PostgresSinkBuilder<T, B> {
         self.test_probe = Some(probe);
         self
     }
-
-    /// Install the typed value-only parameter binder.
-    pub fn bind_with<B2>(self, binder: B2) -> PostgresSinkBuilder<T, B2> {
-        PostgresSinkBuilder {
-            connection: self.connection,
-            destination: self.destination,
-            insert_body: self.insert_body,
-            binder: Some(binder),
-            batch_size: self.batch_size,
-            redelivery_safety: self.redelivery_safety,
-            #[cfg(feature = "test-support")]
-            test_probe: self.test_probe,
-            _input: PhantomData,
-        }
-    }
 }
 
-impl<T, B> PostgresSinkBuilder<T, B>
+impl<B> PostgresSinkBuilder<B>
 where
-    B: PostgresBind<T>,
+    B: PostgresBind,
 {
     /// Finish local validation and return immutable connector configuration.
     ///
     /// This method performs no DNS, authentication, schema, preparation, or
     /// destination I/O.
-    pub fn build(self) -> Result<PostgresSink<T, B>, PostgresConfigError> {
+    pub fn build(self) -> Result<PostgresSink<B>, PostgresConfigError> {
         let destination = self
             .destination
             .ok_or(PostgresConfigError::InvalidIdentifier)?;
@@ -576,12 +561,11 @@ where
             destination,
             _insert_body: insert_body,
             statement,
-            binder: self.binder.ok_or(PostgresConfigError::MissingBinder)?,
+            binder: self.binder,
             batch_size: self.batch_size,
             redelivery_safety: self.redelivery_safety,
             #[cfg(feature = "test-support")]
             test_probe: self.test_probe,
-            _input: PhantomData,
         })
     }
 }
@@ -1134,13 +1118,12 @@ impl PostgresSessionPool {
 }
 
 #[async_trait]
-impl<T, B> SinkConnector for PostgresSink<T, B>
+impl<B> SinkConnector for PostgresSink<B>
 where
-    T: TypedPayload + Send + Sync + 'static,
-    B: PostgresBind<T>,
+    B: PostgresBind,
 {
-    type Input = T;
-    type Writer = PostgresWriter<T, B>;
+    type Input = B::Input;
+    type Writer = PostgresWriter<B>;
 
     fn describe(&self) -> SinkDescription {
         let description = SinkDescription::destination(
@@ -1234,7 +1217,10 @@ struct BufferedRow<T> {
 /// Each writer owns its one-slot session pool, transaction and batching state,
 /// pending capabilities, deadlines, and failure lifecycle. Applications pass
 /// the connector to `sink!`; they do not construct writers directly.
-pub struct PostgresWriter<T, B> {
+pub struct PostgresWriter<B>
+where
+    B: PostgresBind,
+{
     pool: PostgresSessionPool,
     destination: PostgresTable,
     statement: String,
@@ -1242,14 +1228,17 @@ pub struct PostgresWriter<T, B> {
     batch_size: usize,
     operation_timeout: Duration,
     rollback_timeout: Duration,
-    pending: Vec<BufferedRow<T>>,
+    pending: Vec<BufferedRow<B::Input>>,
     probe: WriterProbe,
 }
 
-impl<T, B> fmt::Debug for PostgresWriter<T, B> {
+impl<B> fmt::Debug for PostgresWriter<B>
+where
+    B: PostgresBind,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PostgresWriter")
-            .field("input", &std::any::type_name::<T>())
+            .field("input", &std::any::type_name::<B::Input>())
             .field("destination", &self.destination)
             .field("batch_size", &self.batch_size)
             .field("pending", &self.pending.len())
@@ -1257,7 +1246,10 @@ impl<T, B> fmt::Debug for PostgresWriter<T, B> {
     }
 }
 
-impl<T, B> Drop for PostgresWriter<T, B> {
+impl<B> Drop for PostgresWriter<B>
+where
+    B: PostgresBind,
+{
     fn drop(&mut self) {
         self.probe.record_drop();
     }
@@ -1374,26 +1366,25 @@ async fn rollback_transaction(
     }
 }
 
-fn assemble_query<'q, T, B>(
+fn assemble_query<'q, B>(
     statement: &'q str,
     binder: &B,
-    input: &'q T,
+    input: &'q B::Input,
 ) -> Query<'q, Postgres, PgArguments>
 where
-    B: PostgresBind<T>,
+    B: PostgresBind,
 {
     let mut bindings = PostgresBindings::new();
     binder.bind(&mut bindings, input);
     query_with_result(statement, bindings.finish())
 }
 
-async fn execute_transaction<T, B>(
-    writer: &PostgresWriter<T, B>,
-    current: Option<&T>,
+async fn execute_transaction<B>(
+    writer: &PostgresWriter<B>,
+    current: Option<&B::Input>,
 ) -> Result<(), TransactionFailure>
 where
-    T: Send + Sync,
-    B: PostgresBind<T>,
+    B: PostgresBind,
 {
     let pool = &writer.pool;
     let statement = writer.statement.as_str();
@@ -1694,14 +1685,13 @@ fn with_first_deferred_subject<T>(
 }
 
 #[async_trait]
-impl<T, B> SinkWriter for PostgresWriter<T, B>
+impl<B> SinkWriter for PostgresWriter<B>
 where
-    T: TypedPayload + Send + Sync + 'static,
-    B: PostgresBind<T>,
+    B: PostgresBind,
 {
-    type Input = T;
+    type Input = B::Input;
 
-    async fn write(&mut self, input: T, context: SinkWriteContext) -> SinkWriteResult {
+    async fn write(&mut self, input: B::Input, context: SinkWriteContext) -> SinkWriteResult {
         self.probe.record_write();
         if self.probe.fault_encode() {
             return Err(SinkWriteFailure::current_only(
@@ -1785,10 +1775,9 @@ where
     }
 }
 
-impl<T, B> PostgresWriter<T, B>
+impl<B> PostgresWriter<B>
 where
-    T: TypedPayload + Send + Sync + 'static,
-    B: PostgresBind<T>,
+    B: PostgresBind,
 {
     async fn settle_pending(&mut self) -> SinkOperationResult<SinkWriterLifecycleReport> {
         if self.pending.is_empty() {
@@ -1898,8 +1887,10 @@ mod tests {
     #[derive(Clone)]
     struct Binder;
 
-    impl PostgresBind<Input> for Binder {
-        fn bind(&self, bindings: &mut PostgresBindings, input: &Input) {
+    impl PostgresBind for Binder {
+        type Input = Input;
+
+        fn bind(&self, bindings: &mut PostgresBindings, input: &Self::Input) {
             bindings.bind(&input.value);
         }
     }
@@ -1930,7 +1921,7 @@ mod tests {
     fn connector_input_witness_is_the_builder_payload() {
         fn assert_input<C: SinkConnector<Input = Input>>() {}
 
-        assert_input::<PostgresSink<Input, Binder>>();
+        assert_input::<PostgresSink<Binder>>();
     }
 
     #[test]
@@ -2120,11 +2111,10 @@ mod tests {
 
     #[test]
     fn build_is_local_and_debug_is_redacted() {
-        let sink = PostgresSink::<Input>::builder()
+        let sink = PostgresSink::builder(Binder)
             .connection(connection())
             .insert_into("public", "items", "(value) VALUES ($1)")
             .unwrap()
-            .bind_with(Binder)
             .batch_size(16)
             .unwrap()
             .redelivery_safety(SinkRedeliverySafety::DuplicateSensitive)
@@ -2150,22 +2140,21 @@ mod tests {
 
     #[test]
     fn configuration_rejects_unsafe_shapes() {
-        assert!(PostgresSink::<Input>::builder()
+        assert!(PostgresSink::builder(Binder)
             .insert_into("public;drop", "items", "(value) VALUES ($1)")
             .is_err());
-        assert!(PostgresSink::<Input>::builder()
+        assert!(PostgresSink::builder(Binder)
             .insert_into("public", "items", "")
             .is_err());
-        assert!(PostgresSink::<Input>::builder()
+        assert!(PostgresSink::builder(Binder)
             .insert_into("public", "items", "(value) VALUES ('bad\0value')")
             .is_err());
-        assert!(PostgresSink::<Input>::builder().batch_size(0).is_err());
+        assert!(PostgresSink::builder(Binder).batch_size(0).is_err());
         assert!(matches!(
-            PostgresSink::<Input>::builder()
+            PostgresSink::builder(Binder)
                 .connection(connection().with_operation_timeout(Duration::ZERO))
                 .insert_into("public", "items", "(value) VALUES ($1)")
                 .unwrap()
-                .bind_with(Binder)
                 .build(),
             Err(PostgresConfigError::InvalidTimeout)
         ));
@@ -2178,7 +2167,7 @@ mod tests {
         assert!(!valid_identifier(&format!("a{}", "b".repeat(63))));
         assert_eq!(quote_identifier("a\"b"), "\"a\"\"b\"");
 
-        let sink = PostgresSink::<Input>::builder()
+        let sink = PostgresSink::builder(Binder)
             .connection(connection())
             .insert_into(
                 "Public",
@@ -2186,7 +2175,6 @@ mod tests {
                 "(value) VALUES ('a;b') ON CONFLICT DO NOTHING",
             )
             .unwrap()
-            .bind_with(Binder)
             .build()
             .unwrap();
         assert_eq!(
@@ -2308,14 +2296,13 @@ mod tests {
             .await
             .expect("pool-test table creates");
 
-        let sink = PostgresSink::<Input>::builder()
+        let sink = PostgresSink::builder(Binder)
             .connection(
                 PostgresConnection::from_url(&url, PostgresTransport::ExternallyProtectedPlaintext)
                     .expect("test URL parses"),
             )
             .insert_into(&schema, "values_table", "(value) VALUES ($1)")
             .unwrap()
-            .bind_with(Binder)
             .build()
             .unwrap();
         let writer_a = sink

@@ -2,7 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! CSV file sink
+//! CSV file sink.
+//!
+//! A user-owned [`CsvProjection`] value declares both its domain input and
+//! serializable row as associated types. Passing that value to
+//! [`CsvSink::builder`] keeps connector construction aligned with typed
+//! handlers and effects while leaving file I/O cold until materialisation.
 
 use async_trait::async_trait;
 use csv::{Writer, WriterBuilder};
@@ -16,11 +21,11 @@ use obzenflow_runtime::stages::common::handlers::{
     SinkWriteContext, SinkWriteFailure, SinkWritePhase, SinkWriteReport, SinkWriteResult,
     SinkWriter, SinkWriterInitContext, SinkWriterLifecycleReport,
 };
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -270,9 +275,25 @@ impl CsvWriterProbe {
     }
 }
 
-/// Builder for a CSV projection whose accepted event type is `T`.
-#[derive(Clone, Debug)]
-pub struct CsvSinkBuilder<T> {
+/// User-owned mapping from one domain input to one serializable CSV row.
+///
+/// Like the framework's typed handlers, the projection value owns its input
+/// contract through an associated type. Applications pass that value to
+/// [`CsvSink::builder`] instead of repeating the event type on the sink.
+pub trait CsvProjection: Clone + Send + Sync + 'static {
+    /// Domain input accepted by this projection.
+    type Input: TypedPayload + Send + Sync + 'static;
+    /// Serializable object used for column selection and row encoding.
+    type Row: Serialize;
+
+    /// Project one domain input into its CSV-facing row.
+    fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError>;
+}
+
+/// Builder for a CSV projection whose input contract is owned by `P`.
+#[derive(Clone)]
+pub struct CsvSinkBuilder<P> {
+    projection: P,
     path: Option<PathBuf>,
     columns: Option<Vec<String>>,
     headers: Option<Vec<String>>,
@@ -285,12 +306,28 @@ pub struct CsvSinkBuilder<T> {
     test_redelivery_unspecified: bool,
     #[cfg(feature = "test-support")]
     test_probe: Option<testing::CsvTestProbe>,
-    _phantom: PhantomData<fn() -> T>,
 }
 
-impl<T> Default for CsvSinkBuilder<T> {
-    fn default() -> Self {
+impl<P> std::fmt::Debug for CsvSinkBuilder<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CsvSinkBuilder")
+            .field("projection", &std::any::type_name::<P>())
+            .field("path", &self.path)
+            .field("columns", &self.columns)
+            .field("headers", &self.headers)
+            .field("delimiter", &self.delimiter)
+            .field("buffer_size", &self.buffer_size)
+            .field("flush_every", &self.flush_every)
+            .field("auto_flush", &self.auto_flush)
+            .field("append", &self.append)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<P> CsvSinkBuilder<P> {
+    pub fn new(projection: P) -> Self {
         Self {
+            projection,
             path: None,
             columns: None,
             headers: None,
@@ -303,14 +340,7 @@ impl<T> Default for CsvSinkBuilder<T> {
             test_redelivery_unspecified: false,
             #[cfg(feature = "test-support")]
             test_probe: None,
-            _phantom: PhantomData,
         }
-    }
-}
-
-impl<T> CsvSinkBuilder<T> {
-    pub fn new() -> Self {
-        Self::default()
     }
 
     pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
@@ -383,7 +413,10 @@ impl<T> CsvSinkBuilder<T> {
         self
     }
 
-    pub fn build(self) -> Result<CsvSink<T>, anyhow::Error> {
+    pub fn build(self) -> Result<CsvSink<P>, anyhow::Error>
+    where
+        P: CsvProjection,
+    {
         let path = self.path.ok_or_else(|| anyhow::anyhow!("path required"))?;
 
         if self.buffer_size == 0 {
@@ -406,6 +439,7 @@ impl<T> CsvSinkBuilder<T> {
         }
 
         Ok(CsvSink {
+            projection: self.projection,
             path,
             columns: self.columns,
             headers: self.headers,
@@ -418,16 +452,13 @@ impl<T> CsvSinkBuilder<T> {
             test_redelivery_unspecified: self.test_redelivery_unspecified,
             #[cfg(feature = "test-support")]
             test_probe: self.test_probe,
-            _phantom: PhantomData,
         })
     }
 }
 
-/// A type-indexed CSV projection sink.
-///
-/// The type parameter is the connector-owned input witness used by `sink!`; the
-/// writer and row-shaping state remain schema-agnostic internally.
-pub struct CsvSink<T> {
+/// Reusable, I/O-free CSV sink configuration for projection `P`.
+pub struct CsvSink<P> {
+    projection: P,
     path: PathBuf,
     columns: Option<Vec<String>>,
     headers: Option<Vec<String>>,
@@ -440,13 +471,13 @@ pub struct CsvSink<T> {
     test_redelivery_unspecified: bool,
     #[cfg(feature = "test-support")]
     test_probe: Option<testing::CsvTestProbe>,
-    _phantom: PhantomData<fn() -> T>,
 }
 
-impl<T> std::fmt::Debug for CsvSink<T> {
+impl<P> std::fmt::Debug for CsvSink<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CsvSink")
             .field("path", &self.path)
+            .field("projection", &std::any::type_name::<P>())
             .field("buffer_size", &self.buffer_size)
             .field("auto_flush", &self.auto_flush)
             .field("append", &self.append)
@@ -454,27 +485,30 @@ impl<T> std::fmt::Debug for CsvSink<T> {
     }
 }
 
-impl<T> CsvSink<T> {
-    pub fn builder() -> CsvSinkBuilder<T> {
-        CsvSinkBuilder::new()
+impl<P> CsvSink<P>
+where
+    P: CsvProjection,
+{
+    pub fn builder(projection: P) -> CsvSinkBuilder<P> {
+        CsvSinkBuilder::new(projection)
     }
 
-    pub fn new(path: impl Into<PathBuf>) -> Result<Self, anyhow::Error> {
-        Self::builder().path(path).build()
+    pub fn new(projection: P, path: impl Into<PathBuf>) -> Result<Self, anyhow::Error> {
+        Self::builder(projection).path(path).build()
     }
 
-    pub fn tsv(path: impl Into<PathBuf>) -> Result<Self, anyhow::Error> {
-        Self::builder().path(path).tab_delimited().build()
+    pub fn tsv(projection: P, path: impl Into<PathBuf>) -> Result<Self, anyhow::Error> {
+        Self::builder(projection).path(path).tab_delimited().build()
     }
 }
 
 #[async_trait]
-impl<T> SinkConnector for CsvSink<T>
+impl<P> SinkConnector for CsvSink<P>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    P: CsvProjection,
 {
-    type Input = T;
-    type Writer = CsvWriter<T>;
+    type Input = P::Input;
+    type Writer = CsvWriter<P>;
 
     fn describe(&self) -> SinkDescription {
         let description = SinkDescription::method(DeliveryMethod::FileWrite {
@@ -537,6 +571,7 @@ where
                 gate: io_gate.clone(),
             });
         Ok(CsvWriter {
+            projection: self.projection.clone(),
             inner: Mutex::new(CsvSinkInner {
                 writer,
                 path: self.path.clone(),
@@ -554,40 +589,39 @@ where
                 fail_next_buffer_flush: false,
             }),
             probe,
-            _phantom: PhantomData,
         })
     }
 }
 
 /// Stage-local CSV writer opened from [`CsvSink`].
-pub struct CsvWriter<T> {
+pub struct CsvWriter<P> {
+    projection: P,
     inner: Mutex<CsvSinkInner>,
     probe: CsvWriterProbe,
-    _phantom: PhantomData<fn() -> T>,
 }
 
-impl<T> Drop for CsvWriter<T> {
+impl<P> Drop for CsvWriter<P> {
     fn drop(&mut self) {
         self.probe.record_drop();
     }
 }
 
-impl<T> std::fmt::Debug for CsvWriter<T> {
+impl<P> std::fmt::Debug for CsvWriter<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CsvWriter")
-            .field("payload_type", &std::any::type_name::<T>())
+            .field("projection", &std::any::type_name::<P>())
             .finish_non_exhaustive()
     }
 }
 
 #[async_trait]
-impl<T> SinkWriter for CsvWriter<T>
+impl<P> SinkWriter for CsvWriter<P>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    P: CsvProjection,
 {
-    type Input = T;
+    type Input = P::Input;
 
-    async fn write(&mut self, input: T, context: SinkWriteContext) -> SinkWriteResult {
+    async fn write(&mut self, input: P::Input, context: SinkWriteContext) -> SinkWriteResult {
         self.probe.record_write();
         if self.probe.fault_encode() {
             return Err(SinkWriteFailure::current_only(
@@ -595,6 +629,13 @@ where
                 SinkOperationError::other("injected CSV encode failure"),
             ));
         }
+        let row = self.projection.project(input).map_err(|error| {
+            SinkWriteFailure::current_only(
+                SinkWritePhase::Encode,
+                SinkOperationError::try_from(error)
+                    .unwrap_or_else(|_| SinkOperationError::other("CSV projection failed")),
+            )
+        })?;
         let mut inner = self.inner.lock().map_err(|_| {
             SinkWriteFailure::poisoned(
                 SinkWritePhase::Execute,
@@ -602,7 +643,7 @@ where
             )
         })?;
         inner
-            .consume_report(input, context, &self.probe)
+            .consume_report(row, context, &self.probe)
             .map_err(CsvWriteError::into_failure)
     }
 
@@ -871,17 +912,17 @@ impl CsvSinkInner {
         }
     }
 
-    fn consume_report<T: TypedPayload>(
+    fn consume_report<R: Serialize>(
         &mut self,
-        input: T,
+        row: R,
         context: SinkWriteContext,
         probe: &CsvWriterProbe,
     ) -> Result<SinkWriteReport, CsvWriteError> {
-        let payload = serde_json::to_value(input).map_err(|error| {
+        let payload = serde_json::to_value(row).map_err(|error| {
             CsvWriteError::current(
                 SinkWritePhase::Encode,
                 SinkOperationError::other(format!(
-                    "CsvSink failed to serialize typed input: {error}"
+                    "CsvSink failed to serialize projected row: {error}"
                 )),
             )
         })?;
@@ -1008,6 +1049,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use std::io::Read;
     use std::io::Write;
+    use std::marker::PhantomData;
     use tempfile::NamedTempFile;
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1048,6 +1090,60 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.csv.scalar";
     }
 
+    #[derive(Clone, Debug)]
+    struct SerializeInput<T>(PhantomData<fn() -> T>);
+
+    impl<T> Default for SerializeInput<T> {
+        fn default() -> Self {
+            Self(PhantomData)
+        }
+    }
+
+    impl<T> CsvProjection for SerializeInput<T>
+    where
+        T: TypedPayload + Clone + Send + Sync + 'static,
+    {
+        type Input = T;
+        type Row = T;
+
+        fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError> {
+            Ok(input)
+        }
+    }
+
+    #[derive(Debug, Serialize)]
+    struct SumRow {
+        total: i32,
+    }
+
+    #[derive(Clone, Debug)]
+    struct SumProjection;
+
+    impl CsvProjection for SumProjection {
+        type Input = TestRow;
+        type Row = SumRow;
+
+        fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError> {
+            Ok(SumRow {
+                total: input.a + input.b,
+            })
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct RejectProjection;
+
+    impl CsvProjection for RejectProjection {
+        type Input = TestRow;
+        type Row = TestRow;
+
+        fn project(&self, _input: Self::Input) -> Result<Self::Row, HandlerError> {
+            Err(HandlerError::Validation(
+                "intentional CSV projection rejection".to_string(),
+            ))
+        }
+    }
+
     fn event(a: i32, b: i32) -> obzenflow_core::ChainEvent {
         ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
@@ -1056,9 +1152,9 @@ mod tests {
         )
     }
 
-    async fn adapted<T>(connector: CsvSink<T>) -> SinkWriterAdapter<CsvWriter<T>>
+    async fn adapted<P>(connector: CsvSink<P>) -> SinkWriterAdapter<CsvWriter<P>>
     where
-        T: TypedPayload + Send + Sync + 'static,
+        P: CsvProjection,
     {
         let stage_id = StageId::new();
         let description = connector.describe();
@@ -1080,7 +1176,7 @@ mod tests {
     #[test]
     fn csv_sink_describes_repeatable_redelivery() {
         let tmp = NamedTempFile::new().expect("temp file");
-        let sink = CsvSink::<TestRow>::new(tmp.path()).unwrap();
+        let sink = CsvSink::new(SerializeInput::<TestRow>::default(), tmp.path()).unwrap();
         assert_eq!(
             sink.describe().redelivery_safety(),
             Some(SinkRedeliverySafety::SafeToRepeat)
@@ -1090,7 +1186,7 @@ mod tests {
     #[test]
     fn append_mode_describes_duplicate_sensitive_redelivery() {
         let tmp = NamedTempFile::new().expect("temp file");
-        let sink = CsvSink::<TestRow>::builder()
+        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(tmp.path())
             .columns(["a", "b"])
             .append(true)
@@ -1107,7 +1203,7 @@ mod tests {
         let tmp = NamedTempFile::new().expect("temp file");
         let path = tmp.path().to_path_buf();
 
-        let sink = CsvSink::<TestRow>::builder()
+        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(&path)
             .auto_flush(true)
             .build()
@@ -1123,11 +1219,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn projection_value_owns_input_and_row_shape() {
+        let tmp = NamedTempFile::new().expect("temp file");
+        let path = tmp.path().to_path_buf();
+        let sink = CsvSink::builder(SumProjection)
+            .path(&path)
+            .auto_flush(true)
+            .build()
+            .expect("projected connector");
+        let mut sink = adapted(sink).await;
+
+        sink.consume(event(4, 5)).await.expect("project input");
+        sink.flush().await.expect("flush projection");
+
+        let mut out = String::new();
+        File::open(&path).unwrap().read_to_string(&mut out).unwrap();
+        assert_eq!(out, "total\n9\n");
+    }
+
+    #[tokio::test]
+    async fn projection_failure_is_current_only_and_precedes_deferral() {
+        let tmp = NamedTempFile::new().expect("temp file");
+        let sink = CsvSink::new(RejectProjection, tmp.path()).expect("projection connector");
+        let mut sink = adapted(sink).await;
+
+        let error = sink
+            .consume_report(event(1, 2))
+            .await
+            .expect_err("projection rejection follows the sink error path");
+
+        assert!(matches!(
+            error,
+            HandlerError::SinkWrite(ref failure)
+                if failure.phase() == SinkWritePhase::Encode
+                    && failure.error().detail().contains("intentional CSV projection rejection")
+        ));
+    }
+
+    #[tokio::test]
     async fn csv_sink_buffered_mode_emits_commit_receipts_on_flush() {
         let tmp = NamedTempFile::new().expect("temp file");
         let path = tmp.path().to_path_buf();
 
-        let sink = CsvSink::<TestRow>::builder()
+        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(&path)
             .buffer_size(10)
             .auto_flush(false)
@@ -1172,7 +1306,7 @@ mod tests {
         let tmp = NamedTempFile::new().expect("temp file");
         let path = tmp.path().to_path_buf();
 
-        let sink = CsvSink::<TestRow>::builder()
+        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(&path)
             .buffer_size(10)
             .auto_flush(false)
@@ -1205,7 +1339,7 @@ mod tests {
         let tmp = NamedTempFile::new().expect("temp file");
         let path = tmp.path().to_path_buf();
 
-        let sink = CsvSink::<TestRow>::builder()
+        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(&path)
             .buffer_size(2)
             .auto_flush(false)
@@ -1241,7 +1375,7 @@ mod tests {
     #[tokio::test]
     async fn failed_consume_flush_discards_only_the_current_settlement_capability() {
         let tmp = NamedTempFile::new().expect("temp file");
-        let connector = CsvSink::<TestRow>::builder()
+        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(tmp.path())
             .buffer_size(2)
             .auto_flush(false)
@@ -1300,7 +1434,7 @@ mod tests {
 
         let tmp = NamedTempFile::new().expect("temp file");
         let probe = testing::CsvTestProbe::default();
-        let connector = CsvSink::<TestRow>::builder()
+        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(tmp.path())
             .buffer_size(2)
             .auto_flush(false)
@@ -1343,7 +1477,7 @@ mod tests {
 
         let tmp = NamedTempFile::new().expect("temp file");
         let probe = testing::CsvTestProbe::default();
-        let connector = CsvSink::<TestRow>::builder()
+        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(tmp.path())
             .buffer_size(10)
             .auto_flush(false)
@@ -1374,7 +1508,7 @@ mod tests {
         let tmp = NamedTempFile::new().expect("temp file");
         let path = tmp.path().to_path_buf();
 
-        let first = CsvSink::<TestRow>::builder()
+        let first = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(&path)
             .append(true)
             .columns(["a", "b"])
@@ -1386,7 +1520,7 @@ mod tests {
         first.flush().await.unwrap();
         drop(first);
 
-        let second = CsvSink::<TestRow>::builder()
+        let second = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(&path)
             .append(true)
             .columns(["a", "b"])
@@ -1412,7 +1546,7 @@ mod tests {
         writeln!(tmp, "a,b").unwrap();
         writeln!(tmp, "1,2").unwrap();
 
-        let connector = CsvSink::<TestRow>::builder()
+        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(tmp.path())
             .append(true)
             .build()
@@ -1438,7 +1572,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temporary directory");
         let path = temp.path().join("opened-at-materialisation.csv");
 
-        let connector = CsvSink::<TestRow>::builder()
+        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(&path)
             .build()
             .expect("local configuration is valid");
@@ -1459,7 +1593,7 @@ mod tests {
     #[tokio::test]
     async fn repeated_csv_opens_have_isolated_writer_buffers() {
         let temp = tempfile::tempdir().expect("temporary directory");
-        let connector = CsvSink::<TestRow>::builder()
+        let connector = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(temp.path().join("isolated-writers.csv"))
             .columns(["a", "b"])
             .buffer_size(10)
@@ -1508,7 +1642,7 @@ mod tests {
         let tmp = NamedTempFile::new().expect("temp file");
         let path = tmp.path().to_path_buf();
 
-        let sink = CsvSink::<TestRow>::builder()
+        let sink = CsvSink::builder(SerializeInput::<TestRow>::default())
             .path(&path)
             .tab_delimited()
             .auto_flush(true)
@@ -1527,7 +1661,8 @@ mod tests {
     #[tokio::test]
     async fn csv_sink_routes_typed_serialization_failures_before_deferral() {
         let tmp = NamedTempFile::new().expect("temp file");
-        let sink = CsvSink::<SerializationFails>::new(tmp.path()).unwrap();
+        let sink =
+            CsvSink::new(SerializeInput::<SerializationFails>::default(), tmp.path()).unwrap();
         let mut sink = adapted(sink).await;
         let input = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
@@ -1550,7 +1685,7 @@ mod tests {
     #[tokio::test]
     async fn csv_sink_rejects_non_object_typed_payloads_before_deferral() {
         let tmp = NamedTempFile::new().expect("temp file");
-        let sink = CsvSink::<ScalarRow>::new(tmp.path()).unwrap();
+        let sink = CsvSink::new(SerializeInput::<ScalarRow>::default(), tmp.path()).unwrap();
         let mut sink = adapted(sink).await;
         let input = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),

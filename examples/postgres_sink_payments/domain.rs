@@ -23,8 +23,10 @@ impl TypedPayload for PaymentAuthorized {
 #[derive(Clone, Debug)]
 pub(crate) struct PaymentBinder;
 
-impl PostgresBind<PaymentAuthorized> for PaymentBinder {
-    fn bind(&self, bindings: &mut PostgresBindings, payment: &PaymentAuthorized) {
+impl PostgresBind for PaymentBinder {
+    type Input = PaymentAuthorized;
+
+    fn bind(&self, bindings: &mut PostgresBindings, payment: &Self::Input) {
         bindings
             .bind(payment.payment_id)
             .bind(&payment.order_id)

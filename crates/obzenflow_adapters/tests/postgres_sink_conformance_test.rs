@@ -33,13 +33,15 @@ impl TypedPayload for Payment {
 #[derive(Clone, Debug)]
 struct PaymentBinder;
 
-impl PostgresBind<Payment> for PaymentBinder {
-    fn bind(&self, bindings: &mut PostgresBindings, input: &Payment) {
+impl PostgresBind for PaymentBinder {
+    type Input = Payment;
+
+    fn bind(&self, bindings: &mut PostgresBindings, input: &Self::Input) {
         bindings.bind(input.id).bind(input.amount_cents);
     }
 }
 
-type PaymentSink = PostgresSink<Payment, PaymentBinder>;
+type PaymentSink = PostgresSink<PaymentBinder>;
 
 struct PostgresFixture {
     connection: PostgresConnection,
@@ -140,7 +142,7 @@ impl SinkWriterConformanceFixture for PostgresFixture {
         let probe = self.probe.clone();
         vec![
             SinkBuildCase::valid("postgres-valid", move || {
-                PostgresSink::<Payment>::builder()
+                PostgresSink::builder(PaymentBinder)
                     .connection(connection.clone())
                     .insert_into(
                         &schema,
@@ -151,7 +153,6 @@ impl SinkWriterConformanceFixture for PostgresFixture {
                     .map_err(|error| SinkFixtureError::new(error.to_string()))?
                     .batch_size(2)
                     .map_err(|error| SinkFixtureError::new(error.to_string()))?
-                    .bind_with(PaymentBinder)
                     .test_probe(probe.clone())
                     .build()
                     .map_err(|error| SinkFixtureError::new(error.to_string()))

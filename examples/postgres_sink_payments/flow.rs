@@ -18,7 +18,7 @@ pub(crate) fn build(
 ) -> Result<FlowDefinition> {
     // The conflict target makes delivery repeat-safe: replaying an authorised
     // payment converges on the same row instead of creating a duplicate.
-    let postgres = PostgresSink::<PaymentAuthorized>::builder()
+    let postgres = PostgresSink::builder(PaymentBinder)
         .connection(connection)
         .insert_into(
             schema,
@@ -31,7 +31,6 @@ pub(crate) fn build(
         )?
         .batch_size(2)?
         .redelivery_safety(SinkRedeliverySafety::SafeToRepeat)
-        .bind_with(PaymentBinder)
         .build()?;
 
     Ok(FlowDefinition::materialize(move |_runtime_config| {

@@ -5,7 +5,7 @@
 #![cfg(feature = "test-support")]
 
 use async_trait::async_trait;
-use obzenflow::sinks::CsvSink;
+use obzenflow::sinks::{CsvProjection, CsvSink};
 use obzenflow::sources;
 use obzenflow::testing::sink::{
     run_application_conformance, SinkApplicationBuildCase, SinkApplicationConformanceFixture,
@@ -27,6 +27,7 @@ use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::run_context::FlowBuildContext;
+use obzenflow_runtime::stages::common::HandlerError;
 use obzenflow_runtime::stages::source::strategies::{
     CompletionContext, CompletionDecision, CompletionGate,
 };
@@ -50,6 +51,18 @@ struct Row {
 
 impl TypedPayload for Row {
     const EVENT_TYPE: &'static str = "flowip_122a.csv.application.row";
+}
+
+#[derive(Clone, Debug)]
+struct RowProjection;
+
+impl CsvProjection for RowProjection {
+    type Input = Row;
+    type Row = Row;
+
+    fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError> {
+        Ok(input)
+    }
 }
 
 fn rows() -> Vec<Row> {
@@ -158,8 +171,8 @@ fn build_sink(
     path: PathBuf,
     probe: CsvTestProbe,
     class: SinkDestinationClass,
-) -> Result<CsvSink<Row>, Box<FlowBuildError>> {
-    let builder = CsvSink::<Row>::builder()
+) -> Result<CsvSink<RowProjection>, Box<FlowBuildError>> {
+    let builder = CsvSink::builder(RowProjection)
         .path(path)
         .columns(["id", "amount_cents"])
         .buffer_size(2)

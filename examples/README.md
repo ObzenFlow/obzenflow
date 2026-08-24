@@ -58,7 +58,7 @@ These examples don't have tutorials, but they demonstrate concrete framework con
   - Run with the manual-start control plane: `cargo run -p obzenflow --example product_catalog_enrichment --features obzenflow_infra/warp-server -- --server`
   - Code: [`examples/product_catalog_enrichment/flow.rs`](product_catalog_enrichment/flow.rs)
 
-- **`csv_demo_support_sla`** — Offline CSV batch processing with typed joins, transforms, and CSV sink output. Good for ETL-style jobs that still need typed flows and replayable execution.
+- **`csv_demo_support_sla`** — Offline CSV batch processing with typed joins, transforms, and a user-owned CSV projection whose associated types declare the accepted domain input and output row. Good for ETL-style jobs that still need typed flows and replayable execution.
   - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it)
   - Run: `cargo run -p obzenflow --example csv_demo_support_sla`
   - Code: [`examples/csv_demo_support_sla/flow.rs`](csv_demo_support_sla/flow.rs)

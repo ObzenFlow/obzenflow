@@ -7,7 +7,7 @@ use super::domain::{
 };
 use super::fixtures;
 use anyhow::{Context, Result};
-use obzenflow::sinks::CsvSink;
+use obzenflow::sinks::{CsvProjection, CsvSink};
 use obzenflow::sources::CsvSource;
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
@@ -110,10 +110,24 @@ impl TypedJoinHandler for SupportSlaJoin {
     }
 }
 
+/// A CSV projection owns its accepted domain type in the same way as the
+/// transform and join handlers above.
+#[derive(Clone, Debug)]
+struct EnrichedTicketCsv;
+
+impl CsvProjection for EnrichedTicketCsv {
+    type Input = EnrichedTicket;
+    type Row = EnrichedTicket;
+
+    fn project(&self, ticket: Self::Input) -> Result<Self::Row, HandlerError> {
+        Ok(ticket)
+    }
+}
+
 fn build_flow(
     customers: CsvSource<Customer>,
     tickets: CsvSource<Ticket>,
-    output_sink: CsvSink<EnrichedTicket>,
+    output_sink: CsvSink<EnrichedTicketCsv>,
     journals_dir: PathBuf,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
@@ -151,7 +165,7 @@ pub fn run_example(paths: DemoPaths, presentation: Presentation) -> Result<()> {
         .chunk_size(25)
         .build()?;
 
-    let output_sink = CsvSink::<EnrichedTicket>::builder()
+    let output_sink = CsvSink::builder(EnrichedTicketCsv)
         .path(&paths.output_csv)
         .columns([
             "ticket_id",
