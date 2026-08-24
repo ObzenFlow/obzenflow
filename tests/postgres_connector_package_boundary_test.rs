@@ -84,16 +84,19 @@ fn postgres_stays_in_the_feature_gated_adapter_boundary() {
         "the public consumer fixture must not import SQLx"
     );
 
-    for example in [
-        "examples/postgres_sink_payments.rs",
-        "examples/postgres_sink_inventory.rs",
-    ] {
+    let example_files = [
+        "examples/postgres_sink_payments/main.rs",
+        "examples/postgres_sink_payments/domain.rs",
+        "examples/postgres_sink_payments/flow.rs",
+    ];
+    let mut example_source = String::new();
+    for example in example_files {
         let source =
             std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(example))
                 .unwrap_or_else(|error| {
                     panic!("read shipped PostgreSQL example {example}: {error}")
                 });
-        let source = source.to_ascii_uppercase();
+        let upper_source = source.to_ascii_uppercase();
         for forbidden in [
             "CREATE SCHEMA",
             "CREATE TABLE",
@@ -107,10 +110,25 @@ fn postgres_stays_in_the_feature_gated_adapter_boundary() {
             "TRUNCATE TABLE",
         ] {
             assert!(
-                !source.contains(forbidden),
+                !upper_source.contains(forbidden),
                 "shipped PostgreSQL example {example} must not own DDL `{forbidden}`"
             );
         }
+        example_source.push_str(&source);
+    }
+    for forbidden in [
+        "test-support",
+        "sqlx::",
+        "PostgresTestProbe",
+        "SinkExternalCallKind",
+        "--inspect",
+        "POSTGRES_SQL_EVIDENCE_CANARY",
+        "inspect_destination",
+    ] {
+        assert!(
+            !example_source.contains(forbidden),
+            "the PostgreSQL learning example must not contain proof concern `{forbidden}`"
+        );
     }
 
     let root = packages

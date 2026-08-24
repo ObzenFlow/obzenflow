@@ -69,20 +69,12 @@ These examples don't have tutorials, but they demonstrate concrete framework con
   - Run with metrics: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
   - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)
 
-- **`postgres_sink_payments`** — A real PostgreSQL 17 sink session with deterministic UPSERT delivery, destination inspection, and verified archive redelivery across separate processes.
-  - Run the disposable acceptance proof: `cargo xtask postgres test` builds this example once, then executes that binary in separate live and verified-replay processes.
+- **`postgres_sink_payments`** — Typed payment events delivered to PostgreSQL with parameter binding, batching, verified TLS, and a repeat-safe UPSERT. Use this to learn the PostgreSQL sink's application-facing surface.
   - Start the persistent service: `cargo xtask postgres up`
   - Run live: `cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_payments`
-  - Replay: rerun the same command with `-- --replay-from <live-run-dir> --verify`
   - Stop while retaining rows: `cargo xtask postgres down`; add `--volumes` only to discard the development database
-  - `SafeToRepeat` here certifies convergence for this same compiled target, SQL body, binder, flow, and fixture semantics. It does not certify compatibility after code or schema changes.
-  - Code: [`examples/postgres_sink_payments.rs`](postgres_sink_payments.rs)
-
-- **`postgres_sink_inventory`** — A second production-shaped PostgreSQL consumer with string and boolean bindings, immediate commits, and a warehouse/SKU UPSERT distinct from the batched payment operation.
-  - Start the repository-owned service and provision both example destinations: `cargo xtask postgres up`
-  - Run: `cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_inventory`
-  - The canonical `cargo xtask postgres test` executes this consumer against PostgreSQL 17 and verifies its complete destination state.
-  - Code: [`examples/postgres_sink_inventory.rs`](postgres_sink_inventory.rs)
+  - Guide: [`examples/postgres_sink_payments/README.md`](postgres_sink_payments/README.md)
+  - Code: [`examples/postgres_sink_payments/flow.rs`](postgres_sink_payments/flow.rs)
 
 - **`ecommerce_top_products`** — Bounded-memory ranked aggregation over event streams with source-intake rate limiting. Use this for a realistic Top-N-by-score pattern.
   - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [operational batteries](https://obzenflow.dev/product/how-obzenflow-works/#run-it)

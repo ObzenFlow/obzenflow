@@ -238,12 +238,7 @@ path = "examples/multi_source_ingest_demo/main.rs"
 
 [[example]]
 name = "postgres_sink_payments"
-path = "examples/postgres_sink_payments.rs"
-required-features = ["postgres"]
-
-[[example]]
-name = "postgres_sink_inventory"
-path = "examples/postgres_sink_inventory.rs"
+path = "examples/postgres_sink_payments/main.rs"
 required-features = ["postgres"]
 
 [[test]]
@@ -335,6 +330,16 @@ required-features = ["test-support"]
 name = "postgres_sink_application_conformance_test"
 path = "tests/postgres_sink_application_conformance_test.rs"
 required-features = ["postgres", "test-support"]
+
+[[test]]
+name = "postgres_sink_example_e2e_test"
+path = "tests/postgres_sink_example_e2e_test.rs"
+required-features = ["postgres"]
+
+[[test]]
+name = "postgres_sink_inventory_consumer_test"
+path = "tests/postgres_sink_inventory_consumer_test.rs"
+required-features = ["postgres"]
 
 [[test]]
 name = "postgres_public_consumer_test"
