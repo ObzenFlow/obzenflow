@@ -395,10 +395,16 @@ async fn resuming_an_interrupted_resume_extends_the_same_prefix() -> Result<()> 
 
     let (r0, r1) = record_and_interrupt(&journal_base).await?;
 
+    let mut expected_xform = doubles(1..=RECORDED);
+    expected_xform.push(catch_up("xform", 1));
+    expected_xform.push(catch_up("xform", 2));
+    expected_xform.extend(doubles(RECORDED + 1..=RECORDED + R2_LIVE));
+
     // R2: resume the interrupted archive, fast transform, two live events.
     // The sink's recorded high water in R1 is wherever the interrupt caught
     // the slow transform, so R2's sink counter over-counts the catch-up gap
-    // nondeterministically; completion is awaited from the journal instead.
+    // nondeterministically. Await the complete transform sequence instead of
+    // racing cancellation against catch-up boundary persistence.
     {
         let _bootstrap = install_bootstrap_config(
             replay_testkit::bootstrap_with_archive(ReplayBootstrap {
@@ -423,17 +429,15 @@ async fn resuming_an_interrupted_resume_extends_the_same_prefix() -> Result<()> 
         wait_for_running(&handle).await?;
         let r2 = replay_testkit::latest_run_dir(&journal_base);
         assert_ne!(r1, r2);
-        let live_tail_complete = |envelopes: &[EventEnvelope<ChainEvent>]| {
-            resume_rows(envelopes)
-                .iter()
-                .filter(|row| {
-                    matches!(row, ResumeRow::Data(payload)
-                        if payload["n"].as_u64().is_some_and(|n| n > RECORDED))
-                })
-                .count() as u64
-                == R2_LIVE
-        };
-        wait_for_journal(&r2, "xform", "the live tail", live_tail_complete).await?;
+        let complete_resume =
+            |envelopes: &[EventEnvelope<ChainEvent>]| resume_rows(envelopes) == expected_xform;
+        wait_for_journal(
+            &r2,
+            "xform",
+            "the complete catch-up sequence and live tail",
+            complete_resume,
+        )
+        .await?;
         stop_and_wait(handle).await?;
     }
     let r2 = replay_testkit::latest_run_dir(&journal_base);
@@ -473,10 +477,6 @@ async fn resuming_an_interrupted_resume_extends_the_same_prefix() -> Result<()> 
     // full prefix re-processes, both boundaries re-author, the live tail
     // follows.
     let r2_xform = resume_rows(&replay_testkit::read_stage_envelopes_appended(&r2, "xform").await);
-    let mut expected_xform = doubles(1..=RECORDED);
-    expected_xform.push(catch_up("xform", 1));
-    expected_xform.push(catch_up("xform", 2));
-    expected_xform.extend(doubles(RECORDED + 1..=RECORDED + R2_LIVE));
     assert_eq!(
         r2_xform, expected_xform,
         "R2's transform completes the catch-up R1 tore and continues live"

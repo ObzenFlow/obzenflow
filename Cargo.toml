@@ -158,6 +158,9 @@ console = ["obzenflow_infra/console"]
 http-pull = ["obzenflow_infra/reqwest-client"]
 ai = ["obzenflow_infra/ai-rig", "obzenflow_infra/ai-tiktoken"]
 postgres = ["obzenflow_adapters/postgres"]
+# Selection gate for tests that require repository-managed external services.
+# It carries no product code and is enabled only by the matching conformance job.
+e2e = []
 test-support = [
     "obzenflow_runtime/test-support",
     "obzenflow_dsl/test-support",
@@ -334,12 +337,12 @@ required-features = ["postgres", "test-support"]
 [[test]]
 name = "postgres_sink_example_e2e_test"
 path = "tests/postgres_sink_example_e2e_test.rs"
-required-features = ["postgres"]
+required-features = ["postgres", "e2e"]
 
 [[test]]
 name = "postgres_sink_inventory_consumer_test"
 path = "tests/postgres_sink_inventory_consumer_test.rs"
-required-features = ["postgres"]
+required-features = ["postgres", "e2e"]
 
 [[test]]
 name = "postgres_public_consumer_test"

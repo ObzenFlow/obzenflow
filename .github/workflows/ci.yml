@@ -331,13 +331,13 @@ jobs:
               --features postgres --example postgres_sink_payments
           cargo xtask postgres run -- \
             cargo test --locked -p obzenflow \
-              --features postgres --test postgres_sink_example_e2e_test
+              --features postgres,e2e --test postgres_sink_example_e2e_test
 
       - name: PostgreSQL independent consumer and package boundary
         run: |
           cargo xtask postgres run -- \
             cargo test --locked -p obzenflow \
-              --features postgres --test postgres_sink_inventory_consumer_test
+              --features postgres,e2e --test postgres_sink_inventory_consumer_test
           cargo xtask postgres run -- \
             cargo test --locked -p obzenflow \
               --features postgres --test postgres_public_consumer_test
