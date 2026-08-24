@@ -15,10 +15,9 @@ use csv::{Reader, ReaderBuilder, StringRecord};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::{SourceError, TypedFiniteSourceHandler};
 use obzenflow_runtime::typing::SourceTyping;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -32,8 +31,111 @@ impl TypedPayload for CsvRow {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-#[derive(Clone, Debug)]
-pub struct CsvSourceBuilder<T = CsvRow> {
+/// A redacted view of one CSV record presented to a [`CsvDecoder`].
+///
+/// The view exposes named and positional field access without making the
+/// connector's reader state part of the application-facing contract.
+#[derive(Clone, Copy)]
+pub struct CsvRecord<'a> {
+    headers: &'a StringRecord,
+    fields: &'a StringRecord,
+}
+
+impl<'a> CsvRecord<'a> {
+    fn new(headers: &'a StringRecord, fields: &'a StringRecord) -> Self {
+        Self { headers, fields }
+    }
+
+    /// Deserialize this record using its effective headers.
+    pub fn deserialize<T>(&self) -> Result<T, CsvDecodeError>
+    where
+        T: DeserializeOwned,
+    {
+        self.fields
+            .deserialize(Some(self.headers))
+            .map_err(CsvDecodeError::from)
+    }
+
+    /// Read a field by its effective column name.
+    pub fn get(&self, column: &str) -> Option<&'a str> {
+        self.headers
+            .iter()
+            .position(|header| header == column)
+            .and_then(|index| self.fields.get(index))
+    }
+
+    /// Read a field by its zero-based position.
+    pub fn field(&self, index: usize) -> Option<&'a str> {
+        self.fields.get(index)
+    }
+
+    pub fn len(&self) -> usize {
+        self.fields.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+}
+
+impl std::fmt::Debug for CsvRecord<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CsvRecord")
+            .field("header_count", &self.headers.len())
+            .field("field_count", &self.fields.len())
+            .finish()
+    }
+}
+
+/// Error returned by an application-owned [`CsvDecoder`].
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct CsvDecodeError {
+    message: String,
+}
+
+impl CsvDecodeError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl From<csv::Error> for CsvDecodeError {
+    fn from(error: csv::Error) -> Self {
+        Self::new(error.to_string())
+    }
+}
+
+/// User-owned mapping from one external CSV record to one domain output.
+///
+/// Like typed source handlers, the decoder value owns its output contract
+/// through an associated type. Applications pass that value to
+/// [`CsvSource::builder`] instead of repeating the event type on the source.
+pub trait CsvDecoder: Clone + Send + Sync + 'static {
+    type Output: TypedPayload + Send + Sync + 'static;
+
+    /// Decode one record into the declared domain output.
+    ///
+    /// The default uses serde with the record's effective headers. Override it
+    /// when the external CSV shape differs from the domain type.
+    fn decode(&self, record: CsvRecord<'_>) -> Result<Self::Output, CsvDecodeError> {
+        record.deserialize()
+    }
+}
+
+/// Built-in decoder for string-preserving [`CsvRow`] output.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CsvRowDecoder;
+
+impl CsvDecoder for CsvRowDecoder {
+    type Output = CsvRow;
+}
+
+#[derive(Clone)]
+pub struct CsvSourceBuilder<D> {
+    decoder: D,
     path: Option<PathBuf>,
     has_headers: bool,
     headers: Option<Vec<String>>,
@@ -41,12 +143,27 @@ pub struct CsvSourceBuilder<T = CsvRow> {
     chunk_size: usize,
     skip_rows: usize,
     select_columns: Option<Vec<String>>,
-    _phantom: std::marker::PhantomData<T>,
 }
 
-impl<T> Default for CsvSourceBuilder<T> {
-    fn default() -> Self {
+impl<D> std::fmt::Debug for CsvSourceBuilder<D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CsvSourceBuilder")
+            .field("decoder", &std::any::type_name::<D>())
+            .field("path", &self.path)
+            .field("has_headers", &self.has_headers)
+            .field("headers", &self.headers)
+            .field("delimiter", &self.delimiter)
+            .field("chunk_size", &self.chunk_size)
+            .field("skip_rows", &self.skip_rows)
+            .field("select_columns", &self.select_columns)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<D> CsvSourceBuilder<D> {
+    pub fn new(decoder: D) -> Self {
         Self {
+            decoder,
             path: None,
             has_headers: true,
             headers: None,
@@ -54,12 +171,9 @@ impl<T> Default for CsvSourceBuilder<T> {
             chunk_size: 1000,
             skip_rows: 0,
             select_columns: None,
-            _phantom: std::marker::PhantomData,
         }
     }
-}
 
-impl<T> CsvSourceBuilder<T> {
     pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
         self.path = Some(path.into());
         self
@@ -110,15 +224,11 @@ impl<T> CsvSourceBuilder<T> {
     }
 }
 
-impl<T> CsvSourceBuilder<T>
+impl<D> CsvSourceBuilder<D>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    D: CsvDecoder,
 {
-    pub fn from_file(path: impl Into<PathBuf>) -> Result<CsvSource<T>> {
-        Self::default().path(path).build()
-    }
-
-    pub fn build(self) -> Result<CsvSource<T>> {
+    pub fn build(self) -> Result<CsvSource<D>> {
         let path = self.path.ok_or_else(|| anyhow!("path required"))?;
 
         if self.chunk_size == 0 {
@@ -185,93 +295,70 @@ where
 
         Ok(CsvSource {
             state,
-            _phantom: PhantomData,
+            decoder: self.decoder,
         })
     }
 }
 
 /// CSV file source implementing `TypedFiniteSourceHandler`.
-pub struct CsvSource<T = CsvRow>
-where
-    T: TypedPayload + Send + Sync + 'static,
-{
+pub struct CsvSource<D> {
     state: Arc<Mutex<CsvReaderState>>,
-    _phantom: PhantomData<fn() -> T>,
+    decoder: D,
 }
 
-impl<T> Clone for CsvSource<T>
+impl<D> Clone for CsvSource<D>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    D: Clone,
 {
     fn clone(&self) -> Self {
         Self {
             state: Arc::clone(&self.state),
-            _phantom: PhantomData,
+            decoder: self.decoder.clone(),
         }
     }
 }
 
-impl<T> std::fmt::Debug for CsvSource<T>
+impl<D> std::fmt::Debug for CsvSource<D>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    D: CsvDecoder,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CsvSource")
-            .field("payload_type", &std::any::type_name::<T>())
-            .finish()
+            .field("decoder", &std::any::type_name::<D>())
+            .field("output", &std::any::type_name::<D::Output>())
+            .finish_non_exhaustive()
     }
 }
 
-impl<T> SourceTyping for CsvSource<T>
+impl<D> SourceTyping for CsvSource<D>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    D: CsvDecoder,
 {
-    type Output = T;
+    type Output = D::Output;
 }
 
-impl CsvSource<CsvRow> {
-    pub fn builder() -> CsvSourceBuilder<CsvRow> {
-        CsvSourceBuilder::default()
-    }
-
-    pub fn from_file(path: impl Into<PathBuf>) -> Result<Self> {
-        Self::builder().path(path).build()
-    }
-
-    pub fn tsv_from_file(path: impl Into<PathBuf>) -> Result<Self> {
-        Self::builder().path(path).tab_delimited().build()
-    }
-
-    pub fn typed_builder<T>() -> CsvSourceBuilder<T>
-    where
-        T: TypedPayload + Send + Sync + 'static,
-    {
-        CsvSourceBuilder::default()
-    }
-
-    pub fn typed_from_file<T>(path: impl Into<PathBuf>) -> Result<CsvSource<T>>
-    where
-        T: TypedPayload + Send + Sync + 'static,
-    {
-        CsvSourceBuilder::<T>::from_file(path)
-    }
-
-    pub fn typed_tsv_from_file<T>(path: impl Into<PathBuf>) -> Result<CsvSource<T>>
-    where
-        T: TypedPayload + Send + Sync + 'static,
-    {
-        CsvSourceBuilder::<T>::default()
-            .path(path)
-            .tab_delimited()
-            .build()
-    }
-}
-
-impl<T> TypedFiniteSourceHandler for CsvSource<T>
+impl<D> CsvSource<D>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    D: CsvDecoder,
 {
-    type Output = T;
+    pub fn builder(decoder: D) -> CsvSourceBuilder<D> {
+        CsvSourceBuilder::new(decoder)
+    }
+
+    pub fn from_file(decoder: D, path: impl Into<PathBuf>) -> Result<Self> {
+        Self::builder(decoder).path(path).build()
+    }
+
+    pub fn tsv_from_file(decoder: D, path: impl Into<PathBuf>) -> Result<Self> {
+        Self::builder(decoder).path(path).tab_delimited().build()
+    }
+}
+
+impl<D> TypedFiniteSourceHandler for CsvSource<D>
+where
+    D: CsvDecoder,
+{
+    type Output = D::Output;
 
     fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
         let items = {
@@ -279,7 +366,7 @@ where
                 .state
                 .lock()
                 .map_err(|_| SourceError::Other("CsvSource mutex poisoned".to_string()))?;
-            locked.next_items::<T>()
+            locked.next_items(&self.decoder)
         }?;
 
         let Some(items) = items else {
@@ -322,7 +409,10 @@ impl std::fmt::Debug for CsvReaderState {
 }
 
 impl CsvReaderState {
-    fn next_items<T: TypedPayload>(&mut self) -> Result<Option<Vec<T>>, SourceError> {
+    fn next_items<D: CsvDecoder>(
+        &mut self,
+        decoder: &D,
+    ) -> Result<Option<Vec<D::Output>>, SourceError> {
         if let Some(err) = self.pending_error.take() {
             return Err(err);
         }
@@ -353,7 +443,7 @@ impl CsvReaderState {
             }
         }
 
-        let mut batch: Vec<T> = Vec::with_capacity(self.chunk_size);
+        let mut batch: Vec<D::Output> = Vec::with_capacity(self.chunk_size);
         while batch.len() < self.chunk_size {
             let mut record = StringRecord::new();
             let read = match self.reader.read_record(&mut record) {
@@ -391,14 +481,14 @@ impl CsvReaderState {
                 );
             }
 
-            let decode_result: Result<T, csv::Error> = match self.selected_indices.as_ref() {
-                None => record.deserialize(Some(&self.decode_headers)),
+            let decode_result = match self.selected_indices.as_ref() {
+                None => decoder.decode(CsvRecord::new(&self.decode_headers, &record)),
                 Some(indices) => {
                     let mut selected = StringRecord::new();
                     for &idx in indices {
                         selected.push_field(record.get(idx).unwrap_or(""));
                     }
-                    selected.deserialize(Some(&self.decode_headers))
+                    decoder.decode(CsvRecord::new(&self.decode_headers, &selected))
                 }
             };
 
@@ -434,8 +524,42 @@ impl CsvReaderState {
 mod tests {
     use super::*;
     use obzenflow_runtime::stages::TypedFiniteSourceHandler;
+    use obzenflow_runtime::typing::SourceTyping;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    struct CustomerName {
+        display_name: String,
+    }
+
+    impl TypedPayload for CustomerName {
+        const EVENT_TYPE: &'static str = "csv.customer_name";
+    }
+
+    #[derive(Clone)]
+    struct CustomerNameCsv {
+        prefix: String,
+    }
+
+    impl CsvDecoder for CustomerNameCsv {
+        type Output = CustomerName;
+
+        fn decode(&self, record: CsvRecord<'_>) -> Result<Self::Output, CsvDecodeError> {
+            let name = record
+                .get("name")
+                .ok_or_else(|| CsvDecodeError::new("name column is required"))?;
+            Ok(CustomerName {
+                display_name: format!("{}{}", self.prefix, name.to_uppercase()),
+            })
+        }
+    }
+
+    fn assert_customer_name_output<S>(_source: &S)
+    where
+        S: SourceTyping<Output = CustomerName>,
+    {
+    }
 
     #[test]
     fn csv_row_source_emits_string_values() {
@@ -443,7 +567,7 @@ mod tests {
         writeln!(tmp, "name,age").unwrap();
         writeln!(tmp, "alice,007").unwrap();
 
-        let mut src = CsvSource::from_file(tmp.path()).expect("source build");
+        let mut src = CsvSource::from_file(CsvRowDecoder, tmp.path()).expect("source build");
         let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
@@ -456,7 +580,7 @@ mod tests {
         let mut tmp = NamedTempFile::new().expect("temp file");
         writeln!(tmp, "alice,007").unwrap();
 
-        let mut src = CsvSource::builder()
+        let mut src = CsvSource::builder(CsvRowDecoder)
             .path(tmp.path())
             .has_headers(false)
             .headers(["name", "age"])
@@ -475,11 +599,49 @@ mod tests {
         writeln!(tmp, "name\tage").unwrap();
         writeln!(tmp, "alice\t007").unwrap();
 
-        let mut src = CsvSource::tsv_from_file(tmp.path()).expect("source build");
+        let mut src = CsvSource::tsv_from_file(CsvRowDecoder, tmp.path()).expect("source build");
         let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
         assert_eq!(batch[0].0["name"], "alice");
         assert_eq!(batch[0].0["age"], "007");
+    }
+
+    #[test]
+    fn decoder_value_owns_output_and_can_project_external_rows() {
+        let mut tmp = NamedTempFile::new().expect("temp file");
+        writeln!(tmp, "name,ignored").unwrap();
+        writeln!(tmp, "alice,external-only").unwrap();
+
+        let mut source = CsvSource::builder(CustomerNameCsv {
+            prefix: "customer:".to_string(),
+        })
+        .path(tmp.path())
+        .build()
+        .expect("source build");
+        assert_customer_name_output(&source);
+
+        let batch = source.next().expect("next").expect("one batch");
+        assert_eq!(
+            batch,
+            vec![CustomerName {
+                display_name: "customer:ALICE".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn decoder_and_record_debug_are_value_redacted() {
+        let builder = CsvSource::builder(CustomerNameCsv {
+            prefix: "private-prefix".to_string(),
+        });
+        let builder_debug = format!("{builder:?}");
+        assert!(builder_debug.contains("CustomerNameCsv"));
+        assert!(!builder_debug.contains("private-prefix"));
+
+        let headers = StringRecord::from(vec!["name"]);
+        let fields = StringRecord::from(vec!["private-name"]);
+        let record_debug = format!("{:?}", CsvRecord::new(&headers, &fields));
+        assert!(!record_debug.contains("private-name"));
     }
 }

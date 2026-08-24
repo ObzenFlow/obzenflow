@@ -11,7 +11,6 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::typing::SourceTyping;
-use serde::Serialize;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -54,14 +53,10 @@ impl From<serde_json::Error> for DecodeError {
     }
 }
 
-/// Decoder trait — owns event typing, request building, and response parsing (FLOWIP-084e OT-6/7).
+/// Decoder trait that owns source output, request building, and response parsing.
 pub trait PullDecoder: Clone + Debug + Send + Sync + 'static {
     type Cursor: Clone + Debug + Send + Sync;
-    type Item: TypedPayload + Debug + Send + Sync + 'static;
-
-    /// Event type for all decoded items.
-    /// MUST be stable for the lifetime of this decoder instance.
-    fn event_type(&self) -> String;
+    type Output: TypedPayload + Debug + Send + Sync + 'static;
 
     /// Build the next HTTP request.
     ///
@@ -75,7 +70,7 @@ pub trait PullDecoder: Clone + Debug + Send + Sync + 'static {
         &self,
         cursor: Option<&Self::Cursor>,
         response: &HttpResponse,
-    ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError>;
+    ) -> Result<DecodeResult<Self::Cursor, Self::Output>, DecodeError>;
 
     /// Decode a non-success HTTP response.
     ///
@@ -88,7 +83,7 @@ pub trait PullDecoder: Clone + Debug + Send + Sync + 'static {
         &self,
         _cursor: Option<&Self::Cursor>,
         response: &HttpResponse,
-    ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
+    ) -> Result<DecodeResult<Self::Cursor, Self::Output>, DecodeError> {
         match response.status {
             304 => Ok(DecodeResult {
                 items: Vec::new(),
@@ -117,7 +112,7 @@ pub trait PullDecoder: Clone + Debug + Send + Sync + 'static {
         &self,
         cursor: Option<&Self::Cursor>,
         response: &HttpResponse,
-    ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
+    ) -> Result<DecodeResult<Self::Cursor, Self::Output>, DecodeError> {
         if response.is_success() {
             self.decode_success(cursor, response)
         } else {
@@ -131,14 +126,13 @@ pub trait PullDecoder: Clone + Debug + Send + Sync + 'static {
 /// This avoids exposing cursor types in user code, since `type Cursor = ()` is extremely common
 /// but cannot be expressed as an associated type default on stable Rust.
 pub trait CursorlessPullDecoder: Clone + Debug + Send + Sync + 'static {
-    type Item: TypedPayload + Debug + Send + Sync + 'static;
+    type Output: TypedPayload + Debug + Send + Sync + 'static;
 
-    fn event_type(&self) -> String;
     fn request_spec(&self) -> RequestSpec;
 
-    fn decode_success(&self, response: &HttpResponse) -> Result<Vec<Self::Item>, DecodeError>;
+    fn decode_success(&self, response: &HttpResponse) -> Result<Vec<Self::Output>, DecodeError>;
 
-    fn decode_error(&self, response: &HttpResponse) -> Result<Vec<Self::Item>, DecodeError> {
+    fn decode_error(&self, response: &HttpResponse) -> Result<Vec<Self::Output>, DecodeError> {
         match response.status {
             304 => Ok(Vec::new()),
             429 => {
@@ -157,7 +151,7 @@ pub trait CursorlessPullDecoder: Clone + Debug + Send + Sync + 'static {
         }
     }
 
-    fn decode(&self, response: &HttpResponse) -> Result<Vec<Self::Item>, DecodeError> {
+    fn decode(&self, response: &HttpResponse) -> Result<Vec<Self::Output>, DecodeError> {
         if response.is_success() {
             self.decode_success(response)
         } else {
@@ -171,11 +165,7 @@ where
     D: CursorlessPullDecoder,
 {
     type Cursor = ();
-    type Item = D::Item;
-
-    fn event_type(&self) -> String {
-        CursorlessPullDecoder::event_type(self)
-    }
+    type Output = D::Output;
 
     fn request_spec(&self, _cursor: Option<&Self::Cursor>) -> RequestSpec {
         CursorlessPullDecoder::request_spec(self)
@@ -185,7 +175,7 @@ where
         &self,
         _cursor: Option<&Self::Cursor>,
         response: &HttpResponse,
-    ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
+    ) -> Result<DecodeResult<Self::Cursor, Self::Output>, DecodeError> {
         let items = CursorlessPullDecoder::decode_success(self, response)?;
         Ok(DecodeResult {
             items,
@@ -197,7 +187,7 @@ where
         &self,
         _cursor: Option<&Self::Cursor>,
         response: &HttpResponse,
-    ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
+    ) -> Result<DecodeResult<Self::Cursor, Self::Output>, DecodeError> {
         let items = CursorlessPullDecoder::decode_error(self, response)?;
         Ok(DecodeResult {
             items,
@@ -208,7 +198,6 @@ where
 
 /// Closure-based decoder to minimize boilerplate in demos/examples.
 pub struct FnPullDecoder<C, T> {
-    event_type: String,
     request_spec: RequestSpecFn<C>,
     decode_success: DecodeSuccessFn<C, T>,
 }
@@ -216,7 +205,6 @@ pub struct FnPullDecoder<C, T> {
 impl<C, T> Clone for FnPullDecoder<C, T> {
     fn clone(&self) -> Self {
         Self {
-            event_type: self.event_type.clone(),
             request_spec: self.request_spec.clone(),
             decode_success: self.decode_success.clone(),
         }
@@ -224,9 +212,8 @@ impl<C, T> Clone for FnPullDecoder<C, T> {
 }
 
 impl<C, T> FnPullDecoder<C, T> {
-    pub fn new<E, B, D>(event_type: E, build_request: B, decode_success: D) -> Self
+    pub fn new<B, D>(build_request: B, decode_success: D) -> Self
     where
-        E: Into<String>,
         B: Fn(Option<&C>) -> RequestSpec + Send + Sync + 'static,
         D: Fn(Option<&C>, &HttpResponse) -> Result<DecodeResult<C, T>, DecodeError>
             + Send
@@ -234,7 +221,6 @@ impl<C, T> FnPullDecoder<C, T> {
             + 'static,
     {
         Self {
-            event_type: event_type.into(),
             request_spec: Arc::new(build_request),
             decode_success: Arc::new(decode_success),
         }
@@ -244,10 +230,9 @@ impl<C, T> FnPullDecoder<C, T> {
 impl<C, T> Debug for FnPullDecoder<C, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FnPullDecoder")
-            .field("event_type", &self.event_type)
             .field("cursor_type", &std::any::type_name::<C>())
-            .field("item_type", &std::any::type_name::<T>())
-            .finish()
+            .field("output_type", &std::any::type_name::<T>())
+            .finish_non_exhaustive()
     }
 }
 
@@ -257,11 +242,7 @@ where
     T: TypedPayload + Debug + Send + Sync + 'static,
 {
     type Cursor = C;
-    type Item = T;
-
-    fn event_type(&self) -> String {
-        self.event_type.clone()
-    }
+    type Output = T;
 
     fn request_spec(&self, cursor: Option<&Self::Cursor>) -> RequestSpec {
         (self.request_spec)(cursor)
@@ -271,7 +252,7 @@ where
         &self,
         cursor: Option<&Self::Cursor>,
         response: &HttpResponse,
-    ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
+    ) -> Result<DecodeResult<Self::Cursor, Self::Output>, DecodeError> {
         (self.decode_success)(cursor, response)
     }
 }
@@ -297,7 +278,6 @@ pub struct ListDetailState<K> {
 /// positionally as a closure argument.
 #[derive(Clone)]
 pub struct ListDetailDecoderBuilder<K, T> {
-    event_type: String,
     base_url: Option<obzenflow_core::http_client::Url>,
     list_request: Option<ListRequestFn>,
     list_path: Option<String>,
@@ -312,9 +292,8 @@ pub struct ListDetailDecoderBuilder<K, T> {
 impl<K, T> Debug for ListDetailDecoderBuilder<K, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ListDetailDecoderBuilder")
-            .field("event_type", &self.event_type)
             .field("key_type", &std::any::type_name::<K>())
-            .field("item_type", &std::any::type_name::<T>())
+            .field("output_type", &std::any::type_name::<T>())
             .field("has_base_url", &self.base_url.is_some())
             .field("has_list_request", &self.list_request.is_some())
             .field("has_list_path", &self.list_path.is_some())
@@ -329,9 +308,8 @@ impl<K, T> Debug for ListDetailDecoderBuilder<K, T> {
 }
 
 impl<K: 'static, T> ListDetailDecoderBuilder<K, T> {
-    fn new(event_type: impl Into<String>) -> Self {
+    fn new() -> Self {
         Self {
-            event_type: event_type.into(),
             base_url: None,
             list_request: None,
             list_path: None,
@@ -469,7 +447,6 @@ impl<K: 'static, T> ListDetailDecoderBuilder<K, T> {
         };
 
         Ok(ListDetailDecoder {
-            event_type: self.event_type,
             list_request,
             parse_list: self
                 .parse_list
@@ -490,7 +467,6 @@ impl<K: 'static, T> ListDetailDecoderBuilder<K, T> {
 /// - Subsequent requests fetch each item (`T`) one at a time.
 /// - `None` from `parse_item` is treated as "skip".
 pub struct ListDetailDecoder<K, T> {
-    event_type: String,
     list_request: ListRequestFn,
     parse_list: ListParseFn<K>,
     detail_request: DetailRequestFn<K>,
@@ -502,7 +478,6 @@ pub struct ListDetailDecoder<K, T> {
 impl<K, T> Clone for ListDetailDecoder<K, T> {
     fn clone(&self) -> Self {
         Self {
-            event_type: self.event_type.clone(),
             list_request: self.list_request.clone(),
             parse_list: self.parse_list.clone(),
             detail_request: self.detail_request.clone(),
@@ -515,28 +490,23 @@ impl<K, T> Clone for ListDetailDecoder<K, T> {
 
 impl<K: 'static, T> ListDetailDecoder<K, T> {
     /// Start a named-step builder for the list/detail decoder.
-    pub fn builder<E>(event_type: E) -> ListDetailDecoderBuilder<K, T>
-    where
-        E: Into<String>,
-    {
-        ListDetailDecoderBuilder::new(event_type)
+    pub fn builder() -> ListDetailDecoderBuilder<K, T> {
+        ListDetailDecoderBuilder::new()
     }
 
     #[doc(hidden)]
-    pub fn new<E, PL, DR, PI>(
-        event_type: E,
+    pub fn new<PL, DR, PI>(
         list_url: obzenflow_core::http_client::Url,
         parse_list: PL,
         detail_request: DR,
         parse_item: PI,
     ) -> Self
     where
-        E: Into<String>,
         PL: Fn(&HttpResponse) -> Result<Vec<K>, DecodeError> + Send + Sync + 'static,
         DR: Fn(&K) -> RequestSpec + Send + Sync + 'static,
         PI: Fn(&HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync + 'static,
     {
-        Self::builder(event_type)
+        Self::builder()
             .list_url(list_url)
             .parse_list(parse_list)
             .detail_request(detail_request)
@@ -546,21 +516,19 @@ impl<K: 'static, T> ListDetailDecoder<K, T> {
     }
 
     #[doc(hidden)]
-    pub fn new_with_list_request<E, LR, PL, DR, PI>(
-        event_type: E,
+    pub fn new_with_list_request<LR, PL, DR, PI>(
         list_request: LR,
         parse_list: PL,
         detail_request: DR,
         parse_item: PI,
     ) -> Self
     where
-        E: Into<String>,
         LR: Fn() -> RequestSpec + Send + Sync + 'static,
         PL: Fn(&HttpResponse) -> Result<Vec<K>, DecodeError> + Send + Sync + 'static,
         DR: Fn(&K) -> RequestSpec + Send + Sync + 'static,
         PI: Fn(&HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync + 'static,
     {
-        Self::builder(event_type)
+        Self::builder()
             .list_request(list_request)
             .parse_list(parse_list)
             .detail_request(detail_request)
@@ -588,9 +556,8 @@ impl<K: 'static, T> ListDetailDecoder<K, T> {
 impl<K, T> Debug for ListDetailDecoder<K, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ListDetailDecoder")
-            .field("event_type", &self.event_type)
             .field("key_type", &std::any::type_name::<K>())
-            .field("item_type", &std::any::type_name::<T>())
+            .field("output_type", &std::any::type_name::<T>())
             .field("max_list_items", &self.max_list_items)
             .field("has_on_skip", &self.on_skip.is_some())
             .finish()
@@ -603,11 +570,7 @@ where
     T: TypedPayload + Debug + Send + Sync + 'static,
 {
     type Cursor = ListDetailState<K>;
-    type Item = T;
-
-    fn event_type(&self) -> String {
-        self.event_type.clone()
-    }
+    type Output = T;
 
     fn request_spec(&self, cursor: Option<&Self::Cursor>) -> RequestSpec {
         match cursor {
@@ -616,7 +579,7 @@ where
                 let key = pending
                     .front()
                     .expect("ListDetailDecoder pending queue should not be empty (cursor values must come from the decoder)");
-                tracing::debug!(event_type = %self.event_type, key = ?key, "detail fetch");
+                tracing::debug!(event_type = %T::versioned_event_type(), key = ?key, "detail fetch");
                 (self.detail_request)(key)
             }
         }
@@ -626,7 +589,7 @@ where
         &self,
         cursor: Option<&Self::Cursor>,
         response: &HttpResponse,
-    ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
+    ) -> Result<DecodeResult<Self::Cursor, Self::Output>, DecodeError> {
         match cursor {
             None => {
                 let mut keys = (self.parse_list)(response)?;
@@ -635,7 +598,7 @@ where
                     if total > max_list_items {
                         keys.truncate(max_list_items);
                         tracing::info!(
-                            event_type = %self.event_type,
+                            event_type = %T::versioned_event_type(),
                             total,
                             kept = keys.len(),
                             max_list_items,
@@ -693,17 +656,14 @@ where
 /// - decodes only 2xx payloads via `decode_success`
 /// - ends each poll cycle immediately (`next_cursor = None`)
 pub fn simple_poll<T, D>(
-    event_type: impl Into<String>,
     url: obzenflow_core::http_client::Url,
     decode_success: D,
 ) -> FnPullDecoder<(), T>
 where
-    T: Serialize + Send + 'static,
+    T: TypedPayload + Debug + Send + Sync + 'static,
     D: Fn(&HttpResponse) -> Result<Vec<T>, DecodeError> + Send + Sync + 'static,
 {
-    let event_type = event_type.into();
     FnPullDecoder::new(
-        event_type,
         move |_cursor: Option<&()>| RequestSpec::get(url.clone()),
         move |_cursor: Option<&()>, response: &HttpResponse| {
             let items = decode_success(response)?;
@@ -1053,17 +1013,17 @@ pub struct HttpPollSource<D: PullDecoder> {
 }
 
 impl<D: PullDecoder> SourceTyping for HttpPullSource<D> {
-    type Output = D::Item;
+    type Output = D::Output;
 }
 
 impl<D: PullDecoder> SourceTyping for HttpPollSource<D> {
-    type Output = D::Item;
+    type Output = D::Output;
 }
 
 #[derive(Debug)]
 struct HttpPullSourceInner<D: PullDecoder> {
     cursor: Option<D::Cursor>,
-    buffer: VecDeque<D::Item>,
+    buffer: VecDeque<D::Output>,
     exhausted: bool,
 
     telemetry: HttpPullTelemetry,
@@ -1076,7 +1036,7 @@ struct HttpPullSourceInner<D: PullDecoder> {
 #[derive(Debug)]
 struct HttpPollSourceInner<D: PullDecoder> {
     cursor: Option<D::Cursor>,
-    buffer: VecDeque<D::Item>,
+    buffer: VecDeque<D::Output>,
     first_fetch: bool,
 
     cycle_exhausted: bool,
@@ -1269,7 +1229,7 @@ async fn fetch_decode_once<D: PullDecoder>(
     client: &dyn HttpClient,
     default_headers: &HeaderMap,
     cursor: Option<&D::Cursor>,
-) -> Result<(u16, DecodeResult<D::Cursor, D::Item>), FetchError> {
+) -> Result<(u16, DecodeResult<D::Cursor, D::Output>), FetchError> {
     let mut request = decoder.request_spec(cursor);
     apply_default_headers(&mut request, default_headers);
 
@@ -1288,7 +1248,7 @@ async fn fetch_decode_once<D: PullDecoder>(
 
 #[async_trait]
 impl<D: PullDecoder> TypedAsyncFiniteSourceHandler for HttpPullSource<D> {
-    type Output = D::Item;
+    type Output = D::Output;
 
     fn poll_timeout(&self) -> Option<Duration> {
         self.config.poll_timeout
@@ -1442,7 +1402,7 @@ impl<D: PullDecoder> TypedAsyncFiniteSourceHandler for HttpPullSource<D> {
 
 #[async_trait]
 impl<D: PullDecoder> TypedAsyncInfiniteSourceHandler for HttpPollSource<D> {
-    type Output = D::Item;
+    type Output = D::Output;
 
     fn poll_timeout(&self) -> Option<Duration> {
         self.config.poll_timeout
@@ -1653,7 +1613,7 @@ impl<D: PullDecoder> HttpPollSource<D> {
 }
 
 impl<D: PullDecoder> HttpPullSourceInner<D> {
-    fn drain_batch(&mut self, max_batch_size: usize) -> Vec<D::Item> {
+    fn drain_batch(&mut self, max_batch_size: usize) -> Vec<D::Output> {
         let max_batch_size = max_batch_size.max(1);
         let count = max_batch_size.min(self.buffer.len());
         let mut out = Vec::with_capacity(count);
@@ -1665,7 +1625,7 @@ impl<D: PullDecoder> HttpPullSourceInner<D> {
         out
     }
 
-    fn apply_decode_result(&mut self, result: DecodeResult<D::Cursor, D::Item>) {
+    fn apply_decode_result(&mut self, result: DecodeResult<D::Cursor, D::Output>) {
         self.buffer.extend(result.items);
         self.cursor = result.next_cursor;
         if self.cursor.is_none() {
@@ -1675,7 +1635,7 @@ impl<D: PullDecoder> HttpPullSourceInner<D> {
 }
 
 impl<D: PullDecoder> HttpPollSourceInner<D> {
-    fn drain_batch(&mut self, max_batch_size: usize) -> Vec<D::Item> {
+    fn drain_batch(&mut self, max_batch_size: usize) -> Vec<D::Output> {
         let max_batch_size = max_batch_size.max(1);
         let count = max_batch_size.min(self.buffer.len());
         let mut out = Vec::with_capacity(count);
@@ -1687,7 +1647,7 @@ impl<D: PullDecoder> HttpPollSourceInner<D> {
         out
     }
 
-    fn apply_decode_result(&mut self, result: DecodeResult<D::Cursor, D::Item>) {
+    fn apply_decode_result(&mut self, result: DecodeResult<D::Cursor, D::Output>) {
         self.buffer.extend(result.items);
         self.cursor = result.next_cursor;
         self.cycle_exhausted = self.cursor.is_none();
@@ -1717,7 +1677,7 @@ mod tests {
     }
 
     fn test_list_detail_decoder() -> ListDetailDecoder<u32, TestItem> {
-        ListDetailDecoder::builder("test.item.v1")
+        ListDetailDecoder::builder()
             .list_url("http://example.invalid/list".parse().unwrap())
             .parse_list(|response| Ok(response.json()?))
             .detail_url(|id: &u32| format!("http://example.invalid/item/{id}").parse().unwrap())
@@ -1727,7 +1687,7 @@ mod tests {
     }
 
     fn test_list_detail_path_decoder() -> ListDetailDecoder<u32, TestItem> {
-        ListDetailDecoder::builder("test.item.v1")
+        ListDetailDecoder::builder()
             .base_url("http://example.invalid/api/".parse().unwrap())
             .list_path("list")
             .parse_list(|response| Ok(response.json()?))
@@ -1750,11 +1710,7 @@ mod tests {
 
     impl PullDecoder for TestDecoder {
         type Cursor = u32;
-        type Item = TestItem;
-
-        fn event_type(&self) -> String {
-            "test.item.v1".to_string()
-        }
+        type Output = TestItem;
 
         fn request_spec(&self, cursor: Option<&Self::Cursor>) -> RequestSpec {
             let page = cursor.copied().unwrap_or(1);
@@ -1771,7 +1727,7 @@ mod tests {
             &self,
             _cursor: Option<&Self::Cursor>,
             response: &HttpResponse,
-        ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
+        ) -> Result<DecodeResult<Self::Cursor, Self::Output>, DecodeError> {
             let value: serde_json::Value = response.json()?;
             let items = value
                 .get("items")
@@ -2207,7 +2163,6 @@ mod tests {
     #[test]
     fn list_detail_decoder_new_with_list_request_uses_request_spec_from_fn() {
         let decoder = ListDetailDecoder::<u32, TestItem>::new_with_list_request(
-            "test.item.v1",
             || RequestSpec::post("http://example.invalid/list".parse().unwrap()),
             |response| Ok(response.json()?),
             |id: &u32| {
@@ -2223,7 +2178,7 @@ mod tests {
 
     #[test]
     fn list_detail_decoder_builder_requires_parse_item() {
-        let result = ListDetailDecoder::<u32, TestItem>::builder("test.item.v1")
+        let result = ListDetailDecoder::<u32, TestItem>::builder()
             .base_url("http://example.invalid/".parse().unwrap())
             .list_path("list")
             .parse_list(|response| Ok(response.json()?))
@@ -2313,7 +2268,7 @@ mod tests {
         let skips = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let skips_for_cb = skips.clone();
 
-        let decoder = ListDetailDecoder::<u32, TestItem>::builder("test.item.v1")
+        let decoder = ListDetailDecoder::<u32, TestItem>::builder()
             .list_url("http://example.invalid/list".parse().unwrap())
             .parse_list(|response| Ok(response.json()?))
             .detail_url(|id: &u32| format!("http://example.invalid/item/{id}").parse().unwrap())
@@ -2343,7 +2298,7 @@ mod tests {
 
     #[test]
     fn list_detail_decoder_caps_list_size_with_max_list_items() {
-        let decoder = ListDetailDecoder::<u32, TestItem>::builder("test.item.v1")
+        let decoder = ListDetailDecoder::<u32, TestItem>::builder()
             .list_url("http://example.invalid/list".parse().unwrap())
             .parse_list(|response| Ok(response.json()?))
             .detail_url(|id: &u32| format!("http://example.invalid/item/{id}").parse().unwrap())

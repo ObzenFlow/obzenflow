@@ -120,10 +120,10 @@ pub mod prelude {
     // Handlers
     pub use crate::stages::{
         EffectfulStatefulHandler, EffectfulTransformHandler, HostedIngressSource, InferenceHandler,
-        InlineSink, ObserverHandler, ResourceManaged, SinkConnector, SinkDescription, SinkWriter,
-        SourceError, SourceObservationSink, TypedAsyncFiniteSourceHandler,
-        TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-        TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
+        IngressDecodeError, IngressDecoder, InlineSink, ObserverHandler, ResourceManaged,
+        SinkConnector, SinkDescription, SinkWriter, SourceError, SourceObservationSink,
+        TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+        TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler, TypedTransformHandler,
     };
     pub use crate::typing::{SourceTyping, TransformTyping};
 

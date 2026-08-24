@@ -50,8 +50,19 @@ pub struct SubmissionResponse {
     pub errors: Vec<String>,
 }
 
-/// Framework-owned handoff context carried on accepted HTTP submissions before they become
-/// `ChainEvent`s.
+/// Shape of the data crossing the framework-owned ingress handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmissionPayloadKind {
+    /// Data still has the external protocol shape and must pass through the
+    /// application-owned ingress decoder.
+    External,
+    /// Data was submitted as the decoder's typed output and only needs its
+    /// canonical serde representation restored.
+    TypedOutput,
+}
+
+/// Framework-owned handoff context carried on accepted submissions before they
+/// become `ChainEvent`s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmissionIngressContext {
     pub accepted_at_ns: u64,
@@ -61,6 +72,9 @@ pub struct SubmissionIngressContext {
     /// `IngressRefusal` facts. A batch's accepted rows share one sequence and are
     /// ordered within it by `batch_index`.
     pub attempt_seq: IngressAttemptSeq,
+    /// Distinguishes hosted protocol data from a typed `IngressHandle`
+    /// submission without exposing a second decoding contract to applications.
+    pub payload_kind: SubmissionPayloadKind,
 }
 
 /// Provenance attached to accepted events when they enter the pipeline.

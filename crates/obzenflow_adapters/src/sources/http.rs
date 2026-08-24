@@ -8,7 +8,7 @@
 //! and cleanup behavior are runtime-owned (FLOWIP-134g). HTTP admission stays
 //! in `obzenflow_infra`.
 
-pub use obzenflow_runtime::stages::HostedIngressSource;
+pub use obzenflow_runtime::stages::{HostedIngressSource, IngressDecodeError, IngressDecoder};
 
 #[derive(Debug, Clone)]
 pub struct HttpSourceConfig {

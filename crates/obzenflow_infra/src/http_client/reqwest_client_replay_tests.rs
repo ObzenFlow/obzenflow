@@ -251,9 +251,9 @@ fn counted_client_after_resume_marker(
     })
 }
 
-fn decoder(url: Url) -> impl obzenflow_adapters::sources::PullDecoder<Item = HttpFixtureEvent> {
+fn decoder(url: Url) -> impl obzenflow_adapters::sources::PullDecoder<Output = HttpFixtureEvent> {
     let sequence = Arc::new(AtomicUsize::new(0));
-    simple_poll(HttpFixtureEvent::EVENT_TYPE, url, move |_response| {
+    simple_poll(url, move |_response| {
         Ok(vec![HttpFixtureEvent {
             sequence: sequence.fetch_add(1, Ordering::SeqCst) + 1,
         }])

@@ -40,19 +40,34 @@
 
 use super::domain::*;
 use super::handlers::Checkbook;
+use obzenflow::sources::{HostedIngressSource, IngressDecoder};
 use obzenflow::{joins, sinks};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_adapters::sinks::SnapshotTableFormatter;
-use obzenflow_adapters::sources::http::HostedIngressSource;
 use obzenflow_dsl::{async_infinite_source, flow, join, sink, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use std::path::PathBuf;
 
+/// The ingress decoder owns the domain output emitted by this source.
+#[derive(Clone, Debug)]
+pub(crate) struct AccountIngress;
+
+impl IngressDecoder for AccountIngress {
+    type Output = AccountOpened;
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LedgerIngress;
+
+impl IngressDecoder for LedgerIngress {
+    type Output = LedgerEntry;
+}
+
 pub fn build_flow(
-    accounts_source: HostedIngressSource<AccountOpened>,
-    tx_source: HostedIngressSource<LedgerEntry>,
+    accounts_source: HostedIngressSource<AccountIngress>,
+    tx_source: HostedIngressSource<LedgerIngress>,
 ) -> FlowDefinition {
-    // This function takes only typed sources, not `HttpIngress<T>` bundles.
+    // This function takes only typed sources, not `HttpIngress<D>` bundles.
     // The runner owns HTTP hosting; the flow owns pipeline topology.
     FlowDefinition::materialize(move |_runtime_config| {
         let post_entry = joins::inner_live::<AccountOpened, LedgerEntry, PostedEntry, _, _, _, _>(

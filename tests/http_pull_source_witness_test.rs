@@ -42,17 +42,13 @@ impl TypedPayload for PullItem {
 struct ValidationDecoder;
 
 impl CursorlessPullDecoder for ValidationDecoder {
-    type Item = PullItem;
-
-    fn event_type(&self) -> String {
-        PullItem::versioned_event_type().to_string()
-    }
+    type Output = PullItem;
 
     fn request_spec(&self) -> RequestSpec {
         RequestSpec::get("http://example.invalid/items".parse().expect("test URL"))
     }
 
-    fn decode_success(&self, _response: &HttpResponse) -> Result<Vec<Self::Item>, DecodeError> {
+    fn decode_success(&self, _response: &HttpResponse) -> Result<Vec<Self::Output>, DecodeError> {
         Ok(Vec::new())
     }
 }

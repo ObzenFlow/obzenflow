@@ -35,11 +35,7 @@ mod example {
 
     impl PullDecoder for OffsetPaginationDecoder {
         type Cursor = usize;
-        type Item = JsonItem;
-
-        fn event_type(&self) -> String {
-            "example.http_pull.offset.v1".to_string()
-        }
+        type Output = JsonItem;
 
         fn request_spec(&self, cursor: Option<&Self::Cursor>) -> RequestSpec {
             let offset = cursor.copied().unwrap_or(0);
@@ -56,7 +52,7 @@ mod example {
             &self,
             _cursor: Option<&Self::Cursor>,
             response: &HttpResponse,
-        ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
+        ) -> Result<DecodeResult<Self::Cursor, Self::Output>, DecodeError> {
             let value: serde_json::Value = response.json()?;
 
             let items = value
@@ -88,28 +84,23 @@ mod example {
     }
 
     impl CursorlessPullDecoder for CursorlessJsonArrayDecoder {
-        type Item = JsonItem;
-
-        fn event_type(&self) -> String {
-            "example.http_pull.cursorless.v1".to_string()
-        }
+        type Output = JsonItem;
 
         fn request_spec(&self) -> RequestSpec {
             RequestSpec::get(self.url.clone())
         }
 
-        fn decode_success(&self, response: &HttpResponse) -> Result<Vec<Self::Item>, DecodeError> {
+        fn decode_success(
+            &self,
+            response: &HttpResponse,
+        ) -> Result<Vec<Self::Output>, DecodeError> {
             Ok(response.json()?)
         }
     }
 
     impl PullDecoder for CursorPaginationDecoder {
         type Cursor = String;
-        type Item = JsonItem;
-
-        fn event_type(&self) -> String {
-            "example.http_pull.cursor.v1".to_string()
-        }
+        type Output = JsonItem;
 
         fn request_spec(&self, cursor: Option<&Self::Cursor>) -> RequestSpec {
             let mut url = self.base_url.clone();
@@ -123,7 +114,7 @@ mod example {
             &self,
             _cursor: Option<&Self::Cursor>,
             response: &HttpResponse,
-        ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
+        ) -> Result<DecodeResult<Self::Cursor, Self::Output>, DecodeError> {
             let value: serde_json::Value = response.json()?;
 
             let items = value
@@ -233,7 +224,6 @@ mod example {
 
         // simple_poll helper: closure-based, cursorless-by-default
         let poll = simple_poll(
-            "example.http_pull.simple_poll.v1",
             "http://example.invalid/items"
                 .parse()
                 .expect("simple_poll url"),
