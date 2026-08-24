@@ -4,16 +4,15 @@
 
 //! Example entrypoint and application hosting for the piggy bank demo.
 //!
-//! `HttpIngress<T>` deliberately spans two ownership boundaries:
+//! `HttpIngress<D>` deliberately spans two ownership boundaries:
 //! - the hosted HTTP surface + readiness/telemetry wiring belong to `FlowApplication`
-//! - the typed `HttpSource` belongs inside `flow!`
+//! - the typed `HostedIngressSource` belongs inside `flow!`
 //!
 //! That is why this runner extracts `source()` first, then moves the full ingress
 //! bundles into `FlowApplication::builder()`. The flow topology stays source-oriented,
 //! while the hosting shell stays ingress/surface-oriented.
 
-use super::domain::{AccountOpened, LedgerEntry};
-use super::flow;
+use super::flow::{self, AccountIngress, LedgerIngress};
 use anyhow::Result;
 use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::web::endpoints::event_ingestion::{http_ingress, IngestionConfig};
@@ -33,11 +32,11 @@ fn ingress_config(base_path: &str) -> IngestionConfig {
 }
 
 pub fn run_example() -> Result<()> {
-    let accounts_ingress = http_ingress::<AccountOpened>(ingress_config(ACCOUNTS_BASE_PATH));
+    let accounts_ingress = http_ingress(AccountIngress, ingress_config(ACCOUNTS_BASE_PATH));
     // Extract the typed source before moving the bundle into FlowApplication.
     let accounts_source = accounts_ingress.source();
 
-    let tx_ingress = http_ingress::<LedgerEntry>(ingress_config(TX_BASE_PATH));
+    let tx_ingress = http_ingress(LedgerIngress, ingress_config(TX_BASE_PATH));
     // Same split here: source for `flow!`, bundle for the hosting shell.
     let tx_source = tx_ingress.source();
 

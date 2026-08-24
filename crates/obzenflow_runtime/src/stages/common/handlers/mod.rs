@@ -34,10 +34,10 @@ pub use sink::{
     SinkWriterLifecycleReport, WithRedeliverySafety,
 };
 pub use source::{
-    HostedIngressSource, SourceError, SourceObservationSink, TypedAsyncFiniteSourceHandler,
-    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-    UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler,
-    UnifiedInfiniteSourceHandler,
+    HostedIngressSource, IngressDecodeError, IngressDecoder, SourceError, SourceObservationSink,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler, UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
+    UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
 };
 pub use stateful::{
     EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter, StatefulEmission,

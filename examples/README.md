@@ -58,7 +58,7 @@ These examples don't have tutorials, but they demonstrate concrete framework con
   - Run with the manual-start control plane: `cargo run -p obzenflow --example product_catalog_enrichment --features obzenflow_infra/warp-server -- --server`
   - Code: [`examples/product_catalog_enrichment/flow.rs`](product_catalog_enrichment/flow.rs)
 
-- **`csv_demo_support_sla`** — Offline CSV batch processing with typed joins, transforms, and CSV sink output. Good for ETL-style jobs that still need typed flows and replayable execution.
+- **`csv_demo_support_sla`** — Offline CSV batch processing with typed joins, transforms, and a user-owned CSV projection whose associated types declare the accepted domain input and output row. Good for ETL-style jobs that still need typed flows and replayable execution.
   - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it)
   - Run: `cargo run -p obzenflow --example csv_demo_support_sla`
   - Code: [`examples/csv_demo_support_sla/flow.rs`](csv_demo_support_sla/flow.rs)
@@ -68,6 +68,13 @@ These examples don't have tutorials, but they demonstrate concrete framework con
   - Run: `cargo run -p obzenflow --example payment_gateway_resilience`
   - Run with metrics: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
   - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)
+
+- **`postgres_sink_payments`** — Typed payment events delivered to PostgreSQL with parameter binding, batching, verified TLS, and a repeat-safe UPSERT. Use this to learn the PostgreSQL sink's application-facing surface.
+  - Start the persistent service: `cargo xtask postgres up`
+  - Run live: `cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_payments`
+  - Stop while retaining rows: `cargo xtask postgres down`; add `--volumes` only to discard the development database
+  - Guide: [`examples/postgres_sink_payments/README.md`](postgres_sink_payments/README.md)
+  - Code: [`examples/postgres_sink_payments/flow.rs`](postgres_sink_payments/flow.rs)
 
 - **`ecommerce_top_products`** — Bounded-memory ranked aggregation over event streams with source-intake rate limiting. Use this for a realistic Top-N-by-score pattern.
   - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [operational batteries](https://obzenflow.dev/product/how-obzenflow-works/#run-it)

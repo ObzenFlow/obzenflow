@@ -56,7 +56,7 @@ impl TypedPayload for HnStory {
 fn hn_story_decoder(max_stories: usize) -> ListDetailDecoder<HnStoryId, HnStory> {
     let base_url =
         Url::parse("https://hacker-news.firebaseio.com/").expect("HN base URL should parse");
-    ListDetailDecoder::builder(HnStory::versioned_event_type())
+    ListDetailDecoder::builder()
         .base_url(base_url)
         .list_path("v0/topstories.json")
         .parse_list(|response| Ok(response.json()?))

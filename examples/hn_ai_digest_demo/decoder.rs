@@ -4,7 +4,6 @@
 
 use super::domain::{HnStory, HnStoryId};
 use obzenflow::sources::{ListDetailDecoder, Url};
-use obzenflow_core::TypedPayload;
 
 /// Build the decoder for the HN Firebase API:
 /// `topstories.json` → many `item/{id}.json`.
@@ -12,7 +11,7 @@ pub fn hn_story_decoder(
     base_url: Url,
     max_stories: usize,
 ) -> ListDetailDecoder<HnStoryId, HnStory> {
-    ListDetailDecoder::builder(HnStory::versioned_event_type())
+    ListDetailDecoder::builder()
         .base_url(base_url)
         .list_path("v0/topstories.json")
         .parse_list(|response| Ok(response.json()?))

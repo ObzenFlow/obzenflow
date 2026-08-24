@@ -2414,7 +2414,7 @@ mod tests {
         // cycle_b; the effectful stage hangs below the cycle.
         topology.add_edge(source_id.to_topology_id(), cycle_a_id.to_topology_id());
         topology.add_edge(cycle_a_id.to_topology_id(), cycle_b_id.to_topology_id());
-        topology.add_edge(cycle_b_id.to_topology_id(), cycle_a_id.to_topology_id());
+        topology.add_backward_edge(cycle_b_id.to_topology_id(), cycle_a_id.to_topology_id());
         topology.add_edge(cycle_b_id.to_topology_id(), effectful_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
@@ -2680,7 +2680,7 @@ mod tests {
         }
         topology.add_edge(source_id.to_topology_id(), cycle_a_id.to_topology_id());
         topology.add_edge(cycle_a_id.to_topology_id(), cycle_b_id.to_topology_id());
-        topology.add_edge(cycle_b_id.to_topology_id(), cycle_a_id.to_topology_id());
+        topology.add_backward_edge(cycle_b_id.to_topology_id(), cycle_a_id.to_topology_id());
         topology.add_edge(cycle_b_id.to_topology_id(), sink_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 

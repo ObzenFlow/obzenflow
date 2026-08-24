@@ -17,7 +17,7 @@ use super::{
     WebSurfaceWiringContext,
 };
 use crate::application::config::{CorsModeArg, OnTerminalArg, ResolvedStartupConfig, StartupMode};
-use crate::web::endpoints::event_ingestion::{HttpIngress, IngressHandle};
+use crate::web::endpoints::event_ingestion::{HttpIngress, IngressDecoder, IngressHandle};
 #[cfg(feature = "warp-server")]
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
 use crate::web::RuntimeInstanceId;
@@ -685,9 +685,9 @@ impl FlowApplicationBuilder {
     }
 
     /// Register the optional framework-owned HTTP ingress adaptor.
-    pub fn with_http_ingress<T>(mut self, ingress: HttpIngress<T>) -> Self
+    pub fn with_http_ingress<D>(mut self, ingress: HttpIngress<D>) -> Self
     where
-        T: TypedPayload + Send + Sync + 'static,
+        D: IngressDecoder,
     {
         let (surface, handle) = ingress.into_surface_and_handle();
         self.web_surfaces.push(surface);

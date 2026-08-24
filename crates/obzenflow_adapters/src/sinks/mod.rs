@@ -14,7 +14,7 @@ pub use console::{
     SnapshotTableFormatter, TableFormatter,
 };
 
-pub use csv::{CsvSink, CsvSinkBuilder};
+pub use csv::{CsvProjection, CsvSink, CsvSinkBuilder};
 
 use obzenflow_core::TypedPayload;
 use serde::de::DeserializeOwned;

@@ -110,6 +110,11 @@ pub struct SinkOperationFailed {
     pub input_position: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed_delivery_event_id: Option<EventId>,
+    /// The earlier deferred input whose bind or execution was the actual
+    /// subject of this failure. This is diagnostic evidence, not settlement
+    /// authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_subject_event_id: Option<EventId>,
     pub phase: SinkOperationPhase,
     pub kind: ErrorKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,7 +124,7 @@ pub struct SinkOperationFailed {
 
 impl TypedPayload for SinkOperationFailed {
     const EVENT_TYPE: &'static str = "obzenflow.sink_operation_failed";
-    const SCHEMA_VERSION: u32 = 1;
+    const SCHEMA_VERSION: u32 = 2;
 }
 
 #[cfg(test)]
@@ -160,6 +165,7 @@ mod tests {
             causal_event_id: Some(EventId::new()),
             input_position: Some(7),
             failed_delivery_event_id: Some(EventId::new()),
+            operation_subject_event_id: None,
             phase: SinkOperationPhase::Write(SinkWritePhase::Execute),
             kind: ErrorKind::Remote,
             destination_error_code: code,
@@ -169,12 +175,22 @@ mod tests {
 
     #[test]
     fn destination_code_is_absent_for_none_and_round_trips_when_present() {
+        assert_eq!(SinkOperationFailed::SCHEMA_VERSION, 2);
+        assert_eq!(
+            SinkOperationFailed::versioned_event_type(),
+            "obzenflow.sink_operation_failed.v2"
+        );
         let without = serde_json::to_value(operation_failure(None)).unwrap();
         assert!(without.get("destination_error_code").is_none());
+        assert!(without.get("operation_subject_event_id").is_none());
 
         let expected = SinkDestinationErrorCode::try_new("postgresql.sqlstate", "08007").unwrap();
-        let encoded = serde_json::to_value(operation_failure(Some(expected.clone()))).unwrap();
+        let subject = EventId::new();
+        let mut failure = operation_failure(Some(expected.clone()));
+        failure.operation_subject_event_id = Some(subject);
+        let encoded = serde_json::to_value(failure).unwrap();
         let decoded: SinkOperationFailed = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded.destination_error_code, Some(expected));
+        assert_eq!(decoded.operation_subject_event_id, Some(subject));
     }
 }

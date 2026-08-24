@@ -11,6 +11,7 @@ use super::erased::{
 };
 use super::SourceError;
 use crate::stages::common::handler_error::StageFatal;
+use crate::typing::SourceTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::observability::HttpPullTelemetry;
 use obzenflow_core::event::payloads::observability_payload::{
@@ -19,10 +20,10 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
 use obzenflow_core::ingress::{
     EventSubmission, HostedIngressBindingSlot, IngressContext, SubmissionIngressContext,
+    SubmissionPayloadKind,
 };
 use obzenflow_core::{ChainEvent, OneFactStageOutput, TypedPayload, WriterId};
 use std::fmt;
-use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -329,36 +330,84 @@ pub trait TypedAsyncInfiniteSourceHandler: Send + Sync {
     }
 }
 
+/// Error returned by an application-owned [`IngressDecoder`].
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct IngressDecodeError {
+    message: String,
+}
+
+impl IngressDecodeError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl From<serde_json::Error> for IngressDecodeError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::new(error.to_string())
+    }
+}
+
+/// User-owned mapping from an admitted ingress body to one domain output.
+///
+/// The decoder value owns the source's `Output` contract. The default method
+/// performs ordinary serde JSON decoding; applications can override it for an
+/// external representation that still maps to the declared domain output.
+/// Implementations must be deterministic, side-effect free, and behaviourally
+/// equivalent across clones: hosted HTTP ingress invokes the decoder once for
+/// admission validation and again when the accepted submission reaches the source.
+/// Typed `IngressHandle` submissions already have the `Output` shape and bypass
+/// this external-representation mapping.
+pub trait IngressDecoder: Clone + Send + Sync + 'static {
+    type Output: TypedPayload + Send + Sync + 'static;
+
+    fn decode(&self, data: serde_json::Value) -> Result<Self::Output, IngressDecodeError> {
+        serde_json::from_value(data).map_err(IngressDecodeError::from)
+    }
+}
+
 /// Runtime-owned typed hosted-ingress queue core.
-pub struct HostedIngressSource<T> {
+pub struct HostedIngressSource<D> {
     rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<EventSubmission>>>,
     slot: HostedIngressBindingSlot,
     max_batch_size: usize,
-    _output: PhantomData<fn() -> T>,
+    decoder: D,
 }
 
-impl<T> Clone for HostedIngressSource<T> {
+impl<D> Clone for HostedIngressSource<D>
+where
+    D: Clone,
+{
     fn clone(&self) -> Self {
         Self {
             rx: Arc::clone(&self.rx),
             slot: self.slot.clone(),
             max_batch_size: self.max_batch_size,
-            _output: PhantomData,
+            decoder: self.decoder.clone(),
         }
     }
 }
 
-impl<T> fmt::Debug for HostedIngressSource<T> {
+impl<D> fmt::Debug for HostedIngressSource<D>
+where
+    D: IngressDecoder,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HostedIngressSource")
+            .field("decoder", &std::any::type_name::<D>())
+            .field("output", &std::any::type_name::<D::Output>())
             .field("ingress_key", self.slot.ingress_key())
             .field("max_batch_size", &self.max_batch_size)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
-impl<T> HostedIngressSource<T> {
+impl<D> HostedIngressSource<D> {
     pub fn new(
+        decoder: D,
         rx: tokio::sync::mpsc::Receiver<EventSubmission>,
         slot: HostedIngressBindingSlot,
     ) -> Self {
@@ -366,7 +415,7 @@ impl<T> HostedIngressSource<T> {
             rx: Arc::new(tokio::sync::Mutex::new(rx)),
             slot,
             max_batch_size: 1000,
-            _output: PhantomData,
+            decoder,
         }
     }
 
@@ -376,11 +425,18 @@ impl<T> HostedIngressSource<T> {
     }
 }
 
-impl<T> HostedIngressSource<T>
+impl<D> SourceTyping for HostedIngressSource<D>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    D: IngressDecoder,
 {
-    async fn receive_batch(&mut self) -> Result<Vec<(T, IngressContext)>, SourceError> {
+    type Output = D::Output;
+}
+
+impl<D> HostedIngressSource<D>
+where
+    D: IngressDecoder,
+{
+    async fn receive_batch(&mut self) -> Result<Vec<(D::Output, IngressContext)>, SourceError> {
         let mut rx = self.rx.lock().await;
         let first = rx.recv().await.ok_or_else(|| {
             SourceError::Transport("hosted ingress source channel closed".to_string())
@@ -396,11 +452,11 @@ where
         let expected_key = self.slot.ingress_key();
         let mut decoded = Vec::with_capacity(submissions.len());
         for submission in submissions {
-            if !T::event_type_matches(submission.event_type.as_str()) {
+            if !D::Output::event_type_matches(submission.event_type.as_str()) {
                 return Err(SourceError::Validation(format!(
                     "hosted ingress event type `{}` is outside configured output `{}`",
                     submission.event_type,
-                    T::versioned_event_type(),
+                    D::Output::versioned_event_type(),
                 )));
             }
             let SubmissionIngressContext {
@@ -408,6 +464,7 @@ where
                 ingress_key,
                 batch_index,
                 attempt_seq,
+                payload_kind,
             } = submission.ingress_handoff.ok_or_else(|| {
                 SourceError::Validation(
                     "hosted ingress submission is missing framework ingress context".to_string(),
@@ -418,10 +475,16 @@ where
                     "hosted ingress context key `{ingress_key}` does not match configured key `{expected_key}`"
                 )));
             }
-            let value = serde_json::from_value::<T>(submission.data).map_err(|error| {
+            let value = match payload_kind {
+                SubmissionPayloadKind::External => self.decoder.decode(submission.data),
+                SubmissionPayloadKind::TypedOutput => {
+                    serde_json::from_value(submission.data).map_err(IngressDecodeError::from)
+                }
+            }
+            .map_err(|error| {
                 SourceError::Deserialization(format!(
                     "hosted ingress `{}` decode failed: {error}",
-                    T::versioned_event_type()
+                    D::Output::versioned_event_type()
                 ))
             })?;
             decoded.push((
@@ -439,11 +502,11 @@ where
 }
 
 #[async_trait]
-impl<T> TypedAsyncInfiniteSourceHandler for HostedIngressSource<T>
+impl<D> TypedAsyncInfiniteSourceHandler for HostedIngressSource<D>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    D: IngressDecoder,
 {
-    type Output = T;
+    type Output = D::Output;
 
     async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
         Ok(self
@@ -770,6 +833,33 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
+    struct RowIngress;
+
+    impl IngressDecoder for RowIngress {
+        type Output = Row;
+    }
+
+    #[derive(Clone)]
+    struct OffsetIngress {
+        offset: u32,
+    }
+
+    impl IngressDecoder for OffsetIngress {
+        type Output = Row;
+
+        fn decode(&self, data: serde_json::Value) -> Result<Self::Output, IngressDecodeError> {
+            let row = serde_json::from_value::<u32>(data)?;
+            Ok(Row(row + self.offset))
+        }
+    }
+
+    fn assert_row_output<S>(_source: &S)
+    where
+        S: SourceTyping<Output = Row>,
+    {
+    }
+
+    #[derive(Clone, Debug)]
     struct OneRow;
 
     impl TypedFiniteSourceHandler for OneRow {
@@ -989,6 +1079,7 @@ mod tests {
                 ingress_key: IngressKey::from(ingress_key),
                 batch_index,
                 attempt_seq: IngressAttemptSeq(attempt_seq),
+                payload_kind: SubmissionPayloadKind::External,
             }),
         }
     }
@@ -997,7 +1088,7 @@ mod tests {
     async fn hosted_ingress_rejoins_exact_single_and_batch_context_at_runtime_lowering() {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let slot = HostedIngressBindingSlot::new("bank.accounts");
-        let source = HostedIngressSource::<Row>::new(rx, slot.clone());
+        let source = HostedIngressSource::new(RowIngress, rx, slot.clone());
         let writer_id = WriterId::from(StageId::new());
         let mut adapter = TypedAsyncInfiniteSourceHandlerAdapter::new(source);
 
@@ -1072,10 +1163,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hosted_ingress_decoder_value_owns_and_decodes_output() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let slot = HostedIngressBindingSlot::new("bank.offset");
+        let mut source = HostedIngressSource::new(OffsetIngress { offset: 40 }, rx, slot);
+        assert_row_output(&source);
+
+        let source_debug = format!("{source:?}");
+        assert!(source_debug.contains("OffsetIngress"));
+        assert!(!source_debug.contains("offset: 40"));
+
+        tx.send(hosted_submission(2, 301, "bank.offset", None, 21))
+            .await
+            .expect("submission queued");
+        assert_eq!(source.next().await.expect("decoded batch"), vec![Row(42)]);
+    }
+
+    #[tokio::test]
     async fn hosted_ingress_rejects_a_mixed_batch_atomically() {
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         let slot = HostedIngressBindingSlot::new("bank.accounts");
-        let source = HostedIngressSource::<Row>::new(rx, slot);
+        let source = HostedIngressSource::new(RowIngress, rx, slot);
         let mut adapter = TypedAsyncInfiniteSourceHandlerAdapter::new(source);
         UnifiedAsyncInfiniteSourceHandler::install_writer_id(
             &mut adapter,

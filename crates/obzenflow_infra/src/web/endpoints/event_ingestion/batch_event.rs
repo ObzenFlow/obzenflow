@@ -6,9 +6,9 @@ use super::shared::{join_path, unix_now_nanos};
 use super::IngestionState;
 use super::{authorize_request, validate_submission};
 use async_trait::async_trait;
-use obzenflow_core::ingress::{BatchSubmission, SubmissionIngressContext, SubmissionResponse};
 use obzenflow_core::ingress::{
-    IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext, IngressRefusalReason,
+    BatchSubmission, IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext,
+    IngressRefusalReason, SubmissionIngressContext, SubmissionPayloadKind, SubmissionResponse,
 };
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 use serde_json::json;
@@ -337,6 +337,7 @@ impl HttpEndpoint for BatchEventEndpoint {
                 ingress_key: ingress_key.clone(),
                 batch_index: Some(batch_index),
                 attempt_seq,
+                payload_kind: SubmissionPayloadKind::External,
             });
             permit.send(event);
         }

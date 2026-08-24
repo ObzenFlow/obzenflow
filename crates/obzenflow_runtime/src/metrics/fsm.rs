@@ -2454,6 +2454,7 @@ mod tests {
                 causal_event_id: None,
                 input_position: None,
                 failed_delivery_event_id: None,
+                operation_subject_event_id: None,
                 phase,
                 kind: ErrorKind::Remote,
                 destination_error_code: Some(

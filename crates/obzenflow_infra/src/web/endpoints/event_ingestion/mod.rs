@@ -4,9 +4,9 @@
 
 //! Handle-first ingress plus optional HTTP event ingestion endpoints
 //!
-//! The primary push API is `ingress_source::<T>()`, which returns a typed source
+//! The primary push API is `ingress_source(decoder, ..)`, which returns a typed source
 //! plus a cloneable handle the application can mount behind its own HTTP/RPC
-//! surface. `http_ingress::<T>()` is a convenience wrapper that provides the
+//! surface. `http_ingress(decoder, ..)` is a convenience wrapper that provides the
 //! historical hosted HTTP routes:
 //! - `POST {base_path}/events` (single event)
 //! - `POST {base_path}/batch`  (batch)
@@ -25,7 +25,9 @@ pub use validation::{
     validate_submission, SchemaValidator, TypedValidator, ValidationConfig, ValidationError,
 };
 
-use obzenflow_adapters::sources::http::HostedIngressSource;
+pub use obzenflow_adapters::sources::http::{
+    HostedIngressSource, IngressDecodeError, IngressDecoder,
+};
 use obzenflow_core::ingress::EventSubmission;
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
@@ -85,7 +87,7 @@ where
             metadata: None,
             ingress_handoff: None,
         };
-        Ok(self.state.submit_one(submission).await)
+        Ok(self.state.submit_typed_output(submission).await)
     }
 
     /// Protocol-neutral ingress key used in provenance, refusal facts, and metrics.
@@ -131,48 +133,74 @@ where
 }
 
 /// Typed source plus ingress handle for developer-owned ingress protocols.
-pub struct Ingress<T>
+pub struct Ingress<D>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    D: IngressDecoder,
 {
-    source: HostedIngressSource<T>,
-    handle: IngressHandle<T>,
+    source: HostedIngressSource<D>,
+    handle: IngressHandle<D::Output>,
 }
 
-impl<T> Ingress<T>
+impl<D> Ingress<D>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    D: IngressDecoder,
 {
-    pub fn source(&self) -> HostedIngressSource<T> {
+    pub fn source(&self) -> HostedIngressSource<D> {
         self.source.clone()
     }
 
-    pub fn handle(&self) -> IngressHandle<T> {
+    pub fn handle(&self) -> IngressHandle<D::Output> {
         self.handle.clone()
     }
 }
 
 /// Framework-owned HTTP ingress bundle for a single typed payload.
-pub struct HttpIngress<T>
+pub struct HttpIngress<D>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    D: IngressDecoder,
 {
     surface: WebSurfaceAttachment,
-    source: HostedIngressSource<T>,
-    handle: IngressHandle<T>,
+    source: HostedIngressSource<D>,
+    handle: IngressHandle<D::Output>,
 }
 
-impl<T> HttpIngress<T>
+struct IngressDecoderValidator<D>(D);
+
+impl<D> std::fmt::Debug for IngressDecoderValidator<D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IngressDecoderValidator")
+            .field("decoder", &std::any::type_name::<D>())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<D> SchemaValidator for IngressDecoderValidator<D>
 where
-    T: TypedPayload + Send + Sync + 'static,
+    D: IngressDecoder,
+{
+    fn event_type(&self) -> obzenflow_core::EventType {
+        obzenflow_core::EventType::from(D::Output::EVENT_TYPE)
+    }
+
+    fn validate(&self, payload: &serde_json::Value) -> Result<(), String> {
+        self.0
+            .decode(payload.clone())
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl<D> HttpIngress<D>
+where
+    D: IngressDecoder,
 {
     /// Clone the typed source that feeds accepted events into `flow!`.
-    pub fn source(&self) -> HostedIngressSource<T> {
+    pub fn source(&self) -> HostedIngressSource<D> {
         self.source.clone()
     }
 
     /// Clone the underlying handle used by the hosted HTTP adaptor.
-    pub fn handle(&self) -> IngressHandle<T> {
+    pub fn handle(&self) -> IngressHandle<D::Output> {
         self.handle.clone()
     }
 
@@ -181,18 +209,22 @@ where
         self.surface
     }
 
-    pub(crate) fn into_surface_and_handle(self) -> (WebSurfaceAttachment, IngressHandle<T>) {
+    pub(crate) fn into_surface_and_handle(
+        self,
+    ) -> (WebSurfaceAttachment, IngressHandle<D::Output>) {
         (self.surface, self.handle)
     }
 }
 
-/// Create a typed source plus protocol-neutral ingress handle for `T`.
-pub fn ingress_source<T>(config: IngestionConfig) -> Ingress<T>
+/// Create a typed source plus protocol-neutral ingress handle.
+///
+/// The decoder value owns the source's output type.
+pub fn ingress_source<D>(decoder: D, config: IngestionConfig) -> Ingress<D>
 where
-    T: TypedPayload + Send + Sync + std::fmt::Debug + 'static,
+    D: IngressDecoder,
 {
     let (state, rx) = IngestionState::new(config);
-    let source = HostedIngressSource::<T>::new(rx, state.ingress_slot());
+    let source = HostedIngressSource::new(decoder, rx, state.ingress_slot());
     let handle = IngressHandle {
         state,
         _phantom: PhantomData,
@@ -200,21 +232,21 @@ where
     Ingress { source, handle }
 }
 
-/// Create a zero-wiring HTTP ingress bundle for `T`.
+/// Create a zero-wiring HTTP ingress bundle.
 ///
 /// If `config.validation` is not set, the bundle defaults to a single-type validator
-/// for `T`.
-pub fn http_ingress<T>(mut config: IngestionConfig) -> HttpIngress<T>
+/// for the decoder's output.
+pub fn http_ingress<D>(decoder: D, mut config: IngestionConfig) -> HttpIngress<D>
 where
-    T: TypedPayload + Send + Sync + std::fmt::Debug + 'static,
+    D: IngressDecoder,
 {
     if config.validation.is_none() {
         config.validation = Some(ValidationConfig::Single {
-            validator: Arc::new(TypedValidator::<T>::new()),
+            validator: Arc::new(IngressDecoderValidator(decoder.clone())),
         });
     }
 
-    let ingress = ingress_source::<T>(config);
+    let ingress = ingress_source(decoder, config);
     let source = ingress.source();
     let handle = ingress.handle();
     let surface = create_ingestion_surface_from_state(handle.state());
@@ -332,6 +364,34 @@ mod tests {
     use tokio::sync::Notify;
 
     use crate::journal::disk_journals;
+
+    #[derive(Debug)]
+    struct TestIngress<T>(PhantomData<fn() -> T>);
+
+    impl<T> Clone for TestIngress<T> {
+        fn clone(&self) -> Self {
+            *self
+        }
+    }
+
+    impl<T> Copy for TestIngress<T> {}
+
+    impl<T> Default for TestIngress<T> {
+        fn default() -> Self {
+            Self(PhantomData)
+        }
+    }
+
+    impl<T> IngressDecoder for TestIngress<T>
+    where
+        T: TypedPayload + Send + Sync + 'static,
+    {
+        type Output = T;
+    }
+
+    fn test_ingress<T>() -> TestIngress<T> {
+        TestIngress::default()
+    }
 
     fn unwrap_unary(resp: ManagedResponse) -> Response {
         match resp {
@@ -637,11 +697,14 @@ mod tests {
             }
         }
 
-        let ingress = ingress_source::<HandlePayload>(IngestionConfig {
-            ingress_key: Some("orders".into()),
-            record_ingress_refusals: true,
-            ..Default::default()
-        });
+        let ingress = ingress_source(
+            test_ingress::<HandlePayload>(),
+            IngestionConfig {
+                ingress_key: Some("orders".into()),
+                record_ingress_refusals: true,
+                ..Default::default()
+            },
+        );
         let handle = ingress.handle();
         let mut source = ingress.source();
         let state = handle.state();
@@ -896,11 +959,14 @@ mod tests {
     async fn one_family_cannot_occupy_source_and_ingress_control_positions() {
         use obzenflow_adapters::middleware::rate_limit;
 
-        let ingress = http_ingress::<PlacementPayload>(IngestionConfig {
-            base_path: "/api/placement-duplicate".to_string(),
-            record_ingress_refusals: false,
-            ..Default::default()
-        });
+        let ingress = http_ingress(
+            test_ingress::<PlacementPayload>(),
+            IngestionConfig {
+                base_path: "/api/placement-duplicate".to_string(),
+                record_ingress_refusals: false,
+                ..Default::default()
+            },
+        );
         let hosted_source = ingress.source();
         let built = FlowDefinition::materialize(move |_runtime_config| {
             Ok(flow! {
@@ -949,11 +1015,14 @@ mod tests {
     async fn hosted_source_rejects_a_lone_drain_rate_limiter() {
         use obzenflow_adapters::middleware::rate_limit;
 
-        let ingress = http_ingress::<PlacementPayload>(IngestionConfig {
-            base_path: "/api/placement-drain".to_string(),
-            record_ingress_refusals: false,
-            ..Default::default()
-        });
+        let ingress = http_ingress(
+            test_ingress::<PlacementPayload>(),
+            IngestionConfig {
+                base_path: "/api/placement-drain".to_string(),
+                record_ingress_refusals: false,
+                ..Default::default()
+            },
+        );
         let hosted_source = ingress.source();
         let built = FlowDefinition::materialize(move |_runtime_config| {
             Ok(flow! {
@@ -1633,14 +1702,36 @@ mod tests {
             const EVENT_TYPE: &'static str = "order.created";
         }
 
+        #[derive(Deserialize)]
+        struct ExternalOrder {
+            external_order_id: String,
+        }
+
+        #[derive(Clone, Debug)]
+        struct TestPayloadIngress;
+
+        impl IngressDecoder for TestPayloadIngress {
+            type Output = TestPayload;
+
+            fn decode(&self, data: serde_json::Value) -> Result<Self::Output, IngressDecodeError> {
+                let external = serde_json::from_value::<ExternalOrder>(data)?;
+                Ok(TestPayload {
+                    order_id: external.external_order_id,
+                })
+            }
+        }
+
         // This test wires the surface/source, not refusal recording, so it runs
         // without a system journal; disable recording to avoid the startup check.
-        let ingress = http_ingress::<TestPayload>(IngestionConfig {
-            record_ingress_refusals: false,
-            ..IngestionConfig::default()
-        });
+        let ingress = http_ingress(
+            TestPayloadIngress,
+            IngestionConfig {
+                record_ingress_refusals: false,
+                ..IngestionConfig::default()
+            },
+        );
         let mut source = ingress.source();
-        let (surface, _handle) = ingress.into_surface_and_handle();
+        let (surface, handle) = ingress.into_surface_and_handle();
         let (_name, endpoints, wiring, _ingress_slot) = surface.into_parts();
 
         let wiring = wiring.expect("ingress surface wiring");
@@ -1660,7 +1751,7 @@ mod tests {
         let request = Request::new(HttpMethod::Post, events_endpoint.path().to_string()).with_body(
             serde_json::to_vec(&serde_json::json!({
                 "event_type": "order.created",
-                "data": { "order_id": "1" }
+                "data": { "external_order_id": "1" }
             }))
             .unwrap(),
         );
@@ -1671,6 +1762,20 @@ mod tests {
         let out = source.next().await.unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].order_id, "1");
+
+        let outcome = handle
+            .submit(TestPayload {
+                order_id: "2".to_string(),
+            })
+            .await
+            .expect("typed output serializes");
+        assert!(matches!(
+            outcome,
+            IngressSubmitOutcome::Accepted { event_count: 1, .. }
+        ));
+        let out = source.next().await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].order_id, "2");
 
         for task in wired.tasks {
             task.abort();
@@ -1691,11 +1796,14 @@ mod tests {
             const EVENT_TYPE: &'static str = "order.created";
         }
 
-        let ingress = http_ingress::<TestPayload>(IngestionConfig {
-            base_path: "/api/journal-check".to_string(),
-            record_ingress_refusals: false,
-            ..Default::default()
-        });
+        let ingress = http_ingress(
+            test_ingress::<TestPayload>(),
+            IngestionConfig {
+                base_path: "/api/journal-check".to_string(),
+                record_ingress_refusals: false,
+                ..Default::default()
+            },
+        );
         let source = ingress.source();
         let (surface, _handle) = ingress.into_surface_and_handle();
         let (_name, endpoints, wiring, _ingress_slot) = surface.into_parts();
@@ -1804,10 +1912,13 @@ mod tests {
             const EVENT_TYPE: &'static str = "order.created";
         }
 
-        let ingress = http_ingress::<OrderPayload>(IngestionConfig {
-            base_path: "/api/orders".to_string(),
-            ..Default::default()
-        });
+        let ingress = http_ingress(
+            test_ingress::<OrderPayload>(),
+            IngestionConfig {
+                base_path: "/api/orders".to_string(),
+                ..Default::default()
+            },
+        );
         let source = ingress.source();
         let (surface, _handle) = ingress.into_surface_and_handle();
         let (_name, endpoints, wiring, _slot) = surface.into_parts();

@@ -4,7 +4,10 @@
 
 //! Typed sink authoring and runtime erasure (FLOWIP-134h).
 
-use super::error::{SinkOperationResult, SinkWriteResult};
+use super::error::{
+    SinkOperationError, SinkOperationResult, SinkWriteFailure, SinkWriteFailureDisposition,
+    SinkWriteResult,
+};
 use super::traits::{
     CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport, SinkSettlementCommit,
 };
@@ -68,6 +71,26 @@ struct PendingIdentity {
     registry_id: u64,
     stage_id: StageId,
     nonce: u64,
+}
+
+/// Runtime-authored, non-settlement witness for the deferred input that was
+/// the subject of a failed sink operation.
+///
+/// The connector can copy this only through `PendingSinkInput`; the sealed
+/// adapter validates it against the live pending registry before exposing its
+/// event identity to durable evidence.
+#[derive(Clone, Copy)]
+pub(super) struct PendingOperationSubject {
+    identity: PendingIdentity,
+    parent_event_id: EventId,
+}
+
+impl std::fmt::Debug for PendingOperationSubject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingOperationSubject")
+            .field("stage_scoped", &true)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -185,6 +208,29 @@ impl PendingRegistry {
             ));
         }
         Ok(())
+    }
+
+    fn validate_operation_subject(
+        &self,
+        current: Option<PendingIdentity>,
+        subject: PendingOperationSubject,
+    ) -> Result<EventId, HandlerError> {
+        self.validate_identity(subject.identity)?;
+        if current == Some(subject.identity) {
+            return Err(protocol_fatal(
+                "current sink input cannot be its own deferred operation subject",
+            ));
+        }
+
+        match self.phases.get(&subject.identity.nonce) {
+            Some(PendingPhase::Deferred) => Ok(subject.parent_event_id),
+            Some(PendingPhase::Current) => Err(protocol_fatal(
+                "sink operation subject is not a deferred input",
+            )),
+            None => Err(protocol_fatal(
+                "stale, settled, or closed sink operation subject",
+            )),
+        }
     }
 
     /// Validate the complete returned capability set before consuming any of
@@ -367,6 +413,15 @@ impl std::fmt::Debug for PendingSinkInput {
         f.debug_struct("PendingSinkInput")
             .field("stage_scoped", &true)
             .finish_non_exhaustive()
+    }
+}
+
+impl PendingSinkInput {
+    pub(super) fn operation_subject(&self) -> PendingOperationSubject {
+        PendingOperationSubject {
+            identity: self.identity,
+            parent_event_id: self.parent_event_id,
+        }
     }
 }
 
@@ -860,6 +915,37 @@ impl<W> SinkWriterAdapter<W> {
         )
     }
 
+    fn validate_operation_error(
+        &self,
+        current: Option<PendingIdentity>,
+        error: &mut SinkOperationError,
+    ) -> Result<(), HandlerError> {
+        let subject = error
+            .take_pending_operation_subject()
+            .map_err(|()| protocol_fatal("sink operation subject was already runtime-validated"))?;
+        if let Some(subject) = subject {
+            let event_id = lock_pending_registry(&self.registry)
+                .validate_operation_subject(current, subject)?;
+            error.set_validated_operation_subject(event_id);
+        }
+        Ok(())
+    }
+
+    fn validate_write_failure(
+        &self,
+        current: PendingIdentity,
+        failure: &mut SinkWriteFailure,
+    ) -> Result<(), HandlerError> {
+        if failure.has_pending_operation_subject()
+            && failure.disposition() != SinkWriteFailureDisposition::Poisoned
+        {
+            return Err(protocol_fatal(
+                "a deferred sink operation subject requires a poisoned write failure",
+            ));
+        }
+        self.validate_operation_error(Some(current), failure.error_mut())
+    }
+
     async fn consume_report_in_scope(
         &mut self,
         event: ChainEvent,
@@ -906,11 +992,13 @@ impl<W> SinkWriterAdapter<W> {
         };
         let mut guard = CurrentPendingGuard::new(Arc::clone(&self.registry), current);
 
-        let report = self
-            .writer
-            .write(input, context)
-            .await
-            .map_err(|failure| HandlerError::SinkWrite(Box::new(failure)))?;
+        let report = match self.writer.write(input, context).await {
+            Ok(report) => report,
+            Err(mut failure) => {
+                self.validate_write_failure(current, &mut failure)?;
+                return Err(HandlerError::SinkWrite(Box::new(failure)));
+            }
+        };
         let lowered = self.lower_write_report(current, report)?;
         guard.complete();
         Ok(lowered)
@@ -947,11 +1035,13 @@ where
     }
 
     async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
-        let report = self
-            .writer
-            .flush()
-            .await
-            .map_err(|error| HandlerError::SinkOperation(Box::new(error)))?;
+        let report = match self.writer.flush().await {
+            Ok(report) => report,
+            Err(mut error) => {
+                self.validate_operation_error(None, &mut error)?;
+                return Err(HandlerError::SinkOperation(Box::new(error)));
+            }
+        };
         self.lower_lifecycle_report(report)
     }
 
@@ -960,11 +1050,13 @@ where
     }
 
     async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
-        let report = self
-            .writer
-            .drain()
-            .await
-            .map_err(|error| HandlerError::SinkOperation(Box::new(error)))?;
+        let report = match self.writer.drain().await {
+            Ok(report) => report,
+            Err(mut error) => {
+                self.validate_operation_error(None, &mut error)?;
+                return Err(HandlerError::SinkOperation(Box::new(error)));
+            }
+        };
         self.lower_lifecycle_report(report)
     }
 }
@@ -1348,6 +1440,167 @@ mod tests {
 
         let nondeferred = first.mint(parent);
         assert!(fatal_detail(first.settle(nondeferred).unwrap_err()).contains("non-deferred"));
+    }
+
+    #[test]
+    fn operation_subject_registry_accepts_only_live_same_stage_deferred_inputs() {
+        fn fatal_detail(error: HandlerError) -> String {
+            match error {
+                HandlerError::Fatal(fatal) => fatal.detail,
+                other => panic!("expected protocol fatal, got {other:?}"),
+            }
+        }
+
+        let stage_id = StageId::new();
+        let parent = EventId::new();
+        let mut registry = PendingRegistry::new(stage_id);
+
+        let deferred = registry.mint(parent);
+        registry.defer(&deferred);
+        assert_eq!(
+            registry
+                .validate_operation_subject(None, deferred.operation_subject())
+                .expect("live deferred subject validates"),
+            parent
+        );
+
+        let current = registry.mint(EventId::new());
+        assert!(fatal_detail(
+            registry
+                .validate_operation_subject(None, current.operation_subject())
+                .unwrap_err()
+        )
+        .contains("not a deferred"));
+        registry.defer(&current);
+        assert!(fatal_detail(
+            registry
+                .validate_operation_subject(Some(current.identity), current.operation_subject())
+                .unwrap_err()
+        )
+        .contains("current sink input"));
+
+        let foreign_stage = StageId::new();
+        let foreign_registry = PendingRegistry::new(foreign_stage);
+        assert!(fatal_detail(
+            foreign_registry
+                .validate_operation_subject(None, deferred.operation_subject())
+                .unwrap_err()
+        )
+        .contains("foreign"));
+
+        let replacement = PendingRegistry::new(stage_id);
+        assert!(fatal_detail(
+            replacement
+                .validate_operation_subject(None, deferred.operation_subject())
+                .unwrap_err()
+        )
+        .contains("stale"));
+
+        let settled = registry.mint(EventId::new());
+        registry.defer(&settled);
+        let settled_subject = settled.operation_subject();
+        registry.settle(settled).expect("settle deferred input");
+        assert!(fatal_detail(
+            registry
+                .validate_operation_subject(None, settled_subject)
+                .unwrap_err()
+        )
+        .contains("settled"));
+    }
+
+    #[tokio::test]
+    async fn deferred_origin_poison_is_validated_without_settling_the_subject() {
+        #[derive(Debug)]
+        struct DeferredOriginPoison {
+            first: Option<PendingSinkInput>,
+        }
+
+        #[async_trait]
+        impl SinkWriter for DeferredOriginPoison {
+            type Input = Input;
+
+            async fn write(&mut self, _input: Input, context: SinkWriteContext) -> SinkWriteResult {
+                let current = context.defer();
+                let Some(first) = self.first.as_ref() else {
+                    self.first = Some(current);
+                    return Ok(SinkWriteReport::buffered(
+                        SinkBufferedOutcome::accepted_via(DeliveryMethod::Noop, None),
+                    ));
+                };
+                drop(current);
+                Err(SinkWriteFailure::poisoned_by_deferred(
+                    first,
+                    obzenflow_core::event::SinkWritePhase::Execute,
+                    SinkOperationError::permanent("deferred input failed"),
+                ))
+            }
+        }
+
+        let mut adapter =
+            SinkWriterAdapter::new(DeferredOriginPoison { first: None }, StageId::new());
+        let first = event(1);
+        let first_id = first.id;
+        let mut first_report = adapter
+            .consume_report(first)
+            .await
+            .expect("first input buffers");
+        first_report
+            .commit_settlements()
+            .expect("buffered report validates");
+
+        let error = adapter
+            .consume_report(event(2))
+            .await
+            .expect_err("second write poisons on the deferred subject");
+        let HandlerError::SinkWrite(failure) = error else {
+            panic!("expected a sealed sink write failure");
+        };
+        assert_eq!(failure.disposition(), SinkWriteFailureDisposition::Poisoned);
+        assert_eq!(failure.error().operation_subject_event_id(), Some(first_id));
+        assert!(lock_pending_registry(&adapter.registry)
+            .phases
+            .values()
+            .any(|phase| *phase == PendingPhase::Deferred));
+    }
+
+    #[tokio::test]
+    async fn current_or_nonpoisoned_operation_subject_is_protocol_fatal() {
+        #[derive(Debug)]
+        struct InvalidSubject {
+            nonpoisoned: bool,
+        }
+
+        #[async_trait]
+        impl SinkWriter for InvalidSubject {
+            type Input = Input;
+
+            async fn write(&mut self, _input: Input, context: SinkWriteContext) -> SinkWriteResult {
+                let current = context.defer();
+                let error = SinkOperationError::other("invalid subject")
+                    .with_deferred_operation_subject(&current);
+                if self.nonpoisoned {
+                    Err(SinkWriteFailure::confirmed_rollback(
+                        obzenflow_core::event::SinkWritePhase::Execute,
+                        error,
+                    ))
+                } else {
+                    Err(SinkWriteFailure::poisoned(
+                        obzenflow_core::event::SinkWritePhase::Execute,
+                        error,
+                    ))
+                }
+            }
+        }
+
+        for nonpoisoned in [false, true] {
+            let mut adapter =
+                SinkWriterAdapter::new(InvalidSubject { nonpoisoned }, StageId::new());
+            let error = adapter
+                .consume_report(event(1))
+                .await
+                .expect_err("invalid subject authority must be fatal");
+            assert!(matches!(error, HandlerError::Fatal(_)));
+        }
     }
 
     #[test]

@@ -18,7 +18,7 @@ use std::fmt;
 ///
 /// Wire form is the snake_case string; unknown strings deserialize to
 /// `Other` so manifest and API readers tolerate sources added later
-/// (e.g. FLOWIP-010j's `profile`). The resolver never constructs `Other`.
+/// (e.g. FLOWIP-010n's `profile`). The resolver never constructs `Other`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConfigSource {
     Default,
@@ -216,7 +216,7 @@ mod tests {
             let back: ConfigSource = serde_json::from_str(&wire).unwrap();
             assert_eq!(back, source);
         }
-        // Gap 13: a source added later (010j's `profile`) must not break readers.
+        // Gap 13: a source added later (010n's `profile`) must not break readers.
         let back: ConfigSource = serde_json::from_str("\"profile\"").unwrap();
         assert_eq!(back, ConfigSource::Other("profile".to_string()));
         assert_eq!(back.as_str(), "profile");

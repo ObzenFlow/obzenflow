@@ -264,6 +264,7 @@ pub struct ProjectedSinkOperationFailure {
     input_position: Option<u64>,
     phase: SinkOperationPhase,
     failed_delivery_event_id: Option<EventId>,
+    operation_subject_event_id: Option<EventId>,
     kind: ErrorKind,
     destination_error_code: Option<SinkDestinationErrorCode>,
 }
@@ -299,6 +300,10 @@ impl ProjectedSinkOperationFailure {
 
     pub fn failed_delivery_event_id(&self) -> Option<EventId> {
         self.failed_delivery_event_id
+    }
+
+    pub fn operation_subject_event_id(&self) -> Option<EventId> {
+        self.operation_subject_event_id
     }
 
     pub fn kind(&self) -> &ErrorKind {
@@ -1283,6 +1288,7 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
             input_position: operation.input_position,
             phase: operation.phase,
             failed_delivery_event_id: operation.failed_delivery_event_id,
+            operation_subject_event_id: operation.operation_subject_event_id,
             kind: operation.kind.clone(),
             destination_error_code: operation.destination_error_code.clone(),
         };
@@ -1293,6 +1299,56 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
                 event.id.to_string(),
                 "operation failure fact has inconsistent stage, status, route, or identity",
             ));
+        }
+
+        if let Some(subject_id) = operation.operation_subject_event_id {
+            if subject_id == event.id
+                || operation.causal_event_id == Some(subject_id)
+                || operation.failed_delivery_event_id == Some(subject_id)
+                || !by_id.contains_key(&subject_id)
+            {
+                return Err(failure(
+                    "journal-truth",
+                    event.id.to_string(),
+                    "operation subject is missing, current, self-referential, or a receipt",
+                ));
+            }
+            let buffered_receipts = chain_events
+                .iter()
+                .filter(|candidate| {
+                    candidate.flow_context.stage_id == operation.stage_id
+                        && direct_parent(candidate) == Some(subject_id)
+                        && matches!(
+                            &candidate.content,
+                            ChainEventContent::Delivery(payload)
+                                if matches!(payload.result, DeliveryResult::Buffered { .. })
+                        )
+                })
+                .count();
+            let terminal_receipts = chain_events
+                .iter()
+                .filter(|candidate| {
+                    candidate.flow_context.stage_id == operation.stage_id
+                        && direct_parent(candidate) == Some(subject_id)
+                        && matches!(
+                            &candidate.content,
+                            ChainEventContent::Delivery(payload)
+                                if matches!(
+                                    payload.result,
+                                    DeliveryResult::Success { .. }
+                                        | DeliveryResult::Partial { .. }
+                                        | DeliveryResult::Failed { .. }
+                                )
+                        )
+                })
+                .count();
+            if buffered_receipts != 1 || terminal_receipts != 0 {
+                return Err(failure(
+                    "journal-truth",
+                    event.id.to_string(),
+                    "operation subject is not one unresolved deferred input",
+                ));
+            }
         }
 
         let (disposition, receipt_to_operation, operation_to_route, route_to_lifecycle) = if matches!(
@@ -1341,6 +1397,15 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
                     "failed receipt has no recognised sink write disposition",
                 )
             })?;
+            if operation.operation_subject_event_id.is_some()
+                && disposition != SinkWriteFailureDisposition::Poisoned
+            {
+                return Err(failure(
+                    "journal-truth",
+                    event.id.to_string(),
+                    "a deferred operation subject requires a poisoned write receipt",
+                ));
+            }
             let receipt_ok = write_failure_receipt_matches(
                 input,
                 receipt,
@@ -1810,6 +1875,7 @@ mod tests {
             causal_event_id: Some(input.id),
             input_position: Some(7),
             failed_delivery_event_id: Some(receipt.id),
+            operation_subject_event_id: None,
             phase: SinkOperationPhase::Write(obzenflow_core::event::SinkWritePhase::Commit),
             kind: ErrorKind::Remote,
             destination_error_code: None,

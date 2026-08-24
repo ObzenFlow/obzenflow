@@ -6,9 +6,9 @@ use super::shared::{join_path, unix_now_nanos};
 use super::IngestionState;
 use super::{authorize_request, validate_submission};
 use async_trait::async_trait;
-use obzenflow_core::ingress::{EventSubmission, SubmissionIngressContext, SubmissionResponse};
 use obzenflow_core::ingress::{
-    IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext, IngressRefusalReason,
+    EventSubmission, IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext,
+    IngressRefusalReason, SubmissionIngressContext, SubmissionPayloadKind, SubmissionResponse,
 };
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 use serde_json::json;
@@ -211,6 +211,7 @@ impl HttpEndpoint for SingleEventEndpoint {
                     ingress_key: self.state.ingress_key().clone(),
                     batch_index: None,
                     attempt_seq: attempt.attempt_seq,
+                    payload_kind: SubmissionPayloadKind::External,
                 });
                 permit.send(submission);
                 if let Some(boundary) = accepted_boundary {

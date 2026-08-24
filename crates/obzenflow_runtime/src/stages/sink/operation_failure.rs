@@ -46,6 +46,7 @@ pub async fn record_sink_lifecycle_operation_failure(
         causal_event_id: None,
         input_position: None,
         failed_delivery_event_id: None,
+        operation_subject_event_id: commit.error.operation_subject_event_id(),
         phase: commit.phase,
         kind: commit.error.kind(),
         destination_error_code: commit.error.destination_error_code().cloned(),

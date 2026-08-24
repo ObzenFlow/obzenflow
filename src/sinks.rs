@@ -16,17 +16,21 @@
 //!
 //! ## CSV sinks
 //!
-//! [`CsvSink<T>`](CsvSink) (via [`CsvSinkBuilder<T>`](CsvSinkBuilder)) writes
-//! typed events to CSV files on disk. The output destination is controlled by
-//! [`OutputDestination`].
+//! [`CsvSink`] writes typed events to CSV files on disk. A user-owned
+//! [`CsvProjection`] value declares the accepted input and CSV-facing row with
+//! associated types, matching the framework's handler style.
 
 /// Console and CSV sinks, formatters, and output configuration.
 pub use obzenflow_adapters::sinks::{
-    console, debug, json, json_pretty, table, ConsoleSink, CsvSink, CsvSinkBuilder, DebugFormatter,
-    Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination, TableFormatter,
+    console, debug, json, json_pretty, table, ConsoleSink, CsvProjection, CsvSink, CsvSinkBuilder,
+    DebugFormatter, Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination,
+    TableFormatter,
 };
 
 /// Feature-gated PostgreSQL sink and its typed parameter-binding surface.
+///
+/// The connector witnesses its exact input type, so the generic `sink!` arm
+/// proves arrow equality before erasing the writer.
 #[cfg(feature = "postgres")]
 pub mod postgres {
     pub use obzenflow_adapters::sinks::postgres::*;

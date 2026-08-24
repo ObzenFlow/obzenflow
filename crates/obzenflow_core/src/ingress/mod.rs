@@ -33,5 +33,6 @@ pub use binding::{FilledHostedIngress, HostedIngressAlreadyBound, HostedIngressB
 pub use boundary::IngressBoundaryMiddleware;
 pub use key::IngressKey;
 pub use submission::{
-    BatchSubmission, EventSubmission, IngressContext, SubmissionIngressContext, SubmissionResponse,
+    BatchSubmission, EventSubmission, IngressContext, SubmissionIngressContext,
+    SubmissionPayloadKind, SubmissionResponse,
 };

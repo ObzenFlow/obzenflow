@@ -2,11 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow::sinks::CsvSink;
-use obzenflow::sources::{CsvRow, CsvSource};
+use obzenflow::sinks::{CsvProjection, CsvSink};
+use obzenflow::sources::{CsvDecoder, CsvRow, CsvRowDecoder, CsvSource};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::stages::common::HandlerError;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
@@ -32,6 +33,37 @@ impl TypedPayload for FlightData {
     const SCHEMA_VERSION: u32 = 1;
 }
 
+#[derive(Clone, Debug)]
+struct FlightCsv;
+
+impl CsvDecoder for FlightCsv {
+    type Output = FlightData;
+}
+
+#[derive(Clone, Debug)]
+struct FlightProjection;
+
+impl CsvProjection for FlightProjection {
+    type Input = FlightData;
+    type Row = FlightData;
+
+    fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError> {
+        Ok(input)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CsvRowProjection;
+
+impl CsvProjection for CsvRowProjection {
+    type Input = CsvRow;
+    type Row = CsvRow;
+
+    fn project(&self, input: Self::Input) -> Result<Self::Row, HandlerError> {
+        Ok(input)
+    }
+}
+
 #[tokio::test]
 async fn csv_source_to_sink_roundtrip_skips_bad_rows() -> anyhow::Result<()> {
     let temp_dir = workspace_tempdir()?;
@@ -48,9 +80,9 @@ async fn csv_source_to_sink_roundtrip_skips_bad_rows() -> anyhow::Result<()> {
     let output_path_for_flow = output_path.clone();
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source = CsvSource::typed_from_file::<FlightData>(&input_path_for_flow)
-            .map_err(connector_build_error)?;
-        let sink = CsvSink::<FlightData>::builder()
+        let source =
+            CsvSource::from_file(FlightCsv, &input_path_for_flow).map_err(connector_build_error)?;
+        let sink = CsvSink::builder(FlightProjection)
             .path(&output_path_for_flow)
             .auto_flush(true)
             .build()
@@ -99,8 +131,9 @@ async fn csv_untyped_source_to_sink_roundtrip_preserves_strings() -> anyhow::Res
     let output_path_for_flow = output_path.clone();
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source = CsvSource::from_file(&input_path_for_flow).map_err(connector_build_error)?;
-        let sink = CsvSink::<CsvRow>::builder()
+        let source = CsvSource::from_file(CsvRowDecoder, &input_path_for_flow)
+            .map_err(connector_build_error)?;
+        let sink = CsvSink::builder(CsvRowProjection)
             .path(&output_path_for_flow)
             .auto_flush(true)
             .build()
@@ -146,9 +179,9 @@ async fn csv_source_to_buffered_sink_roundtrip_flushes_on_eof() -> anyhow::Resul
     let output_path_for_flow = output_path.clone();
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source = CsvSource::typed_from_file::<FlightData>(&input_path_for_flow)
-            .map_err(connector_build_error)?;
-        let sink = CsvSink::<FlightData>::builder()
+        let source =
+            CsvSource::from_file(FlightCsv, &input_path_for_flow).map_err(connector_build_error)?;
+        let sink = CsvSink::builder(FlightProjection)
             .path(&output_path_for_flow)
             .buffer_size(100)
             .auto_flush(false)

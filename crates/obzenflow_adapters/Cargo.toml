@@ -25,10 +25,11 @@ csv = { workspace = true }
 http = { workspace = true }
 ring = { workspace = true }
 sqlx = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 
 [features]
 default = []
-postgres = ["dep:sqlx"]
+postgres = ["dep:sqlx", "dep:url"]
 test-support = ["obzenflow_runtime/test-support"]
 
 [dev-dependencies]
@@ -40,4 +41,9 @@ tempfile = { workspace = true }
 [[test]]
 name = "postgres_sink_conformance_test"
 path = "tests/postgres_sink_conformance_test.rs"
+required-features = ["postgres", "test-support"]
+
+[[test]]
+name = "postgres_sink_driver_test"
+path = "tests/postgres_sink_driver_test.rs"
 required-features = ["postgres", "test-support"]

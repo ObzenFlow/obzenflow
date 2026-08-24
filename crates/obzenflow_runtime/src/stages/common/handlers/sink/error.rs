@@ -4,10 +4,11 @@
 
 //! Narrow connector-author error authority.
 
-use super::typed::SinkWriteReport;
+use super::typed::{PendingOperationSubject, PendingSinkInput, SinkWriteReport};
 use crate::stages::common::handler_error::HandlerError;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 pub use obzenflow_core::event::{SinkDestinationErrorCode, SinkWritePhase};
+use obzenflow_core::EventId;
 use std::fmt;
 use std::time::Duration;
 
@@ -15,10 +16,34 @@ const MAX_SINK_OPERATION_DETAIL_BYTES: usize = 512;
 
 /// An operational connector error. Framework and protocol fatality variants
 /// cannot be constructed through this type.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SinkOperationError {
     error: HandlerError,
     destination_error_code: Option<SinkDestinationErrorCode>,
+    operation_subject: Option<SinkOperationSubject>,
+}
+
+#[derive(Clone, Copy)]
+enum SinkOperationSubject {
+    Pending(PendingOperationSubject),
+    Validated(EventId),
+    InvalidMultiple,
+}
+
+impl fmt::Debug for SinkOperationSubject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Deferred")
+    }
+}
+
+impl fmt::Debug for SinkOperationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SinkOperationError")
+            .field("error", &self.error)
+            .field("destination_error_code", &self.destination_error_code)
+            .field("operation_subject", &self.operation_subject)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,12 +116,60 @@ impl SinkOperationError {
         Self {
             error,
             destination_error_code: None,
+            operation_subject: None,
         }
     }
 
     pub fn with_destination_error_code(mut self, code: SinkDestinationErrorCode) -> Self {
         self.destination_error_code = Some(code);
         self
+    }
+
+    /// Attribute this connector operation failure to an earlier deferred
+    /// input without granting authority to settle that input.
+    ///
+    /// The sealed writer adapter validates the opaque witness against its live
+    /// stage registry. Foreign, current, stale, settled, or multiply-authored
+    /// subjects become protocol fatalities before durable journalling.
+    pub fn with_deferred_operation_subject(mut self, pending: &PendingSinkInput) -> Self {
+        self.operation_subject = Some(match self.operation_subject {
+            None => SinkOperationSubject::Pending(pending.operation_subject()),
+            Some(_) => SinkOperationSubject::InvalidMultiple,
+        });
+        self
+    }
+
+    pub(super) fn has_pending_operation_subject(&self) -> bool {
+        self.operation_subject.is_some()
+    }
+
+    pub(super) fn take_pending_operation_subject(
+        &mut self,
+    ) -> Result<Option<PendingOperationSubject>, ()> {
+        match self.operation_subject.take() {
+            None => Ok(None),
+            Some(SinkOperationSubject::Pending(subject)) => Ok(Some(subject)),
+            Some(SinkOperationSubject::Validated(_) | SinkOperationSubject::InvalidMultiple) => {
+                Err(())
+            }
+        }
+    }
+
+    pub(super) fn set_validated_operation_subject(&mut self, event_id: EventId) {
+        debug_assert!(self.operation_subject.is_none());
+        self.operation_subject = Some(SinkOperationSubject::Validated(event_id));
+    }
+
+    /// Return the validated deferred operation subject, if the sealed adapter
+    /// accepted one. Connector-authored but not yet validated witnesses remain
+    /// opaque and return `None`.
+    pub fn operation_subject_event_id(&self) -> Option<EventId> {
+        match self.operation_subject {
+            Some(SinkOperationSubject::Validated(event_id)) => Some(event_id),
+            None
+            | Some(SinkOperationSubject::Pending(_))
+            | Some(SinkOperationSubject::InvalidMultiple) => None,
+        }
     }
 
     pub fn kind(&self) -> ErrorKind {
@@ -185,6 +258,16 @@ impl SinkWriteFailure {
         Self::new(SinkWriteFailureDisposition::Poisoned, phase, error)
     }
 
+    /// Poison the materialisation because an earlier deferred input was the
+    /// subject of the failed operation, even though rollback was acknowledged.
+    pub fn poisoned_by_deferred(
+        pending: &PendingSinkInput,
+        phase: SinkWritePhase,
+        error: SinkOperationError,
+    ) -> Self {
+        Self::poisoned(phase, error.with_deferred_operation_subject(pending))
+    }
+
     fn new(
         disposition: SinkWriteFailureDisposition,
         phase: SinkWritePhase,
@@ -207,6 +290,14 @@ impl SinkWriteFailure {
 
     pub fn error(&self) -> &SinkOperationError {
         &self.error
+    }
+
+    pub(super) fn error_mut(&mut self) -> &mut SinkOperationError {
+        &mut self.error
+    }
+
+    pub(super) fn has_pending_operation_subject(&self) -> bool {
+        self.error.has_pending_operation_subject()
     }
 }
 

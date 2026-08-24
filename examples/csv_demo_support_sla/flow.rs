@@ -7,8 +7,8 @@ use super::domain::{
 };
 use super::fixtures;
 use anyhow::{Context, Result};
-use obzenflow::sinks::CsvSink;
-use obzenflow::sources::CsvSource;
+use obzenflow::sinks::{CsvProjection, CsvSink};
+use obzenflow::sources::{CsvDecoder, CsvSource};
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
@@ -41,6 +41,22 @@ impl DemoPaths {
             journals_dir,
         })
     }
+}
+
+/// A source decoder owns the domain type it emits, just as a transform handler
+/// owns its input and output types.
+#[derive(Clone, Debug)]
+struct CustomerCsv;
+
+impl CsvDecoder for CustomerCsv {
+    type Output = Customer;
+}
+
+#[derive(Clone, Debug)]
+struct TicketCsv;
+
+impl CsvDecoder for TicketCsv {
+    type Output = Ticket;
 }
 
 #[derive(Clone, Debug)]
@@ -110,10 +126,24 @@ impl TypedJoinHandler for SupportSlaJoin {
     }
 }
 
+/// A CSV projection owns its accepted domain type in the same way as the
+/// transform and join handlers above.
+#[derive(Clone, Debug)]
+struct EnrichedTicketCsv;
+
+impl CsvProjection for EnrichedTicketCsv {
+    type Input = EnrichedTicket;
+    type Row = EnrichedTicket;
+
+    fn project(&self, ticket: Self::Input) -> Result<Self::Row, HandlerError> {
+        Ok(ticket)
+    }
+}
+
 fn build_flow(
-    customers: CsvSource<Customer>,
-    tickets: CsvSource<Ticket>,
-    output_sink: CsvSink<EnrichedTicket>,
+    customers: CsvSource<CustomerCsv>,
+    tickets: CsvSource<TicketCsv>,
+    output_sink: CsvSink<EnrichedTicketCsv>,
     journals_dir: PathBuf,
 ) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
@@ -145,13 +175,15 @@ fn build_flow(
 }
 
 pub fn run_example(paths: DemoPaths, presentation: Presentation) -> Result<()> {
-    let customers = CsvSource::typed_from_file::<Customer>(&paths.customers_csv)?;
-    let tickets = CsvSource::typed_builder::<Ticket>()
+    let customers = CsvSource::builder(CustomerCsv)
+        .path(&paths.customers_csv)
+        .build()?;
+    let tickets = CsvSource::builder(TicketCsv)
         .path(&paths.tickets_csv)
         .chunk_size(25)
         .build()?;
 
-    let output_sink = CsvSink::<EnrichedTicket>::builder()
+    let output_sink = CsvSink::builder(EnrichedTicketCsv)
         .path(&paths.output_csv)
         .columns([
             "ticket_id",

@@ -8,7 +8,7 @@ Provides concrete typed policy, observer, source, sink, and monitoring implement
 
 - **Typed policy and observer attachments.** Control factories for rate limiting, circuit breaking, and effect resilience bind at supported live-I/O surfaces. Seven ordinary observer helpers bind read-only, live-only callbacks at framework-owned interception points through the `flow!` macro.
 - **Source adapters.** Ready-to-use source handlers: CSV file reader, HTTP pull/poll sources with pluggable decoders, and an HTTP ingestion source for server-mode flows.
-- **Sink adapters.** Console sink (with JSON, debug, and table formatters) and CSV file sink.
+- **Sink adapters.** Console sink (with JSON, debug, and table formatters), CSV file sink, and the feature-gated PostgreSQL sink. The PostgreSQL connector accepts a typed transport policy, one generated and quoted primary target, an explicit post-target SQL body, and a separate parameter binder. It opens one isolated one-slot pool per materialised writer and prepares the statement before accepting input.
 - **Monitoring exporters.** Prometheus exporter out of the box, with a console summary exporter for local development. The `MetricsExporter` trait makes it straightforward to build custom exporters for other backends.
 
 The built-in adapters are intentionally small in number. To create a source,

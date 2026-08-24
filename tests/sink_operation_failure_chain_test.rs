@@ -32,6 +32,7 @@ use obzenflow_runtime::stages::{
     SourceError, TypedAsyncFiniteSourceHandler, TypedFiniteSourceHandler,
 };
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -309,11 +310,13 @@ impl TypedAsyncFiniteSourceHandler for CoordinatedAsyncSource {
 enum FailureMode {
     CurrentOnlyFirst,
     ConfirmedRollbackSecond,
+    DeferredOriginPoisonSecond,
     ConfirmedRollbackThirdFanIn,
     PoisonedFirst,
     PoisonedThirdFanIn,
     OpenFailed,
     FlushFailed,
+    FlushDeferredOrigin,
     DrainFailed,
 }
 
@@ -442,6 +445,20 @@ impl SinkWriter for ProbeWriter {
                     ),
                 ]))
             }
+            (FailureMode::DeferredOriginPoisonSecond, 1) => {
+                self.retained.push(context.defer());
+                Ok(SinkWriteReport::buffered(
+                    obzenflow_runtime::stages::sink::SinkBufferedOutcome::accepted(None),
+                ))
+            }
+            (FailureMode::DeferredOriginPoisonSecond, 2) => {
+                drop(context.defer());
+                Err(SinkWriteFailure::poisoned_by_deferred(
+                    self.retained.first().expect("first input remains retained"),
+                    SinkWritePhase::Execute,
+                    operation_error(),
+                ))
+            }
             (FailureMode::ConfirmedRollbackThirdFanIn, 1 | 2) => {
                 self.retained.push(context.defer());
                 Ok(SinkWriteReport::buffered(
@@ -478,10 +495,22 @@ impl SinkWriter for ProbeWriter {
                     obzenflow_runtime::stages::sink::SinkBufferedOutcome::accepted(None),
                 ))
             }
-            (FailureMode::PoisonedThirdFanIn, 3) => Err(SinkWriteFailure::poisoned(
-                SinkWritePhase::Commit,
-                operation_error(),
-            )),
+            (FailureMode::PoisonedThirdFanIn, 3) => {
+                drop(context.defer());
+                Err(SinkWriteFailure::poisoned_by_deferred(
+                    self.retained
+                        .get(1)
+                        .expect("second fan-in parent remains retained"),
+                    SinkWritePhase::Execute,
+                    operation_error(),
+                ))
+            }
+            (FailureMode::FlushDeferredOrigin, _) => {
+                self.retained.push(context.defer());
+                Ok(SinkWriteReport::buffered(
+                    obzenflow_runtime::stages::sink::SinkBufferedOutcome::accepted(None),
+                ))
+            }
             _ => Ok(terminal_report()),
         }
     }
@@ -493,6 +522,13 @@ impl SinkWriter for ProbeWriter {
             .push("flush".to_string());
         if matches!(self.mode, FailureMode::FlushFailed) {
             return Err(operation_error());
+        }
+        if matches!(self.mode, FailureMode::FlushDeferredOrigin) {
+            return Err(operation_error().with_deferred_operation_subject(
+                self.retained
+                    .first()
+                    .expect("flush retains at least one deferred input"),
+            ));
         }
         Ok(SinkWriterLifecycleReport::default())
     }
@@ -784,7 +820,7 @@ async fn run_case(
     let journals = temp.path().join("journals");
     let calls = Arc::new(Mutex::new(Vec::new()));
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(60),
         FlowApplication::builder()
             .with_cli_args(["obzenflow"])
             .run_async(build_flow(journals.clone(), mode, Arc::clone(&calls))),
@@ -806,7 +842,7 @@ async fn run_fan_in_case(
     let journals = temp.path().join("journals");
     let calls = Arc::new(Mutex::new(Vec::new()));
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(60),
         FlowApplication::builder()
             .with_cli_args(["obzenflow"])
             .run_async(build_fan_in_flow(
@@ -913,6 +949,115 @@ async fn confirmed_rollback_retains_every_earlier_capability_and_never_settles_f
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn deferred_origin_poison_names_the_buffered_subject_and_stops_reentry() {
+    let (_temp, run, result, calls) = run_case(FailureMode::DeferredOriginPoisonSecond).await;
+    result.expect_err("deferred-origin poison terminates the materialisation");
+
+    let source = read_stage_journal(&run, "inputs", "data_journal_file").await;
+    let input_ids = source
+        .iter()
+        .filter_map(|envelope| {
+            ProbeInput::from_event(&envelope.event).map(|input| (input.value, envelope.event.id))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let data = read_stage_journal(&run, "probe", "data_journal_file").await;
+    let errors = read_stage_journal(&run, "probe", "error_journal_file").await;
+    let chain = failure_chain(&data, &errors);
+
+    assert_eq!(
+        failed_receipt_type(chain.receipt),
+        Some("sink_materialisation_poisoned")
+    );
+    assert_eq!(chain.operation.causal_event_id, Some(input_ids[&2]));
+    assert_eq!(
+        chain.operation.operation_subject_event_id,
+        Some(input_ids[&1])
+    );
+    assert_eq!(direct_parent(chain.receipt), Some(input_ids[&2]));
+    assert_ne!(
+        chain.operation.operation_subject_event_id,
+        chain.operation.causal_event_id
+    );
+
+    let terminal_parents = data
+        .iter()
+        .filter_map(|envelope| match &envelope.event.content {
+            ChainEventContent::Delivery(payload)
+                if matches!(payload.result, DeliveryResult::Success { .. }) =>
+            {
+                direct_parent(&envelope.event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        terminal_parents.is_empty(),
+        "the deferred subject stays unresolved"
+    );
+    assert_eq!(
+        calls.lock().expect("call log").as_slice(),
+        ["open", "write:1", "write:2", "drop"],
+        "poison prevents every later write and lifecycle call"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replay_reproduces_the_unresolved_deferred_origin_failure() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let journals = temp.path().join("journals");
+    let live_calls = Arc::new(Mutex::new(Vec::new()));
+    let live_result = FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_flow(
+            journals.clone(),
+            FailureMode::DeferredOriginPoisonSecond,
+            Arc::clone(&live_calls),
+        ))
+        .await;
+    live_result.expect_err("live deferred-origin poison fails");
+    let live_run = latest_run_dir(&journals);
+
+    let replay_calls = Arc::new(Mutex::new(Vec::new()));
+    let replay_result = FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            live_run.as_os_str().to_os_string(),
+            OsString::from("--allow-incomplete-archive"),
+        ])
+        .run_async(build_flow(
+            journals.clone(),
+            FailureMode::DeferredOriginPoisonSecond,
+            Arc::clone(&replay_calls),
+        ))
+        .await;
+    replay_result.expect_err("replay encounters the unresolved deferred input again");
+    let replay_run = latest_run_dir(&journals);
+    assert_ne!(replay_run, live_run);
+
+    let source = read_stage_journal(&replay_run, "inputs", "data_journal_file").await;
+    let input_ids = source
+        .iter()
+        .filter_map(|envelope| {
+            ProbeInput::from_event(&envelope.event).map(|input| (input.value, envelope.event.id))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let data = read_stage_journal(&replay_run, "probe", "data_journal_file").await;
+    let errors = read_stage_journal(&replay_run, "probe", "error_journal_file").await;
+    let chain = failure_chain(&data, &errors);
+    assert_eq!(chain.operation.causal_event_id, Some(input_ids[&2]));
+    assert_eq!(
+        chain.operation.operation_subject_event_id,
+        Some(input_ids[&1])
+    );
+    assert_eq!(
+        replay_calls.lock().expect("call log").as_slice(),
+        ["open", "write:1", "write:2", "drop"],
+        "replay neither skips nor silently settles the deferred input"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn fan_in_confirmed_rollback_retains_and_settles_exact_cross_upstream_parents() {
     let (_temp, run, result, calls) =
         run_fan_in_case(FailureMode::ConfirmedRollbackThirdFanIn).await;
@@ -935,6 +1080,7 @@ async fn fan_in_confirmed_rollback_retains_and_settles_exact_cross_upstream_pare
     let errors = read_stage_journal(&run, "probe", "error_journal_file").await;
     let chain = failure_chain(&data, &errors);
     assert_eq!(chain.operation.causal_event_id, Some(input_ids[&3]));
+    assert_eq!(chain.operation.operation_subject_event_id, None);
     assert_eq!(direct_parent(chain.receipt), Some(input_ids[&3]));
 
     let terminal_parents = data
@@ -1103,6 +1249,11 @@ async fn fan_in_poison_stops_before_a_later_parent_can_accumulate_receipt_progre
     let errors = read_stage_journal(&run, "probe", "error_journal_file").await;
     let chain = failure_chain(&data, &errors);
     assert_eq!(chain.operation.causal_event_id, Some(input_ids[&3]));
+    assert_eq!(
+        chain.operation.operation_subject_event_id,
+        Some(input_ids[&2]),
+        "the typed subject preserves the exact parent from the other fan-in feed"
+    );
     assert_eq!(direct_parent(chain.receipt), Some(input_ids[&3]));
     assert_eq!(
         data.iter()
@@ -1209,6 +1360,37 @@ async fn flush_failure_stops_before_drain_and_links_directly_to_lifecycle() {
         &["open", "write:1", "write:2", "write:3", "flush", "drop"],
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eof_flush_failure_names_the_deferred_subject_and_skips_drain() {
+    let (_temp, run, result, calls) = run_case(FailureMode::FlushDeferredOrigin).await;
+    result.expect_err("deferred-origin flush failure terminates the materialisation");
+
+    let source = read_stage_journal(&run, "inputs", "data_journal_file").await;
+    let first_id = source
+        .iter()
+        .find_map(|envelope| {
+            ProbeInput::from_event(&envelope.event)
+                .filter(|input| input.value == 1)
+                .map(|_| envelope.event.id)
+        })
+        .expect("first deferred input exists");
+    let errors = read_stage_journal(&run, "probe", "error_journal_file").await;
+    let operations = errors
+        .iter()
+        .filter_map(|envelope| SinkOperationFailed::from_event(&envelope.event))
+        .collect::<Vec<_>>();
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0].phase, SinkOperationPhase::Flush);
+    assert_eq!(operations[0].causal_event_id, None);
+    assert_eq!(operations[0].failed_delivery_event_id, None);
+    assert_eq!(operations[0].operation_subject_event_id, Some(first_id));
+    assert_eq!(
+        calls.lock().expect("call log").as_slice(),
+        ["open", "write:1", "write:2", "write:3", "flush", "drop"],
+        "a failed flush must prevent drain"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

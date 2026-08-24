@@ -49,6 +49,87 @@ fn postgres_stays_in_the_feature_gated_adapter_boundary() {
         .find(|dependency| dependency["name"] == "sqlx")
         .expect("adapters declares SQLx");
     assert_eq!(sqlx["optional"], true, "SQLx must remain optional");
+    assert_eq!(
+        sqlx["uses_default_features"], false,
+        "SQLx default features must remain disabled"
+    );
+    let sqlx_features = sqlx["features"]
+        .as_array()
+        .expect("SQLx dependency features")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        sqlx_features.contains(&"runtime-tokio")
+            && sqlx_features.contains(&"postgres")
+            && sqlx_features.contains(&"tls-rustls-ring-native-roots"),
+        "SQLx must use Tokio, PostgreSQL, and Rustls native roots"
+    );
+    assert!(
+        sqlx_features
+            .iter()
+            .all(|feature| !feature.contains("webpki")),
+        "the PostgreSQL feature path must not select embedded WebPKI roots"
+    );
+    let consumer_source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/postgres_public_consumer_test.rs"),
+    )
+    .expect("read public PostgreSQL consumer fixture");
+    assert!(
+        !consumer_source.lines().any(|line| {
+            let code = line.split("//").next().unwrap_or_default();
+            code.contains("sqlx::") || code.contains("extern crate sqlx")
+        }),
+        "the public consumer fixture must not import SQLx"
+    );
+
+    let example_files = [
+        "examples/postgres_sink_payments/main.rs",
+        "examples/postgres_sink_payments/domain.rs",
+        "examples/postgres_sink_payments/flow.rs",
+    ];
+    let mut example_source = String::new();
+    for example in example_files {
+        let source =
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(example))
+                .unwrap_or_else(|error| {
+                    panic!("read shipped PostgreSQL example {example}: {error}")
+                });
+        let upper_source = source.to_ascii_uppercase();
+        for forbidden in [
+            "CREATE SCHEMA",
+            "CREATE TABLE",
+            "CREATE INDEX",
+            "CREATE FUNCTION",
+            "CREATE TRIGGER",
+            "ALTER TABLE",
+            "DROP TABLE",
+            "DROP FUNCTION",
+            "DROP TRIGGER",
+            "TRUNCATE TABLE",
+        ] {
+            assert!(
+                !upper_source.contains(forbidden),
+                "shipped PostgreSQL example {example} must not own DDL `{forbidden}`"
+            );
+        }
+        example_source.push_str(&source);
+    }
+    for forbidden in [
+        "test-support",
+        "sqlx::",
+        "PostgresTestProbe",
+        "SinkExternalCallKind",
+        "--inspect",
+        "POSTGRES_SQL_EVIDENCE_CANARY",
+        "inspect_destination",
+    ] {
+        assert!(
+            !example_source.contains(forbidden),
+            "the PostgreSQL learning example must not contain proof concern `{forbidden}`"
+        );
+    }
 
     let root = packages
         .iter()

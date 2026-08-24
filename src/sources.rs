@@ -17,24 +17,40 @@
 //! ## CSV sources
 //!
 //! [`CsvSource`] (via [`CsvSourceBuilder`]) reads rows from CSV files on disk.
-//! Each row is emitted as a [`CsvRow`] event.
+//! A user-owned [`CsvDecoder`] value declares the emitted [`CsvDecoder::Output`].
+//! Its default method uses serde when the CSV and domain shapes match;
+//! [`CsvRowDecoder`] provides string-preserving [`CsvRow`] output.
+//!
+//! ## Hosted ingress sources
+//!
+//! [`HostedIngressSource`] receives admitted push submissions. A user-owned
+//! [`IngressDecoder`] value declares the emitted [`IngressDecoder::Output`],
+//! matching the output ownership used by CSV and HTTP pull decoders. Use the
+//! infra layer's `ingress_source(decoder, config)` or
+//! `http_ingress(decoder, config)` helper to construct it.
 //!
 //! ## HTTP pull sources
 //!
 //! [`HttpPullSource`] performs a single HTTP request and decodes the response
-//! body using a [`PullDecoder`]. [`HttpPollSource`] wraps the same logic in a
-//! polling loop controlled by [`HttpPollConfig`].
+//! body using a [`PullDecoder`], whose associated [`PullDecoder::Output`]
+//! declares the emitted domain type. [`HttpPollSource`] wraps the same logic in
+//! a polling loop controlled by [`HttpPollConfig`].
 //!
 //! Both require the `http-pull` feature flag
 //! (`obzenflow_infra/reqwest-client`).
 
-/// CSV file source and its row type.
-pub use obzenflow_adapters::sources::{CsvRow, CsvSource, CsvSourceBuilder};
+/// CSV file source, decoder contract, and string-preserving row support.
+pub use obzenflow_adapters::sources::{
+    CsvDecodeError, CsvDecoder, CsvRecord, CsvRow, CsvRowDecoder, CsvSource, CsvSourceBuilder,
+};
 
 /// In-process source adapters constructed from values and producer functions.
 pub use obzenflow_adapters::sources::{
     async_finite, async_infinite, finite, finite_from_fn, infinite, once,
 };
+
+/// Hosted-ingress source and its application-owned decoder contract.
+pub use obzenflow_adapters::sources::{HostedIngressSource, IngressDecodeError, IngressDecoder};
 
 /// HTTP pull and poll sources, decoders, and configuration types.
 pub use obzenflow_adapters::sources::{

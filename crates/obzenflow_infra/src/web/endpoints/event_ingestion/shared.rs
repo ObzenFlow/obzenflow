@@ -7,7 +7,7 @@ use obzenflow_core::id::SystemId;
 use obzenflow_core::ingress::{
     EdgeShedReason, EventSubmission, HostedIngressBindingSlot, IngressAdmissionDecision,
     IngressAdmissionOutcome, IngressAttemptContext, IngressAttemptSeq, IngressBoundaryMiddleware,
-    IngressRefusalReason, SubmissionIngressContext,
+    IngressRefusalReason, SubmissionIngressContext, SubmissionPayloadKind,
 };
 use obzenflow_core::journal::Journal;
 use obzenflow_core::web::{ManagedResponse, Response, WebError};
@@ -349,13 +349,31 @@ impl IngestionState {
     /// Submit one already-deserialized, already-authorized event through the
     /// protocol-neutral ingress path.
     pub async fn submit_one(&self, submission: EventSubmission) -> IngressSubmitOutcome {
+        self.submit_one_with_payload_kind(submission, SubmissionPayloadKind::External)
+            .await
+    }
+
+    /// Submit a value that already has the source decoder's typed output shape.
+    pub(crate) async fn submit_typed_output(
+        &self,
+        submission: EventSubmission,
+    ) -> IngressSubmitOutcome {
+        self.submit_one_with_payload_kind(submission, SubmissionPayloadKind::TypedOutput)
+            .await
+    }
+
+    async fn submit_one_with_payload_kind(
+        &self,
+        submission: EventSubmission,
+        payload_kind: SubmissionPayloadKind,
+    ) -> IngressSubmitOutcome {
         let attempt = IngressAttemptContext {
             attempt_seq: self.next_attempt_seq(),
             request_count: 1,
             event_count: 1,
             batch_count: 0,
         };
-        self.submit_one_with_attempt(submission, attempt, None)
+        self.submit_one_with_attempt(submission, attempt, None, payload_kind)
             .await
     }
 
@@ -364,6 +382,7 @@ impl IngestionState {
         mut submission: EventSubmission,
         attempt: IngressAttemptContext,
         batch_index: Option<usize>,
+        payload_kind: SubmissionPayloadKind,
     ) -> IngressSubmitOutcome {
         if !self.is_ready() {
             return self
@@ -470,6 +489,7 @@ impl IngestionState {
             ingress_key: self.ingress_key.clone(),
             batch_index,
             attempt_seq: attempt.attempt_seq,
+            payload_kind,
         });
         permit.send(submission);
         if let Some(boundary) = accepted_boundary {

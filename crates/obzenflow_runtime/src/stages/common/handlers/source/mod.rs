@@ -17,6 +17,7 @@ pub use erased::{
 };
 pub use traits::SourceError;
 pub use typed::{
-    HostedIngressSource, SourceObservationSink, TypedAsyncFiniteSourceHandler,
-    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+    HostedIngressSource, IngressDecodeError, IngressDecoder, SourceObservationSink,
+    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
+    TypedInfiniteSourceHandler,
 };
