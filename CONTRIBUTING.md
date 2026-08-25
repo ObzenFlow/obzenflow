@@ -45,7 +45,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 # Tests
 cargo nextest run --workspace --profile ci-fast
 cargo nextest run --workspace --profile ci-full
-cargo nextest run --workspace --profile ci-fast --features console,http-pull,ai
+cargo nextest run --workspace --profile ci-fast --features console,http-pull,ai,postgres
 
 # Dependency policy checks (CI runs these)
 cargo deny --all-features check
@@ -59,7 +59,7 @@ ObzenFlow uses `cargo-nextest` as the supported workspace test runner. The CI te
 | CI job / matrix entry | Pull requests | Pushes to `main` and manual dispatch | What it proves |
 | --- | --- | --- | --- |
 | `test` / `default` | `ci-fast`, no extra features | `ci-full`, no extra features | The workspace passes without optional production features. |
-| `test` / `production-features` | `ci-fast`, `--features console,http-pull,ai` | `ci-full`, `--features console,http-pull,ai` | The explicitly supported production feature set passes. |
+| `test` / `production-features` | `ci-fast`, `--features console,http-pull,ai,postgres` | `ci-full`, `--features console,http-pull,ai,postgres` | The explicitly supported production feature set passes. |
 | `test-test-support` | `ci-fast`, `--features test-support`, targeted integration-test binaries | `ci-full`, `--features test-support`, targeted integration-test binaries | The test-only support helpers compile and work in real tests. |
 
 `ci-fast` is the required PR gate. `ci-full` is the merge/manual gate and includes the long-running binaries excluded from `ci-fast`. The `production-features` entry also runs a guard that compares the workflow feature list to the root `Cargo.toml` production features; if it fails, either update the workflow matrix or mark the feature as intentionally test-only in the guard allowlist.
@@ -68,7 +68,7 @@ Expanded, the normal PR test matrix is:
 
 ```bash
 cargo nextest run --workspace --locked --profile ci-fast
-cargo nextest run --workspace --locked --profile ci-fast --features console,http-pull,ai
+cargo nextest run --workspace --locked --profile ci-fast --features console,http-pull,ai,postgres
 ```
 
 The separate `test-test-support` job is narrower than the normal matrix. It exists only to prove that test-only helpers behind `--features test-support` still compile and work. It runs these integration-test binaries:
@@ -91,7 +91,7 @@ Before opening a PR that touches runtime or tests, run the same profile that CI 
 
 ```bash
 cargo nextest run --workspace --locked --profile ci-fast
-cargo nextest run --workspace --locked --profile ci-fast --features console,http-pull,ai
+cargo nextest run --workspace --locked --profile ci-fast --features console,http-pull,ai,postgres
 ```
 
 Use `ci-full` locally when you change slow e2e coverage, nextest filters, test groups, or timeout policy.

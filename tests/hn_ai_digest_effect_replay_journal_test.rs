@@ -19,6 +19,9 @@ mod domain;
 mod hn_demo_flow;
 #[path = "../examples/hn_ai_digest_demo/mock_server.rs"]
 mod mock_server;
+#[cfg(feature = "e2e")]
+#[path = "support/postgres.rs"]
+mod postgres_support;
 #[path = "../examples/hn_ai_digest_demo/util.rs"]
 mod util;
 
@@ -1384,6 +1387,12 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "let chat_target = chat.target().clone();",
         "token_estimator: chat.estimator().source(),",
         "let hn_source = HttpPullSource::new(decoder, http_source_config);",
+        "DigestOutput::Console =>",
+        "DigestOutput::Postgres =>",
+        ".insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)?",
+        ".batch_size(1)?",
+        ".redelivery_safety(SinkRedeliverySafety::DuplicateSensitive)",
+        "digest_summary = digest_summary;",
         "map: [FormattedStory] -> HnDigestGroupSummary",
         "reduce: (HnTopStories, [HnDigestGroupSummary]) -> HnDigestSummary",
         "uses at_least_once(ChatCompletion)",
@@ -1405,7 +1414,7 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "std::env",
         "env_var(",
         "read_to_string(",
-        "bindings:",
+        "\n            bindings:",
         "effect_ports: effect_ports,",
         "effect_ports,",
         "install_into",
@@ -1431,6 +1440,116 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
     assert!(checked_config.contains("[ai.models]"));
     assert!(checked_config.contains("provider = \"ollama\""));
     assert!(checked_config.contains("model = \"llama3.1:8b\""));
+}
+
+#[tokio::test]
+async fn hn_materialization_evaluates_one_selector_and_constructs_only_its_sink() {
+    let console_temp = tempfile::tempdir().expect("temporary console materialization root");
+    let console_probe = hn_demo_flow::HnSinkSelectionProbe::stopping();
+    let console_flow = hn_demo_flow::build_flow_definition(
+        config::HnRunInputs {
+            digest_output: config::DigestOutput::Console,
+            postgres_digest: None,
+            max_stories: 5,
+            poll_timeout_secs: 10,
+            source_rate_limit: 1_000.0,
+            budget_per_group_override: Some(TokenCount::new(10_000)),
+            max_stories_per_group: Some(5),
+            interests: Some("runtime protocols".to_string()),
+            mode_label: "mock".to_string(),
+            base_url: "http://127.0.0.1:1/"
+                .parse()
+                .expect("cold console source URL is valid"),
+        },
+        hn_demo_flow::HnFlowOptions {
+            journal_base: console_temp.path().join("journals"),
+            chat_binding_override: Some(counting_chat_binding(
+                target(),
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
+                false,
+            )),
+            sink_selection_probe: Some(console_probe.clone()),
+        },
+    );
+    let console_error = match console_flow
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+    {
+        Ok(_) => panic!("the test-only console materialization stop must fire"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        console_error.to_string(),
+        "Stage resources build failed: HN sink selection probe stopped before connector open"
+    );
+    assert_eq!(console_probe.counts(), (1, 1, 0));
+
+    let postgres_temp = tempfile::tempdir().expect("temporary PostgreSQL materialization root");
+    let postgres_probe = hn_demo_flow::HnSinkSelectionProbe::stopping();
+    let postgres_connection = obzenflow::sinks::postgres::PostgresConnection::from_url(
+        "postgres://obzenflow:sentinel@localhost/obzenflow?sslmode=verify-full",
+        obzenflow::sinks::postgres::PostgresTransport::VerifiedTls,
+    )
+    .expect("cold verified-TLS fixture URL is valid without I/O");
+    let postgres_config = config::HnDigestPostgresConfig {
+        connection: postgres_connection,
+        schema: "hn_digest_fixture".to_string(),
+    };
+    let description = hn_demo_flow::describe_digest_postgres_sink(postgres_config.clone())
+        .expect("the locked PostgreSQL sink operation builds");
+    assert_eq!(
+        description.destination_name(),
+        Some("postgres.hn_digest_fixture.hn_digest_summaries")
+    );
+    assert_eq!(
+        description.default_method(),
+        Some(&DeliveryMethod::DatabaseInsert {
+            table: "hn_digest_fixture.hn_digest_summaries".to_string(),
+        })
+    );
+    assert_eq!(
+        description.redelivery_safety(),
+        Some(SinkRedeliverySafety::DuplicateSensitive)
+    );
+    let postgres_flow = hn_demo_flow::build_flow_definition(
+        config::HnRunInputs {
+            digest_output: config::DigestOutput::Postgres,
+            postgres_digest: Some(postgres_config),
+            max_stories: 5,
+            poll_timeout_secs: 10,
+            source_rate_limit: 1_000.0,
+            budget_per_group_override: Some(TokenCount::new(10_000)),
+            max_stories_per_group: Some(5),
+            interests: Some("runtime protocols".to_string()),
+            mode_label: "mock".to_string(),
+            base_url: "http://127.0.0.1:1/"
+                .parse()
+                .expect("cold PostgreSQL source URL is valid"),
+        },
+        hn_demo_flow::HnFlowOptions {
+            journal_base: postgres_temp.path().join("journals"),
+            chat_binding_override: Some(counting_chat_binding(
+                target(),
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
+                false,
+            )),
+            sink_selection_probe: Some(postgres_probe.clone()),
+        },
+    );
+    let postgres_error = match postgres_flow
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+    {
+        Ok(_) => panic!("the test-only PostgreSQL materialization stop must fire"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        postgres_error.to_string(),
+        "Stage resources build failed: HN sink selection probe stopped before connector open"
+    );
+    assert_eq!(postgres_probe.counts(), (1, 0, 1));
 }
 
 #[tokio::test]
@@ -2487,6 +2606,141 @@ async fn resume_closes_a_generated_plan_interrupted_between_snapshot_and_manifes
     assert_eq!(manifests[0].chunk_count, 5);
 }
 
+#[cfg(feature = "e2e")]
+#[tokio::test(flavor = "multi_thread")]
+async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt() {
+    let pool = postgres_support::pool().await;
+    let schema = postgres_support::required_env("OBZENFLOW_POSTGRES_HN_DIGEST_SCHEMA");
+    sqlx::query(&format!(
+        "TRUNCATE TABLE \"{schema}\".hn_digest_summaries RESTART IDENTITY"
+    ))
+    .execute(&pool)
+    .await
+    .expect("reset the isolated HN digest destination");
+
+    let temp = tempfile::tempdir().expect("temporary PostgreSQL HN-flow journal root");
+    let journal_base = temp.path().join("journals");
+    let server = mock_server::spawn_mock_hn_server()
+        .await
+        .expect("deterministic HN server starts");
+    let connection = obzenflow::sinks::postgres::PostgresConnection::from_env(
+        "OBZENFLOW_POSTGRES_URL",
+        obzenflow::sinks::postgres::PostgresTransport::VerifiedTls,
+    )
+    .expect("repository PostgreSQL URL satisfies verified TLS");
+    let inputs = config::HnRunInputs {
+        digest_output: config::DigestOutput::Postgres,
+        postgres_digest: Some(config::HnDigestPostgresConfig {
+            connection,
+            schema: schema.clone(),
+        }),
+        max_stories: 5,
+        poll_timeout_secs: 10,
+        source_rate_limit: 1_000.0,
+        budget_per_group_override: Some(TokenCount::new(10_000)),
+        max_stories_per_group: Some(5),
+        interests: Some("runtime protocols".to_string()),
+        mode_label: "mock".to_string(),
+        base_url: server.base_url(),
+    };
+    let config_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/hn_ai_digest_demo/obzenflow.toml");
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let sink_probe = hn_demo_flow::HnSinkSelectionProbe::default();
+
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--config"),
+            config_path.as_os_str().to_os_string(),
+        ])
+        .run_async(hn_demo_flow::build_flow_definition(
+            inputs,
+            hn_demo_flow::HnFlowOptions {
+                journal_base: journal_base.clone(),
+                chat_binding_override: Some(counting_chat_binding(
+                    target(),
+                    resolutions.clone(),
+                    calls.clone(),
+                    false,
+                )),
+                sink_selection_probe: Some(sink_probe.clone()),
+            },
+        ))
+        .await
+        .expect("the shared HN flow delivers its digest to PostgreSQL");
+
+    assert_eq!(sink_probe.counts(), (1, 0, 1));
+    assert!(server.request_count() > 0);
+    assert_eq!(resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let row_count = sqlx::query_scalar::<_, i64>(&format!(
+        "SELECT COUNT(*) FROM \"{schema}\".hn_digest_summaries"
+    ))
+    .fetch_one(&pool)
+    .await
+    .expect("count the HN digest destination rows");
+    assert_eq!(row_count, 1);
+
+    let row = sqlx::query_as::<
+        _,
+        (
+            i64,
+            bool,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Vec<String>,
+            String,
+        ),
+    >(&format!(
+        "SELECT digest_id, created_at IS NOT NULL, source_mode, source_identity, \
+         ai_provider, ai_model, token_estimator, interests, story_ids, output_markdown \
+         FROM \"{schema}\".hn_digest_summaries"
+    ))
+    .fetch_one(&pool)
+    .await
+    .expect("inspect the HN digest destination");
+    assert_eq!(row.0, 1);
+    assert!(row.1);
+    assert_eq!(row.2, "mock");
+    assert_eq!(row.3, "mock://hacker-news/");
+    assert_eq!(row.4, "fixture");
+    assert_eq!(row.5, "deterministic");
+    assert_eq!(row.6, "heuristic");
+    assert_eq!(row.7.as_deref(), Some("runtime protocols"));
+    assert_eq!(row.8, ["100", "101", "102", "103", "104"]);
+    assert_eq!(row.9, "recorded");
+
+    let archive = latest_run_dir(&journal_base);
+    let finalise = stage_envelopes(&archive, "digest__finalize").await;
+    let sink = stage_envelopes(&archive, "digest_summary").await;
+    let receipts = stable_delivery_receipts(&finalise, &sink);
+    let [receipt] = receipts.as_slice() else {
+        panic!(
+            "the PostgreSQL HN treatment must emit one receipt, found {}",
+            receipts.len()
+        );
+    };
+    assert_eq!(
+        receipt.destination,
+        format!("postgres.{schema}.hn_digest_summaries")
+    );
+    assert_eq!(
+        receipt.method,
+        serde_json::to_value(DeliveryMethod::DatabaseInsert {
+            table: format!("{schema}.hn_digest_summaries"),
+        })
+        .expect("database-insert receipt method serialises")
+    );
+    assert_eq!(receipt.items, Some(1));
+}
+
 #[tokio::test]
 async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let temp = tempfile::tempdir().expect("temporary real HN-flow journal root");
@@ -2495,6 +2749,8 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         .await
         .expect("deterministic HN server starts");
     let demo_inputs = config::HnRunInputs {
+        digest_output: config::DigestOutput::Console,
+        postgres_digest: None,
         max_stories: 5,
         poll_timeout_secs: 10,
         source_rate_limit: 1_000.0,
@@ -2529,6 +2785,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
                 live_calls.clone(),
                 false,
             )),
+            sink_selection_probe: None,
         },
     );
     FlowApplication::builder()
@@ -2607,6 +2864,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
                 replay_calls.clone(),
                 true,
             )),
+            sink_selection_probe: None,
         },
     );
     FlowApplication::builder()

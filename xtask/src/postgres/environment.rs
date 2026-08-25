@@ -5,8 +5,9 @@
 use super::{
     compose::ServiceEvidence,
     config::{
-        inventory_test_schema, payment_test_schema, plaintext_url, tls_url, verified_tls_url,
-        DEVELOPMENT_PAYMENT_SCHEMA, INVENTORY_TEST_SCHEMA_ENV, PAYMENT_TEST_SCHEMA_ENV,
+        hn_digest_test_schema, inventory_test_schema, payment_test_schema, plaintext_url, tls_url,
+        verified_tls_url, DEVELOPMENT_PAYMENT_SCHEMA, HN_DIGEST_TEST_SCHEMA_ENV,
+        INVENTORY_TEST_SCHEMA_ENV, PAYMENT_TEST_SCHEMA_ENV,
     },
     state::SessionState,
 };
@@ -37,6 +38,10 @@ pub(super) fn configure(
         .env("OBZENFLOW_POSTGRES_TEST_HEALTH", &service.health)
         .env("OBZENFLOW_POSTGRES_TEST_TLS_DIR", directory.join("tls"))
         .env(PAYMENT_TEST_SCHEMA_ENV, payment_test_schema(&state.run_id))
+        .env(
+            HN_DIGEST_TEST_SCHEMA_ENV,
+            hn_digest_test_schema(&state.run_id),
+        )
         .env(
             INVENTORY_TEST_SCHEMA_ENV,
             inventory_test_schema(&state.run_id),
