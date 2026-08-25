@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::config::{DigestOutput, HnDigestPostgresConfig, HnRunInputs, PreparedHnRun};
+use super::config::{HnDigestPostgresConfig, HnRunInputs, PreparedHnRun};
 use super::decoder::hn_story_decoder;
 use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
@@ -120,8 +120,7 @@ fn build_digest_postgres_sink(
         .build()
 }
 
-#[cfg(feature = "test-support")]
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn describe_digest_postgres_sink(
     config: HnDigestPostgresConfig,
 ) -> Result<obzenflow_runtime::stages::sink::SinkDescription, PostgresConfigError> {
@@ -390,7 +389,7 @@ pub(crate) struct HnSinkSelectionProbe {
 
 #[cfg(feature = "test-support")]
 impl HnSinkSelectionProbe {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn stopping() -> Self {
         Self {
             stop_after_selection: true,
@@ -417,7 +416,7 @@ impl HnSinkSelectionProbe {
         self.stop_after_selection
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn counts(&self) -> (usize, usize, usize) {
         (
             self.selections.load(std::sync::atomic::Ordering::SeqCst),
@@ -433,6 +432,8 @@ pub(crate) struct HnFlowOptions {
     pub journal_base: std::path::PathBuf,
     pub chat_binding_override: Option<EffectBinding<ChatCompletion>>,
     #[cfg(feature = "test-support")]
+    pub digest_postgres_config_override: Option<HnDigestPostgresConfig>,
+    #[cfg(feature = "test-support")]
     pub sink_selection_probe: Option<HnSinkSelectionProbe>,
 }
 
@@ -442,6 +443,8 @@ impl Default for HnFlowOptions {
             journal_base: std::path::PathBuf::from("target/hn-ai-digest-logs"),
             chat_binding_override: None,
             #[cfg(feature = "test-support")]
+            digest_postgres_config_override: None,
+            #[cfg(feature = "test-support")]
             sink_selection_probe: None,
         }
     }
@@ -450,8 +453,7 @@ impl Default for HnFlowOptions {
 pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions) -> FlowDefinition {
     FlowDefinition::materialize(move |runtime_config| {
         let HnRunInputs {
-            digest_output,
-            postgres_digest,
+            digest_sink_key,
             max_stories,
             poll_timeout_secs,
             source_rate_limit,
@@ -464,6 +466,8 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
         let HnFlowOptions {
             journal_base,
             chat_binding_override,
+            #[cfg(feature = "test-support")]
+            digest_postgres_config_override,
             #[cfg(feature = "test-support")]
             sink_selection_probe,
         } = options;
@@ -537,34 +541,40 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
         if let Some(probe) = &sink_selection_probe {
             probe.record_selection();
         }
-        let digest_summary = match digest_output {
-            DigestOutput::Console => {
-                #[cfg(feature = "test-support")]
-                if let Some(probe) = &sink_selection_probe {
-                    probe.record_console_construction();
-                }
-                let output = sinks::console(format_digest_summary_for_console);
-                sink!(HnDigestSummary => output)
+        let digest_summary = sink!(
+            HnDigestSummary => select(digest_sink_key) {
+                "console" => {
+                    #[cfg(feature = "test-support")]
+                    if let Some(probe) = &sink_selection_probe {
+                        probe.record_console_construction();
+                    }
+                    sinks::console(format_digest_summary_for_console)
+                },
+                "postgres" => {
+                    #[cfg(feature = "test-support")]
+                    if let Some(probe) = &sink_selection_probe {
+                        probe.record_postgres_construction();
+                    }
+                    #[cfg(feature = "test-support")]
+                    let postgres_config = match digest_postgres_config_override {
+                        Some(config) => Ok(config),
+                        None => HnDigestPostgresConfig::from_env(),
+                    };
+                    #[cfg(not(feature = "test-support"))]
+                    let postgres_config = HnDigestPostgresConfig::from_env();
+                    let postgres_config = postgres_config.map_err(|error| {
+                        FlowBuildError::StageResourcesFailed(format!(
+                            "HN digest PostgreSQL configuration failed: {error}"
+                        ))
+                    })?;
+                    build_digest_postgres_sink(postgres_config).map_err(|error| {
+                        FlowBuildError::StageResourcesFailed(format!(
+                            "HN digest PostgreSQL sink configuration failed: {error}"
+                        ))
+                    })?
+                },
             }
-            DigestOutput::Postgres => {
-                #[cfg(feature = "test-support")]
-                if let Some(probe) = &sink_selection_probe {
-                    probe.record_postgres_construction();
-                }
-                let postgres_digest = postgres_digest.ok_or_else(|| {
-                    FlowBuildError::StageResourcesFailed(
-                        "HN_DIGEST_OUTPUT=postgres requires resolved PostgreSQL digest configuration"
-                            .to_string(),
-                    )
-                })?;
-                let output = build_digest_postgres_sink(postgres_digest).map_err(|error| {
-                    FlowBuildError::StageResourcesFailed(format!(
-                        "HN digest PostgreSQL sink configuration failed: {error}"
-                    ))
-                })?;
-                sink!(HnDigestSummary => output)
-            }
-        };
+        )?;
         #[cfg(feature = "test-support")]
         if sink_selection_probe
             .as_ref()
@@ -663,13 +673,13 @@ pub fn run_demo_blocking() -> Result<()> {
 }
 
 pub(crate) fn build_presentation(config: &HnRunInputs) -> Presentation {
-    let digest_output = config.digest_output;
+    let digest_sink_key = config.digest_sink_key.clone();
     Presentation::new(
         Banner::new("HN AI Digest Demo")
             .description(
                 "Fetch top HN stories, then generate a markdown digest via Rig-backed LLM transforms.",
             )
-            .config("digest_output", digest_output.as_str())
+            .config("digest_output", &digest_sink_key)
             .config("mode", &config.mode_label)
             .config("base_url", config.base_url.to_string())
             .config("max_stories", config.max_stories)
@@ -688,12 +698,9 @@ pub(crate) fn build_presentation(config: &HnRunInputs) -> Presentation {
         let is_success = matches!(&outcome, RunPresentationOutcome::Completed { .. });
         let footer = outcome.into_footer();
         if is_success {
-            let delivery = match digest_output {
-                DigestOutput::Console => "The generated digest was printed above.",
-                DigestOutput::Postgres => "The generated digest was inserted into PostgreSQL.",
-            };
             footer.paragraph(format!(
-                "{delivery}\nRe-run with HN_LIVE=1 to fetch from the real Hacker News API."
+                "The generated digest was delivered by the configured {digest_sink_key:?} sink.\n\
+                 Re-run with HN_LIVE=1 to fetch from the real Hacker News API."
             ))
         } else {
             footer

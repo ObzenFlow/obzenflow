@@ -101,6 +101,14 @@ pub enum FlowBuildError {
     #[error("{0}")]
     ConfigResolution(#[source] obzenflow_runtime::runtime_config::ConfigResolveError),
 
+    /// A config-selected `sink!` declaration received a non-secret string
+    /// outside its compile-time-closed alternative set.
+    #[error("sink! configured selection must be {expected}; got {selected:?}")]
+    InvalidSinkSelection {
+        selected: String,
+        expected: &'static str,
+    },
+
     #[error("flow binding '{binding}' configuration failed: {detail}")]
     BindingConfiguration { binding: String, detail: String },
 

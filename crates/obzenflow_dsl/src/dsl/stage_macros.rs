@@ -2847,6 +2847,28 @@ macro_rules! __obzenflow_sink_delivery {
     };
 }
 
+/// Render the closed literal set used by a config-selected `sink!` diagnostic.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_sink_selection_expected {
+    ($only:literal) => {
+        concat!("\"", $only, "\"")
+    };
+    ($first:literal, $second:literal) => {
+        concat!("\"", $first, "\" or \"", $second, "\"")
+    };
+    ($first:literal, $second:literal, $($rest:literal),+) => {
+        concat!(
+            "one of \"",
+            $first,
+            "\", \"",
+            $second,
+            "\"",
+            $(", \"", $rest, "\"")+
+        )
+    };
+}
+
 /// Create a sink stage descriptor.
 ///
 /// Canonical grammar: `InputType => handler_path`, optional `with [...]`,
@@ -2854,8 +2876,45 @@ macro_rules! __obzenflow_sink_delivery {
 /// `observers: [ ... ]`. Construct closure-tier `SinkTyped`
 /// adapters and sink facades in ordinary Rust inside the materialiser, then
 /// pass the resulting binding by path.
+///
+/// The config-selected form is
+/// `InputType => select(owned_string) { "key" => handler_constructor, ... }`.
+/// It evaluates the selector once, constructs only the matching handler, and
+/// checks every branch through the same exact input witness before erasure.
 #[macro_export]
 macro_rules! sink {
+    // FLOWIP-010o B1: one owned, non-secret config key selects from a
+    // compile-time-closed set. No selector or alternative set survives the
+    // match into the ordinary sink descriptor.
+    ($in:ty => select($selector:expr) {
+        $($key:literal => $handler:expr),+ $(,)?
+    }) => {{
+        let __obzenflow_selected_key: ::std::string::String = $selector;
+        #[deny(unreachable_patterns)]
+        let __obzenflow_selected_sink: ::core::result::Result<
+            _,
+            $crate::dsl::FlowBuildError,
+        > = match __obzenflow_selected_key.as_str() {
+            $(
+                $key => ::core::result::Result::Ok(
+                    $crate::__obzenflow_sink_typed!(
+                        input = exact($in),
+                        name = "__obzenflow_binding_derived_name__",
+                        handler = $handler,
+                        sink_policies = [],
+                        observers = []
+                    )
+                ),
+            )+
+            __obzenflow_invalid_key => ::core::result::Result::Err(
+                $crate::dsl::FlowBuildError::InvalidSinkSelection {
+                    selected: __obzenflow_invalid_key.to_owned(),
+                    expected: $crate::__obzenflow_sink_selection_expected!($($key),+),
+                }
+            ),
+        };
+        __obzenflow_selected_sink
+    }};
     ($in:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
         $crate::__obzenflow_stage_middleware_removed!()
     };

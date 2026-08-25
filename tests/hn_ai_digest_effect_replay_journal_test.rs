@@ -1375,6 +1375,9 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let flow_source = std::fs::read_to_string(root.join("examples/hn_ai_digest_demo/flow.rs"))
         .expect("HN witness flow source is readable");
+    let app_config_source =
+        std::fs::read_to_string(root.join("examples/hn_ai_digest_demo/config.rs"))
+            .expect("HN application config source is readable");
     let checked_config =
         std::fs::read_to_string(root.join("examples/hn_ai_digest_demo/obzenflow.toml"))
             .expect("HN witness config is readable");
@@ -1387,8 +1390,10 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "let chat_target = chat.target().clone();",
         "token_estimator: chat.estimator().source(),",
         "let hn_source = HttpPullSource::new(decoder, http_source_config);",
-        "DigestOutput::Console =>",
-        "DigestOutput::Postgres =>",
+        "HnDigestSummary => select(digest_sink_key) {",
+        "\"console\" => {",
+        "\"postgres\" => {",
+        "HnDigestPostgresConfig::from_env()",
         ".insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)?",
         ".batch_size(1)?",
         ".redelivery_safety(SinkRedeliverySafety::DuplicateSensitive)",
@@ -1440,6 +1445,20 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
     assert!(checked_config.contains("[ai.models]"));
     assert!(checked_config.contains("provider = \"ollama\""));
     assert!(checked_config.contains("model = \"llama3.1:8b\""));
+    assert!(app_config_source.contains("digest_sink_key: String"));
+    assert!(app_config_source.contains("\"HN_DIGEST_OUTPUT\", \"console\".to_owned()"));
+    for forbidden in [
+        "enum DigestOutput",
+        "ResolvedDigestOutput",
+        "resolve_digest_configuration",
+        "load_postgres",
+        "postgres_digest: Option",
+    ] {
+        assert!(
+            !app_config_source.contains(forbidden),
+            "HN configuration may not regain backend-aware selection: {forbidden}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1448,8 +1467,7 @@ async fn hn_materialization_evaluates_one_selector_and_constructs_only_its_sink(
     let console_probe = hn_demo_flow::HnSinkSelectionProbe::stopping();
     let console_flow = hn_demo_flow::build_flow_definition(
         config::HnRunInputs {
-            digest_output: config::DigestOutput::Console,
-            postgres_digest: None,
+            digest_sink_key: "console".to_owned(),
             max_stories: 5,
             poll_timeout_secs: 10,
             source_rate_limit: 1_000.0,
@@ -1469,6 +1487,7 @@ async fn hn_materialization_evaluates_one_selector_and_constructs_only_its_sink(
                 Arc::new(AtomicUsize::new(0)),
                 false,
             )),
+            digest_postgres_config_override: None,
             sink_selection_probe: Some(console_probe.clone()),
         },
     );
@@ -1514,8 +1533,7 @@ async fn hn_materialization_evaluates_one_selector_and_constructs_only_its_sink(
     );
     let postgres_flow = hn_demo_flow::build_flow_definition(
         config::HnRunInputs {
-            digest_output: config::DigestOutput::Postgres,
-            postgres_digest: Some(postgres_config),
+            digest_sink_key: "postgres".to_owned(),
             max_stories: 5,
             poll_timeout_secs: 10,
             source_rate_limit: 1_000.0,
@@ -1535,6 +1553,7 @@ async fn hn_materialization_evaluates_one_selector_and_constructs_only_its_sink(
                 Arc::new(AtomicUsize::new(0)),
                 false,
             )),
+            digest_postgres_config_override: Some(postgres_config),
             sink_selection_probe: Some(postgres_probe.clone()),
         },
     );
@@ -2628,12 +2647,12 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
         obzenflow::sinks::postgres::PostgresTransport::VerifiedTls,
     )
     .expect("repository PostgreSQL URL satisfies verified TLS");
+    let postgres_config = config::HnDigestPostgresConfig {
+        connection,
+        schema: schema.clone(),
+    };
     let inputs = config::HnRunInputs {
-        digest_output: config::DigestOutput::Postgres,
-        postgres_digest: Some(config::HnDigestPostgresConfig {
-            connection,
-            schema: schema.clone(),
-        }),
+        digest_sink_key: "postgres".to_owned(),
         max_stories: 5,
         poll_timeout_secs: 10,
         source_rate_limit: 1_000.0,
@@ -2665,6 +2684,7 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
                     calls.clone(),
                     false,
                 )),
+                digest_postgres_config_override: Some(postgres_config),
                 sink_selection_probe: Some(sink_probe.clone()),
             },
         ))
@@ -2749,8 +2769,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         .await
         .expect("deterministic HN server starts");
     let demo_inputs = config::HnRunInputs {
-        digest_output: config::DigestOutput::Console,
-        postgres_digest: None,
+        digest_sink_key: "console".to_owned(),
         max_stories: 5,
         poll_timeout_secs: 10,
         source_rate_limit: 1_000.0,
@@ -2785,6 +2804,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
                 live_calls.clone(),
                 false,
             )),
+            digest_postgres_config_override: None,
             sink_selection_probe: None,
         },
     );
@@ -2864,6 +2884,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
                 replay_calls.clone(),
                 true,
             )),
+            digest_postgres_config_override: None,
             sink_selection_probe: None,
         },
     );

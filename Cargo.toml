@@ -231,11 +231,6 @@ path = "tests/hn_ai_digest_effect_replay_journal_test.rs"
 required-features = ["http-pull", "ai", "postgres", "test-support"]
 
 [[test]]
-name = "hn_ai_digest_output_config_test"
-path = "tests/hn_ai_digest_output_config_test.rs"
-required-features = ["postgres"]
-
-[[test]]
 name = "standalone_ai_effect_replay_test"
 path = "tests/standalone_ai_effect_replay_test.rs"
 required-features = ["ai"]

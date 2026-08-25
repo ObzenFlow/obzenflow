@@ -677,6 +677,82 @@ mod tests {
         let _ = crate::sink!(name: "s", Out => Sn, observers: []);
     }
     #[test]
+    fn sink_selected_form_evaluates_once_and_constructs_one_heterogeneous_handler() {
+        let selector_evaluations = std::cell::Cell::new(0);
+        let inline_constructions = std::cell::Cell::new(0);
+        let closure_constructions = std::cell::Cell::new(0);
+
+        let selected = crate::sink!(
+            Out => select({
+                selector_evaluations.set(selector_evaluations.get() + 1);
+                "closure".to_owned()
+            }) {
+                "inline" => {
+                    inline_constructions.set(inline_constructions.get() + 1);
+                    Sn
+                },
+                "closure" => {
+                    closure_constructions.set(closure_constructions.get() + 1);
+                    SinkTyped::new(|_out: Out| async move {})
+                },
+            }
+        )
+        .expect("the configured sink key is in the closed alternative set");
+
+        assert_eq!(selector_evaluations.get(), 1);
+        assert_eq!(inline_constructions.get(), 0);
+        assert_eq!(closure_constructions.get(), 1);
+        assert_eq!(
+            selected
+                .typing_metadata()
+                .expect("typed sink metadata")
+                .input_type,
+            crate::dsl::typing::TypeHint::exact_payload::<Out>()
+        );
+    }
+
+    #[test]
+    fn sink_selected_form_rejects_unknown_key_before_constructing_a_handler() {
+        let selector_evaluations = std::cell::Cell::new(0);
+        let first_constructions = std::cell::Cell::new(0);
+        let second_constructions = std::cell::Cell::new(0);
+
+        let result = crate::sink!(
+            Out => select({
+                selector_evaluations.set(selector_evaluations.get() + 1);
+                "unknown".to_owned()
+            }) {
+                "first" => {
+                    first_constructions.set(first_constructions.get() + 1);
+                    Sn
+                },
+                "second" => {
+                    second_constructions.set(second_constructions.get() + 1);
+                    SinkTyped::new(|_out: Out| async move {})
+                },
+            }
+        );
+
+        assert_eq!(selector_evaluations.get(), 1);
+        assert_eq!(first_constructions.get(), 0);
+        assert_eq!(second_constructions.get(), 0);
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("an unknown sink key must fail materialisation"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "sink! configured selection must be \"first\" or \"second\"; got \"unknown\""
+        );
+        match error {
+            crate::dsl::FlowBuildError::InvalidSinkSelection { selected, expected } => {
+                assert_eq!(selected, "unknown");
+                assert_eq!(expected, "\"first\" or \"second\"");
+            }
+            error => panic!("unexpected sink selection error: {error}"),
+        }
+    }
+    #[test]
     fn sink_typed_delivery_clause() {
         // The clause rides the sealed closure-tier structs; a custom handler
         // returns its aggregate `SinkDescription` directly instead.
