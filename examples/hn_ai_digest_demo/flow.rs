@@ -390,6 +390,7 @@ pub(crate) struct HnSinkSelectionProbe {
 
 #[cfg(feature = "test-support")]
 impl HnSinkSelectionProbe {
+    #[allow(dead_code)]
     pub(crate) fn stopping() -> Self {
         Self {
             stop_after_selection: true,
