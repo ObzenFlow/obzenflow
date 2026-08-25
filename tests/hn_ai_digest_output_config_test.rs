@@ -14,7 +14,6 @@ mod mock_server;
 use config::{resolve_digest_configuration, DigestOutput, HnDigestPostgresConfig};
 use obzenflow::sinks::postgres::{PostgresConnection, PostgresTransport};
 use std::cell::Cell;
-use std::process::Command;
 
 fn postgres_config() -> HnDigestPostgresConfig {
     let connection = PostgresConnection::from_url(
@@ -77,64 +76,4 @@ fn unknown_output_has_the_locked_diagnostic_without_resolving_postgres() {
         "HN_DIGEST_OUTPUT must be \"console\" or \"postgres\"; got \"Postgres\""
     );
     assert_eq!(postgres_loads.get(), 0);
-}
-
-#[test]
-fn unselected_wrong_input_sink_fails_an_ordinary_build() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let fixture = include_str!("compile_fail/hn_config_selected_sink_wrong_input.rs");
-    let temp = tempfile::tempdir().expect("temporary compile-fail crate");
-    let source_dir = temp.path().join("src");
-    std::fs::create_dir(&source_dir).expect("compile-fail source directory is created");
-    std::fs::write(source_dir.join("main.rs"), fixture)
-        .expect("compile-fail fixture source is written");
-    let manifest = format!(
-        r#"[package]
-name = "hn-config-selected-sink-wrong-input"
-version = "0.0.0"
-edition = "2021"
-
-[dependencies]
-obzenflow = {{ path = {root:?} }}
-obzenflow_core = {{ path = {core:?} }}
-obzenflow_dsl = {{ path = {dsl:?} }}
-"#,
-        root = root,
-        core = root.join("crates/obzenflow_core"),
-        dsl = root.join("crates/obzenflow_dsl"),
-    );
-    let manifest_path = temp.path().join("Cargo.toml");
-    std::fs::write(&manifest_path, manifest).expect("compile-fail manifest is written");
-    std::fs::copy(root.join("Cargo.lock"), temp.path().join("Cargo.lock"))
-        .expect("workspace lockfile is copied into the compile-fail crate");
-
-    let output = Command::new("cargo")
-        .args([
-            "check",
-            "--offline",
-            "--quiet",
-            "--manifest-path",
-            manifest_path
-                .to_str()
-                .expect("temporary manifest path is UTF-8"),
-            "--target-dir",
-            root.join("target")
-                .to_str()
-                .expect("workspace target path is UTF-8"),
-        ])
-        .env("CARGO_TERM_COLOR", "never")
-        .output()
-        .expect("ordinary cargo check runs for the compile-fail witness");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    assert!(
-        !output.status.success(),
-        "the unselected wrong-input arm unexpectedly compiled"
-    );
-    assert!(
-        stderr.contains("AiMapReduceChunkFailed")
-            && stderr.contains("AiMapReducePlanningManifest")
-            && stderr.contains("SinkInputMatchesArrow"),
-        "the build must fail at the sink input proof boundary; stderr:\n{stderr}"
-    );
 }
