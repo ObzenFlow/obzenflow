@@ -141,6 +141,13 @@
 //! stored selector, or lifecycle authority. The ordinary
 //! `sink!(Out => output)` form remains unchanged.
 //!
+//! This is the sink-role instance of a reusable Twelve-Factor law: deployment
+//! configuration names one member of a code-closed typed integration set, and
+//! that choice is consumed before the integration enters its role lifecycle.
+//! Source and effect selection are not provided by this sink surface; later
+//! role-local designs can preserve the law without adding a cross-role registry,
+//! common selection trait, or runtime selector.
+//!
 //! A small named integration can implement `InlineSink` directly. It needs no
 //! separate connector or description method; a site-level clause can classify
 //! redelivery when archive replay matters.
