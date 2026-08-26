@@ -116,11 +116,17 @@ impl PostgresTransport {
 /// Parsed connection options whose formatting never reveals the URL or password.
 #[derive(Clone)]
 pub struct PostgresConnection {
-    options: PgConnectOptions,
+    source: PostgresConnectionSource,
     transport: PostgresTransport,
     acquire_timeout: Duration,
     operation_timeout: Duration,
     rollback_timeout: Duration,
+}
+
+#[derive(Clone)]
+enum PostgresConnectionSource {
+    Parsed(PgConnectOptions),
+    Environment(String),
 }
 
 impl PostgresConnection {
@@ -136,6 +142,22 @@ impl PostgresConnection {
         let value = std::env::var(name)
             .map_err(|_| PostgresConfigError::MissingEnvironment(name.to_string()))?;
         Self::from_url(&value, transport)
+    }
+
+    /// Retain the environment-variable reference and resolve its value only
+    /// if this connector is selected and opened.
+    ///
+    /// This is useful for a cold set of deployment-selectable connectors: an
+    /// unselected PostgreSQL alternative does not require PostgreSQL
+    /// credentials merely to build the application graph.
+    pub fn deferred_from_env(name: impl Into<String>, transport: PostgresTransport) -> Self {
+        Self {
+            source: PostgresConnectionSource::Environment(name.into()),
+            transport,
+            acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
+            operation_timeout: DEFAULT_OPERATION_TIMEOUT,
+            rollback_timeout: DEFAULT_ROLLBACK_TIMEOUT,
+        }
     }
 
     /// Parse a PostgreSQL URL without DNS, authentication, or socket I/O.
@@ -157,9 +179,11 @@ impl PostgresConnection {
         transport: PostgresTransport,
     ) -> Result<Self, PostgresConfigError> {
         Ok(Self {
-            options: options
-                .ssl_mode(transport.ssl_mode())
-                .disable_statement_logging(),
+            source: PostgresConnectionSource::Parsed(
+                options
+                    .ssl_mode(transport.ssl_mode())
+                    .disable_statement_logging(),
+            ),
             transport,
             acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
             operation_timeout: DEFAULT_OPERATION_TIMEOUT,
@@ -194,12 +218,35 @@ impl PostgresConnection {
         }
         Ok(())
     }
+
+    fn resolve_options(&self) -> Result<PgConnectOptions, PostgresConfigError> {
+        match &self.source {
+            PostgresConnectionSource::Parsed(options) => Ok(options.clone()),
+            PostgresConnectionSource::Environment(name) => {
+                let value = std::env::var(name)
+                    .map_err(|_| PostgresConfigError::MissingEnvironment(name.clone()))?;
+                preflight_url(&value, self.transport)?;
+                let options = PgConnectOptions::from_str(&value)
+                    .map_err(|_| PostgresConfigError::InvalidConnection)?;
+                Ok(options
+                    .ssl_mode(self.transport.ssl_mode())
+                    .disable_statement_logging())
+            }
+        }
+    }
 }
 
 impl fmt::Debug for PostgresConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PostgresConnection")
             .field("configured", &true)
+            .field(
+                "source",
+                &match self.source {
+                    PostgresConnectionSource::Parsed(_) => "parsed",
+                    PostgresConnectionSource::Environment(_) => "environment",
+                },
+            )
             .field("transport", &self.transport)
             .field("acquire_timeout", &self.acquire_timeout)
             .field("operation_timeout", &self.operation_timeout)
@@ -413,6 +460,32 @@ pub struct PostgresSink<B> {
     test_probe: Option<testing::PostgresTestProbe>,
 }
 
+/// A validated, I/O-free PostgreSQL sink recipe accepted by
+/// [`crate::sinks::postgres`]. Keeping the recipe distinct from the connector
+/// gives application code the same `sinks::<kind>(config)` construction shape
+/// as the other sink facades.
+pub struct PostgresSinkConfig<B> {
+    sink: PostgresSink<B>,
+}
+
+impl<B> fmt::Debug for PostgresSinkConfig<B>
+where
+    B: PostgresBind,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PostgresSinkConfig")
+            .field(&self.sink)
+            .finish()
+    }
+}
+
+impl<B> PostgresSinkConfig<B> {
+    /// Consume this cold recipe into the ordinary PostgreSQL connector.
+    pub fn into_sink(self) -> PostgresSink<B> {
+        self.sink
+    }
+}
+
 impl<B> fmt::Debug for PostgresSink<B>
 where
     B: PostgresBind,
@@ -567,6 +640,12 @@ where
             #[cfg(feature = "test-support")]
             test_probe: self.test_probe,
         })
+    }
+
+    /// Finish local validation as a cold recipe for the generic
+    /// `sinks::postgres(config)` facade.
+    pub fn build_config(self) -> Result<PostgresSinkConfig<B>, PostgresConfigError> {
+        self.build().map(|sink| PostgresSinkConfig { sink })
     }
 }
 
@@ -1151,9 +1230,17 @@ where
                 test_operation_error("injected PostgreSQL open failure", None),
             ));
         }
+        let options = self.connection.resolve_options().map_err(|error| {
+            destination_operation_error(
+                &self.destination,
+                SinkOperationError::other(format!(
+                    "PostgreSQL connection configuration failed: {error}"
+                )),
+            )
+        })?;
         let deadline = Instant::now() + self.connection.operation_timeout;
         let pool = PostgresSessionPool::new(
-            self.connection.options.clone(),
+            options,
             self.connection.acquire_timeout,
             self.destination.clone(),
             probe.clone(),
@@ -1925,6 +2012,31 @@ mod tests {
     }
 
     #[test]
+    fn deferred_environment_connection_stays_cold_through_recipe_construction() {
+        let deferred = PostgresConnection::deferred_from_env(
+            "OBZENFLOW_POSTGRES_INTENTIONALLY_ABSENT_FOR_COLD_RECIPE_TEST",
+            PostgresTransport::VerifiedTls,
+        );
+        let config = PostgresSink::builder(Binder)
+            .connection(deferred.clone())
+            .insert_into("public", "events", "(value) VALUES ($1)")
+            .unwrap()
+            .build_config()
+            .expect("a cold recipe does not read the referenced environment value");
+        let sink = crate::sinks::postgres(config);
+        assert_eq!(
+            sink.describe().destination_name(),
+            Some("postgres.public.events")
+        );
+
+        assert!(matches!(
+            deferred.resolve_options(),
+            Err(PostgresConfigError::MissingEnvironment(name))
+                if name == "OBZENFLOW_POSTGRES_INTENTIONALLY_ABSENT_FOR_COLD_RECIPE_TEST"
+        ));
+    }
+
+    #[test]
     fn private_assembler_retains_configured_statement_authority() {
         let input = Input {
             value: "binder-value-sentinel".to_string(),
@@ -1974,12 +2086,15 @@ mod tests {
 
         let tls = PostgresConnection::from_url(base, PostgresTransport::VerifiedTls)
             .expect("omitted URL mode is normalised by typed policy");
-        assert!(matches!(tls.options.get_ssl_mode(), PgSslMode::VerifyFull));
+        assert!(matches!(
+            tls.resolve_options().unwrap().get_ssl_mode(),
+            PgSslMode::VerifyFull
+        ));
         let plaintext =
             PostgresConnection::from_url(base, PostgresTransport::ExternallyProtectedPlaintext)
                 .expect("omitted URL mode is normalised by typed policy");
         assert!(matches!(
-            plaintext.options.get_ssl_mode(),
+            plaintext.resolve_options().unwrap().get_ssl_mode(),
             PgSslMode::Disable
         ));
 
@@ -2009,7 +2124,7 @@ mod tests {
         )
         .expect("typed policy overwrites provenance-unknown options");
         assert!(matches!(
-            options.options.get_ssl_mode(),
+            options.resolve_options().unwrap().get_ssl_mode(),
             PgSslMode::VerifyFull
         ));
         let options = PostgresConnection::from_options(
@@ -2017,7 +2132,10 @@ mod tests {
             PostgresTransport::ExternallyProtectedPlaintext,
         )
         .expect("typed plaintext policy overwrites provenance-unknown options");
-        assert!(matches!(options.options.get_ssl_mode(), PgSslMode::Disable));
+        assert!(matches!(
+            options.resolve_options().unwrap().get_ssl_mode(),
+            PgSslMode::Disable
+        ));
 
         for incoming in [
             PgSslMode::Disable,
@@ -2032,14 +2150,17 @@ mod tests {
                 PostgresTransport::VerifiedTls,
             )
             .expect("typed TLS policy normalises every incoming SQLx mode");
-            assert!(matches!(tls.options.get_ssl_mode(), PgSslMode::VerifyFull));
+            assert!(matches!(
+                tls.resolve_options().unwrap().get_ssl_mode(),
+                PgSslMode::VerifyFull
+            ));
             let plaintext = PostgresConnection::from_options(
                 PgConnectOptions::new().ssl_mode(incoming),
                 PostgresTransport::ExternallyProtectedPlaintext,
             )
             .expect("typed plaintext policy normalises every incoming SQLx mode");
             assert!(matches!(
-                plaintext.options.get_ssl_mode(),
+                plaintext.resolve_options().unwrap().get_ssl_mode(),
                 PgSslMode::Disable
             ));
         }
@@ -2070,12 +2191,15 @@ mod tests {
             let base = "postgres://sentinel-user:sentinel-password@localhost/test";
             let tls = PostgresConnection::from_url(base, PostgresTransport::VerifiedTls)
                 .expect("typed TLS policy overrides ambient PGSSLMODE");
-            assert!(matches!(tls.options.get_ssl_mode(), PgSslMode::VerifyFull));
+            assert!(matches!(
+                tls.resolve_options().unwrap().get_ssl_mode(),
+                PgSslMode::VerifyFull
+            ));
             let plaintext =
                 PostgresConnection::from_url(base, PostgresTransport::ExternallyProtectedPlaintext)
                     .expect("typed plaintext policy overrides ambient PGSSLMODE");
             assert!(matches!(
-                plaintext.options.get_ssl_mode(),
+                plaintext.resolve_options().unwrap().get_ssl_mode(),
                 PgSslMode::Disable
             ));
             return;

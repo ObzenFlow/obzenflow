@@ -79,6 +79,28 @@ impl ResolvedRuntimeConfig {
         &self.overlay
     }
 
+    /// Resolve one registered knob for a named stage before the complete
+    /// per-flow effective view exists.
+    ///
+    /// This narrow pre-topology view is used by build-only authoring choices
+    /// whose selected descriptor must exist before topology admission. It
+    /// follows the same stage, flow, global, default ladder as Phase B and
+    /// returns the ordinary provenance-bearing value.
+    pub fn resolve_stage_value(
+        &self,
+        key_path: &str,
+        stage: impl Into<obzenflow_core::StageKey>,
+    ) -> Result<Option<Resolved<ConfigValue>>, ConfigResolveError> {
+        let spec = knob(key_path).ok_or_else(|| ConfigResolveError::UnknownKnob {
+            key_path: key_path.to_string(),
+        })?;
+        super::resolve::resolve_at(
+            spec,
+            &super::resolve::ResolutionPoint::Stage(stage.into()),
+            &self.candidates,
+        )
+    }
+
     /// Resolve one knob's non-structural rungs (flow, then global, then
     /// default). This is the offline and pre-build view: the DSL tier and
     /// stage/edge scopes do not exist here.

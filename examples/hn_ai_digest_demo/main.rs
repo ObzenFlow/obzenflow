@@ -47,11 +47,13 @@
 //! - The HN HTTP source also has a fixed source circuit breaker: 3 failures, 2s cooldown.
 //!
 //! Digest output configuration:
-//! - `HN_DIGEST_OUTPUT=console|postgres` (default `console`)
+//! - `[sinks] handler = "console_sink"` in the checked-in config is the default.
+//! - Override the logical stage in the environment with
+//!   `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink`.
 //! - PostgreSQL output reads `OBZENFLOW_POSTGRES_URL` and optionally
 //!   `OBZENFLOW_POSTGRES_SCHEMA` (default `obzenflow_example`).
 //! - Start the repository service with `cargo xtask postgres up`, then run PostgreSQL output with
-//!   `HN_DIGEST_OUTPUT=postgres cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`.
+//!   `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`.
 //!
 //! AI target configuration:
 //! - `[ai.models]` in `obzenflow.toml` supplies provider, model, optional endpoint, and

@@ -6,8 +6,10 @@
 //! tables, canonical env spellings, and the resume-view CLI flags become a
 //! type-validated `CandidateSet`, then the immutable `ResolvedRuntimeConfig`.
 //!
-//! Scoped entries ride the file source only (§2 first-pass lock; DSL
-//! candidates join at flow build); CLI and env candidates are global-only.
+//! Scoped entries normally ride the file source only (§2 first-pass lock; DSL
+//! candidates join at flow build). Config-selected sinks add one deliberately
+//! narrow stage-addressed environment spelling so a Twelve-Factor deployment
+//! can select a handler without adding selection syntax to the flow.
 //! Startup diagnostics keep the `config error at <path>: ...` currency.
 
 use super::config::{ConfigError, FlowConfig, RawFileStartupConfig};
@@ -15,8 +17,11 @@ use crate::env::{env_bool, env_var};
 use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSource};
 use obzenflow_runtime::runtime_config::{
     knob_registry, CandidateSet, ConfigResolveError, ConfigValue, KnobType, ResolvedRuntimeConfig,
-    ScopedCandidate,
+    ScopedCandidate, SINK_HANDLER_KEY,
 };
+
+const STAGE_SINK_HANDLER_ENV_PREFIX: &str = "OBZENFLOW_SINKS_STAGES_";
+const STAGE_SINK_HANDLER_ENV_SUFFIX: &str = "_HANDLER";
 
 /// Build the startup snapshot (Phase A). The DSL tier and stage/edge
 /// resolution join at flow build (`materialize_flow_config`).
@@ -91,6 +96,31 @@ fn admit_file_candidates(
     set: &mut CandidateSet,
     file: &RawFileStartupConfig,
 ) -> Result<(), ConfigError> {
+    let sinks = &file.sinks;
+    file_text!(
+        set,
+        SINK_HANDLER_KEY,
+        ConfigScope::Global,
+        &sinks.handler,
+        "sinks.handler"
+    );
+    file_text!(
+        set,
+        SINK_HANDLER_KEY,
+        ConfigScope::Flow,
+        &sinks.flow.handler,
+        "sinks.flow.handler"
+    );
+    for (stage, entry) in &sinks.stages {
+        file_text!(
+            set,
+            SINK_HANDLER_KEY,
+            ConfigScope::stage(stage.as_str()),
+            &entry.handler,
+            &format!("sinks.stages.{stage}.handler")
+        );
+    }
+
     // [runtime] global rung.
     let runtime = &file.runtime;
     file_u64!(
@@ -595,6 +625,43 @@ fn admit_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
             )?;
         }
     }
+    admit_stage_sink_handler_env_candidates(set)?;
+    Ok(())
+}
+
+fn admit_stage_sink_handler_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
+    for (name, raw) in std::env::vars_os() {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(encoded_stage) = name
+            .strip_prefix(STAGE_SINK_HANDLER_ENV_PREFIX)
+            .and_then(|rest| rest.strip_suffix(STAGE_SINK_HANDLER_ENV_SUFFIX))
+        else {
+            continue;
+        };
+        if encoded_stage.is_empty()
+            || !encoded_stage
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(ConfigError::at(
+                name,
+                "stage segment must contain only ASCII uppercase letters, digits, or underscores",
+            ));
+        }
+        let value = raw
+            .into_string()
+            .map_err(|_| ConfigError::at(name, "value is not valid Unicode"))?;
+        admit(
+            set,
+            SINK_HANDLER_KEY,
+            ConfigScope::stage(encoded_stage.to_ascii_lowercase()),
+            ConfigSource::Env,
+            ConfigValue::Text(value),
+            name,
+        )?;
+    }
     Ok(())
 }
 
@@ -651,7 +718,7 @@ mod tests {
     use obzenflow_core::StageKey;
     use obzenflow_runtime::runtime_config::{
         materialize_flow_config, DslCandidates, FlowResolutionContext,
-        RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+        RATE_LIMITER_EVENTS_PER_SECOND_KEY, SINK_HANDLER_KEY,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -719,6 +786,69 @@ mod tests {
                 &ConfigScope::stage("fetcher")
             )
             .is_some());
+    }
+
+    #[test]
+    fn sink_handler_uses_the_stage_flow_global_ladder() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&[
+            "OBZENFLOW_SINKS_HANDLER",
+            "OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER",
+        ]);
+        guard.remove("OBZENFLOW_SINKS_HANDLER");
+        guard.remove("OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER");
+        let snapshot = snapshot(
+            r#"
+            [sinks]
+            handler = "console_sink"
+
+            [sinks.stages.audit_output]
+            handler = "audit_sink"
+            "#,
+            &[],
+        );
+
+        assert_eq!(
+            snapshot
+                .resolve_stage_value(SINK_HANDLER_KEY, "digest_summary")
+                .unwrap()
+                .unwrap()
+                .value
+                .as_text(),
+            Some("console_sink")
+        );
+        assert_eq!(
+            snapshot
+                .resolve_stage_value(SINK_HANDLER_KEY, "audit_output")
+                .unwrap()
+                .unwrap()
+                .value
+                .as_text(),
+            Some("audit_sink")
+        );
+    }
+
+    #[test]
+    fn stage_sink_environment_selection_overrides_a_global_file_default() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&[
+            "OBZENFLOW_SINKS_HANDLER",
+            "OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER",
+        ]);
+        guard.remove("OBZENFLOW_SINKS_HANDLER");
+        guard.set(
+            "OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER",
+            "postgres_sink",
+        );
+
+        let snapshot = snapshot("[sinks]\nhandler = \"console_sink\"", &[]);
+        let selected = snapshot
+            .resolve_stage_value(SINK_HANDLER_KEY, "digest_summary")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.value.as_text(), Some("postgres_sink"));
+        assert_eq!(selected.meta.source, ConfigSource::Env);
+        assert_eq!(selected.meta.scope, ConfigScope::stage("digest_summary"));
     }
 
     #[test]
@@ -804,6 +934,7 @@ mod tests {
             "[contracts]\nstrict = true",
             "[effects.stages.x]\nedges = {}",
             "[ai.models]\nprovder = \"ollama\"",
+            "[sinks.stages.output]\nhandlers = \"console_sink\"",
         ] {
             assert!(
                 toml::from_str::<RawFileStartupConfig>(bad).is_err(),

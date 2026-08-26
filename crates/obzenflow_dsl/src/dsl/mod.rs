@@ -114,26 +114,27 @@
 //! but the connector's typed input remains authoritative for the arrow.
 //!
 //! A sink may instead consume one compile-time-closed set of heterogeneous,
-//! lazy handler constructors. The application resolves the selector from its
-//! configuration and passes the resulting owned string explicitly. `sink!`
-//! evaluates it once, constructs only the selected branch, and independently
-//! checks every branch against the declared input before descriptor erasure:
+//! cold sink bindings. Each binding identifier is also its exact configuration
+//! key. The framework resolves `sinks.handler` for the logical sink stage,
+//! lowers only that binding, and independently checks every branch against the
+//! declared input before descriptor erasure:
 //!
 //! ```ignore
+//! let console_sink = sinks::console(render);
+//! let postgres_sink = sinks::postgres(postgres_config);
 //! let output = sink!(
-//!     Out => handler_set!(
-//!         select(app_config.output_sink_key()?) {
-//!             "console" => sinks::console(render),
-//!             "postgres" => build_postgres_sink(postgres_config()?)?,
-//!         }
-//!     ),
+//!     Out => handler_set!(console_sink, postgres_sink),
 //!     delivery: idempotent,
 //! )?;
 //! ```
 //!
-//! `handler_set!` performs no ambient configuration lookup and introduces no
-//! registry, common handler trait, stored selector, or lifecycle authority.
-//! The ordinary `sink!(Out => output)` form remains unchanged.
+//! For a stage bound as `output`, the file address is
+//! `[sinks.stages.output] handler = "postgres_sink"`; the canonical
+//! Twelve-Factor environment spelling is
+//! `OBZENFLOW_SINKS_STAGES_OUTPUT_HANDLER=postgres_sink`. Selection is consumed
+//! before topology admission and introduces no registry, common handler trait,
+//! stored selector, or lifecycle authority. The ordinary
+//! `sink!(Out => output)` form remains unchanged.
 //!
 //! A small named integration can implement `InlineSink` directly. It needs no
 //! separate connector or description method; a site-level clause can classify

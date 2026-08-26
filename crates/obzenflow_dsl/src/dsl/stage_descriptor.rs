@@ -464,6 +464,29 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
         // Default: no-op
     }
 
+    /// Build-only marker for a sink whose ordinary descriptor is selected
+    /// from framework configuration before topology admission. Ordinary
+    /// descriptors return `None`; the selected descriptor does too, so this
+    /// authoring carrier cannot survive into runtime lifecycle processing.
+    #[doc(hidden)]
+    fn configured_sink_handler_keys(&self) -> Option<&'static [&'static str]> {
+        None
+    }
+
+    /// Consume a build-only configured-sink carrier and produce the one
+    /// ordinary descriptor admitted to the flow. Called only when
+    /// `configured_sink_handler_keys` returned `Some`.
+    #[doc(hidden)]
+    fn select_configured_sink_handler(
+        self: Box<Self>,
+        _selected: &str,
+    ) -> Result<Box<dyn StageDescriptor>, crate::dsl::FlowBuildError> {
+        Err(crate::dsl::FlowBuildError::StageResourcesFailed(
+            "an ordinary stage descriptor was asked to select a configured sink handler"
+                .to_string(),
+        ))
+    }
+
     /// Get the stage type
     fn stage_type(&self) -> StageType;
 
@@ -595,6 +618,138 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
     fn direct_fact_plan(
         &self,
     ) -> Option<&obzenflow_runtime::stages::resources_builder::DirectFactPlan> {
+        None
+    }
+}
+
+type ConfiguredSinkMaterializer =
+    Box<dyn FnOnce(&str) -> Option<Box<dyn StageDescriptor>> + Send + Sync + 'static>;
+
+const fn configured_sink_handler_key_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Compile-time uniqueness check used by the exported handler-set macro.
+/// Public solely for downstream macro expansion.
+#[doc(hidden)]
+pub const fn configured_sink_handler_keys_are_unique(keys: &[&str]) -> bool {
+    let mut left = 0;
+    while left < keys.len() {
+        let mut right = left + 1;
+        while right < keys.len() {
+            if configured_sink_handler_key_eq(keys[left], keys[right]) {
+                return false;
+            }
+            right += 1;
+        }
+        left += 1;
+    }
+    true
+}
+
+/// A cold, build-only carrier emitted by `sink!(... => handler_set!(...))`.
+/// It is replaced by one ordinary typed sink descriptor before topology
+/// admission and therefore owns no runtime execution or lifecycle authority.
+struct ConfiguredSinkDescriptor {
+    name: String,
+    keys: &'static [&'static str],
+    expected: &'static str,
+    materialize: Option<ConfiguredSinkMaterializer>,
+}
+
+/// Construct the build-only carrier used by the exported sink macros.
+/// Public solely for downstream macro expansion.
+#[doc(hidden)]
+pub fn configured_sink_descriptor<F>(
+    name: impl Into<String>,
+    keys: &'static [&'static str],
+    expected: &'static str,
+    materialize: F,
+) -> Box<dyn StageDescriptor>
+where
+    F: FnOnce(&str) -> Option<Box<dyn StageDescriptor>> + Send + Sync + 'static,
+{
+    Box::new(ConfiguredSinkDescriptor {
+        name: name.into(),
+        keys,
+        expected,
+        materialize: Some(Box::new(materialize)),
+    })
+}
+
+#[async_trait]
+impl StageDescriptor for ConfiguredSinkDescriptor {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    fn configured_sink_handler_keys(&self) -> Option<&'static [&'static str]> {
+        Some(self.keys)
+    }
+
+    fn select_configured_sink_handler(
+        mut self: Box<Self>,
+        selected: &str,
+    ) -> Result<Box<dyn StageDescriptor>, crate::dsl::FlowBuildError> {
+        if !self.keys.contains(&selected) {
+            return Err(crate::dsl::FlowBuildError::InvalidSinkSelection {
+                stage_name: self.name.clone(),
+                selected: selected.to_owned(),
+                expected: self.expected.to_string(),
+            });
+        }
+
+        let materialize = self.materialize.take().ok_or_else(|| {
+            crate::dsl::FlowBuildError::StageResourcesFailed(format!(
+                "sink stage '{}' attempted to consume its configured handler set more than once",
+                self.name
+            ))
+        })?;
+        let mut descriptor = materialize(selected).ok_or_else(|| {
+            crate::dsl::FlowBuildError::StageResourcesFailed(format!(
+                "sink stage '{}' accepted configured handler {selected:?} but its closed set did not materialise it",
+                self.name
+            ))
+        })?;
+        descriptor.set_name(self.name);
+        Ok(descriptor)
+    }
+
+    fn stage_type(&self) -> StageType {
+        StageType::Sink
+    }
+
+    async fn create_handle(
+        self: Box<Self>,
+        _config: StageConfig,
+        _resources: StageResources,
+        _control_middleware: Arc<ControlMiddlewareAggregator>,
+    ) -> StageCreationResult<BoxedStageHandle> {
+        Err(format!(
+            "configured sink stage '{}' reached lifecycle materialisation before handler selection",
+            self.name
+        )
+        .into())
+    }
+
+    fn sink_description(&self) -> Option<&SinkDescription> {
         None
     }
 }
@@ -2828,6 +2983,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + 'static> sealed::Sealed
 impl<H: TransformHandler + 'static> sealed::Sealed for TransformDescriptor<H> {}
 impl<H: EffectfulTransformHandler + 'static> sealed::Sealed for EffectfulTransformDescriptor<H> {}
 impl<C: SinkConnector + 'static> sealed::Sealed for SinkDescriptor<C> {}
+impl sealed::Sealed for ConfiguredSinkDescriptor {}
 impl<H: UnifiedStatefulHandler + 'static> sealed::Sealed for StatefulDescriptor<H> {}
 impl<H: EffectfulStatefulHandler + 'static> sealed::Sealed for EffectfulStatefulDescriptor<H> {}
 impl<H: UnifiedJoinHandler + 'static> sealed::Sealed for JoinDescriptor<H> {}

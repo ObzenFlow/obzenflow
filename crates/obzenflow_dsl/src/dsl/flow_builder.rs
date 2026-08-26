@@ -21,6 +21,64 @@ use obzenflow_topology::EdgeKind;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn describe_handler_keys(keys: &[&str]) -> String {
+    match keys {
+        [] => "<none>".to_string(),
+        [only] => format!("\"{only}\""),
+        [first, second] => format!("\"{first}\" or \"{second}\""),
+        [first, rest @ ..] => {
+            let mut rendered = format!("one of \"{first}\"");
+            for key in rest {
+                rendered.push_str(&format!(", \"{key}\""));
+            }
+            rendered
+        }
+    }
+}
+
+fn resolve_configured_sink_descriptors(
+    stages: HashMap<String, Box<dyn StageDescriptor>>,
+    runtime_config: &obzenflow_runtime::runtime_config::ResolvedRuntimeConfig,
+) -> Result<
+    (
+        HashMap<String, Box<dyn StageDescriptor>>,
+        std::collections::HashSet<String>,
+    ),
+    crate::dsl::FlowBuildError,
+> {
+    use crate::dsl::FlowBuildError;
+
+    let mut configured_sink_stages = std::collections::HashSet::new();
+    let mut selected_stages = HashMap::with_capacity(stages.len());
+    for (binding, descriptor) in stages {
+        let Some(keys) = descriptor.configured_sink_handler_keys() else {
+            selected_stages.insert(binding, descriptor);
+            continue;
+        };
+        let stage_name = descriptor.name().to_string();
+        let expected = describe_handler_keys(keys);
+        let selected = runtime_config
+            .resolve_stage_value(
+                obzenflow_runtime::runtime_config::SINK_HANDLER_KEY,
+                obzenflow_core::StageKey::from(stage_name.as_str()),
+            )
+            .map_err(FlowBuildError::ConfigResolution)?
+            .ok_or_else(|| FlowBuildError::MissingSinkSelection {
+                stage_name: stage_name.clone(),
+                expected,
+            })?;
+        let selected = selected.value.as_text().ok_or_else(|| {
+            FlowBuildError::StageResourcesFailed(format!(
+                "sinks.handler resolved a non-text value for sink stage '{stage_name}'"
+            ))
+        })?;
+        let selected_descriptor = descriptor.select_configured_sink_handler(selected)?;
+        configured_sink_stages.insert(stage_name);
+        selected_stages.insert(binding, selected_descriptor);
+    }
+    Ok((selected_stages, configured_sink_stages))
+}
+
 /// The production handle plus test-only journal access retained until the
 /// authored macro selects its return shape.
 #[doc(hidden)]
@@ -111,6 +169,11 @@ where
     // build failed before substrate selection, so no run directory exists.
     let mut __run_state: Option<obzenflow_runtime::journal::RunSubstrateState> = None;
     let __build_result: Result<_, FlowBuildError> = async {
+        // FLOWIP-010o: handler sets are build-only. Resolve the framework's
+        // non-secret stage selection and replace each carrier with exactly one
+        // ordinary typed sink descriptor before topology or lifecycle work.
+        let (stages, __configured_sink_stages) =
+            resolve_configured_sink_descriptors(stages, &__runtime_config)?;
 
         // Build topology - Two-pass approach for join stages:
         // Pass 1: Create all stage IDs and build name_to_id mapping
@@ -580,6 +643,12 @@ where
 
             let mut __dsl_candidates = DslCandidates::default();
             for (_name, descriptor) in descriptors.iter() {
+                if __configured_sink_stages.contains(descriptor.name()) {
+                    __dsl_candidates.declare_stage_consumption(
+                        obzenflow_runtime::runtime_config::SINK_HANDLER_KEY,
+                        obzenflow_core::StageKey::from(descriptor.name()),
+                    );
+                }
                 for factory in descriptor.stage_middleware_factories() {
                     for key_path in factory.consumed_config_keys() {
                         __dsl_candidates.declare_stage_consumption(
@@ -1650,4 +1719,102 @@ where
         error,
         run: __run_state,
     })
+}
+
+#[cfg(test)]
+mod configured_sink_tests {
+    use super::*;
+    use obzenflow_core::config::{ConfigScope, ConfigSource};
+    use obzenflow_core::TypedPayload;
+    use obzenflow_runtime::runtime_config::{
+        CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate, SINK_HANDLER_KEY,
+    };
+    use obzenflow_runtime::stages::sink::SinkTyped;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct Output;
+
+    impl TypedPayload for Output {
+        const EVENT_TYPE: &'static str = "flow-builder.configured-sink.output";
+    }
+
+    fn pending_stage() -> Box<dyn StageDescriptor> {
+        let console_sink = SinkTyped::new(|_output: Output| async move {});
+        let postgres_sink = SinkTyped::with_delivery(|_output: Output, _delivery| async move {});
+        let mut pending = crate::sink!(
+            Output => handler_set!(console_sink, postgres_sink)
+        )
+        .expect("the closed handler set is valid");
+        pending.set_name("digest_summary".to_string());
+        pending
+    }
+
+    fn snapshot(selected: Option<&str>) -> ResolvedRuntimeConfig {
+        let mut candidates = CandidateSet::default();
+        if let Some(selected) = selected {
+            candidates
+                .admit(ScopedCandidate::unqualified(
+                    SINK_HANDLER_KEY,
+                    ConfigScope::stage("digest_summary"),
+                    ConfigSource::File,
+                    ConfigValue::Text(selected.to_string()),
+                ))
+                .unwrap();
+        }
+        ResolvedRuntimeConfig::new(candidates)
+    }
+
+    #[test]
+    fn configured_sink_is_an_ordinary_typed_descriptor_before_topology() {
+        let (stages, configured) = resolve_configured_sink_descriptors(
+            HashMap::from([("digest_summary".to_string(), pending_stage())]),
+            &snapshot(Some("postgres_sink")),
+        )
+        .unwrap();
+
+        assert_eq!(
+            configured,
+            std::collections::HashSet::from(["digest_summary".to_string()])
+        );
+        let selected = &stages["digest_summary"];
+        assert!(selected.configured_sink_handler_keys().is_none());
+        assert_eq!(selected.name(), "digest_summary");
+        assert_eq!(
+            selected.typing_metadata().unwrap().input_type,
+            crate::dsl::typing::TypeHint::exact_payload::<Output>()
+        );
+    }
+
+    #[test]
+    fn configured_sink_reports_missing_and_unknown_stage_values() {
+        let missing = match resolve_configured_sink_descriptors(
+            HashMap::from([("digest_summary".to_string(), pending_stage())]),
+            &snapshot(None),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a handler set without selection must fail"),
+        };
+        assert!(matches!(
+            missing,
+            crate::dsl::FlowBuildError::MissingSinkSelection { ref stage_name, .. }
+                if stage_name == "digest_summary"
+        ));
+
+        let unknown = match resolve_configured_sink_descriptors(
+            HashMap::from([("digest_summary".to_string(), pending_stage())]),
+            &snapshot(Some("warehouse_sink")),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a key outside the closed handler set must fail"),
+        };
+        assert!(matches!(
+            unknown,
+            crate::dsl::FlowBuildError::InvalidSinkSelection {
+                ref stage_name,
+                ref selected,
+                ..
+            } if stage_name == "digest_summary" && selected == "warehouse_sink"
+        ));
+    }
 }

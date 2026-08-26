@@ -28,6 +28,15 @@ where
     ConsoleSink::<T>::new(formatter)
 }
 
+/// Construct a PostgreSQL sink from its validated, I/O-free recipe.
+#[cfg(feature = "postgres")]
+pub fn postgres<B>(config: postgres::PostgresSinkConfig<B>) -> postgres::PostgresSink<B>
+where
+    B: postgres::PostgresBind,
+{
+    config.into_sink()
+}
+
 /// Construct a console sink using compact JSON formatting.
 pub fn json<T>() -> ConsoleSink<T, JsonFormatter>
 where

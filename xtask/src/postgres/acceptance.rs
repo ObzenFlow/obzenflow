@@ -279,6 +279,17 @@ impl TestSession {
                 &self.state,
                 &self.service,
             )?;
+            if command.label == "HN digest PostgreSQL treatment" {
+                child
+                    .env(
+                        "OBZENFLOW_POSTGRES_SCHEMA",
+                        super::config::hn_digest_test_schema(&self.state.run_id),
+                    )
+                    .env(
+                        "OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER",
+                        "postgres_sink",
+                    );
+            }
             let status = child.status()?;
             if !status.success() {
                 return Err(error(format!(

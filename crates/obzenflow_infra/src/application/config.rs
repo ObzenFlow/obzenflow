@@ -348,6 +348,7 @@ pub(crate) struct RawFileStartupConfig {
     pub(crate) contracts: RawFileContractsConfig,
     pub(crate) effects: RawFileEffectsConfig,
     pub(crate) ai: RawFileAiConfig,
+    pub(crate) sinks: RawFileSinksConfig,
     /// FLOWIP-114d: Studio phonebook registration (010h startup layer).
     studio: RawFileStudioConfig,
 }
@@ -427,6 +428,22 @@ pub(crate) struct RawRuntimeFlowScope {
 pub(crate) struct RawRuntimeStageScope {
     pub(crate) max_lineage_depth: Option<i64>,
     pub(crate) heartbeat_interval: Option<i64>,
+}
+
+/// `[sinks]`, `[sinks.flow]`, and `[sinks.stages.<key>]` select one member
+/// from an authored `handler_set!`. Handler membership remains Rust-owned.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawFileSinksConfig {
+    pub(crate) handler: Option<String>,
+    pub(crate) flow: RawSinkHandlerFields,
+    pub(crate) stages: BTreeMap<String, RawSinkHandlerFields>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawSinkHandlerFields {
+    pub(crate) handler: Option<String>,
 }
 
 /// `[runtime.backpressure]` with the §4c nested edge layout.

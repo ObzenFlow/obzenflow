@@ -1390,10 +1390,10 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "let chat_target = chat.target().clone();",
         "token_estimator: chat.estimator().source(),",
         "let hn_source = HttpPullSource::new(decoder, http_source_config);",
+        "let console_sink = sinks::console(format_digest_summary_for_console);",
+        "let postgres_sink = sinks::postgres(postgres_config);",
         "HnDigestSummary => handler_set!(",
-        "select(digest_sink_key) {",
-        "\"console\" => sinks::console(format_digest_summary_for_console)",
-        "\"postgres\" => {",
+        "handler_set!(console_sink, postgres_sink)",
         "HnDigestPostgresConfig::from_env()",
         ".insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)?",
         ".batch_size(1)?",
@@ -1452,14 +1452,16 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
     assert!(checked_config.contains("[ai.models]"));
     assert!(checked_config.contains("provider = \"ollama\""));
     assert!(checked_config.contains("model = \"llama3.1:8b\""));
-    assert!(app_config_source.contains("digest_sink_key: String"));
-    assert!(app_config_source.contains("\"HN_DIGEST_OUTPUT\", \"console\".to_owned()"));
+    assert!(checked_config.contains("[sinks]"));
+    assert!(checked_config.contains("handler = \"console_sink\""));
     for forbidden in [
         "enum DigestOutput",
         "ResolvedDigestOutput",
         "resolve_digest_configuration",
         "load_postgres",
         "postgres_digest: Option",
+        "digest_sink_key",
+        "HN_DIGEST_OUTPUT",
     ] {
         assert!(
             !app_config_source.contains(forbidden),
@@ -2568,17 +2570,7 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
     let server = mock_server::spawn_mock_hn_server()
         .await
         .expect("deterministic HN server starts");
-    let connection = obzenflow::sinks::postgres::PostgresConnection::from_env(
-        "OBZENFLOW_POSTGRES_URL",
-        obzenflow::sinks::postgres::PostgresTransport::VerifiedTls,
-    )
-    .expect("repository PostgreSQL URL satisfies verified TLS");
-    let postgres_config = config::HnDigestPostgresConfig {
-        connection,
-        schema: schema.clone(),
-    };
     let inputs = config::HnRunInputs {
-        digest_sink_key: "postgres".to_owned(),
         max_stories: 5,
         poll_timeout_secs: 10,
         source_rate_limit: 1_000.0,
@@ -2608,7 +2600,6 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
                     calls.clone(),
                     false,
                 )),
-                digest_postgres_config_override: Some(postgres_config),
             },
         ))
         .await
@@ -2691,7 +2682,6 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         .await
         .expect("deterministic HN server starts");
     let demo_inputs = config::HnRunInputs {
-        digest_sink_key: "console".to_owned(),
         max_stories: 5,
         poll_timeout_secs: 10,
         source_rate_limit: 1_000.0,
@@ -2726,7 +2716,6 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
                 live_calls.clone(),
                 false,
             )),
-            digest_postgres_config_override: None,
         },
     );
     FlowApplication::builder()
@@ -2805,7 +2794,6 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
                 replay_calls.clone(),
                 true,
             )),
-            digest_postgres_config_override: None,
         },
     );
     FlowApplication::builder()

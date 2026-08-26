@@ -35,3 +35,12 @@ pub use obzenflow_adapters::sinks::{
 pub mod postgres {
     pub use obzenflow_adapters::sinks::postgres::*;
 }
+
+/// Construct a PostgreSQL sink from its validated, I/O-free recipe.
+#[cfg(feature = "postgres")]
+pub fn postgres<B>(config: postgres::PostgresSinkConfig<B>) -> postgres::PostgresSink<B>
+where
+    B: postgres::PostgresBind,
+{
+    config.into_sink()
+}
