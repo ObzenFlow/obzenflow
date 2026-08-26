@@ -16,7 +16,7 @@ mod tests {
         transactional_effect_port_slot, Effect, EffectBinding, EffectBindingEvidence,
         EffectBindingUse, EffectContext, EffectError, EffectPortResolutionError, EffectPortSlotSet,
         EffectRegistrationBuilder, EffectSafety, Effects, LogicalEffectBindingName, Named,
-        NamedEffect, StageCompletion,
+        NamedEffect, SinkRedeliverySafety, StageCompletion,
     };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -683,19 +683,21 @@ mod tests {
         let closure_constructions = std::cell::Cell::new(0);
 
         let selected = crate::sink!(
-            Out => select({
-                selector_evaluations.set(selector_evaluations.get() + 1);
-                "closure".to_owned()
-            }) {
-                "inline" => {
-                    inline_constructions.set(inline_constructions.get() + 1);
-                    Sn
-                },
-                "closure" => {
-                    closure_constructions.set(closure_constructions.get() + 1);
-                    SinkTyped::new(|_out: Out| async move {})
-                },
-            }
+            Out => handler_set!(
+                select({
+                    selector_evaluations.set(selector_evaluations.get() + 1);
+                    "closure".to_owned()
+                }) {
+                    "inline" => {
+                        inline_constructions.set(inline_constructions.get() + 1);
+                        Sn
+                    },
+                    "closure" => {
+                        closure_constructions.set(closure_constructions.get() + 1);
+                        SinkTyped::new(|_out: Out| async move {})
+                    },
+                }
+            )
         )
         .expect("the configured sink key is in the closed alternative set");
 
@@ -716,26 +718,39 @@ mod tests {
         let selector_evaluations = std::cell::Cell::new(0);
         let first_constructions = std::cell::Cell::new(0);
         let second_constructions = std::cell::Cell::new(0);
+        let policy_constructions = std::cell::Cell::new(0);
+        let observer_constructions = std::cell::Cell::new(0);
 
         let result = crate::sink!(
-            Out => select({
-                selector_evaluations.set(selector_evaluations.get() + 1);
-                "unknown".to_owned()
-            }) {
-                "first" => {
-                    first_constructions.set(first_constructions.get() + 1);
-                    Sn
-                },
-                "second" => {
-                    second_constructions.set(second_constructions.get() + 1);
-                    SinkTyped::new(|_out: Out| async move {})
-                },
-            }
+            Out => handler_set!(
+                select({
+                    selector_evaluations.set(selector_evaluations.get() + 1);
+                    "unknown".to_owned()
+                }) {
+                    "first" => {
+                        first_constructions.set(first_constructions.get() + 1);
+                        Sn
+                    },
+                    "second" => {
+                        second_constructions.set(second_constructions.get() + 1);
+                        SinkTyped::new(|_out: Out| async move {})
+                    },
+                }
+            ) with [{
+                policy_constructions.set(policy_constructions.get() + 1);
+                obzenflow_adapters::middleware::RateLimiterBuilder::new(1_000.0).build()
+            }],
+            observers: [{
+                observer_constructions.set(observer_constructions.get() + 1);
+                obzenflow_adapters::middleware::RateLimiterBuilder::new(2_000.0).build()
+            }]
         );
 
         assert_eq!(selector_evaluations.get(), 1);
         assert_eq!(first_constructions.get(), 0);
         assert_eq!(second_constructions.get(), 0);
+        assert_eq!(policy_constructions.get(), 0);
+        assert_eq!(observer_constructions.get(), 0);
         let error = match result {
             Err(error) => error,
             Ok(_) => panic!("an unknown sink key must fail materialisation"),
@@ -751,6 +766,42 @@ mod tests {
             }
             error => panic!("unexpected sink selection error: {error}"),
         }
+    }
+    #[test]
+    fn sink_selected_form_composes_name_and_site_clauses_once() {
+        let policy_constructions = std::cell::Cell::new(0);
+        let observer_constructions = std::cell::Cell::new(0);
+
+        let selected = crate::sink!(
+            name: "selected_output",
+            Out => handler_set!(
+                select("inline".to_owned()) {
+                    "inline" => Sn,
+                    "closure" => SinkTyped::new(|_out: Out| async move {}),
+                }
+            ) with [{
+                policy_constructions.set(policy_constructions.get() + 1);
+                obzenflow_adapters::middleware::RateLimiterBuilder::new(1_000.0).build()
+            }],
+            delivery: idempotent,
+            observers: [{
+                observer_constructions.set(observer_constructions.get() + 1);
+                obzenflow_adapters::middleware::RateLimiterBuilder::new(2_000.0).build()
+            }]
+        )
+        .expect("the configured sink key is in the closed alternative set");
+
+        assert_eq!(selected.name(), "selected_output");
+        assert_eq!(policy_constructions.get(), 1);
+        assert_eq!(observer_constructions.get(), 1);
+        assert_eq!(selected.stage_middleware_names().len(), 2);
+        assert_eq!(
+            selected
+                .sink_description()
+                .expect("selected sink description")
+                .redelivery_safety(),
+            Some(SinkRedeliverySafety::SafeToRepeat)
+        );
     }
     #[test]
     fn sink_typed_delivery_clause() {

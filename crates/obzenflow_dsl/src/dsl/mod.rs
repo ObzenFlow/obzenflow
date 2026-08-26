@@ -9,11 +9,13 @@
 //!
 //! ## Handler references and construction
 //!
-//! Supported stage and AI-role slots take a reference name, unit value path,
-//! or qualified value path. They do not take calls, builder chains, closures,
-//! or struct literals. Construct builder-owned handlers as ordinary Rust inside
+//! Direct stage and AI-role slots take a reference name, unit value path, or
+//! qualified value path. They do not take calls, builder chains, closures, or
+//! struct literals. Construct builder-owned handlers as ordinary Rust inside
 //! the flow's deferred materialiser, immediately above the inner `flow!`, then
-//! pass only the binding name:
+//! pass only the binding name. The one exception is a config-selected sink's
+//! syntax-only `handler_set!` operand, documented below; it is consumed by
+//! `sink!` and cannot exist as a handler value on its own.
 //!
 //! ```ignore
 //! FlowDefinition::materialize(move |_runtime_config| {
@@ -110,6 +112,28 @@
 //!
 //! Connector descriptions and a site-level `delivery:` classification compose,
 //! but the connector's typed input remains authoritative for the arrow.
+//!
+//! A sink may instead consume one compile-time-closed set of heterogeneous,
+//! lazy handler constructors. The application resolves the selector from its
+//! configuration and passes the resulting owned string explicitly. `sink!`
+//! evaluates it once, constructs only the selected branch, and independently
+//! checks every branch against the declared input before descriptor erasure:
+//!
+//! ```ignore
+//! let output = sink!(
+//!     Out => handler_set!(
+//!         select(app_config.output_sink_key()?) {
+//!             "console" => sinks::console(render),
+//!             "postgres" => build_postgres_sink(postgres_config()?)?,
+//!         }
+//!     ),
+//!     delivery: idempotent,
+//! )?;
+//! ```
+//!
+//! `handler_set!` performs no ambient configuration lookup and introduces no
+//! registry, common handler trait, stored selector, or lifecycle authority.
+//! The ordinary `sink!(Out => output)` form remains unchanged.
 //!
 //! A small named integration can implement `InlineSink` directly. It needs no
 //! separate connector or description method; a site-level clause can classify

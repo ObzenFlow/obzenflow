@@ -378,63 +378,11 @@ fn resolve_hn_group_budget(budget_override: Option<TokenCount>, target: &ChatTar
     })
 }
 
-#[cfg(feature = "test-support")]
-#[derive(Clone, Default)]
-pub(crate) struct HnSinkSelectionProbe {
-    selections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    console_constructions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    postgres_constructions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    stop_after_selection: bool,
-}
-
-#[cfg(feature = "test-support")]
-impl HnSinkSelectionProbe {
-    #[cfg(test)]
-    pub(crate) fn stopping() -> Self {
-        Self {
-            stop_after_selection: true,
-            ..Self::default()
-        }
-    }
-
-    fn record_selection(&self) {
-        self.selections
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn record_console_construction(&self) {
-        self.console_constructions
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn record_postgres_construction(&self) {
-        self.postgres_constructions
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn should_stop(&self) -> bool {
-        self.stop_after_selection
-    }
-
-    #[cfg(test)]
-    pub(crate) fn counts(&self) -> (usize, usize, usize) {
-        (
-            self.selections.load(std::sync::atomic::Ordering::SeqCst),
-            self.console_constructions
-                .load(std::sync::atomic::Ordering::SeqCst),
-            self.postgres_constructions
-                .load(std::sync::atomic::Ordering::SeqCst),
-        )
-    }
-}
-
 pub(crate) struct HnFlowOptions {
     pub journal_base: std::path::PathBuf,
     pub chat_binding_override: Option<EffectBinding<ChatCompletion>>,
     #[cfg(feature = "test-support")]
     pub digest_postgres_config_override: Option<HnDigestPostgresConfig>,
-    #[cfg(feature = "test-support")]
-    pub sink_selection_probe: Option<HnSinkSelectionProbe>,
 }
 
 impl Default for HnFlowOptions {
@@ -444,8 +392,6 @@ impl Default for HnFlowOptions {
             chat_binding_override: None,
             #[cfg(feature = "test-support")]
             digest_postgres_config_override: None,
-            #[cfg(feature = "test-support")]
-            sink_selection_probe: None,
         }
     }
 }
@@ -468,8 +414,6 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
             chat_binding_override,
             #[cfg(feature = "test-support")]
             digest_postgres_config_override,
-            #[cfg(feature = "test-support")]
-            sink_selection_probe,
         } = options;
 
         // The mock server binds an ephemeral loopback port for each process.
@@ -537,53 +481,32 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 ))
             })?;
         let source_limiter = RateLimiterBuilder::new(source_rate_limit).build();
-        #[cfg(feature = "test-support")]
-        if let Some(probe) = &sink_selection_probe {
-            probe.record_selection();
-        }
         let digest_summary = sink!(
-            HnDigestSummary => select(digest_sink_key) {
-                "console" => {
-                    #[cfg(feature = "test-support")]
-                    if let Some(probe) = &sink_selection_probe {
-                        probe.record_console_construction();
-                    }
-                    sinks::console(format_digest_summary_for_console)
-                },
-                "postgres" => {
-                    #[cfg(feature = "test-support")]
-                    if let Some(probe) = &sink_selection_probe {
-                        probe.record_postgres_construction();
-                    }
-                    #[cfg(feature = "test-support")]
-                    let postgres_config = match digest_postgres_config_override {
-                        Some(config) => Ok(config),
-                        None => HnDigestPostgresConfig::from_env(),
-                    };
-                    #[cfg(not(feature = "test-support"))]
-                    let postgres_config = HnDigestPostgresConfig::from_env();
-                    let postgres_config = postgres_config.map_err(|error| {
-                        FlowBuildError::StageResourcesFailed(format!(
-                            "HN digest PostgreSQL configuration failed: {error}"
-                        ))
-                    })?;
-                    build_digest_postgres_sink(postgres_config).map_err(|error| {
-                        FlowBuildError::StageResourcesFailed(format!(
-                            "HN digest PostgreSQL sink configuration failed: {error}"
-                        ))
-                    })?
-                },
-            }
+            HnDigestSummary => handler_set!(
+                select(digest_sink_key) {
+                    "console" => sinks::console(format_digest_summary_for_console),
+                    "postgres" => {
+                        #[cfg(feature = "test-support")]
+                        let postgres_config = match digest_postgres_config_override {
+                            Some(config) => Ok(config),
+                            None => HnDigestPostgresConfig::from_env(),
+                        };
+                        #[cfg(not(feature = "test-support"))]
+                        let postgres_config = HnDigestPostgresConfig::from_env();
+                        let postgres_config = postgres_config.map_err(|error| {
+                            FlowBuildError::StageResourcesFailed(format!(
+                                "HN digest PostgreSQL configuration failed: {error}"
+                            ))
+                        })?;
+                        build_digest_postgres_sink(postgres_config).map_err(|error| {
+                            FlowBuildError::StageResourcesFailed(format!(
+                                "HN digest PostgreSQL sink configuration failed: {error}"
+                            ))
+                        })?
+                    },
+                }
+            )
         )?;
-        #[cfg(feature = "test-support")]
-        if sink_selection_probe
-            .as_ref()
-            .is_some_and(HnSinkSelectionProbe::should_stop)
-        {
-            return Err(FlowBuildError::StageResourcesFailed(
-                "HN sink selection probe stopped before connector open".to_string(),
-            ));
-        }
 
         Ok(flow! {
             name: "hn_ai_digest_demo",

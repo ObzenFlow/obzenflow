@@ -2869,26 +2869,63 @@ macro_rules! __obzenflow_sink_selection_expected {
     };
 }
 
-/// Create a sink stage descriptor.
-///
-/// Canonical grammar: `InputType => handler_path`, optional `with [...]`,
-/// optional `delivery: idempotent | non_idempotent`, then optional
-/// `observers: [ ... ]`. Construct closure-tier `SinkTyped`
-/// adapters and sink facades in ordinary Rust inside the materialiser, then
-/// pass the resulting binding by path.
-///
-/// The config-selected form is
-/// `InputType => select(owned_string) { "key" => handler_constructor, ... }`.
-/// It evaluates the selector once, constructs only the matching handler, and
-/// checks every branch through the same exact input witness before erasure.
+/// Apply the enclosing sink site's delivery declaration to one selected
+/// handler constructor. The token group is carried intact through the
+/// heterogeneous branch repetition so every arm receives the same site law.
+#[doc(hidden)]
 #[macro_export]
-macro_rules! sink {
-    // FLOWIP-010o B1: one owned, non-secret config key selects from a
-    // compile-time-closed set. No selector or alternative set survives the
-    // match into the ordinary sink descriptor.
-    ($in:ty => select($selector:expr) {
-        $($key:literal => $handler:expr),+ $(,)?
-    }) => {{
+macro_rules! __obzenflow_sink_handler_set_delivery {
+    ($handler:expr, []) => {
+        $handler
+    };
+    ($handler:expr, [idempotent]) => {
+        $crate::__obzenflow_sink_delivery!($handler, idempotent)
+    };
+    ($handler:expr, [non_idempotent]) => {
+        $crate::__obzenflow_sink_delivery!($handler, non_idempotent)
+    };
+    ($handler:expr, [$other:ident]) => {
+        compile_error!("sink!: `delivery:` accepts `idempotent` or `non_idempotent`")
+    };
+}
+
+/// Lower one branch of a selected sink through the ordinary typed sink
+/// boundary. Keeping this helper branch-local is what makes every authored
+/// alternative satisfy the same arrow-input witness before descriptor erasure.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_sink_handler_set_branch {
+    (
+        input = exact($in:ty),
+        name = $name:literal,
+        handler = $handler:expr,
+        delivery = $delivery:tt,
+        sink_policies = [$($policy:expr),*],
+        observers = [$($observer:expr),*]
+    ) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = $crate::__obzenflow_sink_handler_set_delivery!($handler, $delivery),
+            sink_policies = [$($policy),*],
+            observers = [$($observer),*]
+        )
+    };
+}
+
+/// Sink-owned lowering for the syntax-only `handler_set!` operand.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_sink_handler_set {
+    (
+        input = exact($in:ty),
+        name = $name:literal,
+        selector = $selector:expr,
+        handlers = {$($key:literal => $handler:expr),+ $(,)?},
+        delivery = $delivery:tt,
+        sink_policies = $sink_policies:tt,
+        observers = $observers:tt
+    ) => {{
         let __obzenflow_selected_key: ::std::string::String = $selector;
         #[deny(unreachable_patterns)]
         let __obzenflow_selected_sink: ::core::result::Result<
@@ -2897,12 +2934,13 @@ macro_rules! sink {
         > = match __obzenflow_selected_key.as_str() {
             $(
                 $key => ::core::result::Result::Ok(
-                    $crate::__obzenflow_sink_typed!(
+                    $crate::__obzenflow_sink_handler_set_branch!(
                         input = exact($in),
-                        name = "__obzenflow_binding_derived_name__",
+                        name = $name,
                         handler = $handler,
-                        sink_policies = [],
-                        observers = []
+                        delivery = $delivery,
+                        sink_policies = $sink_policies,
+                        observers = $observers
                     )
                 ),
             )+
@@ -2915,6 +2953,131 @@ macro_rules! sink {
         };
         __obzenflow_selected_sink
     }};
+}
+
+/// A closed set of lazy handler constructors consumed by `sink!`.
+///
+/// This macro is a syntax-only operand. `sink!` must provide the declared input
+/// witness and site clauses before any selected branch can lower to a descriptor.
+/// A standalone invocation is deliberately rejected:
+///
+/// ```compile_fail
+/// use obzenflow_dsl::handler_set;
+///
+/// let _ = handler_set!(
+///     select("console".to_owned()) {
+///         "console" => console_handler,
+///     }
+/// );
+/// ```
+#[macro_export]
+macro_rules! handler_set {
+    ($($tokens:tt)*) => {
+        compile_error!(
+            "handler_set! is a sink! operand, not a standalone handler; use \
+             sink!(Input => handler_set!(select(configured_key) { \"key\" => construct_handler(), ... }))"
+        )
+    };
+}
+
+/// Create a sink stage descriptor.
+///
+/// Canonical grammar: `InputType => handler_path`, optional `with [...]`,
+/// optional `delivery: idempotent | non_idempotent`, then optional
+/// `observers: [ ... ]`. Construct closure-tier `SinkTyped`
+/// adapters and sink facades in ordinary Rust inside the materialiser, then
+/// pass the resulting binding by path.
+///
+/// The config-selected form composes the direct surface with a syntax-only
+/// handler set:
+/// `InputType => handler_set!(select(owned_string) { "key" => constructor, ... })`.
+/// It evaluates the selector once, constructs only the matching handler, and
+/// checks every branch through the same exact input witness before erasure.
+/// The earlier uncomposed spelling receives a migration diagnostic:
+///
+/// ```compile_fail
+/// use obzenflow_dsl::sink;
+///
+/// struct Output;
+/// let _ = sink!(
+///     Output => select("console".to_owned()) {
+///         "console" => console_handler,
+///     }
+/// );
+/// ```
+#[macro_export]
+macro_rules! sink {
+    // FLOWIP-010o B1/B2: one owned, non-secret config key selects from a
+    // compile-time-closed handler set. The enclosing sink owns the arrow
+    // witness and all site metadata; no set or selector survives the match.
+    ($in:ty => handler_set!(
+        select($selector:expr) {
+            $($key:literal => $handler:expr),+ $(,)?
+        }
+    )
+        $(with [$($policy:expr),* $(,)?])?
+        $(, delivery: $delivery:ident)?
+        $(, observers: [$($observer:expr),* $(,)?])?
+    ) => {
+        $crate::__obzenflow_sink_handler_set!(
+            input = exact($in),
+            name = "__obzenflow_binding_derived_name__",
+            selector = $selector,
+            handlers = {$($key => $handler),+},
+            delivery = [$($delivery)?],
+            sink_policies = [$($($policy),*)?],
+            observers = [$($($observer),*)?]
+        )
+    };
+    (name: $name:literal, $in:ty => handler_set!(
+        select($selector:expr) {
+            $($key:literal => $handler:expr),+ $(,)?
+        }
+    )
+        $(with [$($policy:expr),* $(,)?])?
+        $(, delivery: $delivery:ident)?
+        $(, observers: [$($observer:expr),* $(,)?])?
+    ) => {
+        $crate::__obzenflow_sink_handler_set!(
+            input = exact($in),
+            name = $name,
+            selector = $selector,
+            handlers = {$($key => $handler),+},
+            delivery = [$($delivery)?],
+            sink_policies = [$($($policy),*)?],
+            observers = [$($($observer),*)?]
+        )
+    };
+    ($in:ty => handler_set!(select($selector:expr) {}) $($rest:tt)*) => {
+        compile_error!("sink!: handler_set! requires one or more `\"key\" => constructor` alternatives")
+    };
+    (name: $name:literal, $in:ty => handler_set!(select($selector:expr) {}) $($rest:tt)*) => {
+        compile_error!("sink!: handler_set! requires one or more `\"key\" => constructor` alternatives")
+    };
+    ($in:ty => handler_set!($($handler_set:tt)*) $($rest:tt)*) => {
+        compile_error!(
+            "sink!: expected `handler_set!(select(<owned String>) { \"key\" => constructor, ... })`; \
+             keys must be unique exact string literals and wildcard/default arms are not supported"
+        )
+    };
+    (name: $name:literal, $in:ty => handler_set!($($handler_set:tt)*) $($rest:tt)*) => {
+        compile_error!(
+            "sink!: expected `handler_set!(select(<owned String>) { \"key\" => constructor, ... })`; \
+             keys must be unique exact string literals and wildcard/default arms are not supported"
+        )
+    };
+    ($in:ty => select($selector:expr) {$($arms:tt)*} $($rest:tt)*) => {
+        compile_error!(
+            "sink!: selected handlers compose through handler_set!; use \
+             sink!(Input => handler_set!(select(configured_key) { \"key\" => construct_handler(), ... }))"
+        )
+    };
+    (name: $name:literal, $in:ty => select($selector:expr) {$($arms:tt)*} $($rest:tt)*) => {
+        compile_error!(
+            "sink!: selected handlers compose through handler_set!; use \
+             sink!(name: \"output\", Input => handler_set!(select(configured_key) { \"key\" => construct_handler(), ... }))"
+        )
+    };
     ($in:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?] $($rest:tt)*) => {
         $crate::__obzenflow_stage_middleware_removed!()
     };
