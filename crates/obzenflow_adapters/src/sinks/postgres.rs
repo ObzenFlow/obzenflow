@@ -125,7 +125,7 @@ pub struct PostgresConnection {
 
 #[derive(Clone)]
 enum PostgresConnectionSource {
-    Parsed(PgConnectOptions),
+    Parsed(Box<PgConnectOptions>),
     Environment(String),
 }
 
@@ -179,11 +179,11 @@ impl PostgresConnection {
         transport: PostgresTransport,
     ) -> Result<Self, PostgresConfigError> {
         Ok(Self {
-            source: PostgresConnectionSource::Parsed(
+            source: PostgresConnectionSource::Parsed(Box::new(
                 options
                     .ssl_mode(transport.ssl_mode())
                     .disable_statement_logging(),
-            ),
+            )),
             transport,
             acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
             operation_timeout: DEFAULT_OPERATION_TIMEOUT,
@@ -221,7 +221,7 @@ impl PostgresConnection {
 
     fn resolve_options(&self) -> Result<PgConnectOptions, PostgresConfigError> {
         match &self.source {
-            PostgresConnectionSource::Parsed(options) => Ok(options.clone()),
+            PostgresConnectionSource::Parsed(options) => Ok(options.as_ref().clone()),
             PostgresConnectionSource::Environment(name) => {
                 let value = std::env::var(name)
                     .map_err(|_| PostgresConfigError::MissingEnvironment(name.clone()))?;

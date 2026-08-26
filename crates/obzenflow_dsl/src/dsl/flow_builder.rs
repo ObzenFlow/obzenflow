@@ -18,8 +18,13 @@ use obzenflow_runtime::journal::FlowJournalFactory;
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_topology::EdgeKind;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+type ConfiguredSinkResolution = (
+    HashMap<String, Box<dyn StageDescriptor>>,
+    HashSet<String>,
+);
 
 fn describe_handler_keys(keys: &[&str]) -> String {
     match keys {
@@ -36,19 +41,14 @@ fn describe_handler_keys(keys: &[&str]) -> String {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn resolve_configured_sink_descriptors(
     stages: HashMap<String, Box<dyn StageDescriptor>>,
     runtime_config: &obzenflow_runtime::runtime_config::ResolvedRuntimeConfig,
-) -> Result<
-    (
-        HashMap<String, Box<dyn StageDescriptor>>,
-        std::collections::HashSet<String>,
-    ),
-    crate::dsl::FlowBuildError,
-> {
+) -> Result<ConfiguredSinkResolution, crate::dsl::FlowBuildError> {
     use crate::dsl::FlowBuildError;
 
-    let mut configured_sink_stages = std::collections::HashSet::new();
+    let mut configured_sink_stages = HashSet::new();
     let mut selected_stages = HashMap::with_capacity(stages.len());
     for (binding, descriptor) in stages {
         let Some(keys) = descriptor.configured_sink_handler_keys() else {

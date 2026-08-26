@@ -334,6 +334,8 @@ jobs:
               --features postgres,e2e --test postgres_sink_example_e2e_test
 
       - name: PostgreSQL Hacker News digest example
+        env:
+          OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER: postgres_sink
         run: |
           cargo xtask postgres run -- \
             cargo build --locked -p obzenflow \

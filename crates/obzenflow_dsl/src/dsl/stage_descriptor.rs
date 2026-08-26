@@ -477,6 +477,7 @@ pub trait StageDescriptor: sealed::Sealed + Send + Sync {
     /// ordinary descriptor admitted to the flow. Called only when
     /// `configured_sink_handler_keys` returned `Some`.
     #[doc(hidden)]
+    #[allow(clippy::result_large_err)]
     fn select_configured_sink_handler(
         self: Box<Self>,
         _selected: &str,

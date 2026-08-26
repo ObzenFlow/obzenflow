@@ -597,10 +597,10 @@ pub(crate) fn build_presentation(config: &HnRunInputs) -> Presentation {
         let is_success = matches!(&outcome, RunPresentationOutcome::Completed { .. });
         let footer = outcome.into_footer();
         if is_success {
-            footer.paragraph(format!(
+            footer.paragraph(
                 "The generated digest was delivered by the configured sink handler.\n\
                  Re-run with HN_LIVE=1 to fetch from the real Hacker News API."
-            ))
+            )
         } else {
             footer
         }
