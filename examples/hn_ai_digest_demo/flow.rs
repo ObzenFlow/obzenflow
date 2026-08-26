@@ -483,9 +483,6 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 ))
             })?;
         let postgres_sink = sinks::postgres(postgres_config);
-        let digest_summary = sink!(
-            HnDigestSummary => handler_set!(console_sink, postgres_sink)
-        )?;
 
         Ok(flow! {
             name: "hn_ai_digest_demo",
@@ -535,7 +532,9 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                         snapshot_excluded_items_limit: 25,
                     }
                 );
-                digest_summary = digest_summary;
+                digest_summary = sink!(
+                    HnDigestSummary => handler_set!(console_sink, postgres_sink)
+                )?;
             },
 
             topology: {

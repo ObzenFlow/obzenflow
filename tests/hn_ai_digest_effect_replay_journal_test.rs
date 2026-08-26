@@ -1398,7 +1398,7 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         ".insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)?",
         ".batch_size(1)?",
         ".redelivery_safety(SinkRedeliverySafety::DuplicateSensitive)",
-        "digest_summary = digest_summary;",
+        "digest_summary = sink!(",
         "map: [FormattedStory] -> HnDigestGroupSummary",
         "reduce: (HnTopStories, [HnDigestGroupSummary]) -> HnDigestSummary",
         "uses at_least_once(ChatCompletion)",
@@ -1440,6 +1440,7 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "record_console_construction",
         "record_postgres_construction",
         "stopped before connector open",
+        "let digest_summary = sink!(",
     ] {
         assert!(
             !flow_source.contains(forbidden),

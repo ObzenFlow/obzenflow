@@ -122,10 +122,15 @@
 //! ```ignore
 //! let console_sink = sinks::console(render);
 //! let postgres_sink = sinks::postgres(postgres_config);
-//! let output = sink!(
-//!     Out => handler_set!(console_sink, postgres_sink),
-//!     delivery: idempotent,
-//! )?;
+//! flow! {
+//!     stages: {
+//!         output = sink!(
+//!             Out => handler_set!(console_sink, postgres_sink),
+//!             delivery: idempotent,
+//!         )?;
+//!     },
+//!     // topology
+//! }
 //! ```
 //!
 //! For a stage bound as `output`, the file address is
