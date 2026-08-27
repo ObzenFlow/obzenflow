@@ -2,12 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::config::{DEVELOPMENT_CA_FILE, DEVELOPMENT_SESSION, DEVELOPMENT_STATE_ROOT};
 use crate::{error, Result};
 use std::{
-    fs,
-    path::Path,
+    fs::{self, File, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+use uuid::Uuid;
 
 const DEVELOPMENT_DAYS: &str = "3650";
 const TEST_DAYS: &str = "7";
@@ -48,6 +51,51 @@ pub(super) fn verify_development(directory: &Path) -> Result<()> {
         Err(reset_required(
             "PostgreSQL development TLS certificate is invalid or no longer trusted",
         ))
+    }
+}
+
+pub(super) fn client_ca(root: &Path, directory: &Path) -> Result<PathBuf> {
+    let managed = directory.join("tls/ca.crt");
+    let checkout_development = root.join(DEVELOPMENT_STATE_ROOT).join(DEVELOPMENT_SESSION);
+    if directory != checkout_development {
+        return Ok(managed);
+    }
+
+    require_regular_file(&managed, "ca.crt")?;
+    let published = root.join(DEVELOPMENT_CA_FILE);
+    let parent = published
+        .parent()
+        .ok_or_else(|| error("PostgreSQL client CA path has no parent directory"))?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".local-ca-{}.tmp", Uuid::new_v4().simple()));
+    let publish_result: Result<()> = (|| {
+        let mut file = public_file_create_new(&temporary)?;
+        file.write_all(&fs::read(&managed)?)?;
+        file.sync_all()?;
+        set_public_permissions(&temporary)?;
+        #[cfg(windows)]
+        if published.exists() {
+            fs::remove_file(&published)?;
+        }
+        fs::rename(&temporary, &published)?;
+        Ok(())
+    })();
+    if publish_result.is_err() && temporary.exists() {
+        let _ = fs::remove_file(&temporary);
+    }
+    publish_result?;
+    Ok(published)
+}
+
+pub(super) fn remove_client_ca(root: &Path, directory: &Path) -> Result<()> {
+    let checkout_development = root.join(DEVELOPMENT_STATE_ROOT).join(DEVELOPMENT_SESSION);
+    if directory != checkout_development {
+        return Ok(());
+    }
+    match fs::remove_file(root.join(DEVELOPMENT_CA_FILE)) {
+        Ok(()) => Ok(()),
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(failure) => Err(failure.into()),
     }
 }
 
@@ -285,6 +333,29 @@ fn path_arg(path: &Path) -> Result<&str> {
         .ok_or_else(|| error("PostgreSQL session path is not valid Unicode"))
 }
 
+fn public_file_create_new(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o644);
+    }
+    Ok(options.open(path)?)
+}
+
+#[cfg(unix)]
+fn set_public_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_public_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 #[cfg(unix)]
 fn set_private_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -302,4 +373,46 @@ fn reset_required(message: impl AsRef<str>) -> Box<dyn std::error::Error> {
         "{}; reset this development session with `cargo xtask postgres down --volumes`",
         message.as_ref()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_checkout_development_ca_is_published_and_removed() {
+        let root = std::env::temp_dir().join(format!(
+            "obzenflow-postgres-client-ca-{}",
+            Uuid::new_v4().simple()
+        ));
+        let development = root.join(DEVELOPMENT_STATE_ROOT).join(DEVELOPMENT_SESSION);
+        fs::create_dir_all(development.join("tls")).expect("create development TLS fixture");
+        fs::write(development.join("tls/ca.crt"), b"development-ca")
+            .expect("write development CA fixture");
+
+        let published = client_ca(&root, &development).expect("publish development CA");
+        assert_eq!(published, root.join(DEVELOPMENT_CA_FILE));
+        assert_eq!(
+            fs::read(&published).expect("read published CA"),
+            b"development-ca"
+        );
+
+        let isolated = root.join("target/postgres-sessions/persistent-proof");
+        fs::create_dir_all(isolated.join("tls")).expect("create isolated TLS fixture");
+        fs::write(isolated.join("tls/ca.crt"), b"isolated-ca").expect("write isolated CA fixture");
+        assert_eq!(
+            client_ca(&root, &isolated).expect("resolve isolated CA"),
+            isolated.join("tls/ca.crt")
+        );
+        assert_eq!(
+            fs::read(&published).expect("isolated session leaves published CA unchanged"),
+            b"development-ca"
+        );
+
+        remove_client_ca(&root, &isolated).expect("ignore isolated CA cleanup");
+        assert!(published.is_file());
+        remove_client_ca(&root, &development).expect("remove published development CA");
+        assert!(!published.exists());
+        fs::remove_dir_all(root).expect("remove client CA fixture");
+    }
 }

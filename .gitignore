@@ -2,6 +2,7 @@
 *.log
 **/target/
 .obzenflow/
+/dev/postgres/local-ca.crt
 .claude
 .idea
 .obsidian/

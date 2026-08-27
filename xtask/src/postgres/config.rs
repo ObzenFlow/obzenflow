@@ -10,6 +10,7 @@ pub(super) const COMPOSE_FILE: &str = "dev/postgres/compose.yml";
 pub(super) const SESSION_ROOT: &str = "target/postgres-sessions";
 pub(super) const DEVELOPMENT_STATE_ROOT: &str = ".obzenflow/postgres";
 pub(super) const DEVELOPMENT_SESSION: &str = "development";
+pub(super) const DEVELOPMENT_CA_FILE: &str = "dev/postgres/local-ca.crt";
 pub(super) const SESSION_OVERRIDE_ENV: &str = "OBZENFLOW_POSTGRES_XTASK_PROOF_SESSION";
 pub(super) const STATE_FILE: &str = "state.tsv";
 pub(super) const RAW_PASSWORD_FILE: &str = "password";

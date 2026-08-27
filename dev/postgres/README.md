@@ -23,6 +23,11 @@ checkout-local password as two owner-only files:
 - `password`, mounted into the official image through `POSTGRES_PASSWORD_FILE`;
 - `pgpass`, containing the exact retained host, port, database, and user.
 
+The generated CA certificate is public, so `up`, `status`, and `connection`
+publish a gitignored copy at `dev/postgres/local-ca.crt`. This visible path can
+be selected directly in GUI clients such as TablePlus; secret and state files
+remain under `.obzenflow`.
+
 The password is never printed or placed in a connection URL or ordinary child
 environment value. `connection` prints the non-secret profile and a copyable
 `psql` command that removes inherited `PGPASSWORD` and selects the managed
@@ -62,7 +67,7 @@ xtask state.
 # Stop the container; retain port, volume, credentials, and rows.
 cargo xtask postgres down
 
-# Delete the exact owned volume, credentials, certificates, and state.
+# Delete the exact owned volume, credentials, certificates, visible CA copy, and state.
 cargo xtask postgres down --volumes
 ```
 
