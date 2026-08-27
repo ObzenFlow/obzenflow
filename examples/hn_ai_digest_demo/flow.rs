@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::config::{HnRunInputs, PreparedHnRun};
+use super::config::{HnDigestPostgresConfig, HnRunInputs, PreparedHnRun};
 use super::decoder::hn_story_decoder;
 use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
@@ -10,6 +10,9 @@ use anyhow::Result;
 use obzenflow::ai::{
     ChatBindingMetadata, ChatCompletion, ChatEffectBinding, ChunkInfo, EstimateSource, Prompt,
     SystemPrompt, TokenCount, UserPrompt,
+};
+use obzenflow::sinks::postgres::{
+    PostgresBind, PostgresBindings, PostgresSink, PostgresSinkConfig,
 };
 use obzenflow::sources::{http_pull_config, HttpPullSource};
 use obzenflow::{sinks, stateful, transforms};
@@ -24,13 +27,17 @@ use obzenflow_dsl::dsl::error::FlowBuildError;
 use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::EffectBinding;
+use obzenflow_runtime::effects::{EffectBinding, SinkRedeliverySafety};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 const HN_SOURCE_BREAKER_FAILURES: u32 = 3;
 const HN_SOURCE_BREAKER_COOLDOWN_SECS: u64 = 2;
+const HN_DIGEST_TABLE: &str = "hn_digest_summaries";
+const HN_DIGEST_INSERT: &str = "(source_mode, source_identity, ai_provider, ai_model, \
+token_estimator, interests, story_ids, output_markdown) \
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct HnTopStories {
@@ -70,6 +77,57 @@ struct HnDigestSummary {
 
 impl TypedPayload for HnDigestSummary {
     const EVENT_TYPE: &'static str = "hn.digest_summary";
+}
+
+#[derive(Clone, Debug)]
+struct HnDigestPostgresBinder;
+
+impl PostgresBind for HnDigestPostgresBinder {
+    type Input = HnDigestSummary;
+
+    fn bind(&self, bindings: &mut PostgresBindings, digest: &Self::Input) {
+        let token_estimator = match digest.token_estimator {
+            EstimateSource::Heuristic => "heuristic",
+            EstimateSource::Tokenizer => "tokenizer",
+        };
+        let story_ids = digest
+            .input
+            .stories
+            .iter()
+            .map(|story| story.id.to_string())
+            .collect::<Vec<_>>();
+
+        bindings
+            .bind(&digest.mode)
+            .bind(&digest.base_url)
+            .bind(&digest.ai_provider)
+            .bind(&digest.ai_model)
+            .bind(token_estimator)
+            .bind(digest.interests.as_deref())
+            .bind(story_ids)
+            .bind(&digest.output_markdown);
+    }
+}
+
+fn build_digest_postgres_config(
+    config: HnDigestPostgresConfig,
+) -> Result<PostgresSinkConfig<HnDigestPostgresBinder>> {
+    Ok(PostgresSink::builder(HnDigestPostgresBinder)
+        .connection(config.connection)
+        .insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)?
+        .batch_size(1)?
+        .redelivery_safety(SinkRedeliverySafety::DuplicateSensitive)
+        .build_config()?)
+}
+
+#[cfg(test)]
+pub(crate) fn describe_digest_postgres_sink(
+    config: HnDigestPostgresConfig,
+) -> Result<obzenflow_runtime::stages::sink::SinkDescription> {
+    let sink = sinks::postgres(build_digest_postgres_config(config)?);
+    Ok(obzenflow_runtime::stages::sink::SinkConnector::describe(
+        &sink,
+    ))
 }
 
 struct DigestMapCtx {
@@ -416,7 +474,15 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                 ))
             })?;
         let source_limiter = RateLimiterBuilder::new(source_rate_limit).build();
-        let digest_summary_sink = sinks::console(format_digest_summary_for_console);
+        let console_sink = sinks::console(format_digest_summary_for_console);
+        let postgres_config = HnDigestPostgresConfig::from_env()
+            .and_then(build_digest_postgres_config)
+            .map_err(|error| {
+                FlowBuildError::StageResourcesFailed(format!(
+                    "HN digest PostgreSQL sink configuration failed: {error}"
+                ))
+            })?;
+        let postgres_sink = sinks::postgres(postgres_config);
 
         Ok(flow! {
             name: "hn_ai_digest_demo",
@@ -466,7 +532,9 @@ pub(crate) fn build_flow_definition(inputs: HnRunInputs, options: HnFlowOptions)
                         snapshot_excluded_items_limit: 25,
                     }
                 );
-                digest_summary = sink!(HnDigestSummary => digest_summary_sink);
+                digest_summary = sink!(
+                    HnDigestSummary => handler_set!(console_sink, postgres_sink)
+                )?;
             },
 
             topology: {
@@ -530,7 +598,8 @@ pub(crate) fn build_presentation(config: &HnRunInputs) -> Presentation {
         let footer = outcome.into_footer();
         if is_success {
             footer.paragraph(
-                "The generated digest was printed above.\nRe-run with HN_LIVE=1 to fetch from the real Hacker News API.",
+                "The generated digest was delivered by the configured sink handler.\n\
+                 Re-run with HN_LIVE=1 to fetch from the real Hacker News API."
             )
         } else {
             footer

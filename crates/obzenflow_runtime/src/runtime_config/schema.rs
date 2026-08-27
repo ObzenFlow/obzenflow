@@ -16,6 +16,7 @@ use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSubject};
 pub const CIRCUIT_BREAKER_THRESHOLD_KEY: &str = "effects.circuit_breaker.threshold";
 pub const RATE_LIMITER_BURST_CAPACITY_KEY: &str = "effects.rate_limiter.burst_capacity";
 pub const RATE_LIMITER_EVENTS_PER_SECOND_KEY: &str = "effects.rate_limiter.events_per_second";
+pub const SINK_HANDLER_KEY: &str = "sinks.handler";
 pub const RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY: &str =
     "effects.resilience.breaker.consecutive_failures";
 pub const RESILIENCE_BREAKER_COUNT_WINDOW_KEY: &str = "effects.resilience.breaker.count_window";
@@ -52,6 +53,10 @@ pub enum KnobTarget {
     Global,
     Flow,
     Stage,
+    /// An unqualified stage point exists only where build-time authoring
+    /// evidence declares a consumer. This keeps a stage-scoped facility out
+    /// of unrelated stages without admitting effect-qualified subjects.
+    StageConsumer,
     /// One declared effect. Broadcast candidates may live at global, flow,
     /// or stage scope; exact subjects live only at stage scope.
     Effect,
@@ -764,6 +769,17 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 redaction: Redaction::Plain,
                 env: EnvBinding::Named("OBZENFLOW_REPLAY_VERIFY"),
             },
+            KnobSpec {
+                key_path: SINK_HANDLER_KEY,
+                file_path: None,
+                value_type: KnobType::Text,
+                // Only authored handler-set stages consume this key.
+                target: KnobTarget::StageConsumer,
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Immutable,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
         ]
     })
 }
@@ -803,6 +819,12 @@ pub fn schema_view() -> Vec<KnobSchemaDoc> {
                 KnobTarget::Flow => ("flow", vec!["global", "flow"], vec!["unqualified"], ".flow"),
                 KnobTarget::Stage => (
                     "stage",
+                    vec!["global", "flow", "stage"],
+                    vec!["unqualified"],
+                    ".stages.<stage>",
+                ),
+                KnobTarget::StageConsumer => (
+                    "stage_consumer",
                     vec!["global", "flow", "stage"],
                     vec!["unqualified"],
                     ".stages.<stage>",

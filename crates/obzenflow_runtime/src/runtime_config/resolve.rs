@@ -116,7 +116,10 @@ fn ladder(spec: &KnobSpec, point: &ResolutionPoint) -> Vec<ConfigScope> {
                 ConfigScope::Global,
             ]
         }
-        (KnobTarget::Stage | KnobTarget::StageOrEffect, ResolutionPoint::Stage(stage)) => vec![
+        (
+            KnobTarget::Stage | KnobTarget::StageConsumer | KnobTarget::StageOrEffect,
+            ResolutionPoint::Stage(stage),
+        ) => vec![
             ConfigScope::Stage {
                 stage: stage.clone(),
             },
@@ -292,6 +295,16 @@ pub fn materialize_flow_config(
                             known: ctx.stages.iter().map(|s| s.as_str().to_string()).collect(),
                         });
                     }
+                    if matches!(spec.target, KnobTarget::StageConsumer)
+                        && !stage_consumers
+                            .get(spec.key_path)
+                            .is_some_and(|consumers| consumers.contains(stage))
+                    {
+                        return Err(ConfigResolveError::UnattachedStageConsumer {
+                            key_path: spec.key_path.to_string(),
+                            stage: stage.as_str().to_string(),
+                        });
+                    }
                     // §4c fan-in footgun: the stage rung of an edge-target
                     // knob binds upstream, so an entry on a stage with no
                     // outgoing edges governs nothing.
@@ -377,6 +390,12 @@ pub fn materialize_flow_config(
             KnobTarget::Stage => ctx
                 .stages
                 .iter()
+                .map(|stage| ResolutionPoint::Stage(stage.clone()))
+                .collect(),
+            KnobTarget::StageConsumer => stage_consumers
+                .get(spec.key_path)
+                .into_iter()
+                .flat_map(|points| points.iter())
                 .map(|stage| ResolutionPoint::Stage(stage.clone()))
                 .collect(),
             KnobTarget::Effect => effect_consumers
@@ -498,7 +517,7 @@ pub fn materialize_flow_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime_config::candidates::ScopedCandidate;
+    use crate::runtime_config::candidates::{DslCandidates, ScopedCandidate};
     use crate::runtime_config::schema::{EnvBinding, KnobType, Mutability, Redaction};
     use std::collections::BTreeSet;
 
@@ -807,6 +826,81 @@ mod tests {
         assert!(err
             .to_string()
             .contains("configured stage does not exist: 'ghost'"));
+    }
+
+    #[test]
+    fn stage_consumer_knobs_materialise_only_for_authored_consumers() {
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            super::super::schema::SINK_HANDLER_KEY,
+            ConfigScope::Global,
+            ConfigSource::File,
+            ConfigValue::Text("console_sink".to_string()),
+        );
+        let snapshot = ResolvedRuntimeConfig::new(set);
+        let mut dsl = DslCandidates::default();
+        dsl.declare_stage_consumption(super::super::schema::SINK_HANDLER_KEY, "output");
+        let ctx = FlowResolutionContext {
+            flow_name: "f".to_string(),
+            stages: BTreeSet::from([StageKey::from("output"), StageKey::from("ordinary_sink")]),
+            edges: BTreeSet::new(),
+            declared_effects: Default::default(),
+            dsl,
+        };
+
+        let effective = materialize_flow_config(&snapshot, ctx).unwrap();
+        assert_eq!(
+            effective
+                .get(
+                    super::super::schema::SINK_HANDLER_KEY,
+                    &ConfigScope::stage("output")
+                )
+                .unwrap()
+                .value
+                .as_text(),
+            Some("console_sink")
+        );
+        assert!(effective
+            .get(
+                super::super::schema::SINK_HANDLER_KEY,
+                &ConfigScope::stage("ordinary_sink")
+            )
+            .is_none());
+        assert_eq!(
+            effective
+                .points(super::super::schema::SINK_HANDLER_KEY)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn stage_consumer_knobs_reject_entries_on_non_consuming_stages() {
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            super::super::schema::SINK_HANDLER_KEY,
+            ConfigScope::stage("ordinary_sink"),
+            ConfigSource::File,
+            ConfigValue::Text("console_sink".to_string()),
+        );
+        let snapshot = ResolvedRuntimeConfig::new(set);
+        let ctx = FlowResolutionContext {
+            flow_name: "f".to_string(),
+            stages: BTreeSet::from([StageKey::from("ordinary_sink")]),
+            edges: BTreeSet::new(),
+            declared_effects: Default::default(),
+            dsl: Default::default(),
+        };
+
+        let error = materialize_flow_config(&snapshot, ctx).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigResolveError::UnattachedStageConsumer { ref key_path, ref stage }
+                if key_path == super::super::schema::SINK_HANDLER_KEY
+                    && stage == "ordinary_sink"
+        ));
     }
 
     fn one_edge_ctx() -> FlowResolutionContext {

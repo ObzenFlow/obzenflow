@@ -5,7 +5,7 @@
 //! HN AI Digest Demo — showcases Rig-backed LLM transforms.
 //!
 //! Pipeline (batch + map-reduce):
-//! `HttpPullSource` → format stories → accumulate into one batch → `ai_map_reduce!` digest → print markdown digest
+//! `HttpPullSource` → format stories → accumulate into one batch → `ai_map_reduce!` digest → configured sink
 //!
 //! The `digest` stage is a single `ai_map_reduce!`: a `by_budget` chunking policy splits the batch
 //! into token-budgeted chunks, the `map` arm summarizes each chunk with one LLM call, and the
@@ -19,7 +19,7 @@
 //! Tutorials: `https://obzenflow.dev/tutorials/`
 //!
 //! Run (default: local mock HN server + Ollama; requires Ollama running):
-//! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai" -- --config examples/hn_ai_digest_demo/obzenflow.toml`
+//! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`
 //!
 //! Ollama quickstart (macOS):
 //! - Install: `brew install ollama`
@@ -37,7 +37,7 @@
 //! When using a hosted provider, your prompts and story text will be sent to that provider.
 //!
 //! Run against the real HN Firebase API (requires network):
-//! `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"`
+//! `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres"`
 //!
 //! Optional env vars (HN fetch):
 //! - `HN_MAX_STORIES=60` (default 60)
@@ -45,6 +45,15 @@
 //! - `HN_POLL_TIMEOUT_SECS=120` (default 120)
 //! - `HN_SOURCE_RATE_LIMIT=10.0` (default 10.0 events/sec)
 //! - The HN HTTP source also has a fixed source circuit breaker: 3 failures, 2s cooldown.
+//!
+//! Digest output configuration:
+//! - `[sinks] handler = "console_sink"` in the checked-in config is the default.
+//! - Override the logical stage in the environment with
+//!   `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink`.
+//! - PostgreSQL output reads `OBZENFLOW_POSTGRES_URL` and optionally
+//!   `OBZENFLOW_POSTGRES_SCHEMA` (default `obzenflow_example`).
+//! - Start the repository service with `cargo xtask postgres up`, then run PostgreSQL output with
+//!   `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`.
 //!
 //! AI target configuration:
 //! - `[ai.models]` in `obzenflow.toml` supplies provider, model, optional endpoint, and

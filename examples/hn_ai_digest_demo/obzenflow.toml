@@ -10,3 +10,8 @@ stall_timeout_ms = 30000
 [ai.models]
 provider = "ollama"
 model = "llama3.1:8b"
+
+# The logical `digest_summary` stage declares `console_sink` and
+# `postgres_sink`; deployment configuration chooses one binding by name.
+[sinks]
+handler = "console_sink"

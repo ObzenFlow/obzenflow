@@ -32,6 +32,4 @@ pub use obzenflow_adapters::sinks::{
 /// The connector witnesses its exact input type, so the generic `sink!` arm
 /// proves arrow equality before erasing the writer.
 #[cfg(feature = "postgres")]
-pub mod postgres {
-    pub use obzenflow_adapters::sinks::postgres::*;
-}
+pub use obzenflow_adapters::sinks::postgres;

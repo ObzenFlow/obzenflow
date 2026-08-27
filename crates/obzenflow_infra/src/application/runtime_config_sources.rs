@@ -6,8 +6,10 @@
 //! tables, canonical env spellings, and the resume-view CLI flags become a
 //! type-validated `CandidateSet`, then the immutable `ResolvedRuntimeConfig`.
 //!
-//! Scoped entries ride the file source only (§2 first-pass lock; DSL
-//! candidates join at flow build); CLI and env candidates are global-only.
+//! Scoped entries normally ride the file source only (§2 first-pass lock; DSL
+//! candidates join at flow build). Config-selected sinks add one deliberately
+//! narrow stage-addressed environment spelling so a Twelve-Factor deployment
+//! can select a handler without adding selection syntax to the flow.
 //! Startup diagnostics keep the `config error at <path>: ...` currency.
 
 use super::config::{ConfigError, FlowConfig, RawFileStartupConfig};
@@ -15,8 +17,81 @@ use crate::env::{env_bool, env_var};
 use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSource};
 use obzenflow_runtime::runtime_config::{
     knob_registry, CandidateSet, ConfigResolveError, ConfigValue, KnobType, ResolvedRuntimeConfig,
-    ScopedCandidate,
+    ScopedCandidate, SINK_HANDLER_KEY,
 };
+
+const STAGE_SINK_HANDLER_ENV_PREFIX: &str = "OBZENFLOW_SINKS_STAGES_";
+const STAGE_SINK_HANDLER_ENV_SUFFIX: &str = "_HANDLER";
+const ESCAPED_STAGE_ENV_SEGMENT_PREFIX: &str = "X__";
+
+/// Encode one exact, case-sensitive stage key as the segment used by the
+/// stage-addressed `sinks.handler` environment spelling.
+///
+/// Common binding-derived keys stay readable. Every other key uses uppercase
+/// hexadecimal UTF-8 so the mapping remains reversible instead of narrowing
+/// `StageKey` or creating a second stage identity.
+fn encode_stage_sink_handler_env_segment(stage: &str) -> String {
+    let is_readable = !stage.is_empty()
+        && stage
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        && !stage.starts_with("x__");
+
+    if is_readable {
+        return stage.to_ascii_uppercase();
+    }
+
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded =
+        String::with_capacity(ESCAPED_STAGE_ENV_SEGMENT_PREFIX.len() + stage.len() * 2);
+    encoded.push_str(ESCAPED_STAGE_ENV_SEGMENT_PREFIX);
+    for byte in stage.bytes() {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn decode_stage_sink_handler_env_segment(encoded: &str) -> Result<String, &'static str> {
+    let Some(hex) = encoded.strip_prefix(ESCAPED_STAGE_ENV_SEGMENT_PREFIX) else {
+        if encoded.is_empty()
+            || !encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(
+                "stage segment must be non-empty ASCII uppercase letters, digits, or underscores, or X__ followed by uppercase hexadecimal UTF-8 bytes",
+            );
+        }
+        return Ok(encoded.to_ascii_lowercase());
+    };
+
+    if hex.len() % 2 != 0 {
+        return Err("escaped stage segment must contain an even number of hexadecimal digits");
+    }
+    if !hex
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+    {
+        return Err("escaped stage segment must contain only uppercase hexadecimal digits");
+    }
+
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.as_bytes().chunks_exact(2) {
+        let nibble = |byte| match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => unreachable!("escaped stage hex was validated above"),
+        };
+        bytes.push((nibble(pair[0]) << 4) | nibble(pair[1]));
+    }
+    let stage =
+        String::from_utf8(bytes).map_err(|_| "escaped stage segment must decode to valid UTF-8")?;
+    if encode_stage_sink_handler_env_segment(&stage) != encoded {
+        return Err("stage segment is a non-canonical alias for the decoded stage key");
+    }
+    Ok(stage)
+}
 
 /// Build the startup snapshot (Phase A). The DSL tier and stage/edge
 /// resolution join at flow build (`materialize_flow_config`).
@@ -91,6 +166,31 @@ fn admit_file_candidates(
     set: &mut CandidateSet,
     file: &RawFileStartupConfig,
 ) -> Result<(), ConfigError> {
+    let sinks = &file.sinks;
+    file_text!(
+        set,
+        SINK_HANDLER_KEY,
+        ConfigScope::Global,
+        &sinks.handler,
+        "sinks.handler"
+    );
+    file_text!(
+        set,
+        SINK_HANDLER_KEY,
+        ConfigScope::Flow,
+        &sinks.flow.handler,
+        "sinks.flow.handler"
+    );
+    for (stage, entry) in &sinks.stages {
+        file_text!(
+            set,
+            SINK_HANDLER_KEY,
+            ConfigScope::stage(stage.as_str()),
+            &entry.handler,
+            &format!("sinks.stages.{stage}.handler")
+        );
+    }
+
     // [runtime] global rung.
     let runtime = &file.runtime;
     file_u64!(
@@ -595,6 +695,35 @@ fn admit_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
             )?;
         }
     }
+    admit_stage_sink_handler_env_candidates(set)?;
+    Ok(())
+}
+
+fn admit_stage_sink_handler_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
+    for (name, raw) in std::env::vars_os() {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(encoded_stage) = name
+            .strip_prefix(STAGE_SINK_HANDLER_ENV_PREFIX)
+            .and_then(|rest| rest.strip_suffix(STAGE_SINK_HANDLER_ENV_SUFFIX))
+        else {
+            continue;
+        };
+        let stage = decode_stage_sink_handler_env_segment(encoded_stage)
+            .map_err(|message| ConfigError::at(name, message))?;
+        let value = raw
+            .into_string()
+            .map_err(|_| ConfigError::at(name, "value is not valid Unicode"))?;
+        admit(
+            set,
+            SINK_HANDLER_KEY,
+            ConfigScope::stage(stage),
+            ConfigSource::Env,
+            ConfigValue::Text(value),
+            name,
+        )?;
+    }
     Ok(())
 }
 
@@ -650,8 +779,8 @@ mod tests {
     use obzenflow_core::event::EffectType;
     use obzenflow_core::StageKey;
     use obzenflow_runtime::runtime_config::{
-        materialize_flow_config, DslCandidates, FlowResolutionContext,
-        RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+        materialize_flow_config, ConfigResolveError, DslCandidates, FlowResolutionContext,
+        RATE_LIMITER_EVENTS_PER_SECOND_KEY, SINK_HANDLER_KEY,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -719,6 +848,230 @@ mod tests {
                 &ConfigScope::stage("fetcher")
             )
             .is_some());
+    }
+
+    #[test]
+    fn sink_handler_uses_the_stage_flow_global_ladder() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&[
+            "OBZENFLOW_SINKS_HANDLER",
+            "OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER",
+        ]);
+        guard.remove("OBZENFLOW_SINKS_HANDLER");
+        guard.remove("OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER");
+        let snapshot = snapshot(
+            r#"
+            [sinks]
+            handler = "console_sink"
+
+            [sinks.stages.audit_output]
+            handler = "audit_sink"
+            "#,
+            &[],
+        );
+
+        assert_eq!(
+            snapshot
+                .resolve_stage_value(SINK_HANDLER_KEY, "digest_summary")
+                .unwrap()
+                .unwrap()
+                .value
+                .as_text(),
+            Some("console_sink")
+        );
+        assert_eq!(
+            snapshot
+                .resolve_stage_value(SINK_HANDLER_KEY, "audit_output")
+                .unwrap()
+                .unwrap()
+                .value
+                .as_text(),
+            Some("audit_sink")
+        );
+    }
+
+    #[test]
+    fn stage_sink_environment_selection_overrides_a_global_file_default() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&[
+            "OBZENFLOW_SINKS_HANDLER",
+            "OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER",
+        ]);
+        guard.remove("OBZENFLOW_SINKS_HANDLER");
+        guard.set(
+            "OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER",
+            "postgres_sink",
+        );
+
+        let snapshot = snapshot("[sinks]\nhandler = \"console_sink\"", &[]);
+        let selected = snapshot
+            .resolve_stage_value(SINK_HANDLER_KEY, "digest_summary")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.value.as_text(), Some("postgres_sink"));
+        assert_eq!(selected.meta.source, ConfigSource::Env);
+        assert_eq!(selected.meta.scope, ConfigScope::stage("digest_summary"));
+    }
+
+    #[test]
+    fn stage_sink_environment_encoding_is_exact_reversible_and_collision_free() {
+        let examples = [
+            ("digest_summary", "DIGEST_SUMMARY"),
+            ("Audit", "X__4175646974"),
+            ("audit-v2", "X__61756469742D7632"),
+            ("résumé", "X__72C3A973756DC3A9"),
+            ("x__audit", "X__785F5F6175646974"),
+            ("", "X__"),
+        ];
+        for (stage, expected) in examples {
+            let encoded = encode_stage_sink_handler_env_segment(stage);
+            assert_eq!(encoded, expected, "unexpected encoding for {stage:?}");
+            assert_eq!(
+                decode_stage_sink_handler_env_segment(&encoded).as_deref(),
+                Ok(stage),
+                "encoding must round-trip {stage:?}"
+            );
+        }
+
+        let corpus = [
+            "audit",
+            "Audit",
+            "AUDIT",
+            "audit-v2",
+            "résumé",
+            "",
+            "x__",
+            "x__audit",
+            "with space",
+            "stage.with.dot",
+            "東京",
+        ];
+        let encoded: BTreeSet<_> = corpus
+            .iter()
+            .map(|stage| encode_stage_sink_handler_env_segment(stage))
+            .collect();
+        assert_eq!(encoded.len(), corpus.len(), "stage keys must not collide");
+        for stage in corpus {
+            let encoded = encode_stage_sink_handler_env_segment(stage);
+            assert_eq!(
+                decode_stage_sink_handler_env_segment(&encoded).as_deref(),
+                Ok(stage)
+            );
+        }
+    }
+
+    #[test]
+    fn stage_sink_environment_decoder_rejects_malformed_and_alias_spellings() {
+        for malformed in [
+            "",
+            "digest_summary",
+            "AUDIT-V2",
+            "X__0",
+            "X__GG",
+            "X__AUDIT",
+            "X__c3a9",
+            "X__FF",
+            "X__6175646974",
+        ] {
+            assert!(
+                decode_stage_sink_handler_env_segment(malformed).is_err(),
+                "non-canonical stage segment {malformed:?} must be rejected"
+            );
+        }
+
+        let _lock = env_lock();
+        let malformed_name =
+            format!("{STAGE_SINK_HANDLER_ENV_PREFIX}X__0{STAGE_SINK_HANDLER_ENV_SUFFIX}");
+        let guard = EnvGuard::new(&[malformed_name.as_str()]);
+        guard.set(&malformed_name, "console_sink");
+        let error = build_runtime_config_snapshot(&cli(&[]), &parse_file(""))
+            .expect_err("malformed stage encoding must fail startup");
+        assert!(error.to_string().contains(&malformed_name));
+        assert!(error.to_string().contains("even number"));
+    }
+
+    #[test]
+    fn case_distinct_stage_keys_receive_distinct_environment_candidates() {
+        let _lock = env_lock();
+        let lower_name = format!(
+            "{STAGE_SINK_HANDLER_ENV_PREFIX}{}{STAGE_SINK_HANDLER_ENV_SUFFIX}",
+            encode_stage_sink_handler_env_segment("audit")
+        );
+        let upper_name = format!(
+            "{STAGE_SINK_HANDLER_ENV_PREFIX}{}{STAGE_SINK_HANDLER_ENV_SUFFIX}",
+            encode_stage_sink_handler_env_segment("Audit")
+        );
+        let guard = EnvGuard::new(&[lower_name.as_str(), upper_name.as_str()]);
+        guard.set(&lower_name, "lower_sink");
+        guard.set(&upper_name, "upper_sink");
+
+        let snapshot = snapshot("", &[]);
+        assert_eq!(
+            snapshot
+                .resolve_stage_value(SINK_HANDLER_KEY, "audit")
+                .unwrap()
+                .unwrap()
+                .value
+                .as_text(),
+            Some("lower_sink")
+        );
+        assert_eq!(
+            snapshot
+                .resolve_stage_value(SINK_HANDLER_KEY, "Audit")
+                .unwrap()
+                .unwrap()
+                .value
+                .as_text(),
+            Some("upper_sink")
+        );
+    }
+
+    #[test]
+    fn escaped_stage_environment_selection_overrides_a_global_file_default() {
+        let _lock = env_lock();
+        let env_name = format!(
+            "{STAGE_SINK_HANDLER_ENV_PREFIX}{}{STAGE_SINK_HANDLER_ENV_SUFFIX}",
+            encode_stage_sink_handler_env_segment("audit-v2")
+        );
+        let guard = EnvGuard::new(&[env_name.as_str()]);
+        guard.set(&env_name, "postgres_sink");
+
+        let snapshot = snapshot("[sinks]\nhandler = \"console_sink\"", &[]);
+        let selected = snapshot
+            .resolve_stage_value(SINK_HANDLER_KEY, "audit-v2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.value.as_text(), Some("postgres_sink"));
+        assert_eq!(selected.meta.source, ConfigSource::Env);
+        assert_eq!(selected.meta.scope, ConfigScope::stage("audit-v2"));
+    }
+
+    #[test]
+    fn escaped_unknown_stage_uses_the_existing_topology_validation() {
+        let _lock = env_lock();
+        let env_name = format!(
+            "{STAGE_SINK_HANDLER_ENV_PREFIX}{}{STAGE_SINK_HANDLER_ENV_SUFFIX}",
+            encode_stage_sink_handler_env_segment("ghost-stage")
+        );
+        let guard = EnvGuard::new(&[env_name.as_str()]);
+        guard.set(&env_name, "console_sink");
+        let snapshot = snapshot("", &[]);
+
+        let error = materialize_flow_config(
+            &snapshot,
+            FlowResolutionContext {
+                flow_name: "test_flow".to_string(),
+                stages: BTreeSet::from([StageKey::from("real-stage")]),
+                edges: BTreeSet::new(),
+                declared_effects: BTreeMap::new(),
+                dsl: DslCandidates::default(),
+            },
+        )
+        .expect_err("decoded unknown stage must fail ordinary topology validation");
+        assert!(matches!(
+            error,
+            ConfigResolveError::UnknownStage { ref stage, .. } if stage == "ghost-stage"
+        ));
     }
 
     #[test]
@@ -804,6 +1157,7 @@ mod tests {
             "[contracts]\nstrict = true",
             "[effects.stages.x]\nedges = {}",
             "[ai.models]\nprovder = \"ollama\"",
+            "[sinks.stages.output]\nhandlers = \"console_sink\"",
         ] {
             assert!(
                 toml::from_str::<RawFileStartupConfig>(bad).is_err(),

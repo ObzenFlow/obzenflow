@@ -223,12 +223,12 @@ required-features = ["ai"]
 [[example]]
 name = "hn_ai_digest_demo"
 path = "examples/hn_ai_digest_demo/main.rs"
-required-features = ["http-pull", "ai"]
+required-features = ["http-pull", "ai", "postgres"]
 
 [[test]]
 name = "hn_ai_digest_effect_replay_journal_test"
 path = "tests/hn_ai_digest_effect_replay_journal_test.rs"
-required-features = ["http-pull", "ai", "test-support"]
+required-features = ["http-pull", "ai", "postgres", "test-support"]
 
 [[test]]
 name = "standalone_ai_effect_replay_test"

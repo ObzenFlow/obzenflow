@@ -61,16 +61,16 @@ const JOBS: &[JobSpec] = &[
         extra_features: &[],
     },
     // FLOWIP-128a composite showcase: `digest` renders as one collapsed node
-    // in Studio. Mock HN feed by default; the AI provider comes from HN_AI_*
-    // env vars (default: local Ollama). `[server] on_terminal = "park"` keeps
-    // the run inspectable after the digest completes.
+    // in Studio. Mock HN feed and console output are the defaults; the AI
+    // provider comes from the checked HN config. `[server] on_terminal =
+    // "park"` keeps the run inspectable after the digest completes.
     JobSpec {
         job_id: "hn_ai_digest",
         flow_name: "hn_ai_digest_demo",
         example: "hn_ai_digest_demo",
         config: "examples/hn_ai_digest_demo/obzenflow.studio.toml",
         port: 9094,
-        extra_features: &["http-pull", "ai"],
+        extra_features: &["http-pull", "ai", "postgres"],
     },
 ];
 

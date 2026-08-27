@@ -47,6 +47,9 @@ pub enum ConfigResolveError {
         stage: String,
         effect_type: String,
     },
+    /// A consumer-targeted stage entry names a real stage, but that stage did
+    /// not author the facility that consumes this knob.
+    UnattachedStageConsumer { key_path: String, stage: String },
     /// A candidate was admitted at a scope its knob target does not admit,
     /// or a source (CLI/env) was scoped in the first pass.
     ScopeNotAdmitted {
@@ -125,6 +128,10 @@ impl fmt::Display for ConfigResolveError {
                 f,
                 "config error at {key_path}: effect '{effect_type}' is declared by stage \
                  '{stage}', but no surviving attachment consumes this key"
+            ),
+            Self::UnattachedStageConsumer { key_path, stage } => write!(
+                f,
+                "config error at {key_path}: stage '{stage}' exists, but no authored stage facility consumes this key"
             ),
             Self::ScopeNotAdmitted {
                 key_path,

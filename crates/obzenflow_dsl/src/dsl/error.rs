@@ -101,6 +101,26 @@ pub enum FlowBuildError {
     #[error("{0}")]
     ConfigResolution(#[source] obzenflow_runtime::runtime_config::ConfigResolveError),
 
+    /// A `handler_set!` sink has no resolved framework configuration value.
+    #[error(
+        "config error at sinks.stages.{stage_name}.handler: a handler_set! sink requires one of {expected}"
+    )]
+    MissingSinkSelection {
+        stage_name: String,
+        expected: String,
+    },
+
+    /// A config-selected `sink!` declaration received a non-secret string
+    /// outside its compile-time-closed alternative set.
+    #[error(
+        "config error at sinks.stages.{stage_name}.handler: expected {expected}; got {selected:?}"
+    )]
+    InvalidSinkSelection {
+        stage_name: String,
+        selected: String,
+        expected: String,
+    },
+
     #[error("flow binding '{binding}' configuration failed: {detail}")]
     BindingConfiguration { binding: String, detail: String },
 

@@ -6,10 +6,33 @@ use super::mock_server::{spawn_mock_hn_server, MockHnServer};
 use anyhow::{anyhow, Result};
 use obzenflow::ai::TokenCount;
 use obzenflow::env::{env_bool_or, env_var, env_var_or};
+use obzenflow::sinks::postgres::{PostgresConnection, PostgresTransport};
 use obzenflow::sources::Url;
 
 pub(crate) const DEFAULT_HN_MAX_STORIES: usize = 60;
 pub(crate) const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
+const DEFAULT_HN_DIGEST_POSTGRES_SCHEMA: &str = "obzenflow_example";
+
+#[derive(Clone, Debug)]
+pub(crate) struct HnDigestPostgresConfig {
+    pub(crate) connection: PostgresConnection,
+    pub(crate) schema: String,
+}
+
+impl HnDigestPostgresConfig {
+    pub(crate) fn from_env() -> Result<Self> {
+        let connection = PostgresConnection::deferred_from_env(
+            "OBZENFLOW_POSTGRES_URL",
+            PostgresTransport::VerifiedTls,
+        );
+        let schema = env_var_or::<String>(
+            "OBZENFLOW_POSTGRES_SCHEMA",
+            DEFAULT_HN_DIGEST_POSTGRES_SCHEMA.to_string(),
+        )?;
+
+        Ok(Self { connection, schema })
+    }
+}
 
 #[derive(Clone)]
 pub struct HnRunInputs {

@@ -12,6 +12,7 @@ use std::{fs, io::Write, path::Path, process::Stdio};
 
 const PAYMENTS: &str = "dev/postgres/fixtures/payments.sql";
 const INVENTORY: &str = "dev/postgres/fixtures/inventory.sql";
+const HN_DIGEST_SUMMARIES: &str = "dev/postgres/fixtures/hn_digest_summaries.sql";
 
 pub(super) fn provision_development(
     root: &Path,
@@ -21,6 +22,7 @@ pub(super) fn provision_development(
     schema: &str,
 ) -> Result<()> {
     apply(root, compose, directory, state, schema, PAYMENTS)?;
+    apply(root, compose, directory, state, schema, HN_DIGEST_SUMMARIES)?;
     provision_tests(root, compose, directory, state)
 }
 
@@ -45,6 +47,14 @@ pub(super) fn provision_tests(
         state,
         &super::config::inventory_test_schema(&state.run_id),
         INVENTORY,
+    )?;
+    apply(
+        root,
+        compose,
+        directory,
+        state,
+        &super::config::hn_digest_test_schema(&state.run_id),
+        HN_DIGEST_SUMMARIES,
     )
 }
 

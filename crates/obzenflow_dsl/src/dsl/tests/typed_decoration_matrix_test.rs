@@ -16,7 +16,7 @@ mod tests {
         transactional_effect_port_slot, Effect, EffectBinding, EffectBindingEvidence,
         EffectBindingUse, EffectContext, EffectError, EffectPortResolutionError, EffectPortSlotSet,
         EffectRegistrationBuilder, EffectSafety, Effects, LogicalEffectBindingName, Named,
-        NamedEffect, StageCompletion,
+        NamedEffect, SinkRedeliverySafety, StageCompletion,
     };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -675,6 +675,124 @@ mod tests {
     #[test]
     fn sink_typed_name_mw() {
         let _ = crate::sink!(name: "s", Out => Sn, observers: []);
+    }
+    #[test]
+    fn sink_handler_set_lowers_one_heterogeneous_binding_by_its_exact_name() {
+        let inline_sink = Sn;
+        let closure_sink = SinkTyped::new(|_out: Out| async move {});
+        let pending = crate::sink!(Out => handler_set!(inline_sink, closure_sink))
+            .expect("the closed handler set is valid");
+
+        assert_eq!(
+            pending.configured_sink_handler_keys(),
+            Some(["inline_sink", "closure_sink"].as_slice())
+        );
+        let selected = pending
+            .select_configured_sink_handler("closure_sink")
+            .expect("the configured binding name is in the closed set");
+        assert_eq!(
+            selected
+                .typing_metadata()
+                .expect("typed sink metadata")
+                .input_type,
+            crate::dsl::typing::TypeHint::exact_payload::<Out>()
+        );
+    }
+
+    #[test]
+    fn sink_handler_set_rejects_unknown_config_before_descriptor_lowering() {
+        let policy_constructions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observer_constructions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let policy_probe = std::sync::Arc::clone(&policy_constructions);
+        let observer_probe = std::sync::Arc::clone(&observer_constructions);
+        let first_sink = Sn;
+        let second_sink = SinkTyped::new(|_out: Out| async move {});
+
+        let pending = crate::sink!(
+            Out => handler_set!(first_sink, second_sink) with [{
+                policy_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                obzenflow_adapters::middleware::RateLimiterBuilder::new(1_000.0).build()
+            }],
+            observers: [{
+                observer_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                obzenflow_adapters::middleware::RateLimiterBuilder::new(2_000.0).build()
+            }]
+        )
+        .expect("the closed handler set is valid");
+        let result = pending.select_configured_sink_handler("unknown_sink");
+
+        assert_eq!(
+            policy_constructions.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            observer_constructions.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("an unknown sink key must fail materialisation"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "config error at sinks.stages.__obzenflow_binding_derived_name__.handler: expected \"first_sink\" or \"second_sink\"; got \"unknown_sink\""
+        );
+        match error {
+            crate::dsl::FlowBuildError::InvalidSinkSelection {
+                stage_name,
+                selected,
+                expected,
+            } => {
+                assert_eq!(stage_name, "__obzenflow_binding_derived_name__");
+                assert_eq!(selected, "unknown_sink");
+                assert_eq!(expected, "\"first_sink\" or \"second_sink\"");
+            }
+            error => panic!("unexpected sink selection error: {error}"),
+        }
+    }
+    #[test]
+    fn sink_handler_set_form_composes_name_and_site_clauses_once() {
+        let policy_constructions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observer_constructions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let policy_probe = std::sync::Arc::clone(&policy_constructions);
+        let observer_probe = std::sync::Arc::clone(&observer_constructions);
+        let inline_sink = Sn;
+        let closure_sink = SinkTyped::new(|_out: Out| async move {});
+
+        let pending = crate::sink!(
+            name: "selected_output",
+            Out => handler_set!(inline_sink, closure_sink) with [{
+                policy_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                obzenflow_adapters::middleware::RateLimiterBuilder::new(1_000.0).build()
+            }],
+            delivery: idempotent,
+            observers: [{
+                observer_probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                obzenflow_adapters::middleware::RateLimiterBuilder::new(2_000.0).build()
+            }]
+        )
+        .expect("the closed handler set is valid");
+        let selected = pending
+            .select_configured_sink_handler("inline_sink")
+            .expect("the configured binding name is in the closed set");
+
+        assert_eq!(selected.name(), "selected_output");
+        assert_eq!(
+            policy_constructions.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            observer_constructions.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(selected.stage_middleware_names().len(), 2);
+        assert_eq!(
+            selected
+                .sink_description()
+                .expect("selected sink description")
+                .redelivery_safety(),
+            Some(SinkRedeliverySafety::SafeToRepeat)
+        );
     }
     #[test]
     fn sink_typed_delivery_clause() {

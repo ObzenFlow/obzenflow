@@ -19,6 +19,9 @@ mod domain;
 mod hn_demo_flow;
 #[path = "../examples/hn_ai_digest_demo/mock_server.rs"]
 mod mock_server;
+#[cfg(feature = "e2e")]
+#[path = "support/postgres.rs"]
+mod postgres_support;
 #[path = "../examples/hn_ai_digest_demo/util.rs"]
 mod util;
 
@@ -1372,6 +1375,9 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let flow_source = std::fs::read_to_string(root.join("examples/hn_ai_digest_demo/flow.rs"))
         .expect("HN witness flow source is readable");
+    let app_config_source =
+        std::fs::read_to_string(root.join("examples/hn_ai_digest_demo/config.rs"))
+            .expect("HN application config source is readable");
     let checked_config =
         std::fs::read_to_string(root.join("examples/hn_ai_digest_demo/obzenflow.toml"))
             .expect("HN witness config is readable");
@@ -1384,6 +1390,15 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "let chat_target = chat.target().clone();",
         "token_estimator: chat.estimator().source(),",
         "let hn_source = HttpPullSource::new(decoder, http_source_config);",
+        "let console_sink = sinks::console(format_digest_summary_for_console);",
+        "let postgres_sink = sinks::postgres(postgres_config);",
+        "HnDigestSummary => handler_set!(",
+        "handler_set!(console_sink, postgres_sink)",
+        "HnDigestPostgresConfig::from_env()",
+        ".insert_into(config.schema, HN_DIGEST_TABLE, HN_DIGEST_INSERT)?",
+        ".batch_size(1)?",
+        ".redelivery_safety(SinkRedeliverySafety::DuplicateSensitive)",
+        "digest_summary = sink!(",
         "map: [FormattedStory] -> HnDigestGroupSummary",
         "reduce: (HnTopStories, [HnDigestGroupSummary]) -> HnDigestSummary",
         "uses at_least_once(ChatCompletion)",
@@ -1405,7 +1420,7 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "std::env",
         "env_var(",
         "read_to_string(",
-        "bindings:",
+        "\n            bindings:",
         "effect_ports: effect_ports,",
         "effect_ports,",
         "install_into",
@@ -1419,6 +1434,13 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
         "bind_deferred_with_metadata",
         ".into_parts()",
         "chat_registration",
+        "HnSinkSelectionProbe",
+        "sink_selection_probe",
+        "record_selection",
+        "record_console_construction",
+        "record_postgres_construction",
+        "stopped before connector open",
+        "let digest_summary = sink!(",
     ] {
         assert!(
             !flow_source.contains(forbidden),
@@ -1431,6 +1453,51 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
     assert!(checked_config.contains("[ai.models]"));
     assert!(checked_config.contains("provider = \"ollama\""));
     assert!(checked_config.contains("model = \"llama3.1:8b\""));
+    assert!(checked_config.contains("[sinks]"));
+    assert!(checked_config.contains("handler = \"console_sink\""));
+    for forbidden in [
+        "enum DigestOutput",
+        "ResolvedDigestOutput",
+        "resolve_digest_configuration",
+        "load_postgres",
+        "postgres_digest: Option",
+        "digest_sink_key",
+        "HN_DIGEST_OUTPUT",
+    ] {
+        assert!(
+            !app_config_source.contains(forbidden),
+            "HN configuration may not regain backend-aware selection: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn hn_postgres_sink_description_is_truthful_without_selection_instrumentation() {
+    let postgres_connection = obzenflow::sinks::postgres::PostgresConnection::from_url(
+        "postgres://obzenflow:sentinel@localhost/obzenflow?sslmode=verify-full",
+        obzenflow::sinks::postgres::PostgresTransport::VerifiedTls,
+    )
+    .expect("cold verified-TLS fixture URL is valid without I/O");
+    let postgres_config = config::HnDigestPostgresConfig {
+        connection: postgres_connection,
+        schema: "hn_digest_fixture".to_string(),
+    };
+    let description = hn_demo_flow::describe_digest_postgres_sink(postgres_config)
+        .expect("the locked PostgreSQL sink operation builds");
+    assert_eq!(
+        description.destination_name(),
+        Some("postgres.hn_digest_fixture.hn_digest_summaries")
+    );
+    assert_eq!(
+        description.default_method(),
+        Some(&DeliveryMethod::DatabaseInsert {
+            table: "hn_digest_fixture.hn_digest_summaries".to_string(),
+        })
+    );
+    assert_eq!(
+        description.redelivery_safety(),
+        Some(SinkRedeliverySafety::DuplicateSensitive)
+    );
 }
 
 #[tokio::test]
@@ -2485,6 +2552,127 @@ async fn resume_closes_a_generated_plan_interrupted_between_snapshot_and_manifes
         .collect::<Vec<_>>();
     assert_eq!(manifests.len(), 1);
     assert_eq!(manifests[0].chunk_count, 5);
+}
+
+#[cfg(feature = "e2e")]
+#[tokio::test(flavor = "multi_thread")]
+async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt() {
+    let pool = postgres_support::pool().await;
+    let schema = postgres_support::required_env("OBZENFLOW_POSTGRES_SCHEMA");
+    sqlx::query(&format!(
+        "TRUNCATE TABLE \"{schema}\".hn_digest_summaries RESTART IDENTITY"
+    ))
+    .execute(&pool)
+    .await
+    .expect("reset the isolated HN digest destination");
+
+    let temp = tempfile::tempdir().expect("temporary PostgreSQL HN-flow journal root");
+    let journal_base = temp.path().join("journals");
+    let server = mock_server::spawn_mock_hn_server()
+        .await
+        .expect("deterministic HN server starts");
+    let inputs = config::HnRunInputs {
+        max_stories: 5,
+        poll_timeout_secs: 10,
+        source_rate_limit: 1_000.0,
+        budget_per_group_override: Some(TokenCount::new(10_000)),
+        max_stories_per_group: Some(5),
+        interests: Some("runtime protocols".to_string()),
+        mode_label: "mock".to_string(),
+        base_url: server.base_url(),
+    };
+    let config_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/hn_ai_digest_demo/obzenflow.toml");
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--config"),
+            config_path.as_os_str().to_os_string(),
+        ])
+        .run_async(hn_demo_flow::build_flow_definition(
+            inputs,
+            hn_demo_flow::HnFlowOptions {
+                journal_base: journal_base.clone(),
+                chat_binding_override: Some(counting_chat_binding(
+                    target(),
+                    resolutions.clone(),
+                    calls.clone(),
+                    false,
+                )),
+            },
+        ))
+        .await
+        .expect("the shared HN flow delivers its digest to PostgreSQL");
+
+    assert!(server.request_count() > 0);
+    assert_eq!(resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let row_count = sqlx::query_scalar::<_, i64>(&format!(
+        "SELECT COUNT(*) FROM \"{schema}\".hn_digest_summaries"
+    ))
+    .fetch_one(&pool)
+    .await
+    .expect("count the HN digest destination rows");
+    assert_eq!(row_count, 1);
+
+    let row = sqlx::query_as::<
+        _,
+        (
+            i64,
+            bool,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Vec<String>,
+            String,
+        ),
+    >(&format!(
+        "SELECT digest_id, created_at IS NOT NULL, source_mode, source_identity, \
+         ai_provider, ai_model, token_estimator, interests, story_ids, output_markdown \
+         FROM \"{schema}\".hn_digest_summaries"
+    ))
+    .fetch_one(&pool)
+    .await
+    .expect("inspect the HN digest destination");
+    assert_eq!(row.0, 1);
+    assert!(row.1);
+    assert_eq!(row.2, "mock");
+    assert_eq!(row.3, "mock://hacker-news/");
+    assert_eq!(row.4, "fixture");
+    assert_eq!(row.5, "deterministic");
+    assert_eq!(row.6, "heuristic");
+    assert_eq!(row.7.as_deref(), Some("runtime protocols"));
+    assert_eq!(row.8, ["100", "101", "102", "103", "104"]);
+    assert_eq!(row.9, "recorded");
+
+    let archive = latest_run_dir(&journal_base);
+    let finalise = stage_envelopes(&archive, "digest__finalize").await;
+    let sink = stage_envelopes(&archive, "digest_summary").await;
+    let receipts = stable_delivery_receipts(&finalise, &sink);
+    let [receipt] = receipts.as_slice() else {
+        panic!(
+            "the PostgreSQL HN treatment must emit one receipt, found {}",
+            receipts.len()
+        );
+    };
+    assert_eq!(
+        receipt.destination,
+        format!("postgres.{schema}.hn_digest_summaries")
+    );
+    assert_eq!(
+        receipt.method,
+        serde_json::to_value(DeliveryMethod::DatabaseInsert {
+            table: format!("{schema}.hn_digest_summaries"),
+        })
+        .expect("database-insert receipt method serialises")
+    );
+    assert_eq!(receipt.items, Some(1));
 }
 
 #[tokio::test]

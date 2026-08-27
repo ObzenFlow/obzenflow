@@ -15,7 +15,9 @@ Some examples require feature flags:
 - `--features obzenflow_infra/warp-server` for examples whose `obzenflow.toml` enables HTTP endpoints
 - `--features http-pull` for HTTP pull sources
 - `--features ai` for the one-shot AI inference example
-- `--features "http-pull ai"` for the AI digest example
+- `--features "http-pull ai postgres"` for the AI digest example, whose output
+  defaults to `console_sink` and can be selected as PostgreSQL with
+  `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink`
 
 Most examples run on framework defaults and do not need a config file. Examples that enable the HTTP server bundle a minimal `obzenflow.toml` in their directory. To override startup config, pass `-- --config <path/to/obzenflow.toml>` after the Cargo arguments.
 
@@ -39,7 +41,8 @@ These are the flagship examples and the best place to start. Each one has a comp
 - **`hn_ai_digest_demo`** — The canonical AI example: live HTTP pull, token budgeting, chunking, accumulation, and Rig-backed LLM inference with replayable evidence.
   - Tutorial: [Run Live AI Inference from a Real Endpoint](https://obzenflow.dev/tutorials/live-ai-inference/)
   - Shows: [declared effects](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it)
-  - Run: `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"`
+  - Run (console output): `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres"`
+  - Run (PostgreSQL output): `cargo xtask postgres up`, then `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres"`
   - Code: [`examples/hn_ai_digest_demo/flow.rs`](hn_ai_digest_demo/flow.rs)
 
 - **`one_shot_inference_demo`** — One already-bounded input, one declared model effect, and one typed decision. Use this instead of map-reduce when the bounded context has already reduced the evidence.

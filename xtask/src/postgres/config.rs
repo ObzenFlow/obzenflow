@@ -19,6 +19,7 @@ pub(super) const POSTGRES_PASSWORD: &str = "obzenflow-secret-083c";
 pub(super) const DEVELOPMENT_PAYMENT_SCHEMA: &str = "obzenflow_example";
 pub(super) const PAYMENT_TEST_SCHEMA_ENV: &str = "OBZENFLOW_POSTGRES_EXAMPLE_SCHEMA";
 pub(super) const INVENTORY_TEST_SCHEMA_ENV: &str = "OBZENFLOW_POSTGRES_INVENTORY_SCHEMA";
+pub(super) const HN_DIGEST_TEST_SCHEMA_ENV: &str = "OBZENFLOW_POSTGRES_HN_DIGEST_SCHEMA";
 
 pub(super) fn payment_test_schema(run_id: &str) -> String {
     format!("obz083c_example_{run_id}")
@@ -26,6 +27,10 @@ pub(super) fn payment_test_schema(run_id: &str) -> String {
 
 pub(super) fn inventory_test_schema(run_id: &str) -> String {
     format!("obz083c_inventory_{run_id}")
+}
+
+pub(super) fn hn_digest_test_schema(run_id: &str) -> String {
+    format!("obz010o_hn_digest_{run_id}")
 }
 
 pub(super) fn plaintext_url(port: u16) -> String {

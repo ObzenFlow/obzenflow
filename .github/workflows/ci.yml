@@ -333,6 +333,20 @@ jobs:
             cargo test --locked -p obzenflow \
               --features postgres,e2e --test postgres_sink_example_e2e_test
 
+      - name: PostgreSQL Hacker News digest example
+        env:
+          OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER: postgres_sink
+        run: |
+          cargo xtask postgres run -- \
+            cargo build --locked -p obzenflow \
+              --features http-pull,ai,postgres --example hn_ai_digest_demo
+          cargo xtask postgres run -- \
+            cargo test --locked -p obzenflow \
+              --features http-pull,ai,postgres,test-support,e2e \
+              --test hn_ai_digest_effect_replay_journal_test \
+              postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt \
+              -- --exact
+
       - name: PostgreSQL independent consumer and package boundary
         run: |
           cargo xtask postgres run -- \

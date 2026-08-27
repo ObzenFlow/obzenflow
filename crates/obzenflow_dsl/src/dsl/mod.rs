@@ -9,11 +9,13 @@
 //!
 //! ## Handler references and construction
 //!
-//! Supported stage and AI-role slots take a reference name, unit value path,
-//! or qualified value path. They do not take calls, builder chains, closures,
-//! or struct literals. Construct builder-owned handlers as ordinary Rust inside
+//! Direct stage and AI-role slots take a reference name, unit value path, or
+//! qualified value path. They do not take calls, builder chains, closures, or
+//! struct literals. Construct builder-owned handlers as ordinary Rust inside
 //! the flow's deferred materialiser, immediately above the inner `flow!`, then
-//! pass only the binding name:
+//! pass only the binding name. The one exception is a config-selected sink's
+//! syntax-only `handler_set!` operand, documented below; it is consumed by
+//! `sink!` and cannot exist as a handler value on its own.
 //!
 //! ```ignore
 //! FlowDefinition::materialize(move |_runtime_config| {
@@ -110,6 +112,41 @@
 //!
 //! Connector descriptions and a site-level `delivery:` classification compose,
 //! but the connector's typed input remains authoritative for the arrow.
+//!
+//! A sink may instead consume one compile-time-closed set of heterogeneous,
+//! cold sink bindings. Each binding identifier is also its exact configuration
+//! key. The framework resolves `sinks.handler` for the logical sink stage,
+//! lowers only that binding, and independently checks every branch against the
+//! declared input before descriptor erasure:
+//!
+//! ```ignore
+//! let console_sink = sinks::console(render);
+//! let postgres_sink = sinks::postgres(postgres_config);
+//! flow! {
+//!     stages: {
+//!         output = sink!(
+//!             Out => handler_set!(console_sink, postgres_sink),
+//!             delivery: idempotent,
+//!         )?;
+//!     },
+//!     // topology
+//! }
+//! ```
+//!
+//! For a stage bound as `output`, the file address is
+//! `[sinks.stages.output] handler = "postgres_sink"`; the canonical
+//! Twelve-Factor environment spelling is
+//! `OBZENFLOW_SINKS_STAGES_OUTPUT_HANDLER=postgres_sink`. Selection is consumed
+//! before topology admission and introduces no registry, common handler trait,
+//! stored selector, or lifecycle authority. The ordinary
+//! `sink!(Out => output)` form remains unchanged.
+//!
+//! This is the sink-role instance of a reusable Twelve-Factor law: deployment
+//! configuration names one member of a code-closed typed integration set, and
+//! that choice is consumed before the integration enters its role lifecycle.
+//! Source and effect selection are not provided by this sink surface; later
+//! role-local designs can preserve the law without adding a cross-role registry,
+//! common selection trait, or runtime selector.
 //!
 //! A small named integration can implement `InlineSink` directly. It needs no
 //! separate connector or description method; a site-level clause can classify
