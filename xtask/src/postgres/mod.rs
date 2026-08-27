@@ -57,7 +57,7 @@ fn up(flags: &[String]) -> Result<()> {
         return Ok(());
     }
     let root = super::workspace_root()?;
-    let identity = prepare_development_identity(&root)?;
+    let identity = state::development_identity(&root)?;
     let compose = Compose::preflight()?;
     let state_path = identity.directory.join(STATE_FILE);
 
@@ -152,7 +152,7 @@ fn status(flags: &[String]) -> Result<()> {
         return Ok(());
     }
     let root = super::workspace_root()?;
-    let identity = prepare_development_identity(&root)?;
+    let identity = state::development_identity(&root)?;
     let state_path = identity.directory.join(STATE_FILE);
     let compose = Compose::preflight()?;
     if !state_path.is_file() {
@@ -283,7 +283,7 @@ fn down(flags: &[String]) -> Result<()> {
         _ => return Err(error("postgres down accepts only `--volumes`")),
     };
     let root = super::workspace_root()?;
-    let identity = prepare_development_identity(&root)?;
+    let identity = state::development_identity(&root)?;
     let state_path = identity.directory.join(STATE_FILE);
     if !state_path.is_file() {
         println!("no PostgreSQL development session state found");
@@ -374,7 +374,7 @@ fn development_session(
     root: &Path,
     require_ready: bool,
 ) -> Result<(DevelopmentIdentity, SessionState)> {
-    let identity = prepare_development_identity(root)?;
+    let identity = state::development_identity(root)?;
     let state_path = identity.directory.join(STATE_FILE);
     if !state_path.is_file() {
         return Err(error(
@@ -387,12 +387,6 @@ fn development_session(
         state::require_ready(&session)?;
     }
     Ok((identity, session))
-}
-
-fn prepare_development_identity(root: &Path) -> Result<DevelopmentIdentity> {
-    let identity = state::development_identity(root)?;
-    state::reject_legacy_development(root, &identity)?;
-    Ok(identity)
 }
 
 fn verify_running_session(

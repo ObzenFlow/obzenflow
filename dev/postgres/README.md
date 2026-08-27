@@ -73,10 +73,6 @@ interrupted, or retained credentials/certificates are missing or malformed, the
 tool refuses to regenerate them against retained data. Use the explicit
 `down --volumes` reset shown above.
 
-Sessions created by the former checked-in development credential are not adopted
-or decoded. Reset that old development volume with the tooling version that
-created it before starting the generated-credential session.
-
 ## Disposable acceptance suite
 
 ```console

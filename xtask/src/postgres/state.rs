@@ -3,8 +3,7 @@
 // https://obzenflow.dev
 
 use super::config::{
-    DEVELOPMENT_SESSION, DEVELOPMENT_STATE_ROOT, LEGACY_DEVELOPMENT_SESSION, SESSION_OVERRIDE_ENV,
-    SESSION_ROOT, STATE_FILE,
+    DEVELOPMENT_SESSION, DEVELOPMENT_STATE_ROOT, SESSION_OVERRIDE_ENV, SESSION_ROOT, STATE_FILE,
 };
 use crate::{error, Result};
 use std::{
@@ -16,7 +15,6 @@ use std::{
 use uuid::Uuid;
 
 const STATE_HEADER: &str = "# obzenflow xtask postgres v3";
-const LEGACY_DIAGNOSTIC: &str = "legacy PostgreSQL development state uses the removed repository credential; reset it explicitly before running `postgres up`";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SessionMode {
@@ -54,7 +52,6 @@ pub(super) struct SessionState {
 pub(super) struct DevelopmentIdentity {
     pub(super) directory: PathBuf,
     pub(super) project: String,
-    isolated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,29 +75,13 @@ pub(super) fn development_identity(root: &Path) -> Result<DevelopmentIdentity> {
             Ok(DevelopmentIdentity {
                 directory: root.join(SESSION_ROOT).join(format!("persistent-{value}")),
                 project: format!("obzenflow-persistent-{value}"),
-                isolated: true,
             })
         }
         None => Ok(DevelopmentIdentity {
             directory: root.join(DEVELOPMENT_STATE_ROOT).join(DEVELOPMENT_SESSION),
             project: development_project(root),
-            isolated: false,
         }),
     }
-}
-
-pub(super) fn reject_legacy_development(root: &Path, identity: &DevelopmentIdentity) -> Result<()> {
-    if identity.isolated {
-        return Ok(());
-    }
-    if root.join(LEGACY_DEVELOPMENT_SESSION).exists() {
-        return Err(error(LEGACY_DIAGNOSTIC));
-    }
-    let state_path = identity.directory.join(STATE_FILE);
-    if state_path.exists() && !has_current_header(&state_path) {
-        return Err(error(LEGACY_DIAGNOSTIC));
-    }
-    Ok(())
 }
 
 pub(super) fn test_identity(root: &Path, run_id: &str) -> Result<TestIdentity> {
@@ -390,14 +371,6 @@ fn valid_volume(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-fn has_current_header(path: &Path) -> bool {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| contents.lines().next().map(str::to_owned))
-        .as_deref()
-        == Some(STATE_HEADER)
-}
-
 fn set_once(slot: &mut Option<String>, value: &str) -> Result<()> {
     if slot.replace(value.to_string()).is_some() {
         Err(error("duplicate PostgreSQL session state field"))
@@ -514,19 +487,6 @@ mod tests {
         let volume = expected_volume(&state.project);
         record_or_verify_volume(&mut state, &volume).expect("record exact volume");
         require_ready(&state).expect("ready state");
-    }
-
-    #[test]
-    fn old_state_version_is_not_decoded() {
-        let root = env::temp_dir().join(format!("obzenflow-legacy-state-{}", unique_run_id()));
-        fs::create_dir_all(&root).expect("create state root");
-        let directory = private_directory(&root, "session");
-        let path = directory.join(STATE_FILE);
-        let mut file = private_file_create_new(&path).expect("create legacy state");
-        writeln!(file, "# obzenflow xtask postgres v1").expect("write legacy header");
-        writeln!(file, "project\tobzenflow-postgres-legacy").expect("write legacy fixture");
-        assert!(read(&path).is_err());
-        fs::remove_dir_all(root).expect("remove legacy fixture");
     }
 
     #[test]
