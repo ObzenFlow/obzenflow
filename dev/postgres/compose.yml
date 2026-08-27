@@ -3,7 +3,7 @@ services:
     image: postgres:17
     environment:
       POSTGRES_USER: obzenflow
-      POSTGRES_PASSWORD: ${OBZENFLOW_POSTGRES_PASSWORD:?required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/obzenflow-postgres-password
       POSTGRES_DB: obzenflow
     entrypoint:
       - /bin/bash
@@ -18,6 +18,7 @@ services:
       - ssl_key_file=/var/lib/postgresql/obzenflow-tls/server.key
     ports:
       - target: 5432
+        published: "${OBZENFLOW_POSTGRES_HOST_PORT:-0}"
         host_ip: 127.0.0.1
         protocol: tcp
     healthcheck:
@@ -29,6 +30,7 @@ services:
       dev.obzenflow.service: postgres-proof
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ${OBZENFLOW_POSTGRES_PASSWORD_FILE:?required}:/run/secrets/obzenflow-postgres-password:ro
       - ${OBZENFLOW_POSTGRES_TLS_DIR:?required}/server.crt:/run/obzenflow-postgres-tls/server.crt:ro
       - ${OBZENFLOW_POSTGRES_TLS_DIR:?required}/server.key:/run/obzenflow-postgres-tls/server.key:ro
       - ./postgres-entrypoint.sh:/usr/local/bin/obzenflow-postgres-entrypoint.sh:ro

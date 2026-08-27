@@ -52,7 +52,10 @@
 //!   `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink`.
 //! - PostgreSQL output reads `OBZENFLOW_POSTGRES_URL` and optionally
 //!   `OBZENFLOW_POSTGRES_SCHEMA` (default `obzenflow_example`).
-//! - Start the repository service with `cargo xtask postgres up`, then run PostgreSQL output with
+//! - Any externally managed PostgreSQL service may supply those values directly; no `xtask`
+//!   process is part of the application contract.
+//! - For the optional repository service, run `cargo xtask postgres up`, inspect its current
+//!   GUI-client settings with `cargo xtask postgres connection`, then run PostgreSQL output with
 //!   `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`.
 //!
 //! AI target configuration:

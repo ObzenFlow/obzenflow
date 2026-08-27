@@ -9,29 +9,65 @@ use std::{
     process::{Command, Stdio},
 };
 
-pub(super) fn ensure(directory: &Path) -> Result<()> {
+const DEVELOPMENT_DAYS: &str = "3650";
+const TEST_DAYS: &str = "7";
+
+pub(super) fn create_development(directory: &Path) -> Result<()> {
     let tls = directory.join("tls");
-    fs::create_dir_all(&tls)?;
-    let expected = [
-        "ca.crt",
-        "ca.key",
-        "server.crt",
-        "server.key",
-        "untrusted-ca.crt",
-        "untrusted-ca.key",
-    ];
-    if expected.iter().all(|name| tls.join(name).is_file()) {
-        return Ok(());
-    }
-    if tls.is_dir() {
-        fs::remove_dir_all(&tls)?;
-        fs::create_dir_all(&tls)?;
-    }
-    if !command_succeeds("openssl", &["version"]) {
-        return Err(error(
-            "OpenSSL is required to generate the PostgreSQL test certificate",
+    if tls.exists() {
+        return Err(reset_required(
+            "PostgreSQL development TLS state already exists before first-start generation",
         ));
     }
+    generate(&tls, DEVELOPMENT_DAYS, false, "Development")
+}
+
+pub(super) fn verify_development(directory: &Path) -> Result<()> {
+    let tls = directory.join("tls");
+    require_private_directory(&tls)?;
+    for name in ["ca.crt", "server.crt", "server.key"] {
+        require_regular_file(&tls.join(name), name)?;
+    }
+    require_private_file(&tls.join("server.key"), "server.key")?;
+    check_certificate(&tls.join("ca.crt"))?;
+    check_certificate(&tls.join("server.crt"))?;
+    let status = Command::new("openssl")
+        .args([
+            "verify",
+            "-CAfile",
+            path_arg(&tls.join("ca.crt"))?,
+            path_arg(&tls.join("server.crt"))?,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| reset_required("OpenSSL could not validate development TLS state"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(reset_required(
+            "PostgreSQL development TLS certificate is invalid or no longer trusted",
+        ))
+    }
+}
+
+pub(super) fn create_test(directory: &Path) -> Result<()> {
+    let tls = directory.join("tls");
+    if tls.exists() {
+        return Err(error(
+            "PostgreSQL test TLS state already exists before disposable generation",
+        ));
+    }
+    generate(&tls, TEST_DAYS, true, "Test")
+}
+
+fn generate(tls: &Path, days: &str, untrusted: bool, label: &str) -> Result<()> {
+    if !command_succeeds("openssl", &["version"]) {
+        return Err(error(
+            "OpenSSL is required to generate the PostgreSQL certificate",
+        ));
+    }
+    create_private_directory(tls)?;
 
     let ca_key = tls.join("ca.key");
     let ca_cert = tls.join("ca.crt");
@@ -39,13 +75,12 @@ pub(super) fn ensure(directory: &Path) -> Result<()> {
     let server_csr = tls.join("server.csr");
     let server_cert = tls.join("server.crt");
     let extensions = tls.join("server.ext");
-    let untrusted_ca_key = tls.join("untrusted-ca.key");
-    let untrusted_ca_cert = tls.join("untrusted-ca.crt");
     fs::write(
         &extensions,
         "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n",
     )?;
 
+    let ca_subject = format!("/CN=ObzenFlow PostgreSQL {label} CA");
     run(
         "openssl",
         &[
@@ -55,10 +90,10 @@ pub(super) fn ensure(directory: &Path) -> Result<()> {
             "rsa:2048",
             "-sha256",
             "-days",
-            "7",
+            days,
             "-nodes",
             "-subj",
-            "/CN=ObzenFlow PostgreSQL Test CA",
+            &ca_subject,
             "-keyout",
             path_arg(&ca_key)?,
             "-out",
@@ -94,7 +129,7 @@ pub(super) fn ensure(directory: &Path) -> Result<()> {
             path_arg(&ca_key)?,
             "-CAcreateserial",
             "-days",
-            "7",
+            days,
             "-sha256",
             "-extfile",
             path_arg(&extensions)?,
@@ -102,28 +137,123 @@ pub(super) fn ensure(directory: &Path) -> Result<()> {
             path_arg(&server_cert)?,
         ],
     )?;
-    run(
-        "openssl",
-        &[
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-sha256",
-            "-days",
-            "7",
-            "-nodes",
-            "-subj",
-            "/CN=ObzenFlow Untrusted PostgreSQL Test CA",
-            "-keyout",
-            path_arg(&untrusted_ca_key)?,
-            "-out",
-            path_arg(&untrusted_ca_cert)?,
-        ],
-    )?;
+    if untrusted {
+        let untrusted_key = tls.join("untrusted-ca.key");
+        let untrusted_cert = tls.join("untrusted-ca.crt");
+        run(
+            "openssl",
+            &[
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-sha256",
+                "-days",
+                days,
+                "-nodes",
+                "-subj",
+                "/CN=ObzenFlow Untrusted PostgreSQL Test CA",
+                "-keyout",
+                path_arg(&untrusted_key)?,
+                "-out",
+                path_arg(&untrusted_cert)?,
+            ],
+        )?;
+        set_private_permissions(&untrusted_key)?;
+        fs::remove_file(untrusted_key)?;
+    }
     set_private_permissions(&ca_key)?;
     set_private_permissions(&server_key)?;
-    set_private_permissions(&untrusted_ca_key)?;
+    for temporary in [ca_key, server_csr, extensions, tls.join("ca.srl")] {
+        if temporary.exists() {
+            fs::remove_file(temporary)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_certificate(path: &Path) -> Result<()> {
+    let status = Command::new("openssl")
+        .args(["x509", "-checkend", "0", "-noout", "-in", path_arg(path)?])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| reset_required("OpenSSL could not inspect development TLS state"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(reset_required(
+            "PostgreSQL development TLS certificate has expired",
+        ))
+    }
+}
+
+fn create_private_directory(path: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn require_private_directory(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| reset_required("PostgreSQL development TLS directory is missing"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(reset_required(
+            "PostgreSQL development TLS path is not a regular directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o777 != 0o700 {
+            return Err(reset_required(
+                "PostgreSQL development TLS directory permissions must be 0700",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn require_regular_file(path: &Path, label: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| {
+        reset_required(format!(
+            "PostgreSQL development TLS file {label} is missing"
+        ))
+    })?;
+    if metadata.is_file() && !metadata.file_type().is_symlink() {
+        Ok(())
+    } else {
+        Err(reset_required(format!(
+            "PostgreSQL development TLS file {label} is not a regular file"
+        )))
+    }
+}
+
+#[cfg(unix)]
+fn require_private_file(path: &Path, label: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.permissions().mode() & 0o777 == 0o600 {
+        Ok(())
+    } else {
+        Err(reset_required(format!(
+            "PostgreSQL development TLS file {label} permissions must be 0600"
+        )))
+    }
+}
+
+#[cfg(not(unix))]
+fn require_private_file(_path: &Path, _label: &str) -> Result<()> {
     Ok(())
 }
 
@@ -165,4 +295,11 @@ fn set_private_permissions(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_private_permissions(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+fn reset_required(message: impl AsRef<str>) -> Box<dyn std::error::Error> {
+    error(format!(
+        "{}; reset this development session with `cargo xtask postgres down --volumes`",
+        message.as_ref()
+    ))
 }

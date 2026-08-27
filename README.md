@@ -86,7 +86,7 @@ cargo run -p obzenflow --example one_shot_inference_demo --features ai -- \
 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres"
 ```
 
-No features are enabled by default. `--features obzenflow_infra/warp-server` enables the HTTP server and web endpoints, `--features http-pull` enables HTTP pull sources, and `--features postgres` enables the PostgreSQL sink. Its canonical disposable proof is `cargo xtask postgres test`; persistent example sessions begin with `cargo xtask postgres up`. See `crates/obzenflow_infra/README.md` for the remaining feature matrix. An optional Prometheus + Grafana monitoring stack lives in `monitoring/`.
+No features are enabled by default. `--features obzenflow_infra/warp-server` enables the HTTP server and web endpoints, `--features http-pull` enables HTTP pull sources, and `--features postgres` enables the PostgreSQL sink. PostgreSQL applications accept an externally supplied `OBZENFLOW_POSTGRES_URL`; they do not depend on repository tooling to launch the backing service. The optional local harness uses `cargo xtask postgres up`, retains its loopback endpoint and named volume, and prints a password-free client profile through `cargo xtask postgres connection`. Its canonical disposable proof remains `cargo xtask postgres test`. See [`dev/postgres/README.md`](dev/postgres/README.md) for the local lifecycle and `crates/obzenflow_infra/README.md` for the remaining feature matrix. An optional Prometheus + Grafana monitoring stack lives in `monitoring/`.
 
 ## Project organization
 

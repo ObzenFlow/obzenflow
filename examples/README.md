@@ -42,7 +42,7 @@ These are the flagship examples and the best place to start. Each one has a comp
   - Tutorial: [Run Live AI Inference from a Real Endpoint](https://obzenflow.dev/tutorials/live-ai-inference/)
   - Shows: [declared effects](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it)
   - Run (console output): `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres"`
-  - Run (PostgreSQL output): `cargo xtask postgres up`, then `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres"`
+  - Run (PostgreSQL output): supply `OBZENFLOW_POSTGRES_URL` from any PostgreSQL deployment and select `postgres_sink`; the optional local path is `cargo xtask postgres up`, then `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres"`
   - Code: [`examples/hn_ai_digest_demo/flow.rs`](hn_ai_digest_demo/flow.rs)
 
 - **`one_shot_inference_demo`** — One already-bounded input, one declared model effect, and one typed decision. Use this instead of map-reduce when the bounded context has already reduced the evidence.
@@ -73,8 +73,9 @@ These examples don't have tutorials, but they demonstrate concrete framework con
   - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)
 
 - **`postgres_sink_payments`** — Typed payment events delivered to PostgreSQL with parameter binding, batching, verified TLS, and a repeat-safe UPSERT. Use this to learn the PostgreSQL sink's application-facing surface.
-  - Start the persistent service: `cargo xtask postgres up`
-  - Run live: `cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_payments`
+  - Backing service: supply `OBZENFLOW_POSTGRES_URL` directly from any PostgreSQL deployment
+  - Optional local service: `cargo xtask postgres up`, followed by `cargo xtask postgres connection` for GUI-client fields
+  - Run through the local environment: `cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_payments`
   - Stop while retaining rows: `cargo xtask postgres down`; add `--volumes` only to discard the development database
   - Guide: [`examples/postgres_sink_payments/README.md`](postgres_sink_payments/README.md)
   - Code: [`examples/postgres_sink_payments/flow.rs`](postgres_sink_payments/flow.rs)

@@ -4,8 +4,12 @@
 
 //! Black-box lifecycle verification for the public PostgreSQL xtask commands.
 
-use sqlx::PgPool;
+use sqlx::{
+    postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
+    PgPool,
+};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -13,13 +17,13 @@ use std::{
 use uuid::Uuid;
 
 const SESSION_ENV: &str = "OBZENFLOW_POSTGRES_XTASK_PROOF_SESSION";
-const PASSWORD: &str = "obzenflow-secret-083c";
 
 #[derive(Debug, PartialEq, Eq)]
 struct SessionState {
     project: String,
     run_id: String,
     port: u16,
+    volume: String,
 }
 
 struct CleanupGuard {
@@ -37,20 +41,22 @@ impl CleanupGuard {
 impl Drop for CleanupGuard {
     fn drop(&mut self) {
         if self.armed {
-            let _ = xtask(&self.root, &self.token, &["down", "--volumes"]);
+            let _ = xtask(&self.root, &self.token, &["down", "--volumes"], &[]);
         }
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the repository PostgreSQL test environment"]
-async fn public_commands_preserve_data_and_isolate_concurrent_sessions() {
+async fn public_commands_preserve_rows_credentials_and_environment_boundaries() {
     let root = workspace_root();
     let primary_project = required_env("OBZENFLOW_POSTGRES_TEST_PROJECT");
     let primary_run_id = required_env("OBZENFLOW_POSTGRES_TEST_RUN_ID");
     let primary_port = required_env("OBZENFLOW_POSTGRES_TEST_PORT")
         .parse::<u16>()
         .expect("primary port is numeric");
+    let primary_pgpass = PathBuf::from(required_env("PGPASSFILE"));
+    let primary_secret = pgpass_secret(&primary_pgpass, primary_port);
     let primary = PgPool::connect(&required_env("OBZENFLOW_POSTGRES_TEST_URL"))
         .await
         .expect("connect to the primary PostgreSQL test session");
@@ -61,92 +67,226 @@ async fn public_commands_preserve_data_and_isolate_concurrent_sessions() {
         .join("target/postgres-sessions")
         .join(format!("persistent-{token}"));
     let state_path = directory.join("state.tsv");
+    let raw_path = directory.join("password");
+    let pgpass_path = directory.join("pgpass");
+    let journal_root = root.join("target/postgres-lifecycle-journals").join(&token);
     let mut cleanup = CleanupGuard {
         root: root.clone(),
         token: token.clone(),
         armed: true,
     };
 
-    assert_success("up", xtask(&root, &token, &["up"]));
-    assert_success("status", xtask(&root, &token, &["status"]));
+    let up = xtask(&root, &token, &["up"], &[]);
+    let up_text = assert_success("up", up, &[]);
     let initial = read_state(&state_path);
+    let raw = fs::read_to_string(&raw_path).expect("read generated raw credential");
+    assert!(
+        valid_secret(&raw),
+        "raw credential is 64 lowercase hex bytes"
+    );
+    assert_ne!(
+        raw, primary_secret,
+        "test and development credentials differ"
+    );
+    assert!(
+        !up_text.contains(&raw),
+        "up does not print the managed secret"
+    );
+    assert_private_directory(&directory);
+    assert_private_file(&state_path);
+    assert_private_file(&raw_path);
+    assert_private_file(&pgpass_path);
+    assert_eq!(
+        fs::read_to_string(&pgpass_path).expect("read generated pgpass"),
+        format!("localhost:{}:obzenflow:obzenflow:{raw}\n", initial.port)
+    );
+
     assert_ne!(initial.project, primary_project);
     assert_ne!(initial.run_id, primary_run_id);
     assert_ne!(initial.port, primary_port);
+    assert_ne!(pgpass_path, primary_pgpass);
 
-    let secondary = PgPool::connect(&plaintext_url(initial.port))
-        .await
-        .expect("connect to the isolated development session");
-    sqlx::query(
-        "CREATE TABLE public.xtask_lifecycle_marker (id BIGINT PRIMARY KEY, value TEXT NOT NULL)",
-    )
-    .execute(&secondary)
-    .await
-    .expect("create retained-volume marker table");
-    sqlx::query("INSERT INTO public.xtask_lifecycle_marker VALUES (1, 'retained')")
-        .execute(&secondary)
-        .await
-        .expect("insert retained-volume marker");
+    assert_success("status", xtask(&root, &token, &["status"], &[]), &[&raw]);
+    let connection = assert_success(
+        "connection",
+        xtask(&root, &token, &["connection"], &[]),
+        &[&raw],
+    );
+    for field in [
+        "project:",
+        "container:",
+        "volume:",
+        "client host:",
+        "port:",
+        "database:",
+        "schema:",
+        "CA certificate:",
+        "pgpass:",
+        "state:",
+    ] {
+        assert!(
+            connection.contains(field),
+            "connection profile omitted {field}"
+        );
+    }
+    assert!(connection.contains("env -u PGPASSWORD"));
+    assert!(connection.contains("postgresql://obzenflow@localhost:"));
+
+    let captured = assert_success(
+        "run environment capture",
+        xtask(
+            &root,
+            &token,
+            &["run", "--", "env"],
+            &[
+                ("PGPASSWORD", "ambient-wrong-password"),
+                ("OBZENFLOW_POSTGRES_TEST_SENTINEL", "must-not-cross"),
+                ("OBZENFLOW_POSTGRES_PASSWORD", "legacy-ambient-password"),
+                ("OBZENFLOW_POSTGRES_EXAMPLE_SCHEMA", "acceptance-only"),
+            ],
+        ),
+        &[&raw],
+    );
+    let captured = parse_environment(&captured);
+    let development_url = captured
+        .get("OBZENFLOW_POSTGRES_URL")
+        .expect("development URL is supplied");
+    assert!(development_url.starts_with(&format!(
+        "postgresql://obzenflow@localhost:{}/obzenflow?",
+        initial.port
+    )));
+    assert!(!development_url.contains(&raw));
+    assert_eq!(
+        captured.get("PGPASSFILE"),
+        Some(&pgpass_path.display().to_string())
+    );
+    assert_eq!(
+        captured
+            .get("OBZENFLOW_POSTGRES_SCHEMA")
+            .map(String::as_str),
+        Some("obzenflow_example")
+    );
+    assert!(!captured.contains_key("PGPASSWORD"));
+    assert!(!captured.contains_key(SESSION_ENV));
+    assert!(!captured.contains_key("OBZENFLOW_POSTGRES_PASSWORD"));
+    assert!(!captured.contains_key("OBZENFLOW_POSTGRES_PASSWORD_FILE"));
+    assert!(!captured.contains_key("OBZENFLOW_POSTGRES_EXAMPLE_SCHEMA"));
+    assert!(
+        captured
+            .keys()
+            .all(|name| !name.starts_with("OBZENFLOW_POSTGRES_TEST_")),
+        "development child receives no acceptance-only environment"
+    );
+
+    assert_success(
+        "payments example",
+        xtask(
+            &root,
+            &token,
+            &[
+                "run",
+                "--",
+                "cargo",
+                "run",
+                "-p",
+                "obzenflow",
+                "--features",
+                "postgres",
+                "--example",
+                "postgres_sink_payments",
+            ],
+            &[(
+                "OBZENFLOW_JOURNAL_ROOT",
+                journal_root.to_str().expect("journal path is Unicode"),
+            )],
+        ),
+        &[&raw],
+    );
+
+    let secondary = development_pool(initial.port, &raw).await;
+    assert_payment_rows(&secondary).await;
     secondary.close().await;
 
-    assert_success("down", xtask(&root, &token, &["down"]));
+    let initial_raw = fs::read(&raw_path).expect("snapshot raw credential");
+    let initial_pgpass = fs::read(&pgpass_path).expect("snapshot pgpass credential");
+    let initial_ca = fs::read(directory.join("tls/ca.crt")).expect("snapshot development CA");
+    let initial_server_certificate = fs::read(directory.join("tls/server.crt"))
+        .expect("snapshot development server certificate");
+    assert_success("down", xtask(&root, &token, &["down"], &[]), &[&raw]);
     assert!(state_path.is_file(), "normal down retains session state");
-    assert_success("restart", xtask(&root, &token, &["up"]));
+    assert_eq!(fs::read(&raw_path).expect("retained raw"), initial_raw);
+    assert_eq!(
+        fs::read(&pgpass_path).expect("retained pgpass"),
+        initial_pgpass
+    );
+
+    assert_success("restart", xtask(&root, &token, &["up"], &[]), &[&raw]);
     let restarted = read_state(&state_path);
-    assert_eq!(restarted.project, initial.project);
-    assert_eq!(restarted.run_id, initial.run_id);
+    assert_eq!(restarted, initial, "normal restart retains exact authority");
+    assert_eq!(fs::read(&raw_path).expect("restarted raw"), initial_raw);
+    assert_eq!(
+        fs::read(&pgpass_path).expect("restarted pgpass"),
+        initial_pgpass
+    );
+    assert_eq!(
+        fs::read(directory.join("tls/ca.crt")).expect("restarted development CA"),
+        initial_ca
+    );
+    assert_eq!(
+        fs::read(directory.join("tls/server.crt"))
+            .expect("restarted development server certificate"),
+        initial_server_certificate
+    );
 
-    let secondary = PgPool::connect(&plaintext_url(restarted.port))
-        .await
-        .expect("reconnect after normal down and up");
-    let marker = sqlx::query_scalar::<_, String>(
-        "SELECT value FROM public.xtask_lifecycle_marker WHERE id = 1",
-    )
-    .fetch_one(&secondary)
-    .await
-    .expect("read retained-volume marker");
-    assert_eq!(marker, "retained");
+    let secondary = development_pool(restarted.port, &raw).await;
+    assert_payment_rows(&secondary).await;
     secondary.close().await;
-
     assert_eq!(
         query_one(&primary).await,
         1,
-        "the primary session remains healthy"
+        "the disposable acceptance session remains healthy"
     );
-    assert_success("logs", xtask(&root, &token, &["logs"]));
+
+    assert_success("logs", xtask(&root, &token, &["logs"], &[]), &[&raw]);
     assert_success(
         "down --volumes",
-        xtask(&root, &token, &["down", "--volumes"]),
+        xtask(&root, &token, &["down", "--volumes"], &[]),
+        &[&raw],
     );
     assert!(
         !directory.exists(),
-        "volume cleanup removes the owned session directory"
+        "volume cleanup removes the exact owned session directory"
     );
+    if journal_root.exists() {
+        fs::remove_dir_all(&journal_root).expect("remove lifecycle journals");
+    }
     cleanup.disarm();
     primary.close().await;
 }
 
-fn xtask(root: &Path, token: &str, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_xtask"))
+fn xtask(root: &Path, token: &str, args: &[&str], environment: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+    command
         .current_dir(root)
         .arg("postgres")
         .args(args)
-        .env(SESSION_ENV, token)
-        .output()
-        .expect("launch the public xtask binary")
+        .env(SESSION_ENV, token);
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    command.output().expect("launch the public xtask binary")
 }
 
-fn assert_success(label: &str, output: Output) {
+fn assert_success(label: &str, output: Output, forbidden: &[&str]) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     for text in [&stdout, &stderr] {
+        for secret in forbidden {
+            assert!(!text.contains(secret), "{label} exposed a managed secret");
+        }
         assert!(
-            !text.contains(PASSWORD),
-            "{label} exposed the fixture password"
-        );
-        assert!(
-            !text.contains("postgres://obzenflow:"),
-            "{label} exposed a connection URL"
+            !text.contains("postgres://obzenflow:") && !text.contains("postgresql://obzenflow:"),
+            "{label} exposed a password-bearing connection URL"
         );
     }
     assert!(
@@ -156,6 +296,7 @@ fn assert_success(label: &str, output: Output) {
         stdout.trim(),
         stderr.trim()
     );
+    stdout.into_owned()
 }
 
 fn workspace_root() -> PathBuf {
@@ -170,8 +311,37 @@ fn required_env(name: &str) -> String {
         .unwrap_or_else(|_| panic!("{name} is required from `cargo xtask postgres test`"))
 }
 
-fn plaintext_url(port: u16) -> String {
-    format!("postgres://obzenflow:{PASSWORD}@localhost:{port}/obzenflow?sslmode=disable")
+fn valid_secret(secret: &str) -> bool {
+    secret.len() == 64
+        && secret
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn pgpass_secret(path: &Path, port: u16) -> String {
+    fs::read_to_string(path)
+        .expect("read outer pgpass")
+        .lines()
+        .find_map(|line| {
+            let fields = line.split(':').collect::<Vec<_>>();
+            (fields.len() == 5 && fields[1] == port.to_string()).then(|| fields[4].to_string())
+        })
+        .expect("outer pgpass contains its exact port")
+}
+
+async fn development_pool(port: u16, password: &str) -> PgPool {
+    let options = PgConnectOptions::new_without_pgpass()
+        .host("localhost")
+        .port(port)
+        .username("obzenflow")
+        .password(password)
+        .database("obzenflow")
+        .ssl_mode(PgSslMode::Disable);
+    PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .expect("connect to the isolated development session")
 }
 
 async fn query_one(pool: &PgPool) -> i32 {
@@ -181,8 +351,48 @@ async fn query_one(pool: &PgPool) -> i32 {
         .expect("query PostgreSQL readiness")
 }
 
+async fn assert_payment_rows(pool: &PgPool) {
+    let rows = sqlx::query_as::<_, (i64, String, String, i64)>(
+        "SELECT payment_id, order_id, customer_id, amount_cents \
+         FROM obzenflow_example.payments ORDER BY payment_id",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("inspect development payment rows");
+    assert_eq!(
+        rows,
+        vec![
+            (
+                1001,
+                "order-501".to_string(),
+                "customer-71".to_string(),
+                12_500,
+            ),
+            (
+                1002,
+                "order-502".to_string(),
+                "customer-93".to_string(),
+                8_750,
+            ),
+        ]
+    );
+}
+
+fn parse_environment(stdout: &str) -> BTreeMap<String, String> {
+    stdout
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
 fn read_state(path: &Path) -> SessionState {
     let contents = fs::read_to_string(path).expect("read xtask session state");
+    assert_eq!(
+        contents.lines().next(),
+        Some("# obzenflow xtask postgres v3")
+    );
+    assert!(!contents.contains("password"));
     let field = |name: &str| {
         contents
             .lines()
@@ -194,5 +404,32 @@ fn read_state(path: &Path) -> SessionState {
         project: field("project"),
         run_id: field("run_id"),
         port: field("port").parse().expect("state port is numeric"),
+        volume: field("volume"),
     }
+}
+
+#[cfg(unix)]
+fn assert_private_directory(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::symlink_metadata(path).expect("inspect private directory");
+    assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+}
+
+#[cfg(not(unix))]
+fn assert_private_directory(path: &Path) {
+    assert!(path.is_dir());
+}
+
+#[cfg(unix)]
+fn assert_private_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::symlink_metadata(path).expect("inspect private file");
+    assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+}
+
+#[cfg(not(unix))]
+fn assert_private_file(path: &Path) {
+    assert!(path.is_file());
 }
