@@ -2558,7 +2558,7 @@ async fn resume_closes_a_generated_plan_interrupted_between_snapshot_and_manifes
 #[tokio::test(flavor = "multi_thread")]
 async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt() {
     let pool = postgres_support::pool().await;
-    let schema = postgres_support::required_env("OBZENFLOW_POSTGRES_HN_DIGEST_SCHEMA");
+    let schema = postgres_support::required_env("OBZENFLOW_POSTGRES_SCHEMA");
     sqlx::query(&format!(
         "TRUNCATE TABLE \"{schema}\".hn_digest_summaries RESTART IDENTITY"
     ))

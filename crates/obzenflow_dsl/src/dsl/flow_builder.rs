@@ -21,10 +21,7 @@ use obzenflow_topology::EdgeKind;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-type ConfiguredSinkResolution = (
-    HashMap<String, Box<dyn StageDescriptor>>,
-    HashSet<String>,
-);
+type ConfiguredSinkResolution = (HashMap<String, Box<dyn StageDescriptor>>, HashSet<String>);
 
 fn describe_handler_keys(keys: &[&str]) -> String {
     match keys {
