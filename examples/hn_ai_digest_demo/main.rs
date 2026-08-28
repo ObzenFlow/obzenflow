@@ -52,6 +52,8 @@
 //!   `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink`.
 //! - PostgreSQL output reads `OBZENFLOW_POSTGRES_URL` and optionally
 //!   `OBZENFLOW_POSTGRES_SCHEMA` (default `obzenflow_example`).
+//! - Final Markdown uses verified `[^n]` story footnotes and appends a `### Links`
+//!   section from the fetched titles, article URLs, and Hacker News discussion URLs.
 //! - Any externally managed PostgreSQL service may supply those values directly; no `xtask`
 //!   process is part of the application contract.
 //! - For the optional repository service, run `cargo xtask postgres up`, inspect its current

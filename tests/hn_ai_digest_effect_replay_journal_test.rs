@@ -260,7 +260,7 @@ impl ChatClient for CountingChatClient {
             return Err(error);
         }
         Ok(ChatResponse {
-            text: "recorded".to_string(),
+            text: "recorded [^1]".to_string(),
             tool_calls: Vec::new(),
             usage: None,
             raw: None,
@@ -2649,7 +2649,12 @@ async fn postgres_output_inserts_one_deterministic_hn_digest_with_stable_receipt
     assert_eq!(row.6, "heuristic");
     assert_eq!(row.7.as_deref(), Some("runtime protocols"));
     assert_eq!(row.8, ["100", "101", "102", "103", "104"]);
-    assert_eq!(row.9, "recorded");
+    assert_eq!(
+        row.9,
+        "recorded [^1]\n\n### Links\n\n\
+         [^1]: [Rust: tooling update #100](<https://example.com/hn/100>) · \
+         [HN discussion](<https://news.ycombinator.com/item?id=100>)"
+    );
 
     let archive = latest_run_dir(&journal_base);
     let finalise = stage_envelopes(&archive, "digest__finalize").await;

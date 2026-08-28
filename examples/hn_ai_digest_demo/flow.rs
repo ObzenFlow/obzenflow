@@ -30,7 +30,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{EffectBinding, SinkRedeliverySafety};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 const HN_SOURCE_BREAKER_FAILURES: u32 = 3;
 const HN_SOURCE_BREAKER_COOLDOWN_SECS: u64 = 2;
@@ -198,7 +198,7 @@ fn digest_map_prompt(
         "Do not invent facts that are not implied by the titles.".to_string(),
         "Use a neutral, specific tone.".to_string(),
         "IMPORTANT: Do not repeat the input story list.".to_string(),
-        "Cite stories only by number, like (12); do not paste URLs.".to_string(),
+        "Cite stories only with Markdown footnote markers like [^12]; do not use parenthesized numbers, paste URLs, or add footnote definitions.".to_string(),
         format!(
             "Reference at least {min_citations} distinct story numbers across Themes + Notable stories."
         ),
@@ -211,14 +211,14 @@ fn digest_map_prompt(
         .labeled(
             "Output format (follow exactly)",
             "Themes:\n\
-- <theme> (n, n, n): 1 sentence\n\
-- <theme> (n, n, n): 1 sentence\n\
-- <theme> (n, n, n): 1 sentence\n\
+- <theme> [^n] [^n] [^n]: 1 sentence\n\
+- <theme> [^n] [^n] [^n]: 1 sentence\n\
+- <theme> [^n] [^n] [^n]: 1 sentence\n\
 Notable stories:\n\
-- (n) Title: 1 sentence\n\
-- (n) Title: 1 sentence\n\
-- (n) Title: 1 sentence\n\
-- (n) Title: 1 sentence",
+- Title: 1 sentence [^n]\n\
+- Title: 1 sentence [^n]\n\
+- Title: 1 sentence [^n]\n\
+- Title: 1 sentence [^n]",
         )
         .fenced_lines(
             "Input stories (numbered; do not repeat)",
@@ -322,7 +322,9 @@ fn digest_reduce_prompt(
     let rules: Vec<String> = vec![
         "Do not invent facts that are not implied by the titles.".to_string(),
         "Start the response immediately with \"## What's topical today\" (no intro).".to_string(),
-        "Include: Thesis, Themes (cite story numbers), Notable stories, Watch.".to_string(),
+        "Include: Thesis, Themes, Notable stories, Watch.".to_string(),
+        "Cite stories only with Markdown footnote markers like [^12]; preserve the story numbers from the chunk summaries and do not use parenthesized citations.".to_string(),
+        "Do not add URLs, footnote definitions, or a Links section; the application appends verified links.".to_string(),
         "Avoid generic wrap-ups.".to_string(),
     ];
 
@@ -349,6 +351,7 @@ fn digest_reduce_parse(
 ) -> Result<HnDigestSummary, HandlerError> {
     let groups = summaries.len();
     let stories_fetched = seed.stories.len();
+    let output_markdown = render_digest_links(&response.text, &seed.stories)?;
 
     Ok(HnDigestSummary {
         mode: ctx.mode_label.clone(),
@@ -364,7 +367,7 @@ fn digest_reduce_parse(
         chat_prompt_user: user_prompt,
         input: seed,
         group_summaries: summaries,
-        output_markdown: response.text,
+        output_markdown,
     })
 }
 
@@ -674,6 +677,108 @@ fn strip_accidental_story_echo(markdown: &str) -> String {
     out.trim_end().to_string()
 }
 
+fn render_digest_links(markdown: &str, stories: &[FormattedStory]) -> Result<String, HandlerError> {
+    let authored = markdown
+        .lines()
+        .take_while(|line| line.trim() != "### Links")
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (body, citations) = canonicalize_story_citations(authored.trim(), stories.len())?;
+    if citations.is_empty() {
+        return Err(HandlerError::Validation(
+            "HN digest contains no story footnote citations".to_string(),
+        ));
+    }
+
+    let mut output = body.trim_end().to_string();
+    output.push_str("\n\n### Links\n\n");
+    for (index, ordinal) in citations.into_iter().enumerate() {
+        if index > 0 {
+            output.push('\n');
+        }
+        output.push_str(&render_story_footnote(ordinal, &stories[ordinal - 1]));
+    }
+    Ok(output)
+}
+
+fn canonicalize_story_citations(
+    markdown: &str,
+    story_count: usize,
+) -> Result<(String, BTreeSet<usize>), HandlerError> {
+    let bytes = markdown.as_bytes();
+    let mut output = String::with_capacity(markdown.len());
+    let mut citations = BTreeSet::new();
+    let mut copied_through = 0;
+    let mut cursor = 0;
+
+    while cursor < bytes.len() {
+        let explicit = bytes[cursor] == b'[' && bytes.get(cursor + 1) == Some(&b'^');
+        let parenthesized = bytes[cursor] == b'(';
+        let digits_start = cursor + if explicit { 2 } else { 1 };
+        let terminator = if explicit { b']' } else { b')' };
+
+        if explicit || parenthesized {
+            if let Some((end, ordinal)) = decimal_marker(bytes, digits_start, terminator) {
+                if explicit && !(1..=story_count).contains(&ordinal) {
+                    return Err(HandlerError::Validation(format!(
+                        "HN digest cites story {ordinal}, but the input contains {story_count} stories"
+                    )));
+                }
+                if (1..=story_count).contains(&ordinal) {
+                    output.push_str(&markdown[copied_through..cursor]);
+                    output.push_str(&format!("[^{ordinal}]"));
+                    citations.insert(ordinal);
+                    copied_through = end;
+                    cursor = end;
+                    continue;
+                }
+            }
+        }
+        cursor += 1;
+    }
+
+    output.push_str(&markdown[copied_through..]);
+    Ok((output, citations))
+}
+
+fn decimal_marker(bytes: &[u8], start: usize, terminator: u8) -> Option<(usize, usize)> {
+    let mut end = start;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    if end == start || bytes.get(end) != Some(&terminator) {
+        return None;
+    }
+    let ordinal = std::str::from_utf8(&bytes[start..end]).ok()?.parse().ok()?;
+    Some((end + 1, ordinal))
+}
+
+fn render_story_footnote(ordinal: usize, story: &FormattedStory) -> String {
+    let title = markdown_link_label(story.title.trim());
+    let article_url = markdown_link_destination(story.url.trim());
+    let discussion_url = format!("https://news.ycombinator.com/item?id={}", story.id);
+
+    if story.url.trim() == discussion_url {
+        format!("[^{ordinal}]: [{title}](<{article_url}>)")
+    } else {
+        format!("[^{ordinal}]: [{title}](<{article_url}>) · [HN discussion](<{discussion_url}>)")
+    }
+}
+
+fn markdown_link_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+}
+
+fn markdown_link_destination(value: &str) -> String {
+    value
+        .replace(' ', "%20")
+        .replace('<', "%3C")
+        .replace('>', "%3E")
+}
+
 fn render_story_line(n: usize, story: &FormattedStory) -> String {
     let title = story.title.trim();
     let url = story.url.trim();
@@ -699,5 +804,53 @@ fn format_story(story: HnStory) -> FormattedStory {
         author: story.by.unwrap_or_else(|| "(anonymous)".to_string()),
         points: story.score.unwrap_or(0),
         comments: story.descendants.unwrap_or(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::domain::HnStoryId;
+    use super::*;
+
+    fn story(id: u64, title: &str, url: &str) -> FormattedStory {
+        FormattedStory {
+            id: HnStoryId(id),
+            title: title.to_string(),
+            url: url.to_string(),
+            author: "author".to_string(),
+            points: 1,
+            comments: 1,
+        }
+    }
+
+    #[test]
+    fn digest_links_are_verified_deduplicated_and_derived_from_story_inputs() {
+        let stories = vec![
+            story(100, "First", "https://news.ycombinator.com/item?id=100"),
+            story(101, "Second [story]", "https://example.com/second story"),
+        ];
+        let markdown = "## Digest\n\nSecond (2), first [^1], second again [^2].\n\n\
+                        ### Links\n\n[^2]: model-authored link";
+
+        assert_eq!(
+            render_digest_links(markdown, &stories).expect("render verified links"),
+            "## Digest\n\nSecond [^2], first [^1], second again [^2].\n\n\
+             ### Links\n\n\
+             [^1]: [First](<https://news.ycombinator.com/item?id=100>)\n\
+             [^2]: [Second \\[story\\]](<https://example.com/second%20story>) · [HN discussion](<https://news.ycombinator.com/item?id=101>)"
+        );
+    }
+
+    #[test]
+    fn digest_links_reject_missing_and_out_of_range_citations() {
+        let stories = vec![story(100, "First", "https://example.com/first")];
+        assert!(matches!(
+            render_digest_links("## Digest\n\nNo citations.", &stories),
+            Err(HandlerError::Validation(message)) if message.contains("no story footnote")
+        ));
+        assert!(matches!(
+            render_digest_links("## Digest\n\nInvalid [^2].", &stories),
+            Err(HandlerError::Validation(message)) if message.contains("cites story 2")
+        ));
     }
 }
