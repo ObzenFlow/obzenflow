@@ -2,7 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::config::{DEVELOPMENT_CA_FILE, DEVELOPMENT_SESSION, DEVELOPMENT_STATE_ROOT};
+use super::{
+    config::{DEVELOPMENT_CA_FILE, DEVELOPMENT_SESSION, DEVELOPMENT_STATE_ROOT},
+    managed_fs,
+};
 use crate::{error, Result};
 use std::{
     fs::{self, File, OpenOptions},
@@ -237,72 +240,22 @@ fn check_certificate(path: &Path) -> Result<()> {
 }
 
 fn create_private_directory(path: &Path) -> Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
+    managed_fs::create_directory(path)
 }
 
 fn require_private_directory(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| reset_required("PostgreSQL development TLS directory is missing"))?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(reset_required(
-            "PostgreSQL development TLS path is not a regular directory",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o777 != 0o700 {
-            return Err(reset_required(
-                "PostgreSQL development TLS directory permissions must be 0700",
-            ));
-        }
-    }
-    Ok(())
+    managed_fs::require_directory(path, "PostgreSQL development TLS directory")
+        .map_err(|failure| reset_required(failure.to_string()))
 }
 
 fn require_regular_file(path: &Path, label: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| {
-        reset_required(format!(
-            "PostgreSQL development TLS file {label} is missing"
-        ))
-    })?;
-    if metadata.is_file() && !metadata.file_type().is_symlink() {
-        Ok(())
-    } else {
-        Err(reset_required(format!(
-            "PostgreSQL development TLS file {label} is not a regular file"
-        )))
-    }
+    managed_fs::require_regular_file(path, &format!("PostgreSQL development TLS file {label}"))
+        .map_err(|failure| reset_required(failure.to_string()))
 }
 
-#[cfg(unix)]
 fn require_private_file(path: &Path, label: &str) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.permissions().mode() & 0o777 == 0o600 {
-        Ok(())
-    } else {
-        Err(reset_required(format!(
-            "PostgreSQL development TLS file {label} permissions must be 0600"
-        )))
-    }
-}
-
-#[cfg(not(unix))]
-fn require_private_file(_path: &Path, _label: &str) -> Result<()> {
-    Ok(())
+    managed_fs::require_secret_file(path, &format!("PostgreSQL development TLS file {label}"))
+        .map_err(|failure| reset_required(failure.to_string()))
 }
 
 fn command_succeeds(program: &str, args: &[&str]) -> bool {
@@ -356,16 +309,8 @@ fn set_public_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn set_private_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_permissions(_path: &Path) -> Result<()> {
-    Ok(())
+    managed_fs::set_secret_file_permissions(path, "generated PostgreSQL TLS private key")
 }
 
 fn reset_required(message: impl AsRef<str>) -> Box<dyn std::error::Error> {

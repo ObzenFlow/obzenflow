@@ -8,6 +8,7 @@ mod config;
 mod credentials;
 mod environment;
 mod fixtures;
+mod managed_fs;
 mod state;
 mod tls;
 

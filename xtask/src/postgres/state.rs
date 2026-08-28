@@ -2,13 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::config::{
-    DEVELOPMENT_SESSION, DEVELOPMENT_STATE_ROOT, SESSION_OVERRIDE_ENV, SESSION_ROOT, STATE_FILE,
+use super::{
+    config::{
+        DEVELOPMENT_SESSION, DEVELOPMENT_STATE_ROOT, SESSION_OVERRIDE_ENV, SESSION_ROOT, STATE_FILE,
+    },
+    managed_fs,
 };
 use crate::{error, Result};
 use std::{
-    env,
-    fs::{self, File, OpenOptions},
+    env, fs,
     io::Write,
     path::{Path, PathBuf},
 };
@@ -104,18 +106,7 @@ pub(super) fn create_session_directory(directory: &Path) -> Result<()> {
         .parent()
         .ok_or_else(|| error("PostgreSQL session directory has no parent"))?;
     fs::create_dir_all(parent)?;
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(directory)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-    }
+    managed_fs::create_directory(directory)?;
     require_private_directory(directory)
 }
 
@@ -151,7 +142,7 @@ pub(super) fn write(path: &Path, state: &SessionState) -> Result<()> {
     require_private_directory(directory)?;
     let temporary = directory.join(format!(".state-{}.tmp", unique_run_id()));
     let write_result = (|| {
-        let mut file = private_file_create_new(&temporary)?;
+        let mut file = managed_fs::secret_file_create_new(&temporary)?;
         writeln!(file, "{STATE_HEADER}")?;
         writeln!(file, "project\t{}", state.project)?;
         writeln!(file, "run_id\t{}", state.run_id)?;
@@ -162,6 +153,7 @@ pub(super) fn write(path: &Path, state: &SessionState) -> Result<()> {
         }
         file.sync_all()?;
         fs::rename(&temporary, path)?;
+        require_private_regular_file(path)?;
         Ok(())
     })();
     if write_result.is_err() && temporary.exists() {
@@ -379,49 +371,12 @@ fn set_once(slot: &mut Option<String>, value: &str) -> Result<()> {
     }
 }
 
-fn private_file_create_new(path: &Path) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    Ok(options.open(path)?)
-}
-
 fn require_private_directory(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| error("PostgreSQL session directory is unavailable"))?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(error("PostgreSQL session path is not a regular directory"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o777 != 0o700 {
-            return Err(error(
-                "PostgreSQL session directory permissions must be 0700",
-            ));
-        }
-    }
-    Ok(())
+    managed_fs::require_directory(path, "PostgreSQL session directory")
 }
 
 fn require_private_regular_file(path: &Path) -> Result<()> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|_| error("PostgreSQL session state is unavailable"))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(error("PostgreSQL session state is not a regular file"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o777 != 0o600 {
-            return Err(error("PostgreSQL session state permissions must be 0600"));
-        }
-    }
-    Ok(())
+    managed_fs::require_secret_file(path, "PostgreSQL session state")
 }
 
 fn checkout_fingerprint(root: &Path) -> String {
@@ -466,6 +421,10 @@ mod tests {
             mode: SessionMode::Test,
             volume: Some(expected_volume(&project)),
         };
+        let mut provisional = expected.clone();
+        provisional.port = 0;
+        provisional.volume = None;
+        write(&path, &provisional).expect("write provisional state");
         write(&path, &expected).expect("write state");
         let contents = fs::read_to_string(&path).expect("read state");
         assert!(!contents.contains("postgres://"));

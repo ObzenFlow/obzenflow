@@ -5,10 +5,11 @@
 use super::config::{
     PGPASS_FILE, POSTGRES_CLIENT_HOST, POSTGRES_DATABASE, POSTGRES_USER, RAW_PASSWORD_FILE,
 };
+use super::managed_fs;
 use crate::{error, Result};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::Write,
     path::{Path, PathBuf},
 };
@@ -121,14 +122,7 @@ fn pgpass_contents(secret: &str, port: u16, hosts: &[&str]) -> String {
 }
 
 fn create_private_file(path: &Path, contents: &[u8]) -> Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|failure| {
+    let mut file = managed_fs::secret_file_create_new(path).map_err(|failure| {
         error(format!(
             "refusing to overwrite PostgreSQL credential file {}: {failure}",
             path.display()
@@ -140,43 +134,13 @@ fn create_private_file(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 fn require_private_directory(path: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| reset_required("PostgreSQL credential directory is unavailable"))?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(reset_required(
-            "PostgreSQL credential directory is not a regular owned directory",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o777 != 0o700 {
-            return Err(reset_required(
-                "PostgreSQL credential directory permissions must be 0700",
-            ));
-        }
-    }
-    Ok(())
+    managed_fs::require_directory(path, "PostgreSQL credential directory")
+        .map_err(|failure| reset_required(failure.to_string()))
 }
 
 fn require_private_regular_file(path: &Path, label: &str) -> Result<()> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| reset_required(format!("PostgreSQL {label} credential is missing")))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(reset_required(format!(
-            "PostgreSQL {label} credential is not a regular file"
-        )));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o777 != 0o600 {
-            return Err(reset_required(format!(
-                "PostgreSQL {label} credential permissions must be 0600"
-            )));
-        }
-    }
-    Ok(())
+    managed_fs::require_secret_file(path, &format!("PostgreSQL {label} credential"))
+        .map_err(|failure| reset_required(failure.to_string()))
 }
 
 fn reset_required(message: impl AsRef<str>) -> Box<dyn std::error::Error> {
