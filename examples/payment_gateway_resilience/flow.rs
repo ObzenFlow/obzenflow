@@ -10,7 +10,7 @@
 //! web_orders ---+ canonical merge
 //! store_orders -+-> validate_order -- ValidatedOrder --> authorize_payment -- PaymentAuthorized --> paid-orders sink
 //!                     |                                    |             \-- PaymentAuthorizationUnavailable --> manual-review sink
-//!                     \-- OrderCancelled --------------+   \-- OrderCancelled --+
+//!                     \-- CancelledOrder --------------+   \-- CancelledOrder --+
 //!                                                      \----------------------(fan-in)--> cancelled-orders sink
 //! ```
 //!
@@ -24,14 +24,14 @@
 //!
 //! Validation lives in `validation.rs` as one typed classifier with the flat
 //! contract `CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder,
-//! OrderCancelled }`. Its handler-side `ValidationOutcome` carrier is proven
+//! CancelledOrder }`. Its handler-side `ValidationOutcome` carrier is proven
 //! leaf-equal and never journalled; the `authorize_payment` stage performs the
 //! `AuthorizePayment` effect (see
 //! `gateway.rs`). On a live run the configured resilience policy may make up
 //! to three breaker-governed physical calls before the runtime journals one
 //! terminal result; on replay the runtime returns that recorded gateway
 //! decision without calling the gateway again. The stage then emits the named
-//! payment fact that happened, deriving `OrderCancelled` from declines.
+//! payment fact that happened, deriving `CancelledOrder` from declines.
 //!
 //! `InvalidOrder` and `PaymentDeclined` are journal-recorded facts with no
 //! dedicated sink: the journal is the record, sinks are external deliveries.
@@ -47,7 +47,7 @@
 use super::console;
 use super::deliveries::{ShippingDeliveryLog, ShippingHandoff};
 use super::domain::{
-    CustomerOrderPlaced, InvalidOrder, OrderCancelled, PaymentAuthorizationUnavailable,
+    CancelledOrder, CustomerOrderPlaced, InvalidOrder, PaymentAuthorizationUnavailable,
     PaymentAuthorized, PaymentDeclined, ValidatedOrder,
 };
 use super::fixtures;
@@ -169,7 +169,7 @@ pub fn assemble_flow(
         let validate_order = validation::ValidateOrder;
         let shipping_handoff = ShippingHandoff;
         let record_cancelled =
-            SinkTyped::with_delivery(|cancelled: OrderCancelled, delivery| async move {
+            SinkTyped::with_delivery(|cancelled: CancelledOrder, delivery| async move {
                 console::record_cancelled_order(cancelled, delivery.provenance());
             });
         let record_unavailable = SinkTyped::with_delivery(
@@ -217,14 +217,14 @@ pub fn assemble_flow(
                 // classified exactly once by one multi-type stage. This is typed
                 // business classification, not exception handling: a valid order
                 // becomes `ValidatedOrder`, an invalid order records the
-                // `InvalidOrder` fact and its derived `OrderCancelled` consequence.
+                // `InvalidOrder` fact and its derived `CancelledOrder` consequence.
                 // Its typed carrier lowers directly to the declared flat facts;
                 // no effect cursor or effect provenance is involved.
                 validate_order = transform!(
                     CustomerOrderPlaced -> {
                         ValidatedOrder,
                         InvalidOrder,
-                        OrderCancelled
+                        CancelledOrder
                     } => validate_order
                 );
 
@@ -254,7 +254,7 @@ pub fn assemble_flow(
                     ValidatedOrder -> {
                         PaymentAuthorized,
                         PaymentDeclined,
-                        OrderCancelled,
+                        CancelledOrder,
                         PaymentAuthorizationUnavailable,
                     }
                     uses AuthorizePayment
@@ -284,7 +284,7 @@ pub fn assemble_flow(
                 // originated. The second closure argument is the per-delivery
                 // provenance context (FLOWIP-120i): labelling only, never a
                 // reason to skip the write.
-                cancelled_orders = sink!(OrderCancelled => record_cancelled, delivery: idempotent);
+                cancelled_orders = sink!(CancelledOrder => record_cancelled, delivery: idempotent);
 
                 // Unavailable-authorization sink, tier 2: failed gateway call or
                 // breaker refusal. No payment decision was reached, so the order

@@ -46,6 +46,44 @@ impl Drop for CleanupGuard {
     }
 }
 
+struct StateRestoreGuard {
+    original: PathBuf,
+    backup: PathBuf,
+    armed: bool,
+}
+
+impl StateRestoreGuard {
+    fn conceal(original: &Path, backup: &Path) -> Self {
+        assert!(!backup.exists(), "state backup path is unique");
+        fs::rename(original, backup).expect("conceal development state");
+        Self {
+            original: original.to_path_buf(),
+            backup: backup.to_path_buf(),
+            armed: true,
+        }
+    }
+
+    fn restore(&mut self) {
+        assert!(
+            !self.original.exists(),
+            "rejected first-up did not recreate development state"
+        );
+        fs::rename(&self.backup, &self.original).expect("restore development state");
+        self.armed = false;
+    }
+}
+
+impl Drop for StateRestoreGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            if self.original.exists() {
+                let _ = fs::remove_dir_all(&self.original);
+            }
+            let _ = fs::rename(&self.backup, &self.original);
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the repository PostgreSQL test environment"]
 async fn public_commands_preserve_rows_credentials_and_environment_boundaries() {
@@ -209,9 +247,12 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
 
     let initial_raw = fs::read(&raw_path).expect("snapshot raw credential");
     let initial_pgpass = fs::read(&pgpass_path).expect("snapshot pgpass credential");
+    let initial_state = fs::read(&state_path).expect("snapshot development state");
     let initial_ca = fs::read(directory.join("tls/ca.crt")).expect("snapshot development CA");
     let initial_server_certificate = fs::read(directory.join("tls/server.crt"))
         .expect("snapshot development server certificate");
+    let initial_server_key =
+        fs::read(directory.join("tls/server.key")).expect("snapshot development server key");
     assert_success("down", xtask(&root, &token, &["down"], &[]), &[&raw]);
     assert!(state_path.is_file(), "normal down retains session state");
     assert_eq!(fs::read(&raw_path).expect("retained raw"), initial_raw);
@@ -220,9 +261,66 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
         initial_pgpass
     );
 
+    let project_filter = format!("label=com.docker.compose.project={}", initial.project);
+    let containers_before = docker_stdout(&["ps", "--all", "--quiet", "--filter", &project_filter]);
+    let networks_before = docker_stdout(&["network", "ls", "--quiet", "--filter", &project_filter]);
+    assert!(
+        containers_before.trim().is_empty(),
+        "normal down removes the development container"
+    );
+    assert!(
+        networks_before.trim().is_empty(),
+        "normal down removes the development network"
+    );
+    let volume_before = docker_stdout(&["volume", "inspect", &initial.volume]);
+
+    let backup = directory
+        .parent()
+        .expect("development state has a parent")
+        .join(format!(".persistent-{token}-a1-backup"));
+    let mut state_restore = StateRestoreGuard::conceal(&directory, &backup);
+    let rejected = assert_failure(
+        "state-less retained-volume up",
+        xtask(&root, &token, &["up"], &[]),
+        &[&raw],
+    );
+    for expected in [
+        initial.project.as_str(),
+        initial.volume.as_str(),
+        state_path.to_str().expect("state path is Unicode"),
+        "refusing to generate a replacement credential",
+    ] {
+        assert!(
+            rejected.contains(expected),
+            "retained-volume refusal omitted {expected}"
+        );
+    }
+    assert!(!rejected.contains("down --volumes"));
+    assert!(!directory.exists(), "rejected up creates no local state");
+    assert_eq!(
+        docker_stdout(&["ps", "--all", "--quiet", "--filter", &project_filter,]),
+        containers_before,
+        "rejected up creates no development container"
+    );
+    assert_eq!(
+        docker_stdout(&["network", "ls", "--quiet", "--filter", &project_filter]),
+        networks_before,
+        "rejected up creates no development network"
+    );
+    assert_eq!(
+        docker_stdout(&["volume", "inspect", &initial.volume]),
+        volume_before,
+        "rejected up does not mutate the retained volume"
+    );
+    state_restore.restore();
+
     assert_success("restart", xtask(&root, &token, &["up"], &[]), &[&raw]);
     let restarted = read_state(&state_path);
     assert_eq!(restarted, initial, "normal restart retains exact authority");
+    assert_eq!(
+        fs::read(&state_path).expect("restarted state"),
+        initial_state
+    );
     assert_eq!(fs::read(&raw_path).expect("restarted raw"), initial_raw);
     assert_eq!(
         fs::read(&pgpass_path).expect("restarted pgpass"),
@@ -236,6 +334,10 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
         fs::read(directory.join("tls/server.crt"))
             .expect("restarted development server certificate"),
         initial_server_certificate
+    );
+    assert_eq!(
+        fs::read(directory.join("tls/server.key")).expect("restarted development server key"),
+        initial_server_key
     );
 
     let secondary = development_pool(restarted.port, &raw).await;
@@ -297,6 +399,40 @@ fn assert_success(label: &str, output: Output, forbidden: &[&str]) -> String {
         stderr.trim()
     );
     stdout.into_owned()
+}
+
+fn assert_failure(label: &str, output: Output, forbidden: &[&str]) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for text in [&stdout, &stderr] {
+        for secret in forbidden {
+            assert!(!text.contains(secret), "{label} exposed a managed secret");
+        }
+        assert!(
+            !text.contains("postgres://obzenflow:") && !text.contains("postgresql://obzenflow:"),
+            "{label} exposed a password-bearing connection URL"
+        );
+    }
+    assert!(
+        !output.status.success(),
+        "{label} unexpectedly succeeded; stdout={}; stderr={}",
+        stdout.trim(),
+        stderr.trim()
+    );
+    format!("{stdout}\n{stderr}")
+}
+
+fn docker_stdout(args: &[&str]) -> String {
+    let output = Command::new("docker")
+        .args(args)
+        .output()
+        .expect("launch Docker evidence query");
+    assert!(
+        output.status.success(),
+        "Docker evidence query failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    String::from_utf8(output.stdout).expect("Docker evidence is UTF-8")
 }
 
 fn workspace_root() -> PathBuf {

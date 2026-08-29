@@ -16,7 +16,7 @@
 //! its own copy of this logic and only swaps the source and the flow wiring.
 
 use super::domain::{
-    OrderCancellationReason, OrderCancelled, PaymentAuthorizationUnavailable, PaymentAuthorized,
+    CancelledOrder, OrderCancellationReason, PaymentAuthorizationUnavailable, PaymentAuthorized,
     PaymentDeclineReason, PaymentDeclined, PaymentMethodState, TrafficPhase, ValidatedOrder,
 };
 use async_trait::async_trait;
@@ -155,7 +155,7 @@ impl Effect for AuthorizePayment {
 /// recorded effect outcome group (FLOWIP-120m): `fx.perform` records whichever
 /// fact happened and returns the transient carrier, so the handler never
 /// re-emits them. The handler emits only derived consequences
-/// (`OrderCancelled`) and the non-performance fact
+/// (`CancelledOrder`) and the non-performance fact
 /// (`PaymentAuthorizationUnavailable`).
 #[derive(Debug, Clone)]
 pub struct GatewayTransform {
@@ -166,7 +166,7 @@ pub struct GatewayTransform {
 type GatewayOutput = obzenflow_core::stage_fact_set![
     PaymentAuthorized,
     PaymentDeclined,
-    OrderCancelled,
+    CancelledOrder,
     PaymentAuthorizationUnavailable
 ];
 type GatewayAllowedEffects = obzenflow_runtime::effect_set![AuthorizePayment];
@@ -251,7 +251,7 @@ impl EffectfulTransformHandler for GatewayTransform {
                 // Fact first, consequence second: the recorded PaymentDeclined
                 // outcome fact is the gateway's decision, and the derived
                 // lifecycle consequence is that the order is cancelled.
-                fx.emit(OrderCancelled {
+                fx.emit(CancelledOrder {
                     order_id: declined.order_id,
                     customer_id: declined.customer_id,
                     amount_cents: declined.amount_cents,

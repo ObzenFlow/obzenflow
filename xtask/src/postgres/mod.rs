@@ -65,6 +65,7 @@ fn up(flags: &[String]) -> Result<()> {
     let (session, service) = if state_path.is_file() {
         restart_or_verify(&root, &compose, &identity)?
     } else {
+        require_fresh_development_volume(&compose, &identity)?;
         first_up(&root, &compose, &identity).map_err(|failure| {
             error(format!(
                 "{failure}; PostgreSQL development setup remains provisional; reset exactly this project with `cargo xtask postgres down --volumes` before retrying"
@@ -91,6 +92,33 @@ fn up(flags: &[String]) -> Result<()> {
     println!("run a command with: cargo xtask postgres run -- <command> [args...]");
     println!("show the password-free client profile with: cargo xtask postgres connection");
     Ok(())
+}
+
+fn require_fresh_development_volume(
+    compose: &Compose,
+    identity: &DevelopmentIdentity,
+) -> Result<()> {
+    let volume = state::expected_volume(&identity.project);
+    let exists = compose.volume_exists(&volume).map_err(|failure| {
+        error(format!(
+            "failed to establish whether Docker volume '{volume}' exists for PostgreSQL development project '{}'; expected state at '{}'; refusing first-up before mutation: {failure}",
+            identity.project,
+            identity.directory.join(STATE_FILE).display()
+        ))
+    })?;
+    if exists {
+        Err(error(retained_volume_diagnostic(identity, &volume)))
+    } else {
+        Ok(())
+    }
+}
+
+fn retained_volume_diagnostic(identity: &DevelopmentIdentity, volume: &str) -> String {
+    format!(
+        "PostgreSQL development state is missing while retained Docker volume '{volume}' exists for project '{}'; expected state at '{}'; refusing to generate a replacement credential that cannot authenticate to retained data; restore the matching state and credential directory or remove the exact Docker project and volume before retrying",
+        identity.project,
+        identity.directory.join(STATE_FILE).display()
+    )
 }
 
 fn first_up(
@@ -614,6 +642,22 @@ mod tests {
         };
         assert!(verify_running_port(&session, 32780).is_ok());
         assert!(verify_running_port(&session, 32781).is_err());
+    }
+
+    #[test]
+    fn retained_volume_diagnostic_requires_manual_state_less_recovery() {
+        let identity = DevelopmentIdentity {
+            directory: std::path::PathBuf::from("/checkout/.obzenflow/postgres/development"),
+            project: "obzenflow-postgres-v3-checkout".to_string(),
+        };
+        let volume = state::expected_volume(&identity.project);
+        let diagnostic = retained_volume_diagnostic(&identity, &volume);
+
+        assert!(diagnostic.contains(&identity.project));
+        assert!(diagnostic.contains(&volume));
+        assert!(diagnostic.contains("/checkout/.obzenflow/postgres/development/state.tsv"));
+        assert!(diagnostic.contains("refusing to generate a replacement credential"));
+        assert!(!diagnostic.contains("down --volumes"));
     }
 
     #[test]

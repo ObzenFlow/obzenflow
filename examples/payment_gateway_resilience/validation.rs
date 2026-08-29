@@ -8,7 +8,7 @@
 //! order by a single stage with a multi-type output contract:
 //!
 //! ```text
-//! CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder, OrderCancelled }
+//! CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder, CancelledOrder }
 //! ```
 //! `ValidationOutcome` is the handler-side carrier proven leaf-equal to that
 //! flat fact set; it is not a topology payload.
@@ -16,7 +16,7 @@
 //! A valid order becomes `ValidatedOrder` and proceeds to payment
 //! authorization. An invalid order records two facts: `InvalidOrder` (the
 //! validation outcome, the provenance for anyone asking "why") and the derived
-//! lifecycle consequence `OrderCancelled` (the order's fate, which the
+//! lifecycle consequence `CancelledOrder` (the order's fate, which the
 //! cancelled-orders subscriber consumes regardless of where cancellation
 //! originated).
 //!
@@ -24,7 +24,7 @@
 //! classifier outcome rather than using the effectful surface.
 
 use super::domain::{
-    CustomerOrderPlaced, InvalidOrder, InvalidOrderReason, OrderCancellationReason, OrderCancelled,
+    CancelledOrder, CustomerOrderPlaced, InvalidOrder, InvalidOrderReason, OrderCancellationReason,
     PaymentMethodState, ValidatedOrder,
 };
 use obzenflow_core::StageOutputFacts;
@@ -34,13 +34,13 @@ use obzenflow_runtime::stages::common::handlers::TypedTransformHandler;
 /// In-memory carrier for the flat facts authored by local validation.
 ///
 /// The carrier itself is never journalled. Its selected variant is lowered to
-/// one `ValidatedOrder`, or to `InvalidOrder` followed by `OrderCancelled`.
+/// one `ValidatedOrder`, or to `InvalidOrder` followed by `CancelledOrder`.
 #[derive(Debug, Clone, StageOutputFacts)]
 pub enum ValidationOutcome {
     Validated(ValidatedOrder),
     Invalid {
         invalid: InvalidOrder,
-        cancelled: OrderCancelled,
+        cancelled: CancelledOrder,
     },
 }
 
@@ -59,7 +59,7 @@ impl TypedTransformHandler for ValidateOrder {
                 // Fact first, consequence second: the validation outcome is the
                 // provenance, the cancellation is the derived lifecycle fact.
                 let invalid = invalid_order(&order, reason.clone());
-                let cancelled = cancellation_for_invalid(&order, reason);
+                let cancelled = cancelled_order(&order, reason);
                 Ok(ValidationOutcome::Invalid { invalid, cancelled })
             }
         }
@@ -87,11 +87,8 @@ fn invalid_order(order: &CustomerOrderPlaced, reason: InvalidOrderReason) -> Inv
     }
 }
 
-fn cancellation_for_invalid(
-    order: &CustomerOrderPlaced,
-    reason: InvalidOrderReason,
-) -> OrderCancelled {
-    OrderCancelled {
+fn cancelled_order(order: &CustomerOrderPlaced, reason: InvalidOrderReason) -> CancelledOrder {
+    CancelledOrder {
         order_id: order.order_id.clone(),
         customer_id: order.customer_id.clone(),
         amount_cents: order.amount_cents,
@@ -162,7 +159,7 @@ mod tests {
     fn invalid_order_derives_cancellation_with_local_validation_reason() {
         let placed = order(PaymentMethodState::InvalidNumber, 1000);
         let reason = invalid_reason_for(&placed).expect("order is invalid");
-        let cancelled = cancellation_for_invalid(&placed, reason.clone());
+        let cancelled = cancelled_order(&placed, reason.clone());
 
         assert_eq!(cancelled.order_id, placed.order_id);
         assert_eq!(

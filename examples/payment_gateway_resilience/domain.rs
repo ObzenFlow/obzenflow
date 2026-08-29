@@ -169,7 +169,7 @@ impl OrderCancellationReason {
 /// A gateway that was merely unavailable does not cancel: no decision was
 /// reached, so those orders go to manual review instead.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct OrderCancelled {
+pub struct CancelledOrder {
     pub order_id: String,
     pub customer_id: String,
     pub amount_cents: u64,
@@ -177,7 +177,7 @@ pub struct OrderCancelled {
     pub reason: OrderCancellationReason,
 }
 
-impl TypedPayload for OrderCancelled {
+impl TypedPayload for CancelledOrder {
     const EVENT_TYPE: &'static str = "order.cancelled";
     const SCHEMA_VERSION: u32 = 1;
 }

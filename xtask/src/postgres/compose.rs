@@ -337,12 +337,12 @@ impl Compose {
     }
 
     pub(super) fn volume_exists(&self, volume: &str) -> Result<bool> {
-        let status = Command::new("docker")
-            .args(["volume", "inspect", volume])
-            .stdout(Stdio::null())
+        let output = Command::new("docker")
+            .args(["volume", "ls", "--quiet"])
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .status()?;
-        Ok(status.success())
+            .output()?;
+        volume_exists_in_inventory(volume, output.status.success(), &output.stdout)
     }
 
     pub(super) fn logs(
@@ -481,6 +481,17 @@ fn parse_volume_name(output: &str) -> Result<String> {
             "Docker returned an invalid PostgreSQL data volume name",
         ))
     }
+}
+
+fn volume_exists_in_inventory(volume: &str, succeeded: bool, stdout: &[u8]) -> Result<bool> {
+    if !succeeded {
+        return Err(error(
+            "failed to inspect Docker volume inventory; refusing to infer volume absence",
+        ));
+    }
+    let inventory = std::str::from_utf8(stdout)
+        .map_err(|_| error("Docker returned an invalid volume inventory"))?;
+    Ok(inventory.lines().any(|candidate| candidate == volume))
 }
 
 fn parse_published_port(output: &str) -> Result<u16> {
@@ -729,6 +740,26 @@ mod tests {
             "obzenflow-postgres-a_postgres-data"
         );
         assert!(parse_volume_name("volume with spaces\n").is_err());
+
+        assert!(volume_exists_in_inventory(
+            "obzenflow-postgres-a_postgres-data",
+            true,
+            b"another-volume\nobzenflow-postgres-a_postgres-data\n"
+        )
+        .expect("exact volume is present"));
+        assert!(!volume_exists_in_inventory(
+            "obzenflow-postgres-a_postgres-data",
+            true,
+            b"obzenflow-postgres-a_postgres-data-copy\n"
+        )
+        .expect("partial name is absent"));
+        assert!(
+            volume_exists_in_inventory("obzenflow-postgres-a_postgres-data", false, b"").is_err()
+        );
+        assert!(
+            volume_exists_in_inventory("obzenflow-postgres-a_postgres-data", true, &[0xff])
+                .is_err()
+        );
     }
 
     #[test]
