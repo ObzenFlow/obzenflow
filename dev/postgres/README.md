@@ -40,6 +40,42 @@ The disposable `cargo xtask postgres test` service is different: it retains an
 independent generated credential and real verified TLS because it is the
 acceptance proof for authenticated connector behaviour.
 
+## Directory contents and execution model
+
+For quick reference, here is what this directory contains and its execution
+model.
+
+| File | Purpose | Execution model |
+| --- | --- | --- |
+| `README.md` | Documents the local service, lifecycle, and security boundary. | Documentation only; it is not executed. |
+| `compose.yml` | Declares the persistent development PostgreSQL container, loopback port publication, health check, volume, and authentication-policy mount. | Docker Compose interprets it and runs the upstream `postgres:17` image. It contains no shell command or repository-provided entrypoint. The image supplies its own upstream entrypoint. |
+| `pg_hba.conf` | Declares the development-only passwordless PostgreSQL `trust` policy. | PostgreSQL reads it as configuration from a read-only container mount. It is not a certificate, credential, or executable script. |
+| `fixtures/payments.sql` | Declares the payments example schema. | Rust xtask reads it and streams it directly to `psql`; no shell interprets it. |
+| `fixtures/hn_digest_summaries.sql` | Declares the Hacker News digest publication table. | Rust xtask reads it and streams it directly to `psql`; no shell interprets it. |
+| `fixtures/inventory.sql` | Declares the independent inventory-test schema. | Rust xtask reads it and streams it directly to `psql`; no shell interprets it. |
+
+All six files are regular, non-executable files. There are no shell scripts,
+binaries, symlinks, certificates, keys, or credentials in this directory. No
+file in this directory is invoked by a shell. The SQL fixtures are applied by
+[`xtask/src/postgres/fixtures.rs`](../../xtask/src/postgres/fixtures.rs) using
+`psql -f -` with their contents supplied through standard input.
+
+The meaningful supply-chain and interpretation surfaces are explicit:
+
+1. Docker resolves and runs the upstream `postgres:17` image. This is a
+   major-version tag rather than a digest-pinned image.
+2. The image provides the PostgreSQL programs and its own upstream entrypoint;
+   this repository neither supplies nor mounts an entrypoint script.
+3. PostgreSQL interprets the checked-in `pg_hba.conf` authentication policy.
+4. `psql` executes the three checked-in SQL fixtures when xtask provisions the
+   development or acceptance schemas.
+5. The Rust xtask implementation outside this directory controls Compose and
+   fixture invocation.
+
+This directory is repository development tooling. The root
+[`Cargo.toml`](../../Cargo.toml) explicitly excludes `dev/postgres/**` from the
+published `obzenflow` crate.
+
 ## Persistent development session
 
 Docker Compose is required. Start or inspect the service with:
