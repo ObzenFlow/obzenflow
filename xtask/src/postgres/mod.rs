@@ -5,18 +5,33 @@
 mod acceptance;
 mod compose;
 mod config;
+mod credentials;
 mod environment;
 mod fixtures;
+mod managed_fs;
 mod state;
 mod tls;
 
 use self::{
-    compose::Compose,
-    config::{DEVELOPMENT_PAYMENT_SCHEMA, IMAGE, STATE_FILE},
-    state::{DevelopmentIdentity, SessionMode, SessionState},
+    compose::{Compose, ServiceEvidence},
+    config::{
+        plaintext_url, DEVELOPMENT_PAYMENT_SCHEMA, IMAGE, POSTGRES_BIND_ADDRESS,
+        POSTGRES_CLIENT_HOST, POSTGRES_DATABASE, POSTGRES_USER, STATE_FILE,
+    },
+    state::{DevelopmentIdentity, SessionState},
 };
 use super::{error, Result};
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    io::ErrorKind,
+    net::{Ipv4Addr, SocketAddrV4, TcpListener},
+    path::Path,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
+
+const RETAINED_PORT_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) fn run(args: &[String]) -> Result<()> {
     let Some((command, flags)) = args.split_first() else {
@@ -26,6 +41,7 @@ pub(super) fn run(args: &[String]) -> Result<()> {
     match command.as_str() {
         "up" => up(flags),
         "status" => status(flags),
+        "connection" => connection(flags),
         "run" => run_child(flags),
         "test" => test(flags),
         "logs" => logs(flags),
@@ -44,33 +60,21 @@ fn up(flags: &[String]) -> Result<()> {
         return Ok(());
     }
     let root = super::workspace_root()?;
-    let compose = Compose::preflight()?;
     let identity = state::development_identity(&root)?;
+    let compose = Compose::preflight()?;
     let state_path = identity.directory.join(STATE_FILE);
 
-    let mut session = if state_path.is_file() {
-        let session = state::read(&state_path)?;
-        state::require_development_authority(&session, &identity)?;
-        session
+    let (session, service) = if state_path.is_file() {
+        restart_or_verify(&root, &compose, &identity)?
     } else {
-        fs::create_dir_all(&identity.directory)?;
-        let session = SessionState {
-            project: identity.project.clone(),
-            run_id: state::unique_run_id(),
-            port: 0,
-            mode: SessionMode::Development,
-        };
-        state::write(&state_path, &session)?;
-        session
+        require_fresh_development_volume(&compose, &identity)?;
+        first_up(&root, &compose, &identity).map_err(|failure| {
+            error(format!(
+                "{failure}; PostgreSQL development setup remains provisional; reset exactly this project with `cargo xtask postgres down --volumes` before retrying"
+            ))
+        })?
     };
 
-    tls::ensure(&identity.directory)?;
-    if compose.health(&root, &identity.directory, &session)? == "healthy" {
-        session.port = compose.published_port(&root, &identity.directory, &session)?;
-    } else {
-        compose.start(&root, &identity.directory, &mut session)?;
-    }
-    state::write(&state_path, &session)?;
     fixtures::provision_development(
         &root,
         &compose,
@@ -78,9 +82,93 @@ fn up(flags: &[String]) -> Result<()> {
         &session,
         DEVELOPMENT_PAYMENT_SCHEMA,
     )?;
-    print_status(&session, "healthy");
+    print_status(&compose, &identity, &session, "healthy", Some(&service));
     println!("run a command with: cargo xtask postgres run -- <command> [args...]");
+    println!("show the local client profile with: cargo xtask postgres connection");
     Ok(())
+}
+
+fn require_fresh_development_volume(
+    compose: &Compose,
+    identity: &DevelopmentIdentity,
+) -> Result<()> {
+    let volume = state::expected_volume(&identity.project);
+    let exists = compose.volume_exists(&volume).map_err(|failure| {
+        error(format!(
+            "failed to establish whether Docker volume '{volume}' exists for PostgreSQL development project '{}'; expected state at '{}'; refusing first-up before mutation: {failure}",
+            identity.project,
+            identity.directory.join(STATE_FILE).display()
+        ))
+    })?;
+    if exists {
+        Err(error(retained_volume_diagnostic(identity, &volume)))
+    } else {
+        Ok(())
+    }
+}
+
+fn retained_volume_diagnostic(identity: &DevelopmentIdentity, volume: &str) -> String {
+    format!(
+        "PostgreSQL development state is missing while retained Docker volume '{volume}' exists for project '{}'; expected state at '{}'; refusing to adopt retained data without its matching checkout-owned lifecycle state; restore that state directory or remove the exact Docker project and volume before retrying",
+        identity.project,
+        identity.directory.join(STATE_FILE).display()
+    )
+}
+
+fn first_up(
+    root: &Path,
+    compose: &Compose,
+    identity: &DevelopmentIdentity,
+) -> Result<(SessionState, ServiceEvidence)> {
+    state::create_session_directory(&identity.directory)?;
+    let mut session = state::new_development(identity);
+    let state_path = identity.directory.join(STATE_FILE);
+    state::write(&state_path, &session)?;
+    compose.start(root, &identity.directory, &mut session)?;
+    let service = compose.service_evidence(root, &identity.directory, &session)?;
+    state::record_or_verify_volume(&mut session, &service.volume)?;
+    state::write(&state_path, &session)?;
+    Ok((session, service))
+}
+
+fn restart_or_verify(
+    root: &Path,
+    compose: &Compose,
+    identity: &DevelopmentIdentity,
+) -> Result<(SessionState, ServiceEvidence)> {
+    let state_path = identity.directory.join(STATE_FILE);
+    let mut session = state::read(&state_path)?;
+    state::require_development_authority(&session, identity)?;
+    state::require_ready(&session)?;
+
+    let health = compose.health(root, &identity.directory, &session)?;
+    let retained_port = session.port;
+    match health.as_str() {
+        "healthy" => {}
+        "stopped" => {
+            ensure_retained_port_available(session.port)?;
+        }
+        other => {
+            return Err(error(format!(
+                "PostgreSQL project '{}' is {other}; inspect with `cargo xtask postgres logs`",
+                session.project
+            )))
+        }
+    }
+    // Reconcile even a healthy container so a checked-in development policy
+    // change, including the passwordless trust boundary, cannot be skipped.
+    compose.start(root, &identity.directory, &mut session)?;
+    if session.port != retained_port {
+        return Err(error(format!(
+            "PostgreSQL published endpoint changed unexpectedly: expected port {retained_port}, found {}; no replacement endpoint was adopted",
+            session.port
+        )));
+    }
+    let service = compose.service_evidence(root, &identity.directory, &session)?;
+    state::record_or_verify_volume(&mut session, &service.volume)?;
+    state::write(&state_path, &session)?;
+    remove_legacy_development_credentials(root, identity)?;
+    Ok((session, service))
 }
 
 fn status(flags: &[String]) -> Result<()> {
@@ -88,22 +176,53 @@ fn status(flags: &[String]) -> Result<()> {
         return Ok(());
     }
     let root = super::workspace_root()?;
-    let compose = Compose::preflight()?;
     let identity = state::development_identity(&root)?;
     let state_path = identity.directory.join(STATE_FILE);
+    let compose = Compose::preflight()?;
     if !state_path.is_file() {
         println!("no PostgreSQL development session state found");
         return report_existing_test_sessions(&root, &compose);
     }
     let mut session = state::read(&state_path)?;
     state::require_development_authority(&session, &identity)?;
+    let ready = state::require_ready(&session).is_ok();
     let health = compose.health(&root, &identity.directory, &session)?;
-    if health == "healthy" {
-        session.port = compose.published_port(&root, &identity.directory, &session)?;
-        state::write(&state_path, &session)?;
+    let service = if health == "healthy" {
+        let actual_port = compose.published_port(&root, &identity.directory, &session)?;
+        if ready {
+            verify_running_port(&session, actual_port)?;
+        }
+        let service = compose.service_evidence(&root, &identity.directory, &session)?;
+        if ready {
+            state::record_or_verify_volume(&mut session, &service.volume)?;
+            state::write(&state_path, &session)?;
+        }
+        Some(service)
+    } else {
+        None
+    };
+    print_status(&compose, &identity, &session, &health, service.as_ref());
+    if !ready {
+        println!(
+            "  recovery:        setup is provisional; run `cargo xtask postgres down --volumes`"
+        );
     }
-    print_status(&session, &health);
     report_existing_test_sessions(&root, &compose)
+}
+
+fn connection(flags: &[String]) -> Result<()> {
+    if !accept_no_flags("postgres connection", flags)? {
+        return Ok(());
+    }
+    let root = super::workspace_root()?;
+    let compose = Compose::preflight()?;
+    let (identity, mut session) = development_session(&root, true)?;
+    let service = verify_running_session(&root, &compose, &identity, &mut session)?;
+    print_status(&compose, &identity, &session, "healthy", Some(&service));
+    let url = plaintext_url(session.port);
+    println!("copyable password-free psql command:");
+    println!("psql {}", shell_quote(&url));
+    Ok(())
 }
 
 fn run_child(flags: &[String]) -> Result<()> {
@@ -116,26 +235,20 @@ fn run_child(flags: &[String]) -> Result<()> {
 
     let root = super::workspace_root()?;
     let compose = Compose::preflight()?;
-    let identity = state::development_identity(&root)?;
-    let state_path = identity.directory.join(STATE_FILE);
-    let mut session = state::read(&state_path).map_err(|_| {
-        error("PostgreSQL development session is unavailable; run `cargo xtask postgres up`")
-    })?;
-    state::require_development_authority(&session, &identity)?;
-    let health = compose.health(&root, &identity.directory, &session)?;
-    if health != "healthy" {
-        return Err(error(format!(
-            "PostgreSQL project '{}' is not healthy; inspect with `cargo xtask postgres logs`",
-            session.project
-        )));
-    }
-    session.port = compose.published_port(&root, &identity.directory, &session)?;
-    state::write(&state_path, &session)?;
-    let service = compose.service_evidence(&root, &identity.directory, &session)?;
+    let (identity, mut session) = development_session(&root, true)?;
+    let service = verify_running_session(&root, &compose, &identity, &mut session)?;
 
     let mut child = Command::new(&command[0]);
     child.current_dir(&root).args(&command[1..]);
-    environment::configure(&mut child, &identity.directory, &session, &service)?;
+    let schema = environment::configure_development(&mut child, &session)?;
+    println!(
+        "using PostgreSQL development database: project={} volume={} endpoint={}:{} database={} schema={schema:?}",
+        session.project,
+        service.volume,
+        POSTGRES_CLIENT_HOST,
+        session.port,
+        POSTGRES_DATABASE,
+    );
     let child_status = child.status()?;
     if child_status.success() {
         Ok(())
@@ -162,7 +275,7 @@ fn logs(flags: &[String]) -> Result<()> {
     }
     let root = super::workspace_root()?;
     let compose = Compose::preflight()?;
-    let (identity, session) = development_session(&root)?;
+    let (identity, session) = development_session(&root, false)?;
     let output = compose.logs(&root, &identity.directory, &session)?;
     print!("{}", String::from_utf8_lossy(&output.stdout));
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
@@ -193,21 +306,37 @@ fn down(flags: &[String]) -> Result<()> {
     let compose = Compose::preflight()?;
     let session = state::read(&state_path)?;
     state::require_development_authority(&session, &identity)?;
+    let expected_volume = state::expected_volume(&session.project);
     if let Some(container_id) = compose.container_id(&root, &identity.directory, &session)? {
-        compose.verify_container_authority(&container_id, &identity.project)?;
+        compose.verify_container_authority(&container_id, &session.project)?;
+        let actual_volume = compose.container_volume(&container_id)?;
+        if actual_volume != expected_volume {
+            return Err(error(
+                "refusing cleanup because the PostgreSQL volume changed",
+            ));
+        }
+        compose.verify_volume_authority(&actual_volume, &session.project)?;
     }
     if volumes {
         state::require_owned_directory(&root, &identity.directory)?;
+        compose.verify_volume_authority_if_present(&expected_volume, &session.project)?;
         println!(
-            "removing project '{}' and its PostgreSQL data volume; development data will not be recoverable",
-            session.project
+            "removing project '{}' and named volume '{}'; development data and lifecycle state will not be recoverable",
+            session.project, expected_volume
         );
     }
     compose.stop(&root, &identity.directory, &session, volumes)?;
     if volumes {
+        if compose.volume_exists(&expected_volume)? {
+            return Err(error(format!(
+                "Docker retained PostgreSQL volume {expected_volume}; development state was not removed"
+            )));
+        }
         state::remove_owned_directory(&root, &identity.directory)?;
     } else {
-        println!("PostgreSQL project stopped; its named development volume is retained");
+        println!(
+            "PostgreSQL project stopped; its retained port, named volume, lifecycle state, and rows are preserved"
+        );
     }
     Ok(())
 }
@@ -222,9 +351,18 @@ fn cleanup(flags: &[String]) -> Result<()> {
     let session = state::read(&identity.directory.join(STATE_FILE))?;
     state::require_test_authority(&session, &identity)?;
     let compose = Compose::preflight()?;
+    let expected_volume = state::expected_volume(&session.project);
     if let Some(container_id) = compose.container_id(&root, &identity.directory, &session)? {
         compose.verify_container_authority(&container_id, &identity.project)?;
+        let actual_volume = compose.container_volume(&container_id)?;
+        if actual_volume != expected_volume {
+            return Err(error(
+                "refusing cleanup because the disposable PostgreSQL volume changed",
+            ));
+        }
+        compose.verify_volume_authority(&actual_volume, &session.project)?;
     }
+    compose.verify_volume_authority_if_present(&expected_volume, &session.project)?;
     println!(
         "removing disposable PostgreSQL test project '{}' and its data volume",
         identity.project
@@ -236,18 +374,55 @@ fn cleanup(flags: &[String]) -> Result<()> {
         &identity.directory.join(config::LOG_FILE),
     );
     compose.stop(&root, &identity.directory, &session, true)?;
+    if compose.volume_exists(&expected_volume)? {
+        return Err(error(format!(
+            "Docker retained disposable PostgreSQL volume {expected_volume}"
+        )));
+    }
     state::remove_owned_directory(&root, &identity.directory)?;
     println!("PostgreSQL test project '{}' cleaned", identity.project);
     Ok(())
 }
 
-fn development_session(root: &Path) -> Result<(DevelopmentIdentity, SessionState)> {
+fn development_session(
+    root: &Path,
+    require_ready: bool,
+) -> Result<(DevelopmentIdentity, SessionState)> {
     let identity = state::development_identity(root)?;
-    let session = state::read(&identity.directory.join(STATE_FILE)).map_err(|_| {
-        error("PostgreSQL development session is unavailable; run `cargo xtask postgres up`")
-    })?;
+    let state_path = identity.directory.join(STATE_FILE);
+    if !state_path.is_file() {
+        return Err(error(
+            "PostgreSQL development session is unavailable; run `cargo xtask postgres up`",
+        ));
+    }
+    let session = state::read(&state_path)?;
     state::require_development_authority(&session, &identity)?;
+    if require_ready {
+        state::require_ready(&session)?;
+    }
     Ok((identity, session))
+}
+
+fn verify_running_session(
+    root: &Path,
+    compose: &Compose,
+    identity: &DevelopmentIdentity,
+    session: &mut SessionState,
+) -> Result<ServiceEvidence> {
+    state::require_ready(session)?;
+    let health = compose.health(root, &identity.directory, session)?;
+    if health != "healthy" {
+        return Err(error(format!(
+            "PostgreSQL project '{}' is not healthy; start it with `cargo xtask postgres up` or inspect `cargo xtask postgres logs`",
+            session.project
+        )));
+    }
+    let actual_port = compose.published_port(root, &identity.directory, session)?;
+    verify_running_port(session, actual_port)?;
+    let service = compose.service_evidence(root, &identity.directory, session)?;
+    state::record_or_verify_volume(session, &service.volume)?;
+    state::write(&identity.directory.join(STATE_FILE), session)?;
+    Ok(service)
 }
 
 fn report_existing_test_sessions(root: &Path, compose: &Compose) -> Result<()> {
@@ -271,11 +446,104 @@ fn report_existing_test_sessions(root: &Path, compose: &Compose) -> Result<()> {
     Ok(())
 }
 
-fn print_status(session: &SessionState, health: &str) {
+fn print_status(
+    compose: &Compose,
+    identity: &DevelopmentIdentity,
+    session: &SessionState,
+    health: &str,
+    service: Option<&ServiceEvidence>,
+) {
+    let container = service
+        .map(|evidence| evidence.container_id.as_str())
+        .unwrap_or("none");
+    let volume = service
+        .map(|evidence| evidence.volume.as_str())
+        .or(session.volume.as_deref())
+        .unwrap_or("unrecorded");
+    let port = if session.port == 0 {
+        "unassigned (provisional first start)".to_string()
+    } else {
+        format!("{} (retained across normal restarts)", session.port)
+    };
+    println!("PostgreSQL development service");
+    println!("  health:          {health}");
+    println!("  docker context:  {}", compose.context());
+    println!("  image:           {IMAGE}");
+    println!("  project:         {}", session.project);
+    println!("  container:       {container}");
+    println!("  volume:          {volume}");
+    println!("  client host:     {POSTGRES_CLIENT_HOST}");
+    println!("  bind address:    {POSTGRES_BIND_ADDRESS}");
+    println!("  port:            {port}");
+    println!("  database:        {POSTGRES_DATABASE}");
+    println!("  user:            {POSTGRES_USER}");
+    println!("  schema:          {DEVELOPMENT_PAYMENT_SCHEMA}");
+    println!("  transport:       externally protected plaintext (loopback)");
+    println!("  authentication:  trust (no password; trusted development machine only)");
     println!(
-        "project={} image={} health={} host=127.0.0.1 port={}",
-        session.project, IMAGE, health, session.port
+        "  state:           {}",
+        identity.directory.join(STATE_FILE).display()
     );
+}
+
+fn verify_running_port(session: &SessionState, actual_port: u16) -> Result<()> {
+    if session.port == actual_port {
+        Ok(())
+    } else {
+        Err(error(format!(
+            "PostgreSQL published endpoint changed unexpectedly: expected port {}, found {actual_port}; no replacement endpoint was adopted",
+            session.port
+        )))
+    }
+}
+
+fn remove_legacy_development_credentials(
+    root: &Path,
+    identity: &DevelopmentIdentity,
+) -> Result<()> {
+    state::require_owned_directory(root, &identity.directory)?;
+    for name in ["password", "pgpass"] {
+        let path = identity.directory.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => {
+                fs::remove_file(&path)?;
+            }
+            Ok(_) => {
+                return Err(error(format!(
+                    "refusing to remove obsolete PostgreSQL development credential path because it is not a file: {}",
+                    path.display()
+                )))
+            }
+            Err(failure) if failure.kind() == ErrorKind::NotFound => {}
+            Err(failure) => return Err(failure.into()),
+        }
+    }
+    Ok(())
+}
+
+fn ensure_retained_port_available(port: u16) -> Result<()> {
+    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let deadline = Instant::now() + RETAINED_PORT_RELEASE_TIMEOUT;
+    loop {
+        match TcpListener::bind(address) {
+            Ok(listener) => {
+                drop(listener);
+                return Ok(());
+            }
+            Err(_) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => {
+                return Err(error(format!(
+                    "retained PostgreSQL development port {port} is occupied; stop the conflicting service or reset this development session with `cargo xtask postgres down --volumes`"
+                )))
+            }
+        }
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn accept_no_flags(command: &str, flags: &[String]) -> Result<bool> {
@@ -301,6 +569,7 @@ fn print_help() {
     println!("development session:");
     println!("  cargo xtask postgres up");
     println!("  cargo xtask postgres status");
+    println!("  cargo xtask postgres connection");
     println!("  cargo xtask postgres run -- <command> [args...]");
     println!("  cargo xtask postgres logs");
     println!("  cargo xtask postgres down [--volumes]");
@@ -311,6 +580,7 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
+    use super::state::SessionMode;
     use super::*;
 
     #[test]
@@ -321,5 +591,48 @@ mod tests {
             failure.to_string(),
             "unknown postgres command: prove-persistent"
         );
+    }
+
+    #[test]
+    fn up_and_connection_have_no_credential_or_port_options() {
+        assert!(accept_no_flags("postgres up", &[]).unwrap());
+        assert!(accept_no_flags("postgres up", &["--port".to_string()]).is_err());
+        assert!(accept_no_flags("postgres connection", &["--show-password".to_string()]).is_err());
+    }
+
+    #[test]
+    fn a_running_endpoint_cannot_drift_silently() {
+        let project = "obzenflow-test-endpoint".to_string();
+        let session = SessionState {
+            volume: Some(state::expected_volume(&project)),
+            project,
+            run_id: state::unique_run_id(),
+            port: 32780,
+            mode: SessionMode::Test,
+        };
+        assert!(verify_running_port(&session, 32780).is_ok());
+        assert!(verify_running_port(&session, 32781).is_err());
+    }
+
+    #[test]
+    fn retained_volume_diagnostic_requires_manual_state_less_recovery() {
+        let identity = DevelopmentIdentity {
+            directory: std::path::PathBuf::from("/checkout/.obzenflow/postgres/development"),
+            project: "obzenflow-postgres-v3-checkout".to_string(),
+        };
+        let volume = state::expected_volume(&identity.project);
+        let diagnostic = retained_volume_diagnostic(&identity, &volume);
+
+        assert!(diagnostic.contains(&identity.project));
+        assert!(diagnostic.contains(&volume));
+        assert!(diagnostic.contains("/checkout/.obzenflow/postgres/development/state.tsv"));
+        assert!(diagnostic.contains("refusing to adopt retained data"));
+        assert!(!diagnostic.contains("down --volumes"));
+    }
+
+    #[test]
+    fn client_values_are_shell_quoted() {
+        assert_eq!(shell_quote("simple"), "'simple'");
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
     }
 }

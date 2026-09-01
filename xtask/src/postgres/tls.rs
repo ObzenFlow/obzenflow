@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::managed_fs;
 use crate::{error, Result};
 use std::{
     fs,
@@ -9,29 +10,21 @@ use std::{
     process::{Command, Stdio},
 };
 
-pub(super) fn ensure(directory: &Path) -> Result<()> {
+const TEST_DAYS: &str = "7";
+
+pub(super) fn create_test(directory: &Path) -> Result<()> {
     let tls = directory.join("tls");
-    fs::create_dir_all(&tls)?;
-    let expected = [
-        "ca.crt",
-        "ca.key",
-        "server.crt",
-        "server.key",
-        "untrusted-ca.crt",
-        "untrusted-ca.key",
-    ];
-    if expected.iter().all(|name| tls.join(name).is_file()) {
-        return Ok(());
-    }
-    if tls.is_dir() {
-        fs::remove_dir_all(&tls)?;
-        fs::create_dir_all(&tls)?;
+    if tls.exists() {
+        return Err(error(
+            "PostgreSQL acceptance TLS state already exists before disposable generation",
+        ));
     }
     if !command_succeeds("openssl", &["version"]) {
         return Err(error(
-            "OpenSSL is required to generate the PostgreSQL test certificate",
+            "OpenSSL is required to generate the PostgreSQL acceptance certificate",
         ));
     }
+    managed_fs::create_directory(&tls)?;
 
     let ca_key = tls.join("ca.key");
     let ca_cert = tls.join("ca.crt");
@@ -39,8 +32,8 @@ pub(super) fn ensure(directory: &Path) -> Result<()> {
     let server_csr = tls.join("server.csr");
     let server_cert = tls.join("server.crt");
     let extensions = tls.join("server.ext");
-    let untrusted_ca_key = tls.join("untrusted-ca.key");
-    let untrusted_ca_cert = tls.join("untrusted-ca.crt");
+    let untrusted_key = tls.join("untrusted-ca.key");
+    let untrusted_cert = tls.join("untrusted-ca.crt");
     fs::write(
         &extensions,
         "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n",
@@ -55,7 +48,7 @@ pub(super) fn ensure(directory: &Path) -> Result<()> {
             "rsa:2048",
             "-sha256",
             "-days",
-            "7",
+            TEST_DAYS,
             "-nodes",
             "-subj",
             "/CN=ObzenFlow PostgreSQL Test CA",
@@ -94,7 +87,7 @@ pub(super) fn ensure(directory: &Path) -> Result<()> {
             path_arg(&ca_key)?,
             "-CAcreateserial",
             "-days",
-            "7",
+            TEST_DAYS,
             "-sha256",
             "-extfile",
             path_arg(&extensions)?,
@@ -111,19 +104,34 @@ pub(super) fn ensure(directory: &Path) -> Result<()> {
             "rsa:2048",
             "-sha256",
             "-days",
-            "7",
+            TEST_DAYS,
             "-nodes",
             "-subj",
             "/CN=ObzenFlow Untrusted PostgreSQL Test CA",
             "-keyout",
-            path_arg(&untrusted_ca_key)?,
+            path_arg(&untrusted_key)?,
             "-out",
-            path_arg(&untrusted_ca_cert)?,
+            path_arg(&untrusted_cert)?,
         ],
     )?;
-    set_private_permissions(&ca_key)?;
-    set_private_permissions(&server_key)?;
-    set_private_permissions(&untrusted_ca_key)?;
+
+    for private_key in [&ca_key, &server_key, &untrusted_key] {
+        managed_fs::set_secret_file_permissions(
+            private_key,
+            "generated PostgreSQL acceptance TLS private key",
+        )?;
+    }
+    for temporary in [
+        ca_key,
+        untrusted_key,
+        server_csr,
+        extensions,
+        tls.join("ca.srl"),
+    ] {
+        if temporary.exists() {
+            fs::remove_file(temporary)?;
+        }
+    }
     Ok(())
 }
 
@@ -153,16 +161,4 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
 fn path_arg(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| error("PostgreSQL session path is not valid Unicode"))
-}
-
-#[cfg(unix)]
-fn set_private_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_permissions(_path: &Path) -> Result<()> {
-    Ok(())
 }

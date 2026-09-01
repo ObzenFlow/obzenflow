@@ -1,6 +1,7 @@
 .DS_Store
 *.log
 **/target/
+.obzenflow/
 .claude
 .idea
 .obsidian/

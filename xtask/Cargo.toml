@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 libc = { workspace = true }
+ring = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 

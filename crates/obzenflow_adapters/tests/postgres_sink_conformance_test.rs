@@ -19,6 +19,7 @@ use obzenflow_runtime::testing::sink::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
+use std::{fs, path::PathBuf};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Payment {
@@ -109,7 +110,7 @@ impl SinkWriterConformanceFixture for PostgresFixture {
             SINK_CONFORMANCE_PROTOCOL_VERSION,
             SinkSettlementMode::Buffered { batch_size: 2 },
         )
-        .with_credential_sentinel("obzenflow-secret-083c")
+        .with_credential_sentinel(managed_postgres_secret())
         .with_fault(SinkFaultCase::operation(SinkFault::Open))
         .with_fault(SinkFaultCase::write(SinkFault::Encode, CurrentOnly))
         .with_fault(SinkFaultCase::write(SinkFault::Acquire, CurrentOnly))
@@ -217,6 +218,26 @@ impl SinkWriterConformanceFixture for PostgresFixture {
             ),
         ])
     }
+}
+
+fn managed_postgres_secret() -> String {
+    let path = std::env::var_os("PGPASSFILE")
+        .map(PathBuf::from)
+        .expect("PGPASSFILE is required from `cargo xtask postgres test`");
+    let contents = fs::read_to_string(path).expect("read managed PostgreSQL pgpass file");
+    let secret = contents
+        .lines()
+        .next()
+        .and_then(|line| line.rsplit_once(':').map(|(_, secret)| secret.to_string()))
+        .expect("managed pgpass has five fields");
+    assert!(
+        secret.len() == 64
+            && secret
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')),
+        "managed PostgreSQL secret has the expected generated shape"
+    );
+    secret
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -97,6 +97,27 @@ const POSTGRES_FORBIDDEN_EVIDENCE_KEYS: &[&str] = &[
     "trust_store",
 ];
 
+fn managed_postgres_secret() -> Result<String, SinkFixtureError> {
+    let path = std::env::var_os("PGPASSFILE")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            SinkFixtureError::new("PGPASSFILE is required from `cargo xtask postgres test`")
+        })?;
+    let contents =
+        std::fs::read_to_string(path).map_err(|error| SinkFixtureError::new(error.to_string()))?;
+    let secret = contents
+        .lines()
+        .next()
+        .and_then(|line| line.rsplit_once(':').map(|(_, secret)| secret.to_string()))
+        .ok_or_else(|| SinkFixtureError::new("managed pgpass has five fields"))?;
+    if secret.len() != 64 {
+        return Err(SinkFixtureError::new(
+            "managed PostgreSQL secret has an invalid generated shape",
+        ));
+    }
+    Ok(secret)
+}
+
 #[derive(Clone, Default)]
 struct TraceCapture {
     bytes: Arc<Mutex<Vec<u8>>>,
@@ -1340,7 +1361,7 @@ impl PostgresApplicationFixture {
             .map_err(|error| SinkFixtureError::new(error.to_string()))?;
         let evidence = PostgresEvidenceCanaries {
             forbidden_everywhere: vec![
-                "obzenflow-secret-083c".to_string(),
+                managed_postgres_secret()?,
                 url.to_string(),
                 tls_url,
                 ca_cert,
@@ -1747,6 +1768,7 @@ async fn postgres_open_failures_traverse_full_application_lifecycle() {
     let url = std::env::var("OBZENFLOW_POSTGRES_TEST_URL")
         .expect("OBZENFLOW_POSTGRES_TEST_URL comes from cargo xtask postgres test");
     let database = OrderingDatabase::connect(&url, "open_failure").await;
+    let managed_secret = managed_postgres_secret().expect("read managed PostgreSQL secret");
     sqlx::query(&format!(
         "CREATE TABLE {}.forms (id BIGINT PRIMARY KEY, value TEXT)",
         database.schema
@@ -1814,7 +1836,7 @@ async fn postgres_open_failures_traverse_full_application_lifecycle() {
         assert_eq!(operation.failed_delivery_event_id, None, "case={label}");
         assert!(!operation.detail.contains(&url), "case={label}");
         assert!(!operation.detail.contains(body), "case={label}");
-        assert!(!operation.detail.contains("obzenflow-secret-083c"));
+        assert!(!operation.detail.contains(&managed_secret));
 
         let sink_data = read_stage_journal(&run, "postgres", "data_journal_file").await;
         assert!(

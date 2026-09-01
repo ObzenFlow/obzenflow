@@ -4,22 +4,28 @@
 
 //! Deliver typed payment events to PostgreSQL.
 //!
-//! Start the repository PostgreSQL service with `cargo xtask postgres up`, then
-//! run this example through `cargo xtask postgres run -- cargo run -p obzenflow
-//! --features postgres --example postgres_sink_payments`.
+//! Supply any PostgreSQL 17 backing service through `OBZENFLOW_POSTGRES_URL` and
+//! optionally `OBZENFLOW_POSTGRES_SCHEMA`. For the repository-managed development
+//! service, run `cargo xtask postgres up`, inspect its connection with
+//! `cargo xtask postgres connection`, then launch this example through
+//! `cargo xtask postgres run -- cargo run -p obzenflow --features postgres
+//! --example postgres_sink_payments`.
 
 mod domain;
 mod flow;
+#[path = "../support/postgres_transport.rs"]
+mod postgres_transport;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use obzenflow::application::FlowApplication;
-use obzenflow::sinks::postgres::{PostgresConnection, PostgresTransport};
+use obzenflow::sinks::postgres::PostgresConnection;
 use std::path::PathBuf;
 
 fn main() -> Result<()> {
-    let connection =
-        PostgresConnection::from_env("OBZENFLOW_POSTGRES_URL", PostgresTransport::VerifiedTls)
-            .context("configure the PostgreSQL connection from OBZENFLOW_POSTGRES_URL")?;
+    let connection = PostgresConnection::deferred_from_env(
+        "OBZENFLOW_POSTGRES_URL",
+        postgres_transport::from_environment()?,
+    );
     let schema = std::env::var("OBZENFLOW_POSTGRES_SCHEMA")
         .unwrap_or_else(|_| "obzenflow_example".to_string());
     let journals = std::env::var_os("OBZENFLOW_JOURNAL_ROOT")

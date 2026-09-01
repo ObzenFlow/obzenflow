@@ -3,35 +3,25 @@ services:
     image: postgres:17
     environment:
       POSTGRES_USER: obzenflow
-      POSTGRES_PASSWORD: ${OBZENFLOW_POSTGRES_PASSWORD:?required}
       POSTGRES_DB: obzenflow
-    entrypoint:
-      - /bin/bash
-      - /usr/local/bin/obzenflow-postgres-entrypoint.sh
-    command:
-      - postgres
-      - -c
-      - ssl=on
-      - -c
-      - ssl_cert_file=/var/lib/postgresql/obzenflow-tls/server.crt
-      - -c
-      - ssl_key_file=/var/lib/postgresql/obzenflow-tls/server.key
+      POSTGRES_HOST_AUTH_METHOD: trust
+    command: ["postgres", "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
     ports:
       - target: 5432
+        published: "${OBZENFLOW_POSTGRES_HOST_PORT:-0}"
         host_ip: 127.0.0.1
         protocol: tcp
     healthcheck:
-      test: ["CMD-SHELL", "psql -U obzenflow -d obzenflow -Atqc 'SELECT 1'"]
+      test: ["CMD", "psql", "-U", "obzenflow", "-d", "obzenflow", "-Atqc", "SELECT 1"]
       interval: 1s
       timeout: 3s
       retries: 30
     labels:
       dev.obzenflow.service: postgres-proof
+      dev.obzenflow.authentication: trust-local-development
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ${OBZENFLOW_POSTGRES_TLS_DIR:?required}/server.crt:/run/obzenflow-postgres-tls/server.crt:ro
-      - ${OBZENFLOW_POSTGRES_TLS_DIR:?required}/server.key:/run/obzenflow-postgres-tls/server.key:ro
-      - ./postgres-entrypoint.sh:/usr/local/bin/obzenflow-postgres-entrypoint.sh:ro
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
 
 volumes:
   postgres-data:

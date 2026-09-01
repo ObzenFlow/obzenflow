@@ -5,8 +5,8 @@
 use super::{
     compose::{Compose, ServiceEvidence},
     config::{SESSION_ROOT, STATE_FILE},
-    environment, fixtures,
-    state::{self, SessionMode, SessionState, TestIdentity},
+    credentials, environment, fixtures,
+    state::{self, SessionState, TestIdentity},
     tls,
 };
 use crate::{error, Result};
@@ -218,15 +218,14 @@ impl TestSession {
                 "PostgreSQL test generated an already-owned session identity",
             ));
         }
-        fs::create_dir_all(&identity.directory)?;
-        let mut session_state = SessionState {
-            project: identity.project.clone(),
-            run_id,
-            port: 0,
-            mode: SessionMode::Test,
-        };
+        state::create_session_directory(&identity.directory)?;
+        let mut session_state = state::new_test(&identity);
         state::write(&identity.directory.join(STATE_FILE), &session_state)?;
-        if let Err(failure) = tls::ensure(&identity.directory) {
+        if let Err(failure) = credentials::create_acceptance_raw(&identity.directory) {
+            let _ = state::remove_owned_directory(&root, &identity.directory);
+            return Err(failure);
+        }
+        if let Err(failure) = tls::create_test(&identity.directory) {
             let _ = state::remove_owned_directory(&root, &identity.directory);
             return Err(failure);
         }
@@ -240,8 +239,11 @@ impl TestSession {
             ));
         }
         let setup = (|| {
-            state::write(&identity.directory.join(STATE_FILE), &session_state)?;
             let service = compose.service_evidence(&root, &identity.directory, &session_state)?;
+            state::record_or_verify_volume(&mut session_state, &service.volume)?;
+            credentials::create_acceptance_pgpass(&identity.directory, session_state.port)?;
+            credentials::validate_acceptance(&identity.directory, session_state.port)?;
+            state::write(&identity.directory.join(STATE_FILE), &session_state)?;
             fixtures::provision_tests(&root, &compose, &identity.directory, &session_state)?;
             Ok(service)
         })();
@@ -273,7 +275,7 @@ impl TestSession {
             println!("\n==> {}", command.label);
             let mut child = Command::new("cargo");
             child.current_dir(&self.root).args(command.cargo_args);
-            environment::configure(
+            environment::configure_test(
                 &mut child,
                 &self.identity.directory,
                 &self.state,
@@ -362,10 +364,24 @@ fn cleanup_started_session(
 ) -> Result<()> {
     state::require_owned_directory(root, &identity.directory)?;
     state::require_test_authority(session, identity)?;
+    let expected_volume = state::expected_volume(&session.project);
     if let Some(container_id) = compose.container_id(root, &identity.directory, session)? {
         compose.verify_container_authority(&container_id, &identity.project)?;
+        let actual_volume = compose.container_volume(&container_id)?;
+        if actual_volume != expected_volume {
+            return Err(error(
+                "refusing cleanup because the disposable PostgreSQL volume changed",
+            ));
+        }
+        compose.verify_volume_authority(&actual_volume, &session.project)?;
     }
+    compose.verify_volume_authority_if_present(&expected_volume, &session.project)?;
     compose.stop(root, &identity.directory, session, true)?;
+    if compose.volume_exists(&expected_volume)? {
+        return Err(error(format!(
+            "Docker retained disposable PostgreSQL volume {expected_volume}"
+        )));
+    }
     state::remove_owned_directory(root, &identity.directory)
 }
 

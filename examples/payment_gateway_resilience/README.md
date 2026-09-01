@@ -43,15 +43,15 @@ store_orders --+--> validate_order -- ValidatedOrder --> authorize_payment -- Pa
                       |                                   |
                       |                                   AuthorizePayment effect + breaker/retry/limiter
                       |                                   |
-                      \-- OrderCancelled -----------------+-- OrderCancelled --> cancelled_orders
+                      \-- CancelledOrder -----------------+-- CancelledOrder --> cancelled_orders
 ```
 
 `validate_order` classifies each order exactly once and declares
-`CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder, OrderCancelled }`. The
+`CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder, CancelledOrder }`. The
 handler-side `ValidationOutcome` carrier is proven leaf-equal to that flat fact
 set and is never journalled. `InvalidOrder` and `PaymentDeclined` are
 journal-recorded provenance facts with no sink of their own; their lifecycle
-consequence, `OrderCancelled`, converges from both producers on one
+consequence, `CancelledOrder`, converges from both producers on one
 cancelled-orders delivery. The journal is the record, sinks are external
 deliveries.
 
@@ -158,7 +158,7 @@ match outcome {
     Ok(AuthorizePaymentOutcome::Declined(declined)) => {
         // Fact first, consequence second: the recorded decline is the
         // provenance, the derived cancellation is the order's fate.
-        fx.emit(OrderCancelled { ... }).await?
+        fx.emit(CancelledOrder { ... }).await?
     }
     Err(err) => {
         // Gateway failure or breaker refusal, recorded under the effect
@@ -180,19 +180,19 @@ while converging two of them into one delivery.
 
 Local validation failures are facts about the order before any gateway I/O. A
 zero amount or structurally invalid payment method records an `InvalidOrder`
-fact (the provenance) and derives an `OrderCancelled` fact (the consequence):
+fact (the provenance) and derives a `CancelledOrder` fact (the consequence):
 
 ```text
-CustomerOrderPlaced -> validate_order -> InvalidOrder + OrderCancelled
+CustomerOrderPlaced -> validate_order -> InvalidOrder + CancelledOrder
 ```
 
 Material gateway declines are facts returned by the payment gateway after a
 valid authorization attempt. Insufficient funds or billing-address mismatch
-records a `PaymentDeclined` fact and derives the same `OrderCancelled`
+records a `PaymentDeclined` fact and derives the same `CancelledOrder`
 consequence through `fx.emit`:
 
 ```text
-ValidatedOrder -> authorize_payment -> PaymentDeclined + OrderCancelled
+ValidatedOrder -> authorize_payment -> PaymentDeclined + CancelledOrder
 ```
 
 Both cancellations land on the one `cancelled_orders` delivery, each carrying
@@ -309,7 +309,7 @@ is auditable from the journal.
 
 What to watch as it runs:
 
-- Cancelled orders show up in the `cancelled_orders` sink as `OrderCancelled`
+- Cancelled orders show up in the `cancelled_orders` sink as `CancelledOrder`
   events, each carrying its reason: locally invalid orders never call the
   gateway, and gateway declines are material remote payment decisions. The
   underlying `InvalidOrder` and `PaymentDeclined` facts are in the stage

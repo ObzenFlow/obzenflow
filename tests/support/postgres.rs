@@ -18,9 +18,8 @@ pub(crate) async fn pool() -> PgPool {
 
 #[allow(dead_code)] // The black-box example target needs only the pool helper.
 pub(crate) fn connection() -> PostgresConnection {
-    PostgresConnection::from_env(
+    PostgresConnection::deferred_from_env(
         "OBZENFLOW_POSTGRES_TEST_URL",
         PostgresTransport::ExternallyProtectedPlaintext,
     )
-    .expect("the repository loopback URL matches its explicit transport policy")
 }

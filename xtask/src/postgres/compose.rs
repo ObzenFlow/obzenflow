@@ -3,12 +3,16 @@
 // https://obzenflow.dev
 
 use super::{
-    config::{COMPOSE_FILE, IMAGE, LOG_FILE, POSTGRES_DATABASE, POSTGRES_PASSWORD, POSTGRES_USER},
-    state::SessionState,
+    config::{
+        ACCEPTANCE_COMPOSE_FILE, DEVELOPMENT_COMPOSE_FILE, IMAGE, LOG_FILE, POSTGRES_DATABASE,
+        POSTGRES_USER,
+    },
+    credentials,
+    state::{SessionMode, SessionState},
 };
 use crate::{error, Result};
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::Write,
     path::Path,
     process::{Command, Output, Stdio},
@@ -22,12 +26,14 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) struct Compose {
     program: String,
     prefix: Vec<String>,
+    context: String,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct ServiceEvidence {
     pub(super) container_id: String,
     pub(super) health: String,
+    pub(super) volume: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,11 +70,13 @@ impl Compose {
             Self {
                 program: "docker".to_string(),
                 prefix: vec!["compose".to_string()],
+                context: String::new(),
             }
         } else if probe.succeeds("docker-compose", &["version"]) {
             Self {
                 program: "docker-compose".to_string(),
                 prefix: Vec::new(),
+                context: String::new(),
             }
         } else {
             return Err(error(
@@ -90,7 +98,11 @@ impl Compose {
                 "Docker context '{context}' is selected, but its daemon is unavailable"
             )));
         }
-        Ok(compose)
+        Ok(Self { context, ..compose })
+    }
+
+    pub(super) fn context(&self) -> &str {
+        &self.context
     }
 
     pub(super) fn command(
@@ -100,17 +112,31 @@ impl Compose {
         state: &SessionState,
         args: &[&str],
     ) -> Command {
+        let compose_file = match state.mode {
+            SessionMode::Development => DEVELOPMENT_COMPOSE_FILE,
+            SessionMode::Test => ACCEPTANCE_COMPOSE_FILE,
+        };
         let mut command = Command::new(&self.program);
         command
             .current_dir(root)
             .args(&self.prefix)
             .arg("-f")
-            .arg(root.join(COMPOSE_FILE))
+            .arg(root.join(compose_file))
             .arg("-p")
             .arg(&state.project)
             .args(args)
-            .env("OBZENFLOW_POSTGRES_PASSWORD", POSTGRES_PASSWORD)
-            .env("OBZENFLOW_POSTGRES_TLS_DIR", directory.join("tls"));
+            .env_remove("OBZENFLOW_POSTGRES_PASSWORD")
+            .env_remove("OBZENFLOW_POSTGRES_PASSWORD_FILE")
+            .env_remove("OBZENFLOW_POSTGRES_TLS_DIR")
+            .env("OBZENFLOW_POSTGRES_HOST_PORT", state.port.to_string());
+        if state.mode == SessionMode::Test {
+            command
+                .env(
+                    "OBZENFLOW_POSTGRES_PASSWORD_FILE",
+                    credentials::acceptance_raw_path(directory),
+                )
+                .env("OBZENFLOW_POSTGRES_TLS_DIR", directory.join("tls"));
+        }
         command
     }
 
@@ -138,9 +164,14 @@ impl Compose {
         if !output.status.success() {
             let _ = self.capture_logs(root, directory, state, &directory.join(LOG_FILE));
             return Err(error(format!(
-                "PostgreSQL failed to start. project={} image={} port=dynamic; captured logs: {}",
+                "PostgreSQL failed to start. project={} image={} requested_port={}; captured logs: {}",
                 state.project,
                 IMAGE,
+                if state.port == 0 {
+                    "automatic".to_string()
+                } else {
+                    state.port.to_string()
+                },
                 directory.join(LOG_FILE).display()
             )));
         }
@@ -214,15 +245,39 @@ impl Compose {
     ) -> Result<ServiceEvidence> {
         let container_id = self
             .container_id(root, directory, state)?
-            .ok_or_else(|| error("PostgreSQL test service has no container identity"))?;
+            .ok_or_else(|| error("PostgreSQL service has no container identity"))?;
+        self.verify_container_authority(&container_id, &state.project)?;
+        if state.mode == SessionMode::Development {
+            self.verify_development_authentication(&container_id)?;
+        }
         let health = self.health(root, directory, state)?;
         if health != "healthy" {
-            return Err(error("PostgreSQL test service is not healthy"));
+            return Err(error("PostgreSQL service is not healthy"));
         }
+        let volume = self.container_volume(&container_id)?;
+        self.verify_volume_authority(&volume, &state.project)?;
         Ok(ServiceEvidence {
             container_id,
             health,
+            volume,
         })
+    }
+
+    pub(super) fn container_volume(&self, container_id: &str) -> Result<String> {
+        let output = Command::new("docker")
+            .args([
+                "inspect",
+                "--format",
+                "{{range .Mounts}}{{if eq .Destination \"/var/lib/postgresql/data\"}}{{.Name}}{{end}}{{end}}",
+                container_id,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()?;
+        if !output.status.success() {
+            return Err(error("failed to inspect PostgreSQL data volume"));
+        }
+        parse_volume_name(&String::from_utf8_lossy(&output.stdout))
     }
 
     pub(super) fn published_port(
@@ -258,10 +313,72 @@ impl Compose {
             .output()?;
         if !output.status.success() {
             return Err(error(
-                "refusing PostgreSQL cleanup because container authority could not be verified",
+                "refusing PostgreSQL operation because container authority could not be verified",
             ));
         }
         validate_container_labels(&String::from_utf8_lossy(&output.stdout), project)
+    }
+
+    fn verify_development_authentication(&self, container_id: &str) -> Result<()> {
+        let output = Command::new("docker")
+            .args([
+                "inspect",
+                "--format",
+                "{{ index .Config.Labels \"dev.obzenflow.authentication\" }}",
+                container_id,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()?;
+        if !output.status.success()
+            || String::from_utf8_lossy(&output.stdout).trim() != "trust-local-development"
+        {
+            return Err(error(
+                "PostgreSQL development container does not carry the current passwordless trust policy; reconcile it with `cargo xtask postgres up`",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn verify_volume_authority(&self, volume: &str, project: &str) -> Result<()> {
+        let output = Command::new("docker")
+            .args([
+                "volume",
+                "inspect",
+                "--format",
+                "{{ index .Labels \"com.docker.compose.project\" }}\t{{ index .Labels \"com.docker.compose.volume\" }}",
+                volume,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()?;
+        if !output.status.success() {
+            return Err(error(
+                "refusing PostgreSQL operation because volume authority could not be verified",
+            ));
+        }
+        validate_volume_labels(&String::from_utf8_lossy(&output.stdout), project)
+    }
+
+    pub(super) fn verify_volume_authority_if_present(
+        &self,
+        volume: &str,
+        project: &str,
+    ) -> Result<()> {
+        if self.volume_exists(volume)? {
+            self.verify_volume_authority(volume, project)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn volume_exists(&self, volume: &str) -> Result<bool> {
+        let output = Command::new("docker")
+            .args(["volume", "ls", "--quiet"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()?;
+        volume_exists_in_inventory(volume, output.status.success(), &output.stdout)
     }
 
     pub(super) fn logs(
@@ -281,7 +398,7 @@ impl Compose {
         destination: &Path,
     ) -> Result<()> {
         let output = self.logs(root, directory, state)?;
-        let mut file = File::create(destination)?;
+        let mut file = private_log_file(destination)?;
         file.write_all(&output.stdout)?;
         file.write_all(&output.stderr)?;
         Ok(())
@@ -312,10 +429,11 @@ impl Compose {
                 ReadinessDisposition::Failed => {
                     let _ = self.capture_logs(root, directory, state, &directory.join(LOG_FILE));
                     return Err(error(format!(
-                        "PostgreSQL did not become SQL-ready within {}s. project={} image={} port=dynamic last_health={} sql_preflight_attempts={}; captured logs: {}",
+                        "PostgreSQL did not become SQL-ready within {}s. project={} image={} requested_port={} last_health={} sql_preflight_attempts={}; captured logs: {}",
                         HEALTH_TIMEOUT.as_secs(),
                         state.project,
                         IMAGE,
+                        if state.port == 0 { "automatic".to_string() } else { state.port.to_string() },
                         health,
                         sql_preflight_attempts,
                         directory.join(LOG_FILE).display()
@@ -377,12 +495,39 @@ fn validate_server_preflight(stdout: &[u8]) -> Result<()> {
         .and_then(|line| line.parse::<u32>().ok())
         .ok_or_else(|| error("PostgreSQL readiness returned an invalid server version"))?;
     if !(170_000..180_000).contains(&version) {
-        return Err(error("PostgreSQL test service must run major version 17"));
+        return Err(error("PostgreSQL service must run major version 17"));
     }
     if lines.get(1).map(String::as_str) != Some("on") {
-        return Err(error("PostgreSQL test service must keep fsync enabled"));
+        return Err(error("PostgreSQL service must keep fsync enabled"));
     }
     Ok(())
+}
+
+fn parse_volume_name(output: &str) -> Result<String> {
+    let value = output.trim();
+    if !value.is_empty()
+        && value.len() <= 255
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        Ok(value.to_string())
+    } else {
+        Err(error(
+            "Docker returned an invalid PostgreSQL data volume name",
+        ))
+    }
+}
+
+fn volume_exists_in_inventory(volume: &str, succeeded: bool, stdout: &[u8]) -> Result<bool> {
+    if !succeeded {
+        return Err(error(
+            "failed to inspect Docker volume inventory; refusing to infer volume absence",
+        ));
+    }
+    let inventory = std::str::from_utf8(stdout)
+        .map_err(|_| error("Docker returned an invalid volume inventory"))?;
+    Ok(inventory.lines().any(|candidate| candidate == volume))
 }
 
 fn parse_published_port(output: &str) -> Result<u16> {
@@ -416,14 +561,29 @@ fn parse_published_port(output: &str) -> Result<u16> {
 fn validate_container_labels(labels: &str, project: &str) -> Result<()> {
     let Some((actual_project, service)) = labels.trim().split_once('\t') else {
         return Err(error(
-            "refusing PostgreSQL cleanup because container labels are incomplete",
+            "refusing PostgreSQL operation because container labels are incomplete",
         ));
     };
     if actual_project == project && service == "postgres" {
         Ok(())
     } else {
         Err(error(
-            "refusing PostgreSQL cleanup because container labels do not match the session authority",
+            "refusing PostgreSQL operation because container labels do not match the session authority",
+        ))
+    }
+}
+
+fn validate_volume_labels(labels: &str, project: &str) -> Result<()> {
+    let Some((actual_project, logical_volume)) = labels.trim().split_once('\t') else {
+        return Err(error(
+            "refusing PostgreSQL operation because volume labels are incomplete",
+        ));
+    };
+    if actual_project == project && logical_volume == "postgres-data" {
+        Ok(())
+    } else {
+        Err(error(
+            "refusing PostgreSQL operation because volume labels do not match the session authority",
         ))
     }
 }
@@ -436,6 +596,17 @@ fn safe_docker_context(value: &str) -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
     .then(|| value.to_string())
+}
+
+fn private_log_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(options.open(path)?)
 }
 
 fn command_succeeds(program: &str, args: &[&str]) -> bool {
@@ -462,6 +633,7 @@ fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::state::{expected_volume, SessionMode};
     use super::*;
 
     #[derive(Default)]
@@ -493,6 +665,25 @@ mod tests {
         }
     }
 
+    fn compose() -> Compose {
+        Compose {
+            program: "docker".to_string(),
+            prefix: vec!["compose".to_string()],
+            context: "test".to_string(),
+        }
+    }
+
+    fn state() -> SessionState {
+        let project = "obzenflow-postgres-test".to_string();
+        SessionState {
+            volume: Some(expected_volume(&project)),
+            project,
+            run_id: "0123456789abcdef0123456789abcdef".to_string(),
+            port: 15432,
+            mode: SessionMode::Development,
+        }
+    }
+
     #[test]
     fn docker_preflight_is_bounded_context_aware_and_redacted() {
         let mut modern = FakeDockerProbe {
@@ -506,6 +697,7 @@ mod tests {
             Compose {
                 program: "docker".to_string(),
                 prefix: vec!["compose".to_string()],
+                context: "desktop-linux".to_string(),
             }
         );
         assert!(!modern
@@ -521,22 +713,64 @@ mod tests {
         };
         assert!(Compose::preflight_with(&mut legacy).is_ok());
 
-        let malicious = format!("postgres://obzenflow:{POSTGRES_PASSWORD}@localhost/db");
         let mut unavailable = FakeDockerProbe {
             modern_compose: true,
-            context: Some(malicious.clone()),
+            context: Some("postgresql://user:sensitive@localhost/db".to_string()),
             ..FakeDockerProbe::default()
         };
         let diagnostic = Compose::preflight_with(&mut unavailable)
             .expect_err("unavailable daemon is actionable")
             .to_string();
         assert!(diagnostic.contains("'unknown'"));
-        assert!(!diagnostic.contains(POSTGRES_PASSWORD));
-        assert!(!diagnostic.contains("postgres://"));
+        assert!(!diagnostic.contains("sensitive"));
+        assert!(!diagnostic.contains("postgresql://"));
     }
 
     #[test]
-    fn readiness_and_port_parsers_fail_closed() {
+    fn compose_receives_an_acceptance_password_file_only() {
+        let development = compose().command(
+            Path::new("/checkout"),
+            Path::new("/checkout/.obzenflow/postgres/development"),
+            &state(),
+            &["config"],
+        );
+        let development_environment = development
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(|value| value.to_owned())))
+            .collect::<Vec<_>>();
+        assert!(development_environment
+            .iter()
+            .any(|(key, value)| { key == "OBZENFLOW_POSTGRES_PASSWORD_FILE" && value.is_none() }));
+        assert!(development_environment
+            .iter()
+            .any(|(key, value)| key == "OBZENFLOW_POSTGRES_PASSWORD" && value.is_none()));
+
+        let mut acceptance_state = state();
+        acceptance_state.mode = SessionMode::Test;
+        let acceptance = compose().command(
+            Path::new("/checkout"),
+            Path::new("/checkout/target/postgres-sessions/test"),
+            &acceptance_state,
+            &["config"],
+        );
+        let acceptance_environment = acceptance
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(|value| value.to_owned())))
+            .collect::<Vec<_>>();
+        assert!(acceptance_environment.iter().any(|(key, value)| {
+            key == "OBZENFLOW_POSTGRES_PASSWORD_FILE"
+                && value.as_deref()
+                    == Some(std::ffi::OsStr::new(
+                        "/checkout/target/postgres-sessions/test/password",
+                    ))
+        }));
+        assert!(acceptance_environment
+            .iter()
+            .any(|(key, value)| key == "OBZENFLOW_POSTGRES_PASSWORD" && value.is_none()));
+    }
+
+    #[test]
+    fn readiness_port_and_volume_parsers_fail_closed() {
         assert_eq!(
             readiness_disposition("starting", None, false),
             ReadinessDisposition::Retry
@@ -556,13 +790,40 @@ mod tests {
         assert!(parse_published_port("0.0.0.0:49152\n").is_err());
         assert!(parse_published_port("127.0.0.1:0\n").is_err());
         assert!(parse_published_port("127.0.0.1:49152\n127.0.0.1:49153\n").is_err());
+        assert_eq!(
+            parse_volume_name("obzenflow-postgres-a_postgres-data\n").unwrap(),
+            "obzenflow-postgres-a_postgres-data"
+        );
+        assert!(parse_volume_name("volume with spaces\n").is_err());
+
+        assert!(volume_exists_in_inventory(
+            "obzenflow-postgres-a_postgres-data",
+            true,
+            b"another-volume\nobzenflow-postgres-a_postgres-data\n"
+        )
+        .expect("exact volume is present"));
+        assert!(!volume_exists_in_inventory(
+            "obzenflow-postgres-a_postgres-data",
+            true,
+            b"obzenflow-postgres-a_postgres-data-copy\n"
+        )
+        .expect("partial name is absent"));
+        assert!(
+            volume_exists_in_inventory("obzenflow-postgres-a_postgres-data", false, b"").is_err()
+        );
+        assert!(
+            volume_exists_in_inventory("obzenflow-postgres-a_postgres-data", true, &[0xff])
+                .is_err()
+        );
     }
 
     #[test]
-    fn container_labels_are_exact_cleanup_authority() {
+    fn docker_labels_are_exact_operation_authority() {
         validate_container_labels("owned-project\tpostgres\n", "owned-project")
-            .expect("exact labels own cleanup");
+            .expect("exact labels own container");
         assert!(validate_container_labels("other-project\tpostgres\n", "owned-project").is_err());
-        assert!(validate_container_labels("owned-project\tdatabase\n", "owned-project").is_err());
+        validate_volume_labels("owned-project\tpostgres-data\n", "owned-project")
+            .expect("exact labels own volume");
+        assert!(validate_volume_labels("owned-project\tother\n", "owned-project").is_err());
     }
 }

@@ -12,9 +12,9 @@
 //! Sinks are external deliveries, not fact channels: `InvalidOrder` and
 //! `PaymentDeclined` are recorded in the journal as provenance but have no
 //! sink of their own; their lifecycle consequence arrives here as
-//! `OrderCancelled`.
+//! `CancelledOrder`.
 
-use super::domain::{OrderCancelled, PaymentAuthorizationUnavailable, PaymentAuthorized};
+use super::domain::{CancelledOrder, PaymentAuthorizationUnavailable, PaymentAuthorized};
 use obzenflow_runtime::stages::sink::DeliveryProvenance;
 
 /// FLOWIP-120i: archived outcomes re-emitted during replay are labelled, so
@@ -38,7 +38,7 @@ pub fn send_to_shipping(authorized: PaymentAuthorized, provenance: DeliveryProve
     );
 }
 
-pub fn record_cancelled_order(cancelled: OrderCancelled, provenance: DeliveryProvenance) {
+pub fn record_cancelled_order(cancelled: CancelledOrder, provenance: DeliveryProvenance) {
     println!(
         "{}🚫 Order {} is cancelled: {} (customer {}, amount: ${:.2})",
         provenance_prefix(provenance),

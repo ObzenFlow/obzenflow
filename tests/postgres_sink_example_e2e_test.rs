@@ -49,6 +49,13 @@ const FORBIDDEN_DURABLE_DETAILS: &[&str] = &[
     "statement_fingerprint",
 ];
 
+#[test]
+fn payments_example_defers_managed_connection_resolution() {
+    let source = include_str!("../examples/postgres_sink_payments/main.rs");
+    assert!(source.contains("PostgresConnection::deferred_from_env("));
+    assert!(!source.contains("PostgresConnection::from_env("));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn payments_example_converges_after_verified_archive_redelivery() {
     let pool = pool().await;
@@ -129,7 +136,7 @@ fn assert_success(label: &str, output: &Output) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let forbidden = [
-        "obzenflow-secret-083c".to_string(),
+        managed_postgres_secret(),
         required_env("OBZENFLOW_POSTGRES_URL"),
         required_env("OBZENFLOW_POSTGRES_TEST_URL"),
         required_env("OBZENFLOW_POSTGRES_TEST_PROJECT"),
@@ -196,7 +203,7 @@ fn run_directories(root: &Path) -> Vec<PathBuf> {
 fn assert_durable_evidence_is_redacted(root: &Path) {
     let port = required_env("OBZENFLOW_POSTGRES_TEST_PORT");
     let forbidden = [
-        "obzenflow-secret-083c".to_string(),
+        managed_postgres_secret(),
         required_env("OBZENFLOW_POSTGRES_URL"),
         required_env("OBZENFLOW_POSTGRES_TEST_URL"),
         required_env("OBZENFLOW_POSTGRES_TEST_PROJECT"),
@@ -234,6 +241,18 @@ fn assert_durable_evidence_is_redacted(root: &Path) {
             assert_json_is_redacted(&path, &value, &port);
         }
     }
+}
+
+fn managed_postgres_secret() -> String {
+    let path = required_env("PGPASSFILE");
+    let contents = fs::read_to_string(path).expect("read managed PostgreSQL pgpass file");
+    let secret = contents
+        .lines()
+        .next()
+        .and_then(|line| line.rsplit_once(':').map(|(_, secret)| secret.to_string()))
+        .expect("managed pgpass has five fields");
+    assert_eq!(secret.len(), 64, "managed secret uses the generated shape");
+    secret
 }
 
 fn assert_json_is_redacted(path: &Path, value: &Value, forbidden_port: &str) {

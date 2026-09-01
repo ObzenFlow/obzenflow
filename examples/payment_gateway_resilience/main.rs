@@ -61,7 +61,7 @@ fn banner_for(mode: &RunMode) -> Banner {
                 "What to watch",
                 [
                     "validate_order classifies once and authors multiple named facts; invalid orders and gateway declines converge on the cancelled-orders delivery",
-                    "InvalidOrder and PaymentDeclined are journal-recorded provenance facts with no sink; OrderCancelled carries the order's fate",
+                    "InvalidOrder and PaymentDeclined are journal-recorded provenance facts with no sink; CancelledOrder carries the order's fate",
                     "Transient gateway failures receive bounded retry; sustained outages open the circuit breaker (obzenflow_circuit_breaker_*), and terminal unavailability does not cancel",
                     "Re-run with --replay-from target/payment-gateway-logs/flows/<flow_id> to replay with zero gateway calls",
                 ],

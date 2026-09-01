@@ -37,7 +37,7 @@
 //! When using a hosted provider, your prompts and story text will be sent to that provider.
 //!
 //! Run against the real HN Firebase API (requires network):
-//! `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres"`
+//! `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`
 //!
 //! Optional env vars (HN fetch):
 //! - `HN_MAX_STORIES=60` (default 60)
@@ -47,16 +47,21 @@
 //! - The HN HTTP source also has a fixed source circuit breaker: 3 failures, 2s cooldown.
 //!
 //! Digest output configuration:
-//! - `[sinks] handler = "console_sink"` in the checked-in config is the default.
-//! - Override the logical stage in the environment with
-//!   `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink`.
-//! - PostgreSQL output reads `OBZENFLOW_POSTGRES_URL` and optionally
-//!   `OBZENFLOW_POSTGRES_SCHEMA` (default `obzenflow_example`).
-//! - Start the repository service with `cargo xtask postgres up`, then run PostgreSQL output with
-//!   `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`.
+//! - `obzenflow.toml` selects `console_sink`.
+//! - `obzenflow.postgres.toml` selects `postgres_sink`.
+//! - PostgreSQL output reads `OBZENFLOW_POSTGRES_URL`, optionally
+//!   `OBZENFLOW_POSTGRES_SCHEMA` (default `obzenflow_example`), and optionally
+//!   `OBZENFLOW_POSTGRES_TRANSPORT` (default `verified-tls`).
+//! - Final Markdown uses verified `[^n]` story footnotes and appends a `### Links`
+//!   section from the fetched titles, article URLs, and Hacker News discussion URLs.
+//! - Any externally managed PostgreSQL service may supply those values directly; no `xtask`
+//!   process is part of the application contract.
+//! - For the optional repository service, run `cargo xtask postgres up`, inspect its current
+//!   local connection settings with `cargo xtask postgres connection`, then run PostgreSQL output with
+//!   `cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.postgres.toml`.
 //!
 //! AI target configuration:
-//! - `[ai.models]` in `obzenflow.toml` supplies provider, model, optional endpoint, and
+//! - `[ai.models]` in the selected TOML file supplies provider, model, optional endpoint, and
 //!   the credential-reference name.
 //! - Local binding shape is validated during flow build. Secret lookup and unchecked client
 //!   construction are deferred until the first executable live effect; no provider/model

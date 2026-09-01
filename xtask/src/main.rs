@@ -766,7 +766,7 @@ fn print_started_table(states: &[JobState]) {
 fn print_help() {
     println!("usage:");
     println!("  cargo xtask studio-jobs <up|down|status>");
-    println!("  cargo xtask postgres <up|status|run|test|logs|down>");
+    println!("  cargo xtask postgres <up|status|connection|run|test|logs|down|cleanup>");
 }
 
 fn print_studio_jobs_help() {

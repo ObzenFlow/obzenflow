@@ -16,8 +16,8 @@ Some examples require feature flags:
 - `--features http-pull` for HTTP pull sources
 - `--features ai` for the one-shot AI inference example
 - `--features "http-pull ai postgres"` for the AI digest example, whose output
-  defaults to `console_sink` and can be selected as PostgreSQL with
-  `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink`
+  uses `console_sink` with `obzenflow.toml` and `postgres_sink` with
+  `obzenflow.postgres.toml`
 
 Most examples run on framework defaults and do not need a config file. Examples that enable the HTTP server bundle a minimal `obzenflow.toml` in their directory. To override startup config, pass `-- --config <path/to/obzenflow.toml>` after the Cargo arguments.
 
@@ -41,8 +41,8 @@ These are the flagship examples and the best place to start. Each one has a comp
 - **`hn_ai_digest_demo`** — The canonical AI example: live HTTP pull, token budgeting, chunking, accumulation, and Rig-backed LLM inference with replayable evidence.
   - Tutorial: [Run Live AI Inference from a Real Endpoint](https://obzenflow.dev/tutorials/live-ai-inference/)
   - Shows: [declared effects](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it)
-  - Run (console output): `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres"`
-  - Run (PostgreSQL output): `cargo xtask postgres up`, then `OBZENFLOW_SINKS_STAGES_DIGEST_SUMMARY_HANDLER=postgres_sink cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres"`
+  - Run (console output): `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`
+  - Run (PostgreSQL output): supply `OBZENFLOW_POSTGRES_URL` from any PostgreSQL deployment and use `examples/hn_ai_digest_demo/obzenflow.postgres.toml`; the optional local path is `cargo xtask postgres up`, then `cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.postgres.toml`
   - Code: [`examples/hn_ai_digest_demo/flow.rs`](hn_ai_digest_demo/flow.rs)
 
 - **`one_shot_inference_demo`** — One already-bounded input, one declared model effect, and one typed decision. Use this instead of map-reduce when the bounded context has already reduced the evidence.
@@ -72,9 +72,10 @@ These examples don't have tutorials, but they demonstrate concrete framework con
   - Run with metrics: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
   - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)
 
-- **`postgres_sink_payments`** — Typed payment events delivered to PostgreSQL with parameter binding, batching, verified TLS, and a repeat-safe UPSERT. Use this to learn the PostgreSQL sink's application-facing surface.
-  - Start the persistent service: `cargo xtask postgres up`
-  - Run live: `cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_payments`
+- **`postgres_sink_payments`** — Typed payment events delivered to PostgreSQL with parameter binding, batching, an explicit transport policy, and a repeat-safe UPSERT. Direct configuration defaults to verified TLS; the optional repository service deliberately selects loopback-protected plaintext. Use this to learn the PostgreSQL sink's application-facing surface.
+  - Backing service: supply `OBZENFLOW_POSTGRES_URL` directly from any PostgreSQL deployment
+  - Optional local service: `cargo xtask postgres up`, followed by `cargo xtask postgres connection` for its password-free loopback profile
+  - Run through the local environment: `cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_payments`
   - Stop while retaining rows: `cargo xtask postgres down`; add `--volumes` only to discard the development database
   - Guide: [`examples/postgres_sink_payments/README.md`](postgres_sink_payments/README.md)
   - Code: [`examples/postgres_sink_payments/flow.rs`](postgres_sink_payments/flow.rs)

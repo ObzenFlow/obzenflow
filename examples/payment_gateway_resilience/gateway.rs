@@ -16,7 +16,7 @@
 //! its own copy of this logic and only swaps the source and the flow wiring.
 
 use super::domain::{
-    OrderCancellationReason, OrderCancelled, PaymentAuthorizationUnavailable, PaymentAuthorized,
+    CancelledOrder, OrderCancellationReason, PaymentAuthorizationUnavailable, PaymentAuthorized,
     PaymentDeclineReason, PaymentDeclined, PaymentMethodState, TrafficPhase, ValidatedOrder,
 };
 use async_trait::async_trait;
@@ -44,8 +44,10 @@ pub struct AuthorizePayment {
 }
 
 impl AuthorizePayment {
-    fn for_order(order: ValidatedOrder) -> Self {
-        Self { order }
+    fn for_order(order: &ValidatedOrder) -> Self {
+        Self {
+            order: order.clone(),
+        }
     }
 }
 
@@ -155,7 +157,7 @@ impl Effect for AuthorizePayment {
 /// recorded effect outcome group (FLOWIP-120m): `fx.perform` records whichever
 /// fact happened and returns the transient carrier, so the handler never
 /// re-emits them. The handler emits only derived consequences
-/// (`OrderCancelled`) and the non-performance fact
+/// (`CancelledOrder`) and the non-performance fact
 /// (`PaymentAuthorizationUnavailable`).
 #[derive(Debug, Clone)]
 pub struct GatewayTransform {
@@ -166,7 +168,7 @@ pub struct GatewayTransform {
 type GatewayOutput = obzenflow_core::stage_fact_set![
     PaymentAuthorized,
     PaymentDeclined,
-    OrderCancelled,
+    CancelledOrder,
     PaymentAuthorizationUnavailable
 ];
 type GatewayAllowedEffects = obzenflow_runtime::effect_set![AuthorizePayment];
@@ -240,7 +242,8 @@ impl EffectfulTransformHandler for GatewayTransform {
         // recovery exhausts or the breaker prevents an attempt, `perform`
         // returns the one recorded terminal error; resilience never
         // synthesizes a business fact to represent non-execution.
-        let outcome = fx.perform(AuthorizePayment::for_order(order.clone())).await;
+        let authorization = AuthorizePayment::for_order(&order);
+        let outcome = fx.perform(authorization).await;
 
         match outcome {
             Ok(AuthorizePaymentOutcome::Authorized(_)) => {
@@ -251,17 +254,7 @@ impl EffectfulTransformHandler for GatewayTransform {
                 // Fact first, consequence second: the recorded PaymentDeclined
                 // outcome fact is the gateway's decision, and the derived
                 // lifecycle consequence is that the order is cancelled.
-                fx.emit(OrderCancelled {
-                    order_id: declined.order_id,
-                    customer_id: declined.customer_id,
-                    amount_cents: declined.amount_cents,
-                    phase: declined.phase,
-                    reason: OrderCancellationReason::PaymentDeclined {
-                        reason: declined.reason,
-                    },
-                })
-                .await
-                .map_err(|e| HandlerError::Other(e.to_string()))?;
+                emit_cancelled_order(declined, fx).await?;
             }
             Err(err) => {
                 // Gateway failure or breaker prevention: recorded under the
@@ -293,6 +286,23 @@ impl EffectfulTransformHandler for GatewayTransform {
 /// handling here (FLOWIP-120i).
 fn authorization_unavailable_reason(err: EffectError) -> String {
     err.semantic_reason().into_owned()
+}
+
+async fn emit_cancelled_order(
+    declined: PaymentDeclined,
+    fx: &mut Effects<GatewayOutput, GatewayAllowedEffects>,
+) -> Result<(), HandlerError> {
+    fx.emit(CancelledOrder {
+        order_id: declined.order_id,
+        customer_id: declined.customer_id,
+        amount_cents: declined.amount_cents,
+        phase: declined.phase,
+        reason: OrderCancellationReason::PaymentDeclined {
+            reason: declined.reason,
+        },
+    })
+    .await
+    .map_err(|e| HandlerError::Other(e.to_string()))
 }
 
 /// Deliberately no cancellation here: unavailability means no payment decision
