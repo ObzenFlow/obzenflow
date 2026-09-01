@@ -126,14 +126,16 @@ impl Compose {
             .arg(&state.project)
             .args(args)
             .env_remove("OBZENFLOW_POSTGRES_PASSWORD")
+            .env_remove("OBZENFLOW_POSTGRES_PASSWORD_FILE")
             .env_remove("OBZENFLOW_POSTGRES_TLS_DIR")
-            .env(
-                "OBZENFLOW_POSTGRES_PASSWORD_FILE",
-                credentials::raw_path(directory),
-            )
             .env("OBZENFLOW_POSTGRES_HOST_PORT", state.port.to_string());
         if state.mode == SessionMode::Test {
-            command.env("OBZENFLOW_POSTGRES_TLS_DIR", directory.join("tls"));
+            command
+                .env(
+                    "OBZENFLOW_POSTGRES_PASSWORD_FILE",
+                    credentials::acceptance_raw_path(directory),
+                )
+                .env("OBZENFLOW_POSTGRES_TLS_DIR", directory.join("tls"));
         }
         command
     }
@@ -245,6 +247,9 @@ impl Compose {
             .container_id(root, directory, state)?
             .ok_or_else(|| error("PostgreSQL service has no container identity"))?;
         self.verify_container_authority(&container_id, &state.project)?;
+        if state.mode == SessionMode::Development {
+            self.verify_development_authentication(&container_id)?;
+        }
         let health = self.health(root, directory, state)?;
         if health != "healthy" {
             return Err(error("PostgreSQL service is not healthy"));
@@ -312,6 +317,27 @@ impl Compose {
             ));
         }
         validate_container_labels(&String::from_utf8_lossy(&output.stdout), project)
+    }
+
+    fn verify_development_authentication(&self, container_id: &str) -> Result<()> {
+        let output = Command::new("docker")
+            .args([
+                "inspect",
+                "--format",
+                "{{ index .Config.Labels \"dev.obzenflow.authentication\" }}",
+                container_id,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()?;
+        if !output.status.success()
+            || String::from_utf8_lossy(&output.stdout).trim() != "trust-local-development"
+        {
+            return Err(error(
+                "PostgreSQL development container does not carry the current passwordless trust policy; reconcile it with `cargo xtask postgres up`",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn verify_volume_authority(&self, volume: &str, project: &str) -> Result<()> {
@@ -701,25 +727,44 @@ mod tests {
     }
 
     #[test]
-    fn compose_receives_only_the_raw_file_path() {
-        let command = compose().command(
+    fn compose_receives_an_acceptance_password_file_only() {
+        let development = compose().command(
             Path::new("/checkout"),
             Path::new("/checkout/.obzenflow/postgres/development"),
             &state(),
             &["config"],
         );
-        let environment = command
+        let development_environment = development
             .get_envs()
             .map(|(key, value)| (key.to_owned(), value.map(|value| value.to_owned())))
             .collect::<Vec<_>>();
-        assert!(environment.iter().any(|(key, value)| {
+        assert!(development_environment
+            .iter()
+            .any(|(key, value)| { key == "OBZENFLOW_POSTGRES_PASSWORD_FILE" && value.is_none() }));
+        assert!(development_environment
+            .iter()
+            .any(|(key, value)| key == "OBZENFLOW_POSTGRES_PASSWORD" && value.is_none()));
+
+        let mut acceptance_state = state();
+        acceptance_state.mode = SessionMode::Test;
+        let acceptance = compose().command(
+            Path::new("/checkout"),
+            Path::new("/checkout/target/postgres-sessions/test"),
+            &acceptance_state,
+            &["config"],
+        );
+        let acceptance_environment = acceptance
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(|value| value.to_owned())))
+            .collect::<Vec<_>>();
+        assert!(acceptance_environment.iter().any(|(key, value)| {
             key == "OBZENFLOW_POSTGRES_PASSWORD_FILE"
                 && value.as_deref()
                     == Some(std::ffi::OsStr::new(
-                        "/checkout/.obzenflow/postgres/development/password",
+                        "/checkout/target/postgres-sessions/test/password",
                     ))
         }));
-        assert!(environment
+        assert!(acceptance_environment
             .iter()
             .any(|(key, value)| key == "OBZENFLOW_POSTGRES_PASSWORD" && value.is_none()));
     }

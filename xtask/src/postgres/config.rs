@@ -13,8 +13,8 @@ pub(super) const DEVELOPMENT_STATE_ROOT: &str = ".obzenflow/postgres";
 pub(super) const DEVELOPMENT_SESSION: &str = "development";
 pub(super) const SESSION_OVERRIDE_ENV: &str = "OBZENFLOW_POSTGRES_XTASK_PROOF_SESSION";
 pub(super) const STATE_FILE: &str = "state.tsv";
-pub(super) const RAW_PASSWORD_FILE: &str = "password";
-pub(super) const PGPASS_FILE: &str = "pgpass";
+pub(super) const ACCEPTANCE_RAW_PASSWORD_FILE: &str = "password";
+pub(super) const ACCEPTANCE_PGPASS_FILE: &str = "pgpass";
 pub(super) const LOG_FILE: &str = "postgres.log";
 pub(super) const IMAGE: &str = "postgres:17";
 pub(super) const POSTGRES_USER: &str = "obzenflow";
@@ -88,8 +88,11 @@ mod tests {
             .to_path_buf();
         let development = fs::read_to_string(root.join(DEVELOPMENT_COMPOSE_FILE))
             .expect("read development Compose file");
-        assert!(development.contains("POSTGRES_PASSWORD_FILE:"));
-        assert!(!development.contains("POSTGRES_PASSWORD:"));
+        assert!(development.contains("POSTGRES_HOST_AUTH_METHOD: trust"));
+        assert!(development.contains("hba_file=/etc/postgresql/pg_hba.conf"));
+        assert!(development.contains("./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro"));
+        assert!(development.contains("host_ip: 127.0.0.1"));
+        assert!(!development.contains("POSTGRES_PASSWORD"));
         for forbidden in [
             "OBZENFLOW_POSTGRES_TLS_DIR",
             "server.crt",
@@ -101,6 +104,17 @@ mod tests {
             assert!(
                 !development.contains(forbidden),
                 "development Compose contains TLS or shell concern {forbidden}"
+            );
+        }
+
+        let development_hba = fs::read_to_string(root.join("dev/postgres/pg_hba.conf"))
+            .expect("read development host-authentication policy");
+        assert!(development_hba.contains("local all all trust"));
+        assert!(development_hba.contains("host all all all trust"));
+        for forbidden in ["scram-sha-256", "md5", "password", "reject"] {
+            assert!(
+                !development_hba.contains(forbidden),
+                "development host-authentication policy contains {forbidden}"
             );
         }
 

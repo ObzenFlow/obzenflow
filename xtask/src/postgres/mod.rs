@@ -22,6 +22,8 @@ use self::{
 };
 use super::{error, Result};
 use std::{
+    fs,
+    io::ErrorKind,
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
     path::Path,
     process::Command,
@@ -82,7 +84,7 @@ fn up(flags: &[String]) -> Result<()> {
     )?;
     print_status(&compose, &identity, &session, "healthy", Some(&service));
     println!("run a command with: cargo xtask postgres run -- <command> [args...]");
-    println!("show the password-free client profile with: cargo xtask postgres connection");
+    println!("show the local client profile with: cargo xtask postgres connection");
     Ok(())
 }
 
@@ -107,7 +109,7 @@ fn require_fresh_development_volume(
 
 fn retained_volume_diagnostic(identity: &DevelopmentIdentity, volume: &str) -> String {
     format!(
-        "PostgreSQL development state is missing while retained Docker volume '{volume}' exists for project '{}'; expected state at '{}'; refusing to generate a replacement credential that cannot authenticate to retained data; restore the matching state and credential directory or remove the exact Docker project and volume before retrying",
+        "PostgreSQL development state is missing while retained Docker volume '{volume}' exists for project '{}'; expected state at '{}'; refusing to adopt retained data without its matching checkout-owned lifecycle state; restore that state directory or remove the exact Docker project and volume before retrying",
         identity.project,
         identity.directory.join(STATE_FILE).display()
     )
@@ -122,12 +124,9 @@ fn first_up(
     let mut session = state::new_development(identity);
     let state_path = identity.directory.join(STATE_FILE);
     state::write(&state_path, &session)?;
-    credentials::create_raw(&identity.directory)?;
     compose.start(root, &identity.directory, &mut session)?;
     let service = compose.service_evidence(root, &identity.directory, &session)?;
     state::record_or_verify_volume(&mut session, &service.volume)?;
-    credentials::create_development_pgpass(&identity.directory, session.port)?;
-    credentials::validate_development(&identity.directory, session.port)?;
     state::write(&state_path, &session)?;
     Ok((session, service))
 }
@@ -141,24 +140,13 @@ fn restart_or_verify(
     let mut session = state::read(&state_path)?;
     state::require_development_authority(&session, identity)?;
     state::require_ready(&session)?;
-    credentials::validate_development(&identity.directory, session.port)?;
 
     let health = compose.health(root, &identity.directory, &session)?;
+    let retained_port = session.port;
     match health.as_str() {
-        "healthy" => {
-            let actual_port = compose.published_port(root, &identity.directory, &session)?;
-            verify_running_port(&session, actual_port)?;
-        }
+        "healthy" => {}
         "stopped" => {
             ensure_retained_port_available(session.port)?;
-            let retained_port = session.port;
-            compose.start(root, &identity.directory, &mut session)?;
-            if session.port != retained_port {
-                return Err(error(format!(
-                    "PostgreSQL published endpoint changed unexpectedly: expected port {retained_port}, found {}; no replacement endpoint was adopted",
-                    session.port
-                )));
-            }
         }
         other => {
             return Err(error(format!(
@@ -167,10 +155,19 @@ fn restart_or_verify(
             )))
         }
     }
+    // Reconcile even a healthy container so a checked-in development policy
+    // change, including the passwordless trust boundary, cannot be skipped.
+    compose.start(root, &identity.directory, &mut session)?;
+    if session.port != retained_port {
+        return Err(error(format!(
+            "PostgreSQL published endpoint changed unexpectedly: expected port {retained_port}, found {}; no replacement endpoint was adopted",
+            session.port
+        )));
+    }
     let service = compose.service_evidence(root, &identity.directory, &session)?;
     state::record_or_verify_volume(&mut session, &service.volume)?;
-    credentials::validate_development(&identity.directory, session.port)?;
     state::write(&state_path, &session)?;
+    remove_legacy_development_credentials(root, identity)?;
     Ok((session, service))
 }
 
@@ -189,9 +186,6 @@ fn status(flags: &[String]) -> Result<()> {
     let mut session = state::read(&state_path)?;
     state::require_development_authority(&session, &identity)?;
     let ready = state::require_ready(&session).is_ok();
-    if ready {
-        credentials::validate_development(&identity.directory, session.port)?;
-    }
     let health = compose.health(&root, &identity.directory, &session)?;
     let service = if health == "healthy" {
         let actual_port = compose.published_port(&root, &identity.directory, &session)?;
@@ -225,14 +219,8 @@ fn connection(flags: &[String]) -> Result<()> {
     let (identity, mut session) = development_session(&root, true)?;
     let service = verify_running_session(&root, &compose, &identity, &mut session)?;
     print_status(&compose, &identity, &session, "healthy", Some(&service));
-    let pgpass = credentials::pgpass_path(&identity.directory);
     let url = plaintext_url(session.port);
     println!("copyable password-free psql command:");
-    println!("env -u PGPASSWORD \\");
-    println!(
-        "{} \\",
-        shell_quote(&format!("PGPASSFILE={}", pgpass.display()))
-    );
     println!("psql {}", shell_quote(&url));
     Ok(())
 }
@@ -252,7 +240,7 @@ fn run_child(flags: &[String]) -> Result<()> {
 
     let mut child = Command::new(&command[0]);
     child.current_dir(&root).args(&command[1..]);
-    let schema = environment::configure_development(&mut child, &identity.directory, &session)?;
+    let schema = environment::configure_development(&mut child, &session)?;
     println!(
         "using PostgreSQL development database: project={} volume={} endpoint={}:{} database={} schema={schema:?}",
         session.project,
@@ -333,7 +321,7 @@ fn down(flags: &[String]) -> Result<()> {
         state::require_owned_directory(&root, &identity.directory)?;
         compose.verify_volume_authority_if_present(&expected_volume, &session.project)?;
         println!(
-            "removing project '{}' and named volume '{}'; development data and credentials will not be recoverable",
+            "removing project '{}' and named volume '{}'; development data and lifecycle state will not be recoverable",
             session.project, expected_volume
         );
     }
@@ -347,7 +335,7 @@ fn down(flags: &[String]) -> Result<()> {
         state::remove_owned_directory(&root, &identity.directory)?;
     } else {
         println!(
-            "PostgreSQL project stopped; its retained port, named volume, credentials, and rows are preserved"
+            "PostgreSQL project stopped; its retained port, named volume, lifecycle state, and rows are preserved"
         );
     }
     Ok(())
@@ -422,7 +410,6 @@ fn verify_running_session(
     session: &mut SessionState,
 ) -> Result<ServiceEvidence> {
     state::require_ready(session)?;
-    credentials::validate_development(&identity.directory, session.port)?;
     let health = compose.health(root, &identity.directory, session)?;
     if health != "healthy" {
         return Err(error(format!(
@@ -492,10 +479,7 @@ fn print_status(
     println!("  user:            {POSTGRES_USER}");
     println!("  schema:          {DEVELOPMENT_PAYMENT_SCHEMA}");
     println!("  transport:       externally protected plaintext (loopback)");
-    println!(
-        "  pgpass:          {}",
-        credentials::pgpass_path(&identity.directory).display()
-    );
+    println!("  authentication:  trust (no password; trusted development machine only)");
     println!(
         "  state:           {}",
         identity.directory.join(STATE_FILE).display()
@@ -511,6 +495,30 @@ fn verify_running_port(session: &SessionState, actual_port: u16) -> Result<()> {
             session.port
         )))
     }
+}
+
+fn remove_legacy_development_credentials(
+    root: &Path,
+    identity: &DevelopmentIdentity,
+) -> Result<()> {
+    state::require_owned_directory(root, &identity.directory)?;
+    for name in ["password", "pgpass"] {
+        let path = identity.directory.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => {
+                fs::remove_file(&path)?;
+            }
+            Ok(_) => {
+                return Err(error(format!(
+                    "refusing to remove obsolete PostgreSQL development credential path because it is not a file: {}",
+                    path.display()
+                )))
+            }
+            Err(failure) if failure.kind() == ErrorKind::NotFound => {}
+            Err(failure) => return Err(failure.into()),
+        }
+    }
+    Ok(())
 }
 
 fn ensure_retained_port_available(port: u16) -> Result<()> {
@@ -618,7 +626,7 @@ mod tests {
         assert!(diagnostic.contains(&identity.project));
         assert!(diagnostic.contains(&volume));
         assert!(diagnostic.contains("/checkout/.obzenflow/postgres/development/state.tsv"));
-        assert!(diagnostic.contains("refusing to generate a replacement credential"));
+        assert!(diagnostic.contains("refusing to adopt retained data"));
         assert!(!diagnostic.contains("down --volumes"));
     }
 

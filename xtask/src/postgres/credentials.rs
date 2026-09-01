@@ -2,8 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+//! Disposable acceptance-session credentials.
+//!
+//! The persistent development service deliberately uses PostgreSQL `trust`
+//! authentication and never calls this module.
+
 use super::config::{
-    PGPASS_FILE, POSTGRES_CLIENT_HOST, POSTGRES_DATABASE, POSTGRES_USER, RAW_PASSWORD_FILE,
+    ACCEPTANCE_PGPASS_FILE, ACCEPTANCE_RAW_PASSWORD_FILE, POSTGRES_CLIENT_HOST, POSTGRES_DATABASE,
+    POSTGRES_USER,
 };
 use super::managed_fs;
 use crate::{error, Result};
@@ -19,77 +25,59 @@ const SECRET_HEX_LENGTH: usize = SECRET_BYTES * 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CredentialFiles {
-    pub(super) raw: PathBuf,
     pub(super) pgpass: PathBuf,
 }
 
-pub(super) fn raw_path(directory: &Path) -> PathBuf {
-    directory.join(RAW_PASSWORD_FILE)
+pub(super) fn acceptance_raw_path(directory: &Path) -> PathBuf {
+    directory.join(ACCEPTANCE_RAW_PASSWORD_FILE)
 }
 
-pub(super) fn pgpass_path(directory: &Path) -> PathBuf {
-    directory.join(PGPASS_FILE)
+pub(super) fn acceptance_pgpass_path(directory: &Path) -> PathBuf {
+    directory.join(ACCEPTANCE_PGPASS_FILE)
 }
 
-pub(super) fn create_raw(directory: &Path) -> Result<()> {
+pub(super) fn create_acceptance_raw(directory: &Path) -> Result<()> {
     require_private_directory(directory)?;
     let secret = generate_secret()?;
-    create_private_file(&raw_path(directory), secret.as_bytes())
+    create_private_file(&acceptance_raw_path(directory), secret.as_bytes())
 }
 
-pub(super) fn create_development_pgpass(directory: &Path, port: u16) -> Result<()> {
-    let secret = read_raw(directory)?;
-    let contents = pgpass_contents(&secret, port, &[POSTGRES_CLIENT_HOST]);
-    create_private_file(&pgpass_path(directory), contents.as_bytes())
-}
-
-pub(super) fn create_test_pgpass(directory: &Path, port: u16) -> Result<()> {
+pub(super) fn create_acceptance_pgpass(directory: &Path, port: u16) -> Result<()> {
     let secret = read_raw(directory)?;
     let contents = pgpass_contents(&secret, port, &[POSTGRES_CLIENT_HOST, "127.0.0.1"]);
-    create_private_file(&pgpass_path(directory), contents.as_bytes())
+    create_private_file(&acceptance_pgpass_path(directory), contents.as_bytes())
 }
 
-pub(super) fn validate_development(directory: &Path, port: u16) -> Result<CredentialFiles> {
-    validate(directory, port, &[POSTGRES_CLIENT_HOST])
-}
-
-pub(super) fn validate_test(directory: &Path, port: u16) -> Result<CredentialFiles> {
-    validate(directory, port, &[POSTGRES_CLIENT_HOST, "127.0.0.1"])
-}
-
-fn validate(directory: &Path, port: u16, hosts: &[&str]) -> Result<CredentialFiles> {
+pub(super) fn validate_acceptance(directory: &Path, port: u16) -> Result<CredentialFiles> {
     require_private_directory(directory)?;
     if port == 0 {
-        return Err(reset_required(
-            "PostgreSQL session credentials cannot be validated before port discovery",
+        return Err(invalid(
+            "PostgreSQL acceptance credentials cannot be validated before port discovery",
         ));
     }
     let secret = read_raw(directory)?;
-    let pgpass = pgpass_path(directory);
+    let pgpass = acceptance_pgpass_path(directory);
     require_private_regular_file(&pgpass, "pgpass")?;
     let actual = fs::read_to_string(&pgpass)
-        .map_err(|_| reset_required("PostgreSQL pgpass credential is unreadable"))?;
-    let expected = pgpass_contents(&secret, port, hosts);
+        .map_err(|_| invalid("PostgreSQL acceptance pgpass credential is unreadable"))?;
+    let expected = pgpass_contents(&secret, port, &[POSTGRES_CLIENT_HOST, "127.0.0.1"]);
     if actual != expected {
-        return Err(reset_required(
-            "PostgreSQL pgpass credential is malformed, endpoint-mismatched, or inconsistent",
+        return Err(invalid(
+            "PostgreSQL acceptance pgpass credential is malformed, endpoint-mismatched, or inconsistent",
         ));
     }
-    Ok(CredentialFiles {
-        raw: raw_path(directory),
-        pgpass,
-    })
+    Ok(CredentialFiles { pgpass })
 }
 
 fn read_raw(directory: &Path) -> Result<String> {
-    let path = raw_path(directory);
+    let path = acceptance_raw_path(directory);
     require_private_regular_file(&path, "raw")?;
     let secret = fs::read_to_string(&path)
-        .map_err(|_| reset_required("PostgreSQL raw credential is unreadable"))?;
+        .map_err(|_| invalid("PostgreSQL acceptance raw credential is unreadable"))?;
     if valid_secret(&secret) {
         Ok(secret)
     } else {
-        Err(reset_required("PostgreSQL raw credential is malformed"))
+        Err(invalid("PostgreSQL acceptance raw credential is malformed"))
     }
 }
 
@@ -124,7 +112,7 @@ fn pgpass_contents(secret: &str, port: u16, hosts: &[&str]) -> String {
 fn create_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     let mut file = managed_fs::secret_file_create_new(path).map_err(|failure| {
         error(format!(
-            "refusing to overwrite PostgreSQL credential file {}: {failure}",
+            "refusing to overwrite PostgreSQL acceptance credential file {}: {failure}",
             path.display()
         ))
     })?;
@@ -134,20 +122,17 @@ fn create_private_file(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 fn require_private_directory(path: &Path) -> Result<()> {
-    managed_fs::require_directory(path, "PostgreSQL credential directory")
-        .map_err(|failure| reset_required(failure.to_string()))
+    managed_fs::require_directory(path, "PostgreSQL acceptance credential directory")
+        .map_err(|failure| invalid(failure.to_string()))
 }
 
 fn require_private_regular_file(path: &Path, label: &str) -> Result<()> {
-    managed_fs::require_secret_file(path, &format!("PostgreSQL {label} credential"))
-        .map_err(|failure| reset_required(failure.to_string()))
+    managed_fs::require_secret_file(path, &format!("PostgreSQL acceptance {label} credential"))
+        .map_err(|failure| invalid(failure.to_string()))
 }
 
-fn reset_required(message: impl AsRef<str>) -> Box<dyn std::error::Error> {
-    error(format!(
-        "{}; reset this session with `cargo xtask postgres down --volumes`",
-        message.as_ref()
-    ))
+fn invalid(message: impl AsRef<str>) -> Box<dyn std::error::Error> {
+    error(message.as_ref())
 }
 
 #[cfg(test)]
@@ -180,44 +165,50 @@ mod tests {
     }
 
     #[test]
-    fn exact_pgpass_pair_round_trips_without_overwrite() {
+    fn acceptance_pgpass_pair_round_trips_without_overwrite() {
         let directory = private_directory("roundtrip");
-        create_raw(&directory).expect("create raw credential");
-        assert!(create_raw(&directory).is_err());
-        create_development_pgpass(&directory, 15432).expect("create pgpass");
-        let files = validate_development(&directory, 15432).expect("validate pair");
-        assert_eq!(files.raw, directory.join(RAW_PASSWORD_FILE));
-        assert_eq!(files.pgpass, directory.join(PGPASS_FILE));
-        let secret = fs::read_to_string(&files.raw).expect("read fixture secret");
+        create_acceptance_raw(&directory).expect("create raw credential");
+        assert!(create_acceptance_raw(&directory).is_err());
+        create_acceptance_pgpass(&directory, 15432).expect("create pgpass");
+        let files = validate_acceptance(&directory, 15432).expect("validate pair");
+        assert_eq!(files.pgpass, directory.join(ACCEPTANCE_PGPASS_FILE));
+        let secret =
+            fs::read_to_string(acceptance_raw_path(&directory)).expect("read fixture secret");
         assert_eq!(
             fs::read_to_string(&files.pgpass).expect("read pgpass"),
-            format!("localhost:15432:obzenflow:obzenflow:{secret}\n")
+            format!(
+                "localhost:15432:obzenflow:obzenflow:{secret}\n127.0.0.1:15432:obzenflow:obzenflow:{secret}\n"
+            )
         );
-        assert!(validate_development(&directory, 15433).is_err());
+        assert!(validate_acceptance(&directory, 15433).is_err());
         fs::remove_dir_all(directory).expect("remove fixture");
     }
 
     #[cfg(unix)]
     #[test]
-    fn credential_permissions_fail_closed() {
+    fn acceptance_credential_permissions_fail_closed() {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = private_directory("permissions");
-        create_raw(&directory).expect("create raw credential");
-        create_development_pgpass(&directory, 15432).expect("create pgpass");
-        fs::set_permissions(raw_path(&directory), fs::Permissions::from_mode(0o640))
-            .expect("weaken fixture permissions");
-        assert!(validate_development(&directory, 15432).is_err());
+        create_acceptance_raw(&directory).expect("create raw credential");
+        create_acceptance_pgpass(&directory, 15432).expect("create pgpass");
+        fs::set_permissions(
+            acceptance_raw_path(&directory),
+            fs::Permissions::from_mode(0o640),
+        )
+        .expect("weaken fixture permissions");
+        assert!(validate_acceptance(&directory, 15432).is_err());
         fs::remove_dir_all(directory).expect("remove fixture");
     }
 
     #[test]
-    fn test_pgpass_has_only_the_two_exercised_hosts() {
+    fn acceptance_pgpass_has_only_the_two_exercised_hosts() {
         let directory = private_directory("test-hosts");
-        create_raw(&directory).expect("create raw credential");
-        create_test_pgpass(&directory, 25432).expect("create test pgpass");
-        validate_test(&directory, 25432).expect("validate test pair");
-        let pgpass = fs::read_to_string(pgpass_path(&directory)).expect("read test pgpass");
+        create_acceptance_raw(&directory).expect("create raw credential");
+        create_acceptance_pgpass(&directory, 25432).expect("create test pgpass");
+        validate_acceptance(&directory, 25432).expect("validate test pair");
+        let pgpass =
+            fs::read_to_string(acceptance_pgpass_path(&directory)).expect("read test pgpass");
         assert_eq!(pgpass.lines().count(), 2);
         assert!(pgpass.starts_with("localhost:25432:obzenflow:obzenflow:"));
         assert!(pgpass.contains("\n127.0.0.1:25432:obzenflow:obzenflow:"));

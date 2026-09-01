@@ -43,16 +43,10 @@ const KNOWN_TEST_ENV: &[&str] = &[
     "OBZENFLOW_POSTGRES_TEST_UNTRUSTED_CA_CERT",
 ];
 
-pub(super) fn configure_development(
-    command: &mut Command,
-    directory: &Path,
-    state: &SessionState,
-) -> Result<String> {
-    let files = credentials::validate_development(directory, state.port)?;
+pub(super) fn configure_development(command: &mut Command, state: &SessionState) -> Result<String> {
     remove_development_only_inputs(command);
     command
         .env("OBZENFLOW_POSTGRES_URL", plaintext_url(state.port))
-        .env("PGPASSFILE", files.pgpass)
         .env(POSTGRES_TRANSPORT_ENV, LOOPBACK_TRANSPORT);
     let schema = inherited_schema()?;
     command.env(POSTGRES_SCHEMA_ENV, &schema);
@@ -65,7 +59,7 @@ pub(super) fn configure_test(
     state: &SessionState,
     service: &ServiceEvidence,
 ) -> Result<()> {
-    let files = credentials::validate_test(directory, state.port)?;
+    let files = credentials::validate_acceptance(directory, state.port)?;
     let ca_certificate = directory.join("tls/ca.crt");
     command
         .env_remove("PGPASSWORD")
@@ -116,6 +110,7 @@ pub(super) fn configure_test(
 
 fn remove_development_only_inputs(command: &mut Command) {
     command.env_remove("PGPASSWORD");
+    command.env_remove("PGPASSFILE");
     for name in INTERNAL_DEVELOPMENT_ENV.iter().chain(KNOWN_TEST_ENV.iter()) {
         command.env_remove(name);
     }
@@ -143,10 +138,7 @@ fn test_environment_name(name: &OsStr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        credentials,
-        state::{self, SessionMode},
-    };
+    use super::super::state::{self, SessionMode};
     use super::*;
     use std::{collections::BTreeMap, ffi::OsString, fs};
 
@@ -158,8 +150,6 @@ mod tests {
         ));
         let directory = root.join("session");
         state::create_session_directory(&directory).expect("create session");
-        credentials::create_raw(&directory).expect("create raw credential");
-        credentials::create_development_pgpass(&directory, 15432).expect("create pgpass");
         let project = "obzenflow-postgres-environment".to_string();
         let state = SessionState {
             project: project.clone(),
@@ -171,15 +161,17 @@ mod tests {
         let mut command = Command::new("env");
         command
             .env("PGPASSWORD", "ambient")
+            .env("PGPASSFILE", "/ambient/pgpass")
             .env("OBZENFLOW_POSTGRES_TEST_URL", "ambient")
             .env(POSTGRES_TRANSPORT_ENV, "ambient")
             .env(SESSION_OVERRIDE_ENV, "ambient");
-        configure_development(&mut command, &directory, &state).expect("configure child");
+        configure_development(&mut command, &state).expect("configure child");
         let environment = command
             .get_envs()
             .map(|(name, value)| (name.to_owned(), value.map(OsString::from)))
             .collect::<BTreeMap<_, _>>();
         assert_eq!(environment.get(OsStr::new("PGPASSWORD")), Some(&None));
+        assert_eq!(environment.get(OsStr::new("PGPASSFILE")), Some(&None));
         assert_eq!(
             environment.get(OsStr::new("OBZENFLOW_POSTGRES_TEST_URL")),
             Some(&None)
@@ -202,12 +194,6 @@ mod tests {
                 .and_then(Option::as_ref),
             Some(&OsString::from(LOOPBACK_TRANSPORT))
         );
-        assert_eq!(
-            environment
-                .get(OsStr::new("PGPASSFILE"))
-                .and_then(Option::as_ref),
-            Some(&OsString::from(directory.join("pgpass")))
-        );
         fs::remove_dir_all(root).expect("remove environment fixture");
     }
 
@@ -217,48 +203,5 @@ mod tests {
             "OBZENFLOW_POSTGRES_TEST_SENTINEL"
         )));
         assert!(!test_environment_name(OsStr::new("OBZENFLOW_POSTGRES_URL")));
-    }
-
-    #[test]
-    fn malformed_managed_pgpass_fails_before_child_launch_configuration() {
-        let root = env::temp_dir().join(format!(
-            "obzenflow-development-env-invalid-{}",
-            state::unique_run_id()
-        ));
-        let directory = root.join("session");
-        state::create_session_directory(&directory).expect("create session");
-        credentials::create_raw(&directory).expect("create raw credential");
-        credentials::create_development_pgpass(&directory, 15432).expect("create pgpass");
-        fs::write(
-            credentials::pgpass_path(&directory),
-            "localhost:9999:obzenflow:obzenflow:wrong\n",
-        )
-        .expect("corrupt managed pgpass");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(
-                credentials::pgpass_path(&directory),
-                fs::Permissions::from_mode(0o600),
-            )
-            .expect("retain owner-only mode");
-        }
-        let project = "obzenflow-postgres-invalid-environment".to_string();
-        let state = SessionState {
-            project: project.clone(),
-            run_id: state::unique_run_id(),
-            port: 15432,
-            mode: SessionMode::Development,
-            volume: Some(state::expected_volume(&project)),
-        };
-        let mut command = Command::new("env");
-        assert!(configure_development(&mut command, &directory, &state).is_err());
-        assert!(
-            command
-                .get_envs()
-                .all(|(name, _)| name != OsStr::new("OBZENFLOW_POSTGRES_URL")),
-            "a bad managed file is rejected before launch inputs are installed"
-        );
-        fs::remove_dir_all(root).expect("remove environment fixture");
     }
 }

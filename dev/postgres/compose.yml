@@ -3,8 +3,9 @@ services:
     image: postgres:17
     environment:
       POSTGRES_USER: obzenflow
-      POSTGRES_PASSWORD_FILE: /run/secrets/obzenflow-postgres-password
       POSTGRES_DB: obzenflow
+      POSTGRES_HOST_AUTH_METHOD: trust
+    command: ["postgres", "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
     ports:
       - target: 5432
         published: "${OBZENFLOW_POSTGRES_HOST_PORT:-0}"
@@ -17,9 +18,10 @@ services:
       retries: 30
     labels:
       dev.obzenflow.service: postgres-proof
+      dev.obzenflow.authentication: trust-local-development
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ${OBZENFLOW_POSTGRES_PASSWORD_FILE:?required}:/run/secrets/obzenflow-postgres-password:ro
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
 
 volumes:
   postgres-data:

@@ -221,7 +221,7 @@ impl TestSession {
         state::create_session_directory(&identity.directory)?;
         let mut session_state = state::new_test(&identity);
         state::write(&identity.directory.join(STATE_FILE), &session_state)?;
-        if let Err(failure) = credentials::create_raw(&identity.directory) {
+        if let Err(failure) = credentials::create_acceptance_raw(&identity.directory) {
             let _ = state::remove_owned_directory(&root, &identity.directory);
             return Err(failure);
         }
@@ -241,8 +241,8 @@ impl TestSession {
         let setup = (|| {
             let service = compose.service_evidence(&root, &identity.directory, &session_state)?;
             state::record_or_verify_volume(&mut session_state, &service.volume)?;
-            credentials::create_test_pgpass(&identity.directory, session_state.port)?;
-            credentials::validate_test(&identity.directory, session_state.port)?;
+            credentials::create_acceptance_pgpass(&identity.directory, session_state.port)?;
+            credentials::validate_acceptance(&identity.directory, session_state.port)?;
             state::write(&identity.directory.join(STATE_FILE), &session_state)?;
             fixtures::provision_tests(&root, &compose, &identity.directory, &session_state)?;
             Ok(service)

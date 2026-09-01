@@ -87,7 +87,7 @@ impl Drop for StateRestoreGuard {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the repository PostgreSQL test environment"]
-async fn public_commands_preserve_rows_credentials_and_environment_boundaries() {
+async fn public_commands_preserve_rows_and_passwordless_environment_boundaries() {
     let root = workspace_root();
     let primary_project = required_env("OBZENFLOW_POSTGRES_TEST_PROJECT");
     let primary_run_id = required_env("OBZENFLOW_POSTGRES_TEST_RUN_ID");
@@ -106,8 +106,8 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
         .join("target/postgres-sessions")
         .join(format!("persistent-{token}"));
     let state_path = directory.join("state.tsv");
-    let raw_path = directory.join("password");
-    let pgpass_path = directory.join("pgpass");
+    let legacy_raw_path = directory.join("password");
+    let legacy_pgpass_path = directory.join("pgpass");
     let journal_root = root.join("target/postgres-lifecycle-journals").join(&token);
     let mut cleanup = CleanupGuard {
         root: root.clone(),
@@ -116,44 +116,30 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
     };
 
     let up = xtask(&root, &token, &["up"], &[]);
-    let up_text = assert_success("up", up, &[]);
+    let up_text = assert_success("up", up, &[&primary_secret]);
     let initial = read_state(&state_path);
-    let raw = fs::read_to_string(&raw_path).expect("read generated raw credential");
-    assert!(
-        valid_secret(&raw),
-        "raw credential is 64 lowercase hex bytes"
-    );
-    assert_ne!(
-        raw, primary_secret,
-        "test and development credentials differ"
-    );
-    assert!(
-        !up_text.contains(&raw),
-        "up does not print the managed secret"
-    );
+    assert!(up_text.contains("authentication:  trust"));
     assert_private_directory(&directory);
     assert_private_file(&state_path);
-    assert_private_file(&raw_path);
-    assert_private_file(&pgpass_path);
+    assert!(!legacy_raw_path.exists());
+    assert!(!legacy_pgpass_path.exists());
     assert!(
         !directory.join("tls").exists(),
         "development creates no TLS material"
     );
-    assert_eq!(
-        fs::read_to_string(&pgpass_path).expect("read generated pgpass"),
-        format!("localhost:{}:obzenflow:obzenflow:{raw}\n", initial.port)
-    );
-
     assert_ne!(initial.project, primary_project);
     assert_ne!(initial.run_id, primary_run_id);
     assert_ne!(initial.port, primary_port);
-    assert_ne!(pgpass_path, primary_pgpass);
 
-    assert_success("status", xtask(&root, &token, &["status"], &[]), &[&raw]);
+    assert_success(
+        "status",
+        xtask(&root, &token, &["status"], &[]),
+        &[&primary_secret],
+    );
     let connection = assert_success(
         "connection",
         xtask(&root, &token, &["connection"], &[]),
-        &[&raw],
+        &[&primary_secret],
     );
     for field in [
         "project:",
@@ -164,7 +150,7 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
         "database:",
         "schema:",
         "transport:",
-        "pgpass:",
+        "authentication:",
         "state:",
     ] {
         assert!(
@@ -172,7 +158,8 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
             "connection profile omitted {field}"
         );
     }
-    assert!(connection.contains("env -u PGPASSWORD"));
+    assert!(!connection.contains("env -u"));
+    assert!(connection.contains("psql 'postgresql://obzenflow@localhost:"));
     assert!(connection.contains("postgresql://obzenflow@localhost:"));
 
     let captured = assert_success(
@@ -183,13 +170,14 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
             &["run", "--", "env"],
             &[
                 ("PGPASSWORD", "ambient-wrong-password"),
+                ("PGPASSFILE", "/ambient/pgpass"),
                 ("OBZENFLOW_POSTGRES_TEST_SENTINEL", "must-not-cross"),
                 ("OBZENFLOW_POSTGRES_PASSWORD", "legacy-ambient-password"),
                 ("OBZENFLOW_POSTGRES_EXAMPLE_SCHEMA", "acceptance-only"),
                 (TRANSPORT_ENV, "verified-tls"),
             ],
         ),
-        &[&raw],
+        &[&primary_secret],
     );
     let captured = parse_environment(&captured);
     let development_url = captured
@@ -200,14 +188,10 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
         initial.port
     )));
     assert!(development_url.contains("sslmode=disable"));
-    assert!(!development_url.contains(&raw));
+    assert!(!development_url.contains(&primary_secret));
     assert_eq!(
         captured.get(TRANSPORT_ENV).map(String::as_str),
         Some("externally-protected-plaintext")
-    );
-    assert_eq!(
-        captured.get("PGPASSFILE"),
-        Some(&pgpass_path.display().to_string())
     );
     assert_eq!(
         captured
@@ -216,6 +200,7 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
         Some("obzenflow_example")
     );
     assert!(!captured.contains_key("PGPASSWORD"));
+    assert!(!captured.contains_key("PGPASSFILE"));
     assert!(!captured.contains_key(SESSION_ENV));
     assert!(!captured.contains_key("OBZENFLOW_POSTGRES_PASSWORD"));
     assert!(!captured.contains_key("OBZENFLOW_POSTGRES_PASSWORD_FILE"));
@@ -249,23 +234,20 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
                 journal_root.to_str().expect("journal path is Unicode"),
             )],
         ),
-        &[&raw],
+        &[&primary_secret],
     );
 
-    let secondary = development_pool(initial.port, &raw).await;
+    let secondary = development_pool(initial.port).await;
     assert_payment_rows(&secondary).await;
     secondary.close().await;
 
-    let initial_raw = fs::read(&raw_path).expect("snapshot raw credential");
-    let initial_pgpass = fs::read(&pgpass_path).expect("snapshot pgpass credential");
     let initial_state = fs::read(&state_path).expect("snapshot development state");
-    assert_success("down", xtask(&root, &token, &["down"], &[]), &[&raw]);
-    assert!(state_path.is_file(), "normal down retains session state");
-    assert_eq!(fs::read(&raw_path).expect("retained raw"), initial_raw);
-    assert_eq!(
-        fs::read(&pgpass_path).expect("retained pgpass"),
-        initial_pgpass
+    assert_success(
+        "down",
+        xtask(&root, &token, &["down"], &[]),
+        &[&primary_secret],
     );
+    assert!(state_path.is_file(), "normal down retains session state");
 
     let project_filter = format!("label=com.docker.compose.project={}", initial.project);
     let containers_before = docker_stdout(&["ps", "--all", "--quiet", "--filter", &project_filter]);
@@ -288,13 +270,13 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
     let rejected = assert_failure(
         "state-less retained-volume up",
         xtask(&root, &token, &["up"], &[]),
-        &[&raw],
+        &[&primary_secret],
     );
     for expected in [
         initial.project.as_str(),
         initial.volume.as_str(),
         state_path.to_str().expect("state path is Unicode"),
-        "refusing to generate a replacement credential",
+        "refusing to adopt retained data",
     ] {
         assert!(
             rejected.contains(expected),
@@ -320,24 +302,29 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
     );
     state_restore.restore();
 
-    assert_success("restart", xtask(&root, &token, &["up"], &[]), &[&raw]);
+    fs::write(&legacy_raw_path, "obsolete-development-password")
+        .expect("create obsolete raw credential fixture");
+    fs::write(&legacy_pgpass_path, "obsolete-development-pgpass")
+        .expect("create obsolete pgpass fixture");
+    assert_success(
+        "restart",
+        xtask(&root, &token, &["up"], &[]),
+        &[&primary_secret, "obsolete-development-password"],
+    );
     let restarted = read_state(&state_path);
     assert_eq!(restarted, initial, "normal restart retains exact authority");
     assert_eq!(
         fs::read(&state_path).expect("restarted state"),
         initial_state
     );
-    assert_eq!(fs::read(&raw_path).expect("restarted raw"), initial_raw);
-    assert_eq!(
-        fs::read(&pgpass_path).expect("restarted pgpass"),
-        initial_pgpass
-    );
+    assert!(!legacy_raw_path.exists());
+    assert!(!legacy_pgpass_path.exists());
     assert!(
         !directory.join("tls").exists(),
         "restart creates no development TLS material"
     );
 
-    let secondary = development_pool(restarted.port, &raw).await;
+    let secondary = development_pool(restarted.port).await;
     assert_payment_rows(&secondary).await;
     secondary.close().await;
     assert_eq!(
@@ -346,11 +333,15 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
         "the disposable acceptance session remains healthy"
     );
 
-    assert_success("logs", xtask(&root, &token, &["logs"], &[]), &[&raw]);
+    assert_success(
+        "logs",
+        xtask(&root, &token, &["logs"], &[]),
+        &[&primary_secret],
+    );
     assert_success(
         "down --volumes",
         xtask(&root, &token, &["down", "--volumes"], &[]),
-        &[&raw],
+        &[&primary_secret],
     );
     assert!(
         !directory.exists(),
@@ -444,13 +435,6 @@ fn required_env(name: &str) -> String {
         .unwrap_or_else(|_| panic!("{name} is required from `cargo xtask postgres test`"))
 }
 
-fn valid_secret(secret: &str) -> bool {
-    secret.len() == 64
-        && secret
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
 fn pgpass_secret(path: &Path, port: u16) -> String {
     fs::read_to_string(path)
         .expect("read outer pgpass")
@@ -462,12 +446,11 @@ fn pgpass_secret(path: &Path, port: u16) -> String {
         .expect("outer pgpass contains its exact port")
 }
 
-async fn development_pool(port: u16, password: &str) -> PgPool {
+async fn development_pool(port: u16) -> PgPool {
     let options = PgConnectOptions::new_without_pgpass()
         .host("localhost")
         .port(port)
         .username("obzenflow")
-        .password(password)
         .database("obzenflow")
         .ssl_mode(PgSslMode::Disable);
     PgPoolOptions::new()

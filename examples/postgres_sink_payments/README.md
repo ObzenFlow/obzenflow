@@ -32,11 +32,14 @@ cargo xtask postgres connection
 
 The command provisions the table from
 [the repository payments fixture](https://github.com/obzenflow/obzenflow/blob/main/dev/postgres/fixtures/payments.sql)
-and keeps the connection on loopback with a generated password and explicit
-externally protected plaintext transport. It generates no local certificates.
+and keeps the connection on loopback with explicit externally protected
+plaintext transport. It uses PostgreSQL `trust`
+authentication and generates neither development credentials nor local certificates.
+This optional service is suitable only for a trusted developer machine, never a
+shared workstation, remote service, production deployment, or sensitive data.
 Its first start allocates an available port and normal restarts retain it.
-`connection` prints the non-secret fields, managed pgpass path, and a copyable
-password-free `psql` command. To allocate a new automatic port, discard the
+`connection` prints the non-secret fields, the explicit trust boundary, and a
+copyable password-free `psql` command. To allocate a new automatic port, discard the
 session explicitly with `cargo xtask postgres down --volumes`, then run `up`
 again.
 
@@ -61,6 +64,6 @@ cargo xtask postgres run -- sh -c \
 
 Stop the service while retaining its data with `cargo xtask postgres down`, or
 remove the local data volume with `cargo xtask postgres down --volumes`. Normal
-shutdown retains the endpoint, Compose project, named volume, generated
-credentials, and rows; `status` verifies the retained endpoint and Docker
+shutdown retains the endpoint, Compose project, named volume, lifecycle state,
+and rows; `status` verifies the retained endpoint and Docker
 authority before presenting the service.
