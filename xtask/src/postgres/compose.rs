@@ -3,9 +3,12 @@
 // https://obzenflow.dev
 
 use super::{
-    config::{COMPOSE_FILE, IMAGE, LOG_FILE, POSTGRES_DATABASE, POSTGRES_USER},
+    config::{
+        ACCEPTANCE_COMPOSE_FILE, DEVELOPMENT_COMPOSE_FILE, IMAGE, LOG_FILE, POSTGRES_DATABASE,
+        POSTGRES_USER,
+    },
     credentials,
-    state::SessionState,
+    state::{SessionMode, SessionState},
 };
 use crate::{error, Result};
 use std::{
@@ -109,22 +112,29 @@ impl Compose {
         state: &SessionState,
         args: &[&str],
     ) -> Command {
+        let compose_file = match state.mode {
+            SessionMode::Development => DEVELOPMENT_COMPOSE_FILE,
+            SessionMode::Test => ACCEPTANCE_COMPOSE_FILE,
+        };
         let mut command = Command::new(&self.program);
         command
             .current_dir(root)
             .args(&self.prefix)
             .arg("-f")
-            .arg(root.join(COMPOSE_FILE))
+            .arg(root.join(compose_file))
             .arg("-p")
             .arg(&state.project)
             .args(args)
             .env_remove("OBZENFLOW_POSTGRES_PASSWORD")
+            .env_remove("OBZENFLOW_POSTGRES_TLS_DIR")
             .env(
                 "OBZENFLOW_POSTGRES_PASSWORD_FILE",
                 credentials::raw_path(directory),
             )
-            .env("OBZENFLOW_POSTGRES_TLS_DIR", directory.join("tls"))
             .env("OBZENFLOW_POSTGRES_HOST_PORT", state.port.to_string());
+        if state.mode == SessionMode::Test {
+            command.env("OBZENFLOW_POSTGRES_TLS_DIR", directory.join("tls"));
+        }
         command
     }
 

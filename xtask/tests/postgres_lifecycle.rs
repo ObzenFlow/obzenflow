@@ -17,6 +17,7 @@ use std::{
 use uuid::Uuid;
 
 const SESSION_ENV: &str = "OBZENFLOW_POSTGRES_XTASK_PROOF_SESSION";
+const TRANSPORT_ENV: &str = "OBZENFLOW_POSTGRES_TRANSPORT";
 
 #[derive(Debug, PartialEq, Eq)]
 struct SessionState {
@@ -134,6 +135,10 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
     assert_private_file(&state_path);
     assert_private_file(&raw_path);
     assert_private_file(&pgpass_path);
+    assert!(
+        !directory.join("tls").exists(),
+        "development creates no TLS material"
+    );
     assert_eq!(
         fs::read_to_string(&pgpass_path).expect("read generated pgpass"),
         format!("localhost:{}:obzenflow:obzenflow:{raw}\n", initial.port)
@@ -158,7 +163,7 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
         "port:",
         "database:",
         "schema:",
-        "CA certificate:",
+        "transport:",
         "pgpass:",
         "state:",
     ] {
@@ -181,6 +186,7 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
                 ("OBZENFLOW_POSTGRES_TEST_SENTINEL", "must-not-cross"),
                 ("OBZENFLOW_POSTGRES_PASSWORD", "legacy-ambient-password"),
                 ("OBZENFLOW_POSTGRES_EXAMPLE_SCHEMA", "acceptance-only"),
+                (TRANSPORT_ENV, "verified-tls"),
             ],
         ),
         &[&raw],
@@ -193,7 +199,12 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
         "postgresql://obzenflow@localhost:{}/obzenflow?",
         initial.port
     )));
+    assert!(development_url.contains("sslmode=disable"));
     assert!(!development_url.contains(&raw));
+    assert_eq!(
+        captured.get(TRANSPORT_ENV).map(String::as_str),
+        Some("externally-protected-plaintext")
+    );
     assert_eq!(
         captured.get("PGPASSFILE"),
         Some(&pgpass_path.display().to_string())
@@ -248,11 +259,6 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
     let initial_raw = fs::read(&raw_path).expect("snapshot raw credential");
     let initial_pgpass = fs::read(&pgpass_path).expect("snapshot pgpass credential");
     let initial_state = fs::read(&state_path).expect("snapshot development state");
-    let initial_ca = fs::read(directory.join("tls/ca.crt")).expect("snapshot development CA");
-    let initial_server_certificate = fs::read(directory.join("tls/server.crt"))
-        .expect("snapshot development server certificate");
-    let initial_server_key =
-        fs::read(directory.join("tls/server.key")).expect("snapshot development server key");
     assert_success("down", xtask(&root, &token, &["down"], &[]), &[&raw]);
     assert!(state_path.is_file(), "normal down retains session state");
     assert_eq!(fs::read(&raw_path).expect("retained raw"), initial_raw);
@@ -326,18 +332,9 @@ async fn public_commands_preserve_rows_credentials_and_environment_boundaries() 
         fs::read(&pgpass_path).expect("restarted pgpass"),
         initial_pgpass
     );
-    assert_eq!(
-        fs::read(directory.join("tls/ca.crt")).expect("restarted development CA"),
-        initial_ca
-    );
-    assert_eq!(
-        fs::read(directory.join("tls/server.crt"))
-            .expect("restarted development server certificate"),
-        initial_server_certificate
-    );
-    assert_eq!(
-        fs::read(directory.join("tls/server.key")).expect("restarted development server key"),
-        initial_server_key
+    assert!(
+        !directory.join("tls").exists(),
+        "restart creates no development TLS material"
     );
 
     let secondary = development_pool(restarted.port, &raw).await;

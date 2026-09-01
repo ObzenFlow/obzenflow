@@ -7,8 +7,8 @@ use super::{
     config::{
         hn_digest_test_schema, inventory_test_schema, payment_test_schema, plaintext_url, tls_url,
         verified_tls_url, DEVELOPMENT_PAYMENT_SCHEMA, HN_DIGEST_TEST_SCHEMA_ENV,
-        INVENTORY_TEST_SCHEMA_ENV, PAYMENT_TEST_SCHEMA_ENV, POSTGRES_SCHEMA_ENV,
-        SESSION_OVERRIDE_ENV,
+        INVENTORY_TEST_SCHEMA_ENV, LOOPBACK_TRANSPORT, PAYMENT_TEST_SCHEMA_ENV,
+        POSTGRES_SCHEMA_ENV, POSTGRES_TRANSPORT_ENV, SESSION_OVERRIDE_ENV, VERIFIED_TLS_TRANSPORT,
     },
     credentials,
     state::SessionState,
@@ -22,6 +22,7 @@ const INTERNAL_DEVELOPMENT_ENV: &[&str] = &[
     "OBZENFLOW_POSTGRES_PASSWORD_FILE",
     "OBZENFLOW_POSTGRES_TLS_DIR",
     "OBZENFLOW_POSTGRES_HOST_PORT",
+    POSTGRES_TRANSPORT_ENV,
     PAYMENT_TEST_SCHEMA_ENV,
     INVENTORY_TEST_SCHEMA_ENV,
     HN_DIGEST_TEST_SCHEMA_ENV,
@@ -49,13 +50,10 @@ pub(super) fn configure_development(
 ) -> Result<String> {
     let files = credentials::validate_development(directory, state.port)?;
     remove_development_only_inputs(command);
-    let ca_certificate = directory.join("tls/ca.crt");
     command
-        .env(
-            "OBZENFLOW_POSTGRES_URL",
-            verified_tls_url(state.port, &ca_certificate)?,
-        )
-        .env("PGPASSFILE", files.pgpass);
+        .env("OBZENFLOW_POSTGRES_URL", plaintext_url(state.port))
+        .env("PGPASSFILE", files.pgpass)
+        .env(POSTGRES_TRANSPORT_ENV, LOOPBACK_TRANSPORT);
     let schema = inherited_schema()?;
     command.env(POSTGRES_SCHEMA_ENV, &schema);
     Ok(schema)
@@ -79,6 +77,7 @@ pub(super) fn configure_test(
             "OBZENFLOW_POSTGRES_URL",
             verified_tls_url(state.port, &ca_certificate)?,
         )
+        .env(POSTGRES_TRANSPORT_ENV, VERIFIED_TLS_TRANSPORT)
         .env(POSTGRES_SCHEMA_ENV, DEVELOPMENT_PAYMENT_SCHEMA)
         .env("OBZENFLOW_POSTGRES_TEST_URL", plaintext_url(state.port))
         .env("OBZENFLOW_POSTGRES_TEST_RUN_ID", &state.run_id)
@@ -173,6 +172,7 @@ mod tests {
         command
             .env("PGPASSWORD", "ambient")
             .env("OBZENFLOW_POSTGRES_TEST_URL", "ambient")
+            .env(POSTGRES_TRANSPORT_ENV, "ambient")
             .env(SESSION_OVERRIDE_ENV, "ambient");
         configure_development(&mut command, &directory, &state).expect("configure child");
         let environment = command
@@ -194,7 +194,14 @@ mod tests {
             .expect("managed URL")
             .to_string_lossy();
         assert!(url.starts_with("postgresql://obzenflow@localhost:15432/"));
+        assert!(url.contains("sslmode=disable"));
         assert!(!url.contains(":ambient@"));
+        assert_eq!(
+            environment
+                .get(OsStr::new(POSTGRES_TRANSPORT_ENV))
+                .and_then(Option::as_ref),
+            Some(&OsString::from(LOOPBACK_TRANSPORT))
+        );
         assert_eq!(
             environment
                 .get(OsStr::new("PGPASSFILE"))

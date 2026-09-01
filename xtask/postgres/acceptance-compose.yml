@@ -1,0 +1,57 @@
+services:
+  tls-material:
+    image: postgres:17
+    entrypoint:
+      - install
+    command:
+      - -o
+      - postgres
+      - -g
+      - postgres
+      - -m
+      - "0600"
+      - /input/server.crt
+      - /input/server.key
+      - /output/
+    volumes:
+      - ${OBZENFLOW_POSTGRES_TLS_DIR:?required}/server.crt:/input/server.crt:ro
+      - ${OBZENFLOW_POSTGRES_TLS_DIR:?required}/server.key:/input/server.key:ro
+      - postgres-tls:/output
+
+  postgres:
+    image: postgres:17
+    depends_on:
+      tls-material:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_USER: obzenflow
+      POSTGRES_PASSWORD_FILE: /run/secrets/obzenflow-postgres-password
+      POSTGRES_DB: obzenflow
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/var/lib/postgresql/obzenflow-tls/server.crt
+      - -c
+      - ssl_key_file=/var/lib/postgresql/obzenflow-tls/server.key
+    ports:
+      - target: 5432
+        published: "${OBZENFLOW_POSTGRES_HOST_PORT:-0}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    healthcheck:
+      test: ["CMD", "psql", "-U", "obzenflow", "-d", "obzenflow", "-Atqc", "SELECT 1"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    labels:
+      dev.obzenflow.service: postgres-proof
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ${OBZENFLOW_POSTGRES_PASSWORD_FILE:?required}:/run/secrets/obzenflow-postgres-password:ro
+      - postgres-tls:/var/lib/postgresql/obzenflow-tls:ro
+
+volumes:
+  postgres-data:
+  postgres-tls:

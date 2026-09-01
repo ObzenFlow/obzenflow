@@ -7,7 +7,7 @@ disposable service for acceptance tests.
 
 ## Persistent development session
 
-Docker Compose and OpenSSL are required. Start or inspect the service with:
+Docker Compose is required. Start or inspect the service with:
 
 ```console
 cargo xtask postgres up
@@ -23,10 +23,11 @@ checkout-local password as two owner-only files:
 - `password`, mounted into the official image through `POSTGRES_PASSWORD_FILE`;
 - `pgpass`, containing the exact retained host, port, database, and user.
 
-The generated CA certificate is public, so `up`, `status`, and `connection`
-publish a gitignored copy at `dev/postgres/local-ca.crt`. This visible path can
-be selected directly in GUI clients such as TablePlus; secret and state files
-remain under `.obzenflow`.
+The service binds only `127.0.0.1` and uses PostgreSQL password authentication.
+Development traffic is deliberately plaintext inside that trusted loopback
+boundary. The managed profile selects ObzenFlow's explicit
+`ExternallyProtectedPlaintext` transport; it creates no CA, certificate, private
+key, or custom container entrypoint.
 
 The password is never printed or placed in a connection URL or ordinary child
 environment value. `connection` prints the non-secret profile and a copyable
@@ -67,16 +68,16 @@ xtask state.
 # Stop the container; retain port, volume, credentials, and rows.
 cargo xtask postgres down
 
-# Delete the exact owned volume, credentials, certificates, visible CA copy, and state.
+# Delete the exact owned volume, credentials, and state.
 cargo xtask postgres down --volumes
 ```
 
 First startup is transactional: provisional state and the raw credential are
 written before Compose starts; the exact pgpass and ready state are committed
 only after Docker reports the published port and named volume. If setup is
-interrupted, or retained credentials/certificates are missing or malformed, the
-tool refuses to regenerate them against retained data. Use the explicit
-`down --volumes` reset shown above.
+interrupted, or retained credentials are missing or malformed, the tool refuses
+to regenerate them against retained data. Use the explicit `down --volumes`
+reset shown above.
 
 ## Disposable acceptance suite
 
@@ -84,8 +85,9 @@ tool refuses to regenerate them against retained data. Use the explicit
 cargo xtask postgres test
 ```
 
-Each run creates its own project, dynamic port, volume, state directory,
-credential, pgpass, TLS material, and schemas under
-`target/postgres-sessions/<run-id>`. The coordinator supplies test-only inputs to
-its named children and removes the disposable project and files when the suite
-finishes.
+Each run creates its own project, dynamic port, data and TLS volumes, state
+directory, credential, pgpass, short-lived TLS material, and schemas under
+`target/postgres-sessions/<run-id>`. OpenSSL is required only for this explicit
+acceptance command. The unpublished xtask Compose profile prepares the server
+certificate and key through a disposable setup service, retains 083c's real TLS
+proof, and removes the project and files when the suite finishes.

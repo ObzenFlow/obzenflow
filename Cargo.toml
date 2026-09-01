@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 keywords = ["event-streaming", "event-sourcing", "async", "pipeline"]
 publish = true
+exclude = ["dev/postgres/**"]
 
 [workspace]
 resolver = "2"

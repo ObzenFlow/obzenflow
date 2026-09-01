@@ -15,7 +15,7 @@ mod tls;
 use self::{
     compose::{Compose, ServiceEvidence},
     config::{
-        verified_tls_url, DEVELOPMENT_PAYMENT_SCHEMA, IMAGE, POSTGRES_BIND_ADDRESS,
+        plaintext_url, DEVELOPMENT_PAYMENT_SCHEMA, IMAGE, POSTGRES_BIND_ADDRESS,
         POSTGRES_CLIENT_HOST, POSTGRES_DATABASE, POSTGRES_USER, STATE_FILE,
     },
     state::{DevelopmentIdentity, SessionState},
@@ -80,15 +80,7 @@ fn up(flags: &[String]) -> Result<()> {
         &session,
         DEVELOPMENT_PAYMENT_SCHEMA,
     )?;
-    let ca_certificate = tls::client_ca(&root, &identity.directory)?;
-    print_status(
-        &compose,
-        &identity,
-        &session,
-        "healthy",
-        Some(&service),
-        &ca_certificate,
-    );
+    print_status(&compose, &identity, &session, "healthy", Some(&service));
     println!("run a command with: cargo xtask postgres run -- <command> [args...]");
     println!("show the password-free client profile with: cargo xtask postgres connection");
     Ok(())
@@ -131,7 +123,6 @@ fn first_up(
     let state_path = identity.directory.join(STATE_FILE);
     state::write(&state_path, &session)?;
     credentials::create_raw(&identity.directory)?;
-    tls::create_development(&identity.directory)?;
     compose.start(root, &identity.directory, &mut session)?;
     let service = compose.service_evidence(root, &identity.directory, &session)?;
     state::record_or_verify_volume(&mut session, &service.volume)?;
@@ -151,7 +142,6 @@ fn restart_or_verify(
     state::require_development_authority(&session, identity)?;
     state::require_ready(&session)?;
     credentials::validate_development(&identity.directory, session.port)?;
-    tls::verify_development(&identity.directory)?;
 
     let health = compose.health(root, &identity.directory, &session)?;
     match health.as_str() {
@@ -201,13 +191,7 @@ fn status(flags: &[String]) -> Result<()> {
     let ready = state::require_ready(&session).is_ok();
     if ready {
         credentials::validate_development(&identity.directory, session.port)?;
-        tls::verify_development(&identity.directory)?;
     }
-    let ca_certificate = if ready {
-        tls::client_ca(&root, &identity.directory)?
-    } else {
-        identity.directory.join("tls/ca.crt")
-    };
     let health = compose.health(&root, &identity.directory, &session)?;
     let service = if health == "healthy" {
         let actual_port = compose.published_port(&root, &identity.directory, &session)?;
@@ -223,14 +207,7 @@ fn status(flags: &[String]) -> Result<()> {
     } else {
         None
     };
-    print_status(
-        &compose,
-        &identity,
-        &session,
-        &health,
-        service.as_ref(),
-        &ca_certificate,
-    );
+    print_status(&compose, &identity, &session, &health, service.as_ref());
     if !ready {
         println!(
             "  recovery:        setup is provisional; run `cargo xtask postgres down --volumes`"
@@ -247,17 +224,9 @@ fn connection(flags: &[String]) -> Result<()> {
     let compose = Compose::preflight()?;
     let (identity, mut session) = development_session(&root, true)?;
     let service = verify_running_session(&root, &compose, &identity, &mut session)?;
-    let ca_certificate = tls::client_ca(&root, &identity.directory)?;
-    print_status(
-        &compose,
-        &identity,
-        &session,
-        "healthy",
-        Some(&service),
-        &ca_certificate,
-    );
+    print_status(&compose, &identity, &session, "healthy", Some(&service));
     let pgpass = credentials::pgpass_path(&identity.directory);
-    let url = verified_tls_url(session.port, &ca_certificate)?;
+    let url = plaintext_url(session.port);
     println!("copyable password-free psql command:");
     println!("env -u PGPASSWORD \\");
     println!(
@@ -343,9 +312,6 @@ fn down(flags: &[String]) -> Result<()> {
     let identity = state::development_identity(&root)?;
     let state_path = identity.directory.join(STATE_FILE);
     if !state_path.is_file() {
-        if volumes {
-            tls::remove_client_ca(&root, &identity.directory)?;
-        }
         println!("no PostgreSQL development session state found");
         return Ok(());
     }
@@ -379,7 +345,6 @@ fn down(flags: &[String]) -> Result<()> {
             )));
         }
         state::remove_owned_directory(&root, &identity.directory)?;
-        tls::remove_client_ca(&root, &identity.directory)?;
     } else {
         println!(
             "PostgreSQL project stopped; its retained port, named volume, credentials, and rows are preserved"
@@ -458,7 +423,6 @@ fn verify_running_session(
 ) -> Result<ServiceEvidence> {
     state::require_ready(session)?;
     credentials::validate_development(&identity.directory, session.port)?;
-    tls::verify_development(&identity.directory)?;
     let health = compose.health(root, &identity.directory, session)?;
     if health != "healthy" {
         return Err(error(format!(
@@ -501,7 +465,6 @@ fn print_status(
     session: &SessionState,
     health: &str,
     service: Option<&ServiceEvidence>,
-    ca_certificate: &Path,
 ) {
     let container = service
         .map(|evidence| evidence.container_id.as_str())
@@ -528,8 +491,7 @@ fn print_status(
     println!("  database:        {POSTGRES_DATABASE}");
     println!("  user:            {POSTGRES_USER}");
     println!("  schema:          {DEVELOPMENT_PAYMENT_SCHEMA}");
-    println!("  TLS mode:        verify-full");
-    println!("  CA certificate:  {}", ca_certificate.display());
+    println!("  transport:       externally protected plaintext (loopback)");
     println!(
         "  pgpass:          {}",
         credentials::pgpass_path(&identity.directory).display()

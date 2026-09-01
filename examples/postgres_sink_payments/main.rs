@@ -13,16 +13,18 @@
 
 mod domain;
 mod flow;
+#[path = "../support/postgres_transport.rs"]
+mod postgres_transport;
 
 use anyhow::Result;
 use obzenflow::application::FlowApplication;
-use obzenflow::sinks::postgres::{PostgresConnection, PostgresTransport};
+use obzenflow::sinks::postgres::PostgresConnection;
 use std::path::PathBuf;
 
 fn main() -> Result<()> {
     let connection = PostgresConnection::deferred_from_env(
         "OBZENFLOW_POSTGRES_URL",
-        PostgresTransport::VerifiedTls,
+        postgres_transport::from_environment()?,
     );
     let schema = std::env::var("OBZENFLOW_POSTGRES_SCHEMA")
         .unwrap_or_else(|_| "obzenflow_example".to_string());

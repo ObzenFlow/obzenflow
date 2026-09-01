@@ -6,11 +6,11 @@ use crate::{error, Result};
 use std::path::Path;
 use url::Url;
 
-pub(super) const COMPOSE_FILE: &str = "dev/postgres/compose.yml";
+pub(super) const DEVELOPMENT_COMPOSE_FILE: &str = "dev/postgres/compose.yml";
+pub(super) const ACCEPTANCE_COMPOSE_FILE: &str = "xtask/postgres/acceptance-compose.yml";
 pub(super) const SESSION_ROOT: &str = "target/postgres-sessions";
 pub(super) const DEVELOPMENT_STATE_ROOT: &str = ".obzenflow/postgres";
 pub(super) const DEVELOPMENT_SESSION: &str = "development";
-pub(super) const DEVELOPMENT_CA_FILE: &str = "dev/postgres/local-ca.crt";
 pub(super) const SESSION_OVERRIDE_ENV: &str = "OBZENFLOW_POSTGRES_XTASK_PROOF_SESSION";
 pub(super) const STATE_FILE: &str = "state.tsv";
 pub(super) const RAW_PASSWORD_FILE: &str = "password";
@@ -24,6 +24,9 @@ pub(super) const PAYMENT_TEST_SCHEMA_ENV: &str = "OBZENFLOW_POSTGRES_EXAMPLE_SCH
 pub(super) const INVENTORY_TEST_SCHEMA_ENV: &str = "OBZENFLOW_POSTGRES_INVENTORY_SCHEMA";
 pub(super) const HN_DIGEST_TEST_SCHEMA_ENV: &str = "OBZENFLOW_POSTGRES_HN_DIGEST_SCHEMA";
 pub(super) const POSTGRES_SCHEMA_ENV: &str = "OBZENFLOW_POSTGRES_SCHEMA";
+pub(super) const POSTGRES_TRANSPORT_ENV: &str = "OBZENFLOW_POSTGRES_TRANSPORT";
+pub(super) const VERIFIED_TLS_TRANSPORT: &str = "verified-tls";
+pub(super) const LOOPBACK_TRANSPORT: &str = "externally-protected-plaintext";
 
 pub(super) const POSTGRES_CLIENT_HOST: &str = "localhost";
 pub(super) const POSTGRES_BIND_ADDRESS: &str = "127.0.0.1";
@@ -78,14 +81,47 @@ mod tests {
     }
 
     #[test]
-    fn compose_uses_a_password_file_not_a_secret_environment_value() {
+    fn compose_profiles_separate_plaintext_development_from_tls_acceptance() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("xtask is a workspace member")
             .to_path_buf();
-        let compose = fs::read_to_string(root.join(COMPOSE_FILE)).expect("read Compose file");
-        assert!(compose.contains("POSTGRES_PASSWORD_FILE:"));
-        assert!(!compose.contains("POSTGRES_PASSWORD:"));
+        let development = fs::read_to_string(root.join(DEVELOPMENT_COMPOSE_FILE))
+            .expect("read development Compose file");
+        assert!(development.contains("POSTGRES_PASSWORD_FILE:"));
+        assert!(!development.contains("POSTGRES_PASSWORD:"));
+        for forbidden in [
+            "OBZENFLOW_POSTGRES_TLS_DIR",
+            "server.crt",
+            "server.key",
+            "ssl=on",
+            "entrypoint:",
+            "CMD-SHELL",
+        ] {
+            assert!(
+                !development.contains(forbidden),
+                "development Compose contains TLS or shell concern {forbidden}"
+            );
+        }
+
+        let acceptance = fs::read_to_string(root.join(ACCEPTANCE_COMPOSE_FILE))
+            .expect("read acceptance Compose file");
+        assert!(acceptance.contains("POSTGRES_PASSWORD_FILE:"));
+        assert!(!acceptance.contains("POSTGRES_PASSWORD:"));
+        for required in [
+            "OBZENFLOW_POSTGRES_TLS_DIR",
+            "server.crt",
+            "server.key",
+            "ssl=on",
+            "condition: service_completed_successfully",
+        ] {
+            assert!(
+                acceptance.contains(required),
+                "acceptance Compose omitted TLS concern {required}"
+            );
+        }
+        assert!(!acceptance.contains("/bin/bash"));
+        assert!(!acceptance.contains("CMD-SHELL"));
     }
 
     #[test]

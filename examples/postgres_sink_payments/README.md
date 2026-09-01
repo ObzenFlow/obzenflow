@@ -13,11 +13,14 @@ export OBZENFLOW_POSTGRES_SCHEMA='payments'
 cargo run -p obzenflow --features postgres --example postgres_sink_payments
 ```
 
-The backing service is not launched or owned by the application. The URL must select
+The backing service is not launched or owned by the application. An absent
+`OBZENFLOW_POSTGRES_TRANSPORT` defaults to `verified-tls`, so the URL must select
 `sslmode=verify-full`; private certificate authorities can be provided with its
-`sslrootcert` option. `OBZENFLOW_POSTGRES_SCHEMA` defaults to
-`obzenflow_example`, and `OBZENFLOW_JOURNAL_ROOT` defaults to
-`target/postgres-sink-payments`.
+`sslrootcert` option. An application may explicitly set the transport to
+`externally-protected-plaintext` only when another local boundary such as loopback,
+a Unix socket, sidecar, or tunnel protects the connection.
+`OBZENFLOW_POSTGRES_SCHEMA` defaults to `obzenflow_example`, and
+`OBZENFLOW_JOURNAL_ROOT` defaults to `target/postgres-sink-payments`.
 
 For local development, an optional repository-managed PostgreSQL 17 service is
 available:
@@ -28,12 +31,14 @@ cargo xtask postgres connection
 ```
 
 The command provisions the table from
-[`dev/postgres/fixtures/payments.sql`](../../dev/postgres/fixtures/payments.sql)
-and keeps the connection on loopback with hostname-verified TLS. Its first start
-allocates an available port and normal restarts retain it. `connection` prints
-the non-secret fields, managed pgpass path, and a copyable password-free `psql`
-command. To allocate a new automatic port, discard the session explicitly with
-`cargo xtask postgres down --volumes`, then run `up` again.
+[the repository payments fixture](https://github.com/obzenflow/obzenflow/blob/main/dev/postgres/fixtures/payments.sql)
+and keeps the connection on loopback with a generated password and explicit
+externally protected plaintext transport. It generates no local certificates.
+Its first start allocates an available port and normal restarts retain it.
+`connection` prints the non-secret fields, managed pgpass path, and a copyable
+password-free `psql` command. To allocate a new automatic port, discard the
+session explicitly with `cargo xtask postgres down --volumes`, then run `up`
+again.
 
 Run the example inside that optional local environment:
 

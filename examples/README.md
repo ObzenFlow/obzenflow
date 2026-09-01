@@ -72,9 +72,9 @@ These examples don't have tutorials, but they demonstrate concrete framework con
   - Run with metrics: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
   - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)
 
-- **`postgres_sink_payments`** — Typed payment events delivered to PostgreSQL with parameter binding, batching, verified TLS, and a repeat-safe UPSERT. Use this to learn the PostgreSQL sink's application-facing surface.
+- **`postgres_sink_payments`** — Typed payment events delivered to PostgreSQL with parameter binding, batching, an explicit transport policy, and a repeat-safe UPSERT. Direct configuration defaults to verified TLS; the optional repository service deliberately selects loopback-protected plaintext. Use this to learn the PostgreSQL sink's application-facing surface.
   - Backing service: supply `OBZENFLOW_POSTGRES_URL` directly from any PostgreSQL deployment
-  - Optional local service: `cargo xtask postgres up`, followed by `cargo xtask postgres connection` for GUI-client fields
+  - Optional local service: `cargo xtask postgres up`, followed by `cargo xtask postgres connection` for its password-free loopback profile
   - Run through the local environment: `cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_payments`
   - Stop while retaining rows: `cargo xtask postgres down`; add `--volumes` only to discard the development database
   - Guide: [`examples/postgres_sink_payments/README.md`](postgres_sink_payments/README.md)
