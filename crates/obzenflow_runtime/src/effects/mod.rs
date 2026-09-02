@@ -18,9 +18,9 @@ pub use obzenflow_core::event::payloads::effect_payload::{
     EFFECT_ATTEMPT_STARTED_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
     EFFECT_RECOVERY_ABANDONED_EVENT_TYPE,
 };
-// `EffectOutcomeFacts` re-exports both the trait and its derive (FLOWIP-120m).
+use obzenflow_core::event::schema::EffectOutcomeFacts;
 pub use obzenflow_core::event::schema::{
-    EffectOutcomeFacts, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
+    TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
 };
 use obzenflow_core::event::{ChainEventContent, ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::Journal;

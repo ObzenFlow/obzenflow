@@ -139,9 +139,9 @@ macro_rules! effect_set {
             $crate::effect_set!(@list $($member),*)
         >
     };
-    (@list) => { $crate::obzenflow_core::event::schema::EmptySet };
+    (@list) => { $crate::__private::EmptySet };
     (@list $head:ty $(, $rest:ty)*) => {
-        $crate::obzenflow_core::event::schema::WithMember<
+        $crate::__private::WithMember<
             $head,
             $crate::effect_set!(@list $($rest),*)
         >

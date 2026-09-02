@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Derive macros for ObzenFlow.
+//! Compiler-host derives for Core-owned ObzenFlow contracts.
 //!
 //! Provides `#[derive(EffectOutcomeFacts)]` for effect outcome carriers
 //! (FLOWIP-120m) and `#[derive(StageOutputFacts)]` for pure stage output
@@ -45,13 +45,12 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, Ident, Type};
 /// # Path resolution
 ///
 /// Generated code resolves `::obzenflow_core` in the deriving crate's
-/// namespace. If your crate reaches the trait through a re-export and has no
-/// direct `obzenflow_core` dependency (for example, only `obzenflow_runtime`
-/// in Cargo.toml), point the derive at the re-exported core:
+/// namespace. If the direct `obzenflow_core` dependency has been renamed in
+/// Cargo.toml, point the derive at that extern-prelude name:
 ///
 /// ```ignore
 /// #[derive(Debug, Clone, EffectOutcomeFacts)]
-/// #[effect_outcome(crate = obzenflow_runtime::obzenflow_core)]
+/// #[effect_outcome(crate = flow_core)]
 /// enum Outcome {
 ///     Ok(SomeFact),
 /// }
@@ -83,8 +82,8 @@ pub fn derive_effect_outcome_facts(input: TokenStream) -> TokenStream {
 /// `TypedPayload`: the blanket implementations conflict, deliberately.
 ///
 /// The `#[stage_output(crate = <path>)]` attribute mirrors
-/// `#[effect_outcome(crate = <path>)]` for crates that reach
-/// `obzenflow_core` through a re-export.
+/// `#[effect_outcome(crate = <path>)]` when the direct `obzenflow_core`
+/// dependency has been renamed.
 #[proc_macro_derive(StageOutputFacts, attributes(stage_output))]
 pub fn derive_stage_output_facts(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -95,7 +94,7 @@ pub fn derive_stage_output_facts(input: TokenStream) -> TokenStream {
 
 /// The path the generated code resolves `obzenflow_core` through: the
 /// caller's extern-prelude name by default, or the path named by
-/// `#[effect_outcome(crate = <path>)]` when core is reached via a re-export.
+/// `#[effect_outcome(crate = <path>)]` when that dependency has been renamed.
 fn core_path(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
     attr_core_path(input, "effect_outcome", "FLOWIP-120m")
 }

@@ -1,6 +1,6 @@
 [package]
-name = "obzenflow_derive"
-description = "Derive macros for ObzenFlow - effect outcome carriers via #[derive(EffectOutcomeFacts)]"
+name = "obzenflow_core_derive"
+description = "Procedural derives for Core-owned ObzenFlow contracts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

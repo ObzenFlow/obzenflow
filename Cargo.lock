@@ -1714,6 +1714,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1822,7 +1823,7 @@ dependencies = [
  "chrono",
  "futures-core",
  "http 1.4.0",
- "obzenflow_derive",
+ "obzenflow_core_derive",
  "ring",
  "serde",
  "serde_json",
@@ -1833,7 +1834,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "obzenflow_derive"
+name = "obzenflow_core_derive"
 version = "0.2.0"
 dependencies = [
  "proc-macro2",
@@ -4131,7 +4132,7 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "ring",

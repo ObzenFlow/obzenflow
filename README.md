@@ -94,7 +94,7 @@ No features are enabled by default. `--features obzenflow_infra/warp-server` ena
 ObzenFlow follows an onion architecture: `obzenflow_core` defines the business domain and ports (traits), and outer layers provide implementations, orchestration, wiring, and concrete integrations.
 
 - `crates/obzenflow_core/README.md`: core domain types + stable interfaces (events, journals, contracts, middleware ports)
-- `crates/obzenflow_derive/README.md`: derive macros for the authoring surface (`EffectOutcomeFacts` for effect outcome carriers)
+- `crates/obzenflow_core_derive/README.md`: compiler-host derives for Core-owned authoring contracts
 - `crates/obzenflow_runtime/README.md`: stage execution + supervisors + runtime orchestration (the engine)
 - `crates/obzenflow_dsl/README.md`: the `flow!` DSL and how it builds a runnable flow graph
 - `crates/obzenflow_infra/README.md`: `FlowApplication` + journaling/web/HTTP implementations, mostly behind feature flags

@@ -16,7 +16,7 @@ members = ["crates/*", "xtask"]
 # Build all workspace members by default (excluding the root package)
 # Note: obzenflow_benchmarks is excluded from default-members as it's only for benchmarking
 default-members = [
-    "crates/obzenflow_derive",
+    "crates/obzenflow_core_derive",
     "crates/obzenflow_core",
     "crates/obzenflow_runtime",
     "crates/obzenflow_adapters",
@@ -34,14 +34,14 @@ homepage = "https://obzenflow.dev"
 
 [workspace.dependencies]
 # Workspace crates
-obzenflow_derive = { version = "0.2.0", path = "crates/obzenflow_derive" }
-obzenflow_core = { version = "0.2.0", path = "crates/obzenflow_core" }
-obzenflow_runtime = { version = "0.2.0", path = "crates/obzenflow_runtime" }
-obzenflow_adapters = { version = "0.2.0", path = "crates/obzenflow_adapters" }
-obzenflow_dsl = { version = "0.2.0", path = "crates/obzenflow_dsl" }
-obzenflow_infra = { version = "0.2.0", path = "crates/obzenflow_infra" }
-obzenflow_benchmarks = { version = "0.2.0", path = "crates/obzenflow_benchmarks" }
-obzenflow_sketches = { version = "0.2.0", path = "crates/obzenflow_sketches" }
+obzenflow_core_derive = { version = "=0.2.0", path = "crates/obzenflow_core_derive" }
+obzenflow_core = { version = "=0.2.0", path = "crates/obzenflow_core" }
+obzenflow_runtime = { version = "=0.2.0", path = "crates/obzenflow_runtime" }
+obzenflow_adapters = { version = "=0.2.0", path = "crates/obzenflow_adapters" }
+obzenflow_dsl = { version = "=0.2.0", path = "crates/obzenflow_dsl" }
+obzenflow_infra = { version = "=0.2.0", path = "crates/obzenflow_infra" }
+obzenflow_benchmarks = { version = "=0.2.0", path = "crates/obzenflow_benchmarks" }
+obzenflow_sketches = { version = "=0.2.0", path = "crates/obzenflow_sketches" }
 
 # External ObzenFlow crates
 obzenflow-topology = "0.5.1"
@@ -72,7 +72,7 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
 anyhow = "1"
 
-# Proc-macro toolchain (obzenflow_derive)
+# Proc-macro toolchain (obzenflow_core_derive)
 proc-macro2 = "1"
 quote = "1"
 syn = "2"
@@ -152,6 +152,7 @@ tempfile = { workspace = true }
 futures = { workspace = true }
 proc-macro2 = { workspace = true }
 syn = { workspace = true, features = ["full", "visit"] }
+toml = { workspace = true }
 csv = { workspace = true }
 
 [features]

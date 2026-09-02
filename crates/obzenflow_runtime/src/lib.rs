@@ -4,13 +4,6 @@
 
 #![doc = include_str!("../README.md")]
 
-// Escape-hatch target for `#[effect_outcome(crate = ...)]` (FLOWIP-120m):
-// derive output resolves `::obzenflow_core` in the deriving crate, so a
-// downstream crate that depends only on obzenflow_runtime points the derive
-// at `obzenflow_runtime::obzenflow_core` instead.
-#[doc(hidden)]
-pub use obzenflow_core;
-
 // Core modules
 pub mod backpressure;
 pub mod bootstrap;
@@ -40,6 +33,8 @@ pub mod stages;
 /// Authored joins use [`stages::TypedJoinHandler`] instead.
 #[doc(hidden)]
 pub mod __private {
+    // Public macros resolve through this narrow hygiene surface without
+    // re-exporting Core itself as an alternate authoring gateway.
     pub use crate::stages::common::handlers::join::{
         ErasedJoinInvocation, TypedJoinHandlerAdapter, UnifiedJoinHandler,
     };
@@ -53,6 +48,7 @@ pub mod __private {
         UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
         UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
     };
+    pub use obzenflow_core::event::schema::{EmptySet, WithMember};
 }
 
 #[cfg(any(test, feature = "test-support"))]
