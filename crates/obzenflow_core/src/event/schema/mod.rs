@@ -24,7 +24,7 @@ pub use member_set::{
 };
 // The derive shares the trait's name, serde-style: one import brings both.
 pub use middleware_context_key::MiddlewareContextKey;
-pub use obzenflow_derive::{EffectOutcomeFacts, StageOutputFacts};
+pub use obzenflow_core_derive::{EffectOutcomeFacts, StageOutputFacts};
 pub use stage_fact_set::{assert_distinct_stage_fact_set, DeclaredStageFactSet, StageFactSet};
 pub use stage_output::{OneFactStageOutput, StageOutputFacts, StageOutputs};
 pub use typed_fact_set::{
