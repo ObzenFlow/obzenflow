@@ -8,7 +8,18 @@ license.workspace = true
 repository.workspace = true
 keywords = ["event-streaming", "event-sourcing", "async", "pipeline"]
 publish = true
-exclude = ["dev/postgres/**"]
+include = [
+    "src/**",
+    "examples/**",
+    "tests/**",
+    "Cargo.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "TRADEMARKS.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "NOTICE",
+]
 
 [workspace]
 resolver = "2"

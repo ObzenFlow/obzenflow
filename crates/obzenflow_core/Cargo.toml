@@ -7,6 +7,16 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = true
+include = [
+    "src/**",
+    "tests/**",
+    "Cargo.toml",
+    "README.md",
+    "TRADEMARKS.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "NOTICE",
+]
 
 [dependencies]
 # Core domain dependencies - minimal

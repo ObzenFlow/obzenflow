@@ -1,0 +1,142 @@
+name: Publish to crates.io
+run-name: Publish ${{ inputs.package }} ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Workspace version to publish; must match an existing tag vX.Y.Z"
+        required: true
+        type: string
+      package:
+        description: "One crate to publish in maintainer-controlled dependency order"
+        required: true
+        type: choice
+        options:
+          - obzenflow_core_derive
+          - obzenflow_core
+          - obzenflow_runtime
+          - obzenflow_adapters
+          - obzenflow_dsl
+          - obzenflow_infra
+          - obzenflow
+
+# A workspace version is published one crate at a time. A second dispatch for the
+# same version queues instead of racing the currently selected crate.
+concurrency:
+  group: publish-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    env:
+      REQUESTED_VERSION: ${{ inputs.version }}
+      REQUESTED_PACKAGE: ${{ inputs.package }}
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Validate release inputs
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$REQUESTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::version must be X.Y.Z or X.Y.Z-prerelease, got '$REQUESTED_VERSION'"
+            exit 1
+          fi
+
+          case "$REQUESTED_PACKAGE" in
+            obzenflow_core_derive|obzenflow_core|obzenflow_runtime|obzenflow_adapters|obzenflow_dsl|obzenflow_infra|obzenflow)
+              ;;
+            *)
+              echo "::error::package is not in the publishable ObzenFlow crate set: '$REQUESTED_PACKAGE'"
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/v${{ inputs.version }}
+
+      - name: Pin the checked-out commit
+        id: resolve
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fetch --locked
+
+      - name: Verify tag, package, and workspace version agree
+        run: |
+          set -euo pipefail
+
+          manifest_version="$(
+            cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg package "$REQUESTED_PACKAGE" \
+                '.packages[] | select(.name == $package) | .version'
+          )"
+
+          if [[ -z "$manifest_version" ]]; then
+            echo "::error::package '$REQUESTED_PACKAGE' is absent from the tagged workspace"
+            exit 1
+          fi
+
+          echo "package=$REQUESTED_PACKAGE  requested=$REQUESTED_VERSION  tag=v$REQUESTED_VERSION  manifest=$manifest_version"
+          if [[ "$manifest_version" != "$REQUESTED_VERSION" ]]; then
+            echo "::error::tag v$REQUESTED_VERSION gives $REQUESTED_PACKAGE manifest version $manifest_version"
+            exit 1
+          fi
+
+      - name: Show the selected crate's shipped file set, then dry-run
+        run: |
+          set -euo pipefail
+
+          {
+            echo "### $REQUESTED_PACKAGE $REQUESTED_VERSION files"
+            echo '<pre>'
+            cargo package --package "$REQUESTED_PACKAGE" --list
+            echo '</pre>'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          cargo publish --package "$REQUESTED_PACKAGE" --dry-run --locked
+
+  # Re-run the complete repository CI against the exact commit preflight inspected.
+  # The pull-request-only DCO job self-skips for this manual release call.
+  ci:
+    needs: preflight
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.preflight.outputs.sha }}
+
+  publish:
+    needs: [preflight, ci]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      REQUESTED_PACKAGE: ${{ inputs.package }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: Publish the selected crate
+        run: cargo publish --package "$REQUESTED_PACKAGE" --locked --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

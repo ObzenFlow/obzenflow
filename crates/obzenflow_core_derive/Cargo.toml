@@ -7,6 +7,15 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = true
+include = [
+    "src/**",
+    "Cargo.toml",
+    "README.md",
+    "TRADEMARKS.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "NOTICE",
+]
 
 [lib]
 proc-macro = true
