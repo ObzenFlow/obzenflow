@@ -7,14 +7,16 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = true
+# Fail closed on shipped artifact types. Tests and repository-only files remain
+# in Git and CI rather than in the crates.io source archive.
 include = [
-    "src/**",
-    "Cargo.toml",
-    "README.md",
-    "TRADEMARKS.md",
-    "LICENSE-MIT",
-    "LICENSE-APACHE",
-    "NOTICE",
+    "/src/**/*.rs",
+    "/Cargo.toml",
+    "/README.md",
+    "/TRADEMARKS.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/NOTICE",
 ]
 
 [lib]

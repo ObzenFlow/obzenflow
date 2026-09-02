@@ -8,17 +8,23 @@ license.workspace = true
 repository.workspace = true
 keywords = ["event-streaming", "event-sourcing", "async", "pipeline"]
 publish = true
+# Fail closed on shipped artifact types. Tests and repository-only tooling remain
+# in Git and CI rather than in the crates.io source archive.
 include = [
-    "src/**",
-    "examples/**",
-    "tests/**",
-    "Cargo.toml",
-    "README.md",
-    "CHANGELOG.md",
-    "TRADEMARKS.md",
-    "LICENSE-MIT",
-    "LICENSE-APACHE",
-    "NOTICE",
+    "/src/**/*.rs",
+    "/examples/**/*.rs",
+    "/examples/**/*.md",
+    "/examples/**/*.toml",
+    "/examples/**/*.json",
+    "/examples/**/*.csv",
+    "/docs/**/*.md",
+    "/Cargo.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/TRADEMARKS.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/NOTICE",
 ]
 
 [workspace]
