@@ -56,11 +56,6 @@ configuration exposed through `poll_timeout()`, not stage syntax.
 
 The DSL has four core sections: optional `name` (flow identifier), `journals` (persistence backend), `stages` (bindings producing stage descriptors), and `topology` (edges connecting stages with `|>` and `<|` operators). Optional flow backpressure and effect-port sections sit between `journals` and `stages`. Middleware is declared only on the stage where it applies.
 
-See [the type-and-effect stage grammar](../../docs/type-and-effect-stage-grammar.md)
-for trailing `uses` capability declarations, typed `via` bindings, singleton
-`with` policies, and migration from detached declarations and raw port
-registries.
-
 ## AI stage shapes
 
 Use `inference!` when each input is already bounded and needs exactly one model decision:

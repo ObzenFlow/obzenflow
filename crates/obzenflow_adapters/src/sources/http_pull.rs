@@ -1742,6 +1742,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn simple_poll_builds_a_cursorless_decoder_with_default_status_mapping() {
+        let decoder = simple_poll(
+            "http://example.invalid/items".parse().unwrap(),
+            |response: &HttpResponse| Ok(response.json::<Vec<TestItem>>()?),
+        );
+
+        let request = decoder.request_spec(None);
+        assert_eq!(request.url.as_str(), "http://example.invalid/items");
+
+        let response = HttpResponse::new(
+            200,
+            HeaderMap::new(),
+            serde_json::to_vec(&serde_json::json!([{"n": 1}, {"n": 2}])).unwrap(),
+        );
+        let decoded = decoder.decode(None, &response).unwrap();
+        assert_eq!(decoded.items.len(), 2);
+        assert!(decoded.next_cursor.is_none());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("Retry-After", "5".parse().unwrap());
+        let error = match decoder.decode(None, &HttpResponse::new(429, headers, "")) {
+            Ok(_) => panic!("rate-limited response should fail decoding"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            DecodeError::RateLimited {
+                retry_after: Some(delay),
+                ..
+            } if delay == Duration::from_secs(5)
+        ));
+    }
+
     #[tokio::test]
     async fn http_pull_source_paginates_using_mock_http_client() {
         let (mock, client) = mock_client();

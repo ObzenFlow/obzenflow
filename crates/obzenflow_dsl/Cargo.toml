@@ -7,6 +7,18 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = true
+# Fail closed on shipped artifact types. Tests and repository-only files remain
+# in Git and CI rather than in the crates.io source archive.
+include = [
+    "/src/**/*.rs",
+    "/src/**/README.md",
+    "/Cargo.toml",
+    "/README.md",
+    "/TRADEMARKS.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/NOTICE",
+]
 
 [features]
 test-support = ["obzenflow_runtime/test-support"]
