@@ -28,6 +28,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -65,58 +66,257 @@ jobs:
         id: resolve
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Verify the release SHA passed full CI on main
+        uses: actions/github-script@v7
+        env:
+          RELEASE_SHA: ${{ steps.resolve.outputs.sha }}
+        with:
+          script: |
+            const releaseSha = process.env.RELEASE_SHA;
+            const { data } = await github.request(
+              "GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs",
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: "ci.yml",
+                branch: "main",
+                event: "push",
+                status: "success",
+                head_sha: releaseSha,
+                per_page: 100,
+              },
+            );
+
+            const run = data.workflow_runs.find((candidate) =>
+              candidate.head_sha === releaseSha &&
+              candidate.head_branch === "main" &&
+              candidate.event === "push" &&
+              candidate.status === "completed" &&
+              candidate.conclusion === "success"
+            );
+
+            if (!run) {
+              throw new Error(
+                `No successful full main CI run exists for release SHA ${releaseSha}. ` +
+                "Wait for the push-to-main CI run to pass, then dispatch again."
+              );
+            }
+
+            core.info(`Release SHA ${releaseSha} is sealed by ${run.html_url}`);
+            await core.summary
+              .addHeading("Release CI seal", 3)
+              .addTable([
+                [
+                  { data: "Release SHA", header: true },
+                  { data: "Main CI run", header: true },
+                ],
+                [releaseSha, `<a href="${run.html_url}">#${run.run_number}</a>`],
+              ])
+              .write();
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
 
-      - uses: Swatinem/rust-cache@v2
-
-      - run: cargo fetch --locked
-
-      - name: Verify tag, package, and workspace version agree
+      - name: Verify the selected package and shipped-file policy
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
 
-          manifest_version="$(
-            cargo metadata --no-deps --format-version 1 \
-              | jq -r --arg package "$REQUESTED_PACKAGE" \
-                '.packages[] | select(.name == $package) | .version'
-          )"
+          import html
+          import json
+          import os
+          import subprocess
+          import sys
+          import tomllib
+          from pathlib import Path, PurePosixPath
 
-          if [[ -z "$manifest_version" ]]; then
-            echo "::error::package '$REQUESTED_PACKAGE' is absent from the tagged workspace"
-            exit 1
-          fi
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          requested_package = os.environ["REQUESTED_PACKAGE"]
+          requested_version = os.environ["REQUESTED_VERSION"]
+          expected_repository = "https://github.com/obzenflow/obzenflow"
+          expected_license = "MIT OR Apache-2.0"
+          expected_header = [
+              "// SPDX-License-Identifier: MIT OR Apache-2.0",
+              "// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors",
+              "// https://obzenflow.dev",
+          ]
+          required_files = {
+              "Cargo.toml",
+              "README.md",
+              "TRADEMARKS.md",
+              "LICENSE-MIT",
+              "LICENSE-APACHE",
+              "NOTICE",
+          }
+          generated_files = {
+              ".cargo_vcs_info.json",
+              "Cargo.lock",
+              "Cargo.toml.orig",
+          }
+          canonical_files = {
+              "TRADEMARKS.md",
+              "LICENSE-MIT",
+              "LICENSE-APACHE",
+              "NOTICE",
+          }
 
-          echo "package=$REQUESTED_PACKAGE  requested=$REQUESTED_VERSION  tag=v$REQUESTED_VERSION  manifest=$manifest_version"
-          if [[ "$manifest_version" != "$REQUESTED_VERSION" ]]; then
-            echo "::error::tag v$REQUESTED_VERSION gives $REQUESTED_PACKAGE manifest version $manifest_version"
-            exit 1
-          fi
+          errors: list[str] = []
+          workspace_manifest = tomllib.loads(
+              (workspace / "Cargo.toml").read_text(encoding="utf-8")
+          )
+          workspace_version = workspace_manifest["workspace"]["package"]["version"]
 
-      - name: Show the selected crate's shipped file set, then dry-run
-        run: |
-          set -euo pipefail
+          metadata = json.loads(
+              subprocess.check_output(
+                  [
+                      "cargo",
+                      "metadata",
+                      "--locked",
+                      "--no-deps",
+                      "--format-version",
+                      "1",
+                  ],
+                  cwd=workspace,
+                  text=True,
+              )
+          )
+          packages = [
+              package
+              for package in metadata["packages"]
+              if package["name"] == requested_package
+          ]
+          if len(packages) != 1:
+              errors.append(
+                  f"expected exactly one package named {requested_package}, found {len(packages)}"
+              )
+              package = None
+              package_root = workspace
+          else:
+              package = packages[0]
+              package_root = Path(package["manifest_path"]).resolve().parent
+              try:
+                  package_root.relative_to(workspace)
+              except ValueError:
+                  errors.append(f"package root escapes the workspace: {package_root}")
 
-          {
-            echo "### $REQUESTED_PACKAGE $REQUESTED_VERSION files"
-            echo '<pre>'
-            cargo package --package "$REQUESTED_PACKAGE" --list
-            echo '</pre>'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if workspace_version != requested_version:
+              errors.append(
+                  f"tag v{requested_version} has workspace version {workspace_version}"
+              )
 
-          cargo publish --package "$REQUESTED_PACKAGE" --dry-run --locked
+          if package is not None:
+              if package["version"] != requested_version:
+                  errors.append(
+                      f"{requested_package} has version {package['version']}, expected {requested_version}"
+                  )
+              if package.get("publish") == []:
+                  errors.append(f"{requested_package} has publishing disabled")
+              if package.get("license") != expected_license:
+                  errors.append(
+                      f"{requested_package} license is {package.get('license')!r}, expected {expected_license!r}"
+                  )
+              if package.get("repository") != expected_repository:
+                  errors.append(
+                      f"{requested_package} repository is {package.get('repository')!r}, expected {expected_repository!r}"
+                  )
+              if not package.get("description"):
+                  errors.append(f"{requested_package} has no package description")
 
-  # Re-run the complete repository CI against the exact commit preflight inspected.
-  # The pull-request-only DCO job self-skips for this manual release call.
-  ci:
-    needs: preflight
-    uses: ./.github/workflows/ci.yml
-    with:
-      ref: ${{ needs.preflight.outputs.sha }}
+          package_files = subprocess.check_output(
+              [
+                  "cargo",
+                  "package",
+                  "--package",
+                  requested_package,
+                  "--locked",
+                  "--list",
+              ],
+              cwd=workspace,
+              text=True,
+          ).splitlines()
+          package_file_set = set(package_files)
+
+          missing = sorted(required_files - package_file_set)
+          if missing:
+              errors.append(f"required package files are missing: {', '.join(missing)}")
+
+          rust_sources: list[str] = []
+          unexpected: list[str] = []
+          for relative in package_files:
+              path = PurePosixPath(relative)
+              if path.is_absolute() or ".." in path.parts:
+                  unexpected.append(relative)
+                  continue
+              if relative in required_files or relative in generated_files:
+                  continue
+              if len(path.parts) > 1 and path.parts[0] == "src":
+                  if path.suffix == ".rs":
+                      rust_sources.append(relative)
+                      continue
+                  if path.name == "README.md":
+                      continue
+              unexpected.append(relative)
+
+          if unexpected:
+              errors.append(
+                  "files outside the published-file policy: " + ", ".join(unexpected)
+              )
+          if not rust_sources:
+              errors.append("package contains no Rust source files")
+
+          for name in sorted(canonical_files):
+              canonical = workspace / name
+              owned = package_root / name
+              if not canonical.is_file():
+                  errors.append(f"missing canonical root file {name}")
+              if not owned.is_file():
+                  errors.append(f"missing package-owned file {owned}")
+              if canonical.is_file() and owned.is_file():
+                  if canonical.read_bytes() != owned.read_bytes():
+                      errors.append(f"{owned} differs from canonical root {name}")
+
+          for relative in rust_sources:
+              source = package_root / relative
+              if not source.is_file():
+                  errors.append(f"packaged Rust source is absent locally: {source}")
+                  continue
+              lines = source.read_text(encoding="utf-8").splitlines()
+              if lines[:3] != expected_header:
+                  errors.append(f"SPDX header mismatch in packaged source {relative}")
+
+          print(
+              f"package={requested_package} requested={requested_version} "
+              f"workspace={workspace_version} files={len(package_files)}"
+          )
+          for relative in package_files:
+              print(relative)
+
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write(
+                  f"\n### {html.escape(requested_package)} "
+                  f"{html.escape(requested_version)} files\n\n<pre>\n"
+              )
+              for relative in package_files:
+                  handle.write(f"{html.escape(relative)}\n")
+              handle.write("</pre>\n")
+
+          if errors:
+              print("Publication policy failed:", file=sys.stderr)
+              for error in errors:
+                  print(f"  - {error}", file=sys.stderr)
+              sys.exit(1)
+
+          print(
+              f"Publication policy OK: {len(package_files)} files, "
+              f"{len(rust_sources)} Rust sources"
+          )
+          PY
 
   publish:
-    needs: [preflight, ci]
+    needs: preflight
     runs-on: ubuntu-latest
     environment: release
     permissions:
