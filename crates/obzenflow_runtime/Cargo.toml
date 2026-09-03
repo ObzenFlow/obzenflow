@@ -11,7 +11,7 @@ publish = true
 # in Git and CI rather than in the crates.io source archive.
 include = [
     "/src/**/*.rs",
-    "/src/supervised_base/README.md",
+    "/src/**/README.md",
     "/Cargo.toml",
     "/README.md",
     "/TRADEMARKS.md",

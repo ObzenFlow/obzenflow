@@ -45,9 +45,13 @@ FlowApplication::run(build_flow()).await?;
 Builder-owned handlers are ordinary Rust locals inside the deferred materialiser;
 stage rows reference those locals by name.
 
-For runnable versions with real domain types and handlers, see the examples catalog in `examples/README.md`.
+For runnable versions with real domain types and handlers, see the
+[repository examples catalog](https://github.com/obzenflow/obzenflow/blob/main/examples/README.md).
 
 ## Quickstart: durable execution in two commands
+
+These commands run from a clone of the ObzenFlow repository. Examples are
+repository learning assets and are not included in the crates.io package.
 
 Prerequisites:
 - Rust `1.93.0` (pinned in `rust-toolchain.toml`)
@@ -69,7 +73,8 @@ Replay reads the archived inputs instead of polling the sources and substitutes 
 
 ## More examples
 
-The full catalog with grouped commands and code pointers is in `examples/README.md`. A few highlights:
+The full catalog with grouped commands and code pointers is in the
+[repository examples catalog](https://github.com/obzenflow/obzenflow/blob/main/examples/README.md). A few highlights:
 
 ```bash
 # Framework overview: reference catalogs + joins + stateful summary
@@ -99,7 +104,6 @@ ObzenFlow follows an onion architecture: `obzenflow_core` defines the business d
 - `crates/obzenflow_dsl/README.md`: the `flow!` DSL and how it builds a runnable flow graph
 - `crates/obzenflow_infra/README.md`: `FlowApplication` + journaling/web/HTTP implementations, mostly behind feature flags
 - `crates/obzenflow_adapters/README.md`: middleware + concrete sources/sinks composed into flows
-- `docs/type-and-effect-stage-grammar.md`: `uses` capability clauses, lexical typed bindings, and migration from the pre-132a surface
 
 The root `obzenflow` crate is a convenience re-export layer for common sources/sinks (`src/sources.rs`, `src/sinks.rs`). The remaining workspace crates, `obzenflow_benchmarks` and `obzenflow_sketches`, are internal support crates outside the public surface.
 
