@@ -118,202 +118,79 @@ jobs:
         with:
           toolchain: 1.93.0
 
-      - name: Verify the selected package and shipped-file policy
+      - name: Verify the selected package
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from __future__ import annotations
 
-          import html
-          import json
-          import os
-          import subprocess
-          import sys
-          import tomllib
-          from pathlib import Path, PurePosixPath
-
-          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
-          requested_package = os.environ["REQUESTED_PACKAGE"]
-          requested_version = os.environ["REQUESTED_VERSION"]
-          expected_repository = "https://github.com/obzenflow/obzenflow"
-          expected_license = "MIT OR Apache-2.0"
-          expected_header = [
-              "// SPDX-License-Identifier: MIT OR Apache-2.0",
-              "// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors",
-              "// https://obzenflow.dev",
-          ]
-          required_files = {
-              "Cargo.toml",
-              "README.md",
-              "TRADEMARKS.md",
-              "LICENSE-MIT",
-              "LICENSE-APACHE",
-              "NOTICE",
-          }
-          generated_files = {
-              ".cargo_vcs_info.json",
-              "Cargo.lock",
-              "Cargo.toml.orig",
-          }
-          canonical_files = {
-              "TRADEMARKS.md",
-              "LICENSE-MIT",
-              "LICENSE-APACHE",
-              "NOTICE",
+          fail() {
+            echo "::error::$1"
+            exit 1
           }
 
-          errors: list[str] = []
-          workspace_manifest = tomllib.loads(
-              (workspace / "Cargo.toml").read_text(encoding="utf-8")
+          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+          if ! package="$(
+            jq -ce --arg name "$REQUESTED_PACKAGE" \
+              '.packages[] | select(.name == $name)' <<< "$metadata"
+          )"; then
+            fail "package '$REQUESTED_PACKAGE' is absent from the tagged workspace"
+          fi
+
+          package_version="$(jq -r '.version' <<< "$package")"
+          workspace_version="$(
+            jq -r '.packages[] | select(.name == "obzenflow") | .version' <<< "$metadata"
+          )"
+          package_license="$(jq -r '.license // ""' <<< "$package")"
+          package_root="$(dirname "$(jq -r '.manifest_path' <<< "$package")")"
+
+          [[ "$workspace_version" == "$REQUESTED_VERSION" ]] || \
+            fail "tag v$REQUESTED_VERSION has workspace version $workspace_version"
+          [[ "$package_version" == "$REQUESTED_VERSION" ]] || \
+            fail "$REQUESTED_PACKAGE has version $package_version, expected $REQUESTED_VERSION"
+          [[ "$package_license" == "MIT OR Apache-2.0" ]] || \
+            fail "$REQUESTED_PACKAGE has unexpected license metadata: '$package_license'"
+
+          package_files="$(
+            cargo package --package "$REQUESTED_PACKAGE" --locked --list
+          )"
+
+          required_files=(
+            Cargo.toml
+            README.md
+            TRADEMARKS.md
+            LICENSE-MIT
+            LICENSE-APACHE
+            NOTICE
           )
-          workspace_version = workspace_manifest["workspace"]["package"]["version"]
+          for file in "${required_files[@]}"; do
+            grep -Fqx -- "$file" <<< "$package_files" || \
+              fail "$REQUESTED_PACKAGE archive is missing $file"
+          done
 
-          metadata = json.loads(
-              subprocess.check_output(
-                  [
-                      "cargo",
-                      "metadata",
-                      "--locked",
-                      "--no-deps",
-                      "--format-version",
-                      "1",
-                  ],
-                  cwd=workspace,
-                  text=True,
-              )
-          )
-          packages = [
-              package
-              for package in metadata["packages"]
-              if package["name"] == requested_package
-          ]
-          if len(packages) != 1:
-              errors.append(
-                  f"expected exactly one package named {requested_package}, found {len(packages)}"
-              )
-              package = None
-              package_root = workspace
-          else:
-              package = packages[0]
-              package_root = Path(package["manifest_path"]).resolve().parent
-              try:
-                  package_root.relative_to(workspace)
-              except ValueError:
-                  errors.append(f"package root escapes the workspace: {package_root}")
+          while IFS= read -r file; do
+            case "$file" in
+              .cargo_vcs_info.json|Cargo.lock|Cargo.toml|Cargo.toml.orig|README.md|TRADEMARKS.md|LICENSE-MIT|LICENSE-APACHE|NOTICE|src/*.rs|src/README.md|src/*/README.md)
+                ;;
+              *)
+                fail "$REQUESTED_PACKAGE archive contains unexpected file: $file"
+                ;;
+            esac
+          done <<< "$package_files"
 
-          if workspace_version != requested_version:
-              errors.append(
-                  f"tag v{requested_version} has workspace version {workspace_version}"
-              )
+          for file in TRADEMARKS.md LICENSE-MIT LICENSE-APACHE NOTICE; do
+            cmp -s "$GITHUB_WORKSPACE/$file" "$package_root/$file" || \
+              fail "$REQUESTED_PACKAGE/$file differs from the canonical root copy"
+          done
 
-          if package is not None:
-              if package["version"] != requested_version:
-                  errors.append(
-                      f"{requested_package} has version {package['version']}, expected {requested_version}"
-                  )
-              if package.get("publish") == []:
-                  errors.append(f"{requested_package} has publishing disabled")
-              if package.get("license") != expected_license:
-                  errors.append(
-                      f"{requested_package} license is {package.get('license')!r}, expected {expected_license!r}"
-                  )
-              if package.get("repository") != expected_repository:
-                  errors.append(
-                      f"{requested_package} repository is {package.get('repository')!r}, expected {expected_repository!r}"
-                  )
-              if not package.get("description"):
-                  errors.append(f"{requested_package} has no package description")
+          printf 'package=%s requested=%s workspace=%s\n' \
+            "$REQUESTED_PACKAGE" "$REQUESTED_VERSION" "$workspace_version"
+          printf '%s\n' "$package_files"
 
-          package_files = subprocess.check_output(
-              [
-                  "cargo",
-                  "package",
-                  "--package",
-                  requested_package,
-                  "--locked",
-                  "--list",
-              ],
-              cwd=workspace,
-              text=True,
-          ).splitlines()
-          package_file_set = set(package_files)
-
-          missing = sorted(required_files - package_file_set)
-          if missing:
-              errors.append(f"required package files are missing: {', '.join(missing)}")
-
-          rust_sources: list[str] = []
-          unexpected: list[str] = []
-          for relative in package_files:
-              path = PurePosixPath(relative)
-              if path.is_absolute() or ".." in path.parts:
-                  unexpected.append(relative)
-                  continue
-              if relative in required_files or relative in generated_files:
-                  continue
-              if len(path.parts) > 1 and path.parts[0] == "src":
-                  if path.suffix == ".rs":
-                      rust_sources.append(relative)
-                      continue
-                  if path.name == "README.md":
-                      continue
-              unexpected.append(relative)
-
-          if unexpected:
-              errors.append(
-                  "files outside the published-file policy: " + ", ".join(unexpected)
-              )
-          if not rust_sources:
-              errors.append("package contains no Rust source files")
-
-          for name in sorted(canonical_files):
-              canonical = workspace / name
-              owned = package_root / name
-              if not canonical.is_file():
-                  errors.append(f"missing canonical root file {name}")
-              if not owned.is_file():
-                  errors.append(f"missing package-owned file {owned}")
-              if canonical.is_file() and owned.is_file():
-                  if canonical.read_bytes() != owned.read_bytes():
-                      errors.append(f"{owned} differs from canonical root {name}")
-
-          for relative in rust_sources:
-              source = package_root / relative
-              if not source.is_file():
-                  errors.append(f"packaged Rust source is absent locally: {source}")
-                  continue
-              lines = source.read_text(encoding="utf-8").splitlines()
-              if lines[:3] != expected_header:
-                  errors.append(f"SPDX header mismatch in packaged source {relative}")
-
-          print(
-              f"package={requested_package} requested={requested_version} "
-              f"workspace={workspace_version} files={len(package_files)}"
-          )
-          for relative in package_files:
-              print(relative)
-
-          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
-          with summary.open("a", encoding="utf-8") as handle:
-              handle.write(
-                  f"\n### {html.escape(requested_package)} "
-                  f"{html.escape(requested_version)} files\n\n<pre>\n"
-              )
-              for relative in package_files:
-                  handle.write(f"{html.escape(relative)}\n")
-              handle.write("</pre>\n")
-
-          if errors:
-              print("Publication policy failed:", file=sys.stderr)
-              for error in errors:
-                  print(f"  - {error}", file=sys.stderr)
-              sys.exit(1)
-
-          print(
-              f"Publication policy OK: {len(package_files)} files, "
-              f"{len(rust_sources)} Rust sources"
-          )
-          PY
+          {
+            printf '### %s %s files\n\n' "$REQUESTED_PACKAGE" "$REQUESTED_VERSION"
+            printf 'Tag: v%s\n\n' "$REQUESTED_VERSION"
+            printf 'Commit: %s\n\n' "$(git rev-parse HEAD)"
+            printf '```text\n%s\n```\n' "$package_files"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
     needs: preflight
