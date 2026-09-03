@@ -337,6 +337,6 @@ jobs:
         id: auth
 
       - name: Publish the selected crate
-        run: cargo publish --package "$REQUESTED_PACKAGE" --locked --no-verify
+        run: cargo publish --package "$REQUESTED_PACKAGE" --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
