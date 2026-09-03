@@ -53,9 +53,6 @@ For runnable versions with real domain types and handlers, see the
 These commands run from a clone of the ObzenFlow repository. Examples are
 repository learning assets and are not included in the crates.io package.
 
-Prerequisites:
-- Rust `1.93.0` (pinned in `rust-toolchain.toml`)
-
 Run the payment gateway example, a flow that authorizes orders through an unreliable gateway behind a declared effect and a circuit breaker:
 
 ```bash
@@ -92,28 +89,13 @@ cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai post
   --config examples/hn_ai_digest_demo/obzenflow.toml
 ```
 
-No features are enabled by default. `--features obzenflow_infra/warp-server` enables the HTTP server and web endpoints, `--features http-pull` enables HTTP pull sources, and `--features postgres` enables the PostgreSQL sink. PostgreSQL applications accept an externally supplied `OBZENFLOW_POSTGRES_URL`; they do not depend on repository tooling to launch the backing service. The optional contributor harness uses `cargo xtask postgres up`, retains its loopback endpoint and named volume, and prints a password-free client profile through `cargo xtask postgres connection`. It uses PostgreSQL `trust` authentication and plaintext transport on a `127.0.0.1`-only endpoint, creates no development credentials or certificates, and is appropriate only on a trusted developer machine. It is not a production or shared-workstation deployment. Its canonical disposable proof remains `cargo xtask postgres test`, which separately retains generated credentials and the real verified-TLS tests. Repository-only PostgreSQL orchestration is not included in the published crate. See the [repository development-service guide](https://github.com/obzenflow/obzenflow/blob/main/dev/postgres/README.md) for the exact trust boundary and local lifecycle, and `crates/obzenflow_infra/README.md` for the remaining feature matrix. An optional Prometheus + Grafana monitoring stack lives in `monitoring/`.
+No features are enabled by default. `--features obzenflow_infra/warp-server` enables the HTTP server and web endpoints, `--features http-pull` enables HTTP pull sources, and `--features postgres` enables the PostgreSQL sink. PostgreSQL applications accept an externally supplied `OBZENFLOW_POSTGRES_URL`; they do not depend on repository tooling to launch the backing service.
 
 ## Project organization
 
 ObzenFlow follows an onion architecture: `obzenflow_core` defines the business domain and ports (traits), and outer layers provide implementations, orchestration, wiring, and concrete integrations.
 
-- `crates/obzenflow_core/README.md`: core domain types + stable interfaces (events, journals, contracts, middleware ports)
-- `crates/obzenflow_core_derive/README.md`: compiler-host derives for Core-owned authoring contracts
-- `crates/obzenflow_runtime/README.md`: stage execution + supervisors + runtime orchestration (the engine)
-- `crates/obzenflow_dsl/README.md`: the `flow!` DSL and how it builds a runnable flow graph
-- `crates/obzenflow_infra/README.md`: `FlowApplication` + journaling/web/HTTP implementations, mostly behind feature flags
-- `crates/obzenflow_adapters/README.md`: middleware + concrete sources/sinks composed into flows
-
 The root `obzenflow` crate is a convenience re-export layer for common sources/sinks (`src/sources.rs`, `src/sinks.rs`). The remaining workspace crates, `obzenflow_benchmarks` and `obzenflow_sketches`, are internal support crates outside the public surface.
-
-## Project policies
-
-- Contributing: `CONTRIBUTING.md`
-- Code of Conduct: `CODE_OF_CONDUCT.md`
-- Governance: `GOVERNANCE.md`
-- Security: `SECURITY.md`
-- Trademarks: `TRADEMARKS.md`
 
 ## License
 
