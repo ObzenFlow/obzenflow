@@ -28,6 +28,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -65,58 +66,134 @@ jobs:
         id: resolve
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Verify the release SHA passed full CI on main
+        uses: actions/github-script@v7
+        env:
+          RELEASE_SHA: ${{ steps.resolve.outputs.sha }}
+        with:
+          script: |
+            const releaseSha = process.env.RELEASE_SHA;
+            const { data } = await github.request(
+              "GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs",
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: "ci.yml",
+                branch: "main",
+                event: "push",
+                status: "success",
+                head_sha: releaseSha,
+                per_page: 100,
+              },
+            );
+
+            const run = data.workflow_runs.find((candidate) =>
+              candidate.head_sha === releaseSha &&
+              candidate.head_branch === "main" &&
+              candidate.event === "push" &&
+              candidate.status === "completed" &&
+              candidate.conclusion === "success"
+            );
+
+            if (!run) {
+              throw new Error(
+                `No successful full main CI run exists for release SHA ${releaseSha}. ` +
+                "Wait for the push-to-main CI run to pass, then dispatch again."
+              );
+            }
+
+            core.info(`Release SHA ${releaseSha} is sealed by ${run.html_url}`);
+            await core.summary
+              .addHeading("Release CI seal", 3)
+              .addTable([
+                [
+                  { data: "Release SHA", header: true },
+                  { data: "Main CI run", header: true },
+                ],
+                [releaseSha, `<a href="${run.html_url}">#${run.run_number}</a>`],
+              ])
+              .write();
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
 
-      - uses: Swatinem/rust-cache@v2
-
-      - run: cargo fetch --locked
-
-      - name: Verify tag, package, and workspace version agree
+      - name: Verify the selected package
         run: |
           set -euo pipefail
 
-          manifest_version="$(
-            cargo metadata --no-deps --format-version 1 \
-              | jq -r --arg package "$REQUESTED_PACKAGE" \
-                '.packages[] | select(.name == $package) | .version'
+          fail() {
+            echo "::error::$1"
+            exit 1
+          }
+
+          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+          if ! package="$(
+            jq -ce --arg name "$REQUESTED_PACKAGE" \
+              '.packages[] | select(.name == $name)' <<< "$metadata"
+          )"; then
+            fail "package '$REQUESTED_PACKAGE' is absent from the tagged workspace"
+          fi
+
+          package_version="$(jq -r '.version' <<< "$package")"
+          workspace_version="$(
+            jq -r '.packages[] | select(.name == "obzenflow") | .version' <<< "$metadata"
+          )"
+          package_license="$(jq -r '.license // ""' <<< "$package")"
+          package_root="$(dirname "$(jq -r '.manifest_path' <<< "$package")")"
+
+          [[ "$workspace_version" == "$REQUESTED_VERSION" ]] || \
+            fail "tag v$REQUESTED_VERSION has workspace version $workspace_version"
+          [[ "$package_version" == "$REQUESTED_VERSION" ]] || \
+            fail "$REQUESTED_PACKAGE has version $package_version, expected $REQUESTED_VERSION"
+          [[ "$package_license" == "MIT OR Apache-2.0" ]] || \
+            fail "$REQUESTED_PACKAGE has unexpected license metadata: '$package_license'"
+
+          package_files="$(
+            cargo package --package "$REQUESTED_PACKAGE" --locked --list
           )"
 
-          if [[ -z "$manifest_version" ]]; then
-            echo "::error::package '$REQUESTED_PACKAGE' is absent from the tagged workspace"
-            exit 1
-          fi
+          required_files=(
+            Cargo.toml
+            README.md
+            TRADEMARKS.md
+            LICENSE-MIT
+            LICENSE-APACHE
+            NOTICE
+          )
+          for file in "${required_files[@]}"; do
+            grep -Fqx -- "$file" <<< "$package_files" || \
+              fail "$REQUESTED_PACKAGE archive is missing $file"
+          done
 
-          echo "package=$REQUESTED_PACKAGE  requested=$REQUESTED_VERSION  tag=v$REQUESTED_VERSION  manifest=$manifest_version"
-          if [[ "$manifest_version" != "$REQUESTED_VERSION" ]]; then
-            echo "::error::tag v$REQUESTED_VERSION gives $REQUESTED_PACKAGE manifest version $manifest_version"
-            exit 1
-          fi
+          while IFS= read -r file; do
+            case "$file" in
+              .cargo_vcs_info.json|Cargo.lock|Cargo.toml|Cargo.toml.orig|README.md|TRADEMARKS.md|LICENSE-MIT|LICENSE-APACHE|NOTICE|src/*.rs|src/README.md|src/*/README.md)
+                ;;
+              *)
+                fail "$REQUESTED_PACKAGE archive contains unexpected file: $file"
+                ;;
+            esac
+          done <<< "$package_files"
 
-      - name: Show the selected crate's shipped file set, then dry-run
-        run: |
-          set -euo pipefail
+          for file in TRADEMARKS.md LICENSE-MIT LICENSE-APACHE NOTICE; do
+            cmp -s "$GITHUB_WORKSPACE/$file" "$package_root/$file" || \
+              fail "$REQUESTED_PACKAGE/$file differs from the canonical root copy"
+          done
+
+          printf 'package=%s requested=%s workspace=%s\n' \
+            "$REQUESTED_PACKAGE" "$REQUESTED_VERSION" "$workspace_version"
+          printf '%s\n' "$package_files"
 
           {
-            echo "### $REQUESTED_PACKAGE $REQUESTED_VERSION files"
-            echo '<pre>'
-            cargo package --package "$REQUESTED_PACKAGE" --list
-            echo '</pre>'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-
-          cargo publish --package "$REQUESTED_PACKAGE" --dry-run --locked
-
-  # Re-run the complete repository CI against the exact commit preflight inspected.
-  # The pull-request-only DCO job self-skips for this manual release call.
-  ci:
-    needs: preflight
-    uses: ./.github/workflows/ci.yml
-    with:
-      ref: ${{ needs.preflight.outputs.sha }}
+            printf '### %s %s files\n\n' "$REQUESTED_PACKAGE" "$REQUESTED_VERSION"
+            printf 'Tag: v%s\n\n' "$REQUESTED_VERSION"
+            printf 'Commit: %s\n\n' "$(git rev-parse HEAD)"
+            printf '```text\n%s\n```\n' "$package_files"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
-    needs: [preflight, ci]
+    needs: preflight
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -137,6 +214,6 @@ jobs:
         id: auth
 
       - name: Publish the selected crate
-        run: cargo publish --package "$REQUESTED_PACKAGE" --locked --no-verify
+        run: cargo publish --package "$REQUESTED_PACKAGE" --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
