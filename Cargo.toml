@@ -15,7 +15,6 @@ include = [
     "/src/**/README.md",
     "/Cargo.toml",
     "/README.md",
-    "/CHANGELOG.md",
     "/TRADEMARKS.md",
     "/LICENSE-MIT",
     "/LICENSE-APACHE",
