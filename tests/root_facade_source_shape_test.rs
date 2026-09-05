@@ -7,15 +7,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn rust_sources_under(path: &Path, excluded_root: &Path, output: &mut Vec<PathBuf>) {
-    if path == excluded_root || !path.is_dir() {
+fn rust_sources_under(path: &Path, output: &mut Vec<PathBuf>) {
+    if !path.is_dir() {
         return;
     }
 
     for entry in fs::read_dir(path).expect("read root source directory") {
         let path = entry.expect("read root source entry").path();
         if path.is_dir() {
-            rust_sources_under(&path, excluded_root, output);
+            rust_sources_under(&path, output);
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             output.push(path);
         }
@@ -62,6 +62,12 @@ fn root_library_source_contains_only_facade_items() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let typed_root = root.join("src/typed");
     assert!(
+        !root
+            .join("crates/obzenflow_infra/src/config_cli/mod.rs")
+            .exists(),
+        "CLI-only configuration implementation must not return to the framework"
+    );
+    assert!(
         !typed_root.exists(),
         "retired root namespace exists: {}",
         typed_root.display()
@@ -69,7 +75,7 @@ fn root_library_source_contains_only_facade_items() {
 
     let mut sources = Vec::new();
     let source_root = root.join("src");
-    rust_sources_under(&source_root, &source_root.join("bin"), &mut sources);
+    rust_sources_under(&source_root, &mut sources);
     sources.sort();
 
     let mut violations = Vec::new();

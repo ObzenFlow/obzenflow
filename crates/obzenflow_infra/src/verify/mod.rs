@@ -11,7 +11,7 @@
 //! `lineage`, `report`, `verdict`) are I/O-free over `obzenflow_core` types;
 //! `source` and `fs` touch disk, reusing infra's framed journal format and
 //! archive status derivation. Both product surfaces (the `--verify` flag on
-//! `FlowApplication` and the `obzenflow verify` subcommand) call
+//! `FlowApplication` and external operational tools) call
 //! [`verify_run_dirs`], so both certify identically from manifest data.
 
 pub mod certification;

@@ -1981,7 +1981,7 @@ impl FlowApplication {
         };
         if std::fs::metadata(&baseline).is_err() {
             return skip(format!(
-                "verification skipped: source archive unavailable ({})\nrun later: obzenflow verify --baseline {} --candidate {}",
+                "verification skipped: source archive unavailable ({})\nrestore the source archive, then compare baseline {} and candidate {} with obzenflow::application::verify_run_dirs",
                 baseline.display(),
                 baseline.display(),
                 candidate.display()
