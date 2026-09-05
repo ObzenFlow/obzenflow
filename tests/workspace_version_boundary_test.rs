@@ -28,7 +28,7 @@ fn workspace_members_and_internal_dependencies_use_one_exact_version() {
         .filter_map(|package| package["name"].as_str())
         .collect::<BTreeSet<_>>();
 
-    // FLOWIP-141a: the operational CLI belongs to an independent private repository.
+    // FLOWIP-141b: the operational CLI belongs to an independent private repository.
     // Metadata includes dev/target dependencies, so none can silently reintroduce it.
     let private_cli = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
