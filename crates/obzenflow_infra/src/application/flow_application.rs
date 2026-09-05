@@ -149,7 +149,103 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn server_auto_mode_tolerates_application_start_and_supervisor_auto_run() {
+    async fn authentication_admission_failure_prevents_automatic_run() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone, Debug)]
+        struct CountingSource(Arc<AtomicUsize>);
+        impl TypedInfiniteSourceHandler for CountingSource {
+            type Output = IdlePayload;
+            fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Vec::new())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("obzenflow.toml");
+        let missing = format!("OBZENFLOW_AUTH_MISSING_{}", uuid::Uuid::new_v4().simple());
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = {}
+startup_mode = "auto"
+[server.control_plane_auth]
+mode = "api_key"
+value_env = "{missing}"
+[metrics]
+enabled = false
+"#,
+                available_local_port()
+            ),
+        )
+        .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let source_calls = calls.clone();
+        let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
+        let hook_observed = observed.clone();
+        let definition = FlowDefinition::new(move |context| async move {
+            let source = CountingSource(source_calls);
+            let sink = NoopSink;
+            let handle = flow! {
+                name: "auth_admission_no_automatic_run",
+                journals: crate::journal::memory_journals(),
+                stages: {
+                    src = infinite_source!(IdlePayload => source);
+                    sink = sink!(IdlePayload => sink);
+                },
+                topology: { src |> sink; }
+            }
+            .build(context)
+            .await?;
+            handle
+                .wait_for_ready()
+                .await
+                .expect("pipeline reaches readiness");
+            assert!(matches!(handle.current_state(), PipelineState::ReadyForRun));
+            Ok(handle)
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            FlowApplication::launch(
+                definition,
+                LaunchParams {
+                    enable_autodiscovery: false,
+                    cli_args: Some(vec![
+                        "obzenflow".into(),
+                        "--config".into(),
+                        config_path.into_os_string(),
+                    ]),
+                    flow_handle_hooks: vec![Box::new(move |handle| {
+                        *hook_observed.lock().unwrap() = Some(handle.clone());
+                        Ok(tokio::spawn(async {}))
+                    })],
+                    ..LaunchParams::default()
+                },
+            ),
+        )
+        .await
+        .expect("auth admission must return promptly");
+        assert!(matches!(
+            result,
+            Err(ApplicationError::ServerStartFailed(_))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let handle = observed.lock().unwrap().take().unwrap();
+        assert!(
+            !handle.is_running(),
+            "failed admission must stop the waiting supervisor"
+        );
+        assert!(matches!(handle.current_state(), PipelineState::ReadyForRun));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_auto_mode_starts_after_host_admission() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let journal_dir = tempdir.path().join("journals");
         std::fs::create_dir_all(&journal_dir).expect("create journal root");
@@ -1112,6 +1208,12 @@ impl FlowApplication {
             // journal is created.
             let bootstrap_config = {
                 let mut bootstrap_config = config.bootstrap_config();
+                if config.server.enabled {
+                    // The host releases automatic Run only after authentication
+                    // admission succeeds. The supervisor must not race ahead.
+                    bootstrap_config.startup_mode =
+                        obzenflow_runtime::bootstrap::StartupMode::Manual;
+                }
                 if let Some(replay) = bootstrap_config.replay.clone() {
                     let archive = crate::journal::disk::replay_archive::DiskReplayArchive::open(
                         replay.archive_path,
@@ -1316,6 +1418,12 @@ impl FlowApplication {
                 match start_result {
                     Ok(server_handle) => server_handle,
                     Err(err) => {
+                        use obzenflow_runtime::supervised_base::SupervisorHandle;
+                        // Stop the waiting supervisor before dropping the bootstrap
+                        // guard, which restores the process's automatic-start default.
+                        if let Err(cleanup_error) = flow_handle.abort_and_wait().await {
+                            tracing::warn!(%cleanup_error, "Failed to stop pipeline after web admission failure");
+                        }
                         break 'run (Err(err), Some(flow_name), run_state, false);
                     }
                 }

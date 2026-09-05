@@ -356,8 +356,9 @@ pub async fn start_web_server_with_config(
 
     // Start server in background
     let addr = server_config.address();
+    let serving = server.prepare_start(server_config)?;
     let handle = tokio::spawn(async move {
-        if let Err(e) = server.start(server_config).await {
+        if let Err(e) = serving.await {
             tracing::error!("Web server failed: {}", e);
         }
     });

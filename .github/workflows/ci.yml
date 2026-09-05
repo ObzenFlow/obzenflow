@@ -253,6 +253,8 @@ jobs:
         # change). Exclude a genuinely slow binary via the profile's
         # default-filter, with a comment, so the exclusion is explicit
         # and reviewed.
+        # Include the optional managed host so authentication and startup
+        # regressions execute in CI rather than only compiling under Clippy.
         run: |
           set -euo pipefail
 
@@ -266,7 +268,7 @@ jobs:
             --workspace \
             --locked \
             --profile "${profile}" \
-            --features test-support
+            --features test-support,obzenflow_infra/warp-server
 
   postgres-conformance:
     needs: fmt
