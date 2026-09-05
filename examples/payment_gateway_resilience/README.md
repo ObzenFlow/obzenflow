@@ -262,21 +262,15 @@ reconstruction matches the original archive fact-for-fact.
 
 The run directory holds the durable journals as internal framed storage
 (`<len>:<crc>:<json>` records in `.log` files). Read them through the supported
-journal subcommands rather than parsing the files directly:
+journal library rather than parsing the files directly. The existing
+`obzenflow_infra::journal::disk::inspect::export_jsonl` function exports one JSON object per
+committed record across system, data, and error journals; pass `None` as its output argument to
+write to stdout. The adjacent `inspect` function provides a summary and filtered stage listing.
 
-```sh
-RUN=$(ls -dt target/payment-gateway-logs/flows/*/ | head -1)
-
-# A human summary plus a per-stage event listing:
-cargo run -p obzenflow -- journal inspect "$RUN"
-
-# One JSON object per committed record (system, data, and error journals):
-cargo run -p obzenflow -- journal export-jsonl "$RUN"
-```
-
-Both commands read through the same framed parser as replay and verification, so
-they fail loud on a corrupt record with its file and offset rather than silently
-skipping it.
+The framework's [journal validation test](../../tests/payment_gateway_validation_journal_test.rs)
+shows programmatic export through the shared framed reader. The framework package installs no
+standalone journal command. Replay with `--verify`, as shown above, remains the application-owned
+way to certify the reconstructed output.
 
 ## 5. Resilience as the Second Layer
 

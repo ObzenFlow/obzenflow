@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 keywords = ["event-streaming", "event-sourcing", "async", "pipeline"]
 publish = true
+autobins = false
 # Fail closed on shipped artifact types. Tests, examples, and repository-only tooling
 # remain in Git and CI rather than in the crates.io source archive.
 include = [
@@ -136,10 +137,6 @@ obzenflow_infra = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
-# CLI surface for the `obzenflow` binary (FLOWIP-095j)
-clap = { workspace = true }
-# Live-mode HTTP client for `obzenflow config get --url` (FLOWIP-010).
-reqwest = { workspace = true, features = ["blocking"] }
 
 [dev-dependencies]
 # Used by examples/tests/benchmarks in this crate

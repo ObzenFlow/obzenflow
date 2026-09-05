@@ -28,8 +28,40 @@ fn workspace_members_and_internal_dependencies_use_one_exact_version() {
         .filter_map(|package| package["name"].as_str())
         .collect::<BTreeSet<_>>();
 
+    // FLOWIP-141b: the operational CLI belongs to an independent private repository.
+    // Metadata includes dev/target dependencies, so none can silently reintroduce it.
+    let private_cli = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("framework has a parent directory")
+        .join("obzenflow-cli");
+    assert_eq!(
+        workspace_manifest["package"]["autobins"].as_bool(),
+        Some(false),
+        "the facade must disable binary auto-discovery"
+    );
+    assert!(
+        workspace_manifest.get("bin").is_none(),
+        "the facade must not declare an explicit binary target"
+    );
+
     for package in &workspace_packages {
         let package_name = package["name"].as_str().expect("package name is a string");
+        assert!(
+            !matches!(package_name, "obzenflow_cli" | "obzenflow-cli"),
+            "the operational CLI must not be a framework workspace member"
+        );
+        if package_name == "obzenflow" {
+            for target in package["targets"].as_array().expect("package targets") {
+                assert!(
+                    !target["kind"]
+                        .as_array()
+                        .expect("target kinds")
+                        .iter()
+                        .any(|kind| kind == "bin"),
+                    "the published facade must contain no binary target"
+                );
+            }
+        }
         assert_eq!(
             package["version"].as_str(),
             Some(workspace_version),
@@ -57,6 +89,19 @@ fn workspace_members_and_internal_dependencies_use_one_exact_version() {
             let dependency_name = dependency["name"]
                 .as_str()
                 .expect("dependency name is a string");
+            assert!(
+                !matches!(dependency_name, "obzenflow_cli" | "obzenflow-cli")
+                    && !dependency["path"]
+                        .as_str()
+                        .is_some_and(|path| Path::new(path).starts_with(&private_cli)),
+                "framework package {package_name} must not depend on the private CLI"
+            );
+            if package_name == "obzenflow" {
+                assert!(
+                    !matches!(dependency_name, "clap" | "reqwest"),
+                    "the facade must not retain CLI-only dependency {dependency_name}"
+                );
+            }
             if workspace_names.contains(dependency_name) {
                 assert_eq!(
                     dependency["req"].as_str(),

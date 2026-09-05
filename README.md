@@ -52,6 +52,8 @@ For runnable versions with real domain types and handlers, see the
 
 These commands run from a clone of the ObzenFlow repository. Examples are
 repository learning assets and are not included in the crates.io package.
+The `obzenflow` package is a Rust library and installs no operational CLI. Replay and verification
+run through your application's executable.
 
 Run the payment gateway example, a flow that authorizes orders through an unreliable gateway behind a declared effect and a circuit breaker:
 
