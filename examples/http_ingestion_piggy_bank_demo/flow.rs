@@ -14,7 +14,9 @@
 //! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server`
 //!
 //! Recommended control-plane auth example:
-//! `export OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH='Bearer piggy-bank-demo-secret'`
+//! Provision `OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH` out of band with the complete
+//! expected `Authorization` header value before starting the process. The repository
+//! guide at `crates/obzenflow_infra/src/web/README.md` explains the authentication scopes.
 //! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`
 //!
 //! 1) Open accounts (reference side; required before ledger entries):
@@ -31,9 +33,9 @@
 //! - The stateful stage emits a `bank.checkbook` snapshot for every posted entry.
 //! - The `{accepted,rejected}` response is per-request (single POST => accepted=1). For cumulative counts, check `/metrics`.
 //! - Ingress POSTs above stay unauthenticated in this example. Control-plane auth protects built-ins such as `/metrics`, `/api/topology`, and `/api/flow/*`.
-//! - With the recommended auth example above, query built-ins with:
-//!   - `curl http://127.0.0.1:9090/metrics -H 'Authorization: Bearer piggy-bank-demo-secret'`
-//!   - `curl http://127.0.0.1:9090/api/topology -H 'Authorization: Bearer piggy-bank-demo-secret'`
+//! - With control-plane auth enabled, configure the client's `Authorization` header
+//!   through its protected credential configuration before querying `/metrics` or
+//!   `/api/topology`. Keep credential values out of command arguments and shell history.
 //! - In this example, `runner.rs` owns the HTTP ingress bundles and hosting shell,
 //!   while `build_flow(...)` stays pipeline-only and accepts the extracted typed
 //!   sources. That split is intentional: hosting concerns stay outside `flow!`.

@@ -442,21 +442,12 @@ impl WarpServer {
             let endpoint = endpoint.clone();
             let template = endpoint.path().to_string();
 
-            if let Some(managed) = endpoint.managed_route() {
-                if let Some(surface_policy) = managed.surface_policy.as_ref() {
-                    if let Some(surface_auth) = surface_policy.auth.as_ref() {
-                        if !matches!(surface_auth, AuthPolicy::None)
-                            && matches!(managed.route_policy.auth, Some(AuthPolicy::None))
-                        {
-                            return Err(WebError::EndpointRegistrationFailed {
-                                path: template.clone(),
-                                message: "Route-local AuthPolicy::None must not weaken a surface-level auth requirement; prefer leaving surface auth unset and declaring auth on protected routes explicitly"
-                                    .to_string(),
-                            });
-                        }
-                    }
-                }
-            }
+            let managed = endpoint.managed_route();
+            let auth = managed
+                .as_ref()
+                .map(|managed| resolve_managed_auth(managed, &template))
+                .transpose()?
+                .flatten();
 
             let surface_metrics = match (&self.surface_metrics, surface_name_tag_value(&endpoint)) {
                 (Some(collector), Some(surface_name)) => Some(SurfaceMetricsRouteContext {
@@ -480,10 +471,24 @@ impl WarpServer {
             for method in claimed_methods {
                 dispatch.insert_method(
                     method,
-                    endpoint.clone(),
-                    surface_metrics.clone(),
+                    RoutedEndpoint {
+                        endpoint: endpoint.clone(),
+                        managed: managed.clone(),
+                        auth: auth.clone(),
+                        surface_metrics: surface_metrics.clone(),
+                    },
                     &template,
                 )?;
+            }
+        }
+
+        // Resolve all declarations before reading material. A route cannot hide
+        // an invalid surface requirement behind a different credential.
+        for dispatch in by_template.values() {
+            for routed in dispatch.by_method.values() {
+                if let Some(auth) = &routed.auth {
+                    validate_auth_policy_startup(auth)?;
+                }
             }
         }
 
@@ -903,6 +908,9 @@ fn surface_name_tag_value(endpoint: &Arc<dyn HttpEndpoint>) -> Option<Arc<str>> 
 #[derive(Clone)]
 struct RoutedEndpoint {
     endpoint: Arc<dyn HttpEndpoint>,
+    // Freeze declarations at admission; only secret material is request-resolved.
+    managed: Option<ManagedRouteInfo>,
+    auth: Option<AuthPolicy>,
     surface_metrics: Option<SurfaceMetricsRouteContext>,
 }
 
@@ -923,8 +931,7 @@ impl RouteDispatch {
     fn insert_method(
         &mut self,
         method: HttpMethod,
-        endpoint: Arc<dyn HttpEndpoint>,
-        surface_metrics: Option<SurfaceMetricsRouteContext>,
+        routed: RoutedEndpoint,
         template_for_error: &str,
     ) -> Result<(), WebError> {
         if self.by_method.contains_key(&method) {
@@ -938,13 +945,7 @@ impl RouteDispatch {
             });
         }
 
-        self.by_method.insert(
-            method,
-            RoutedEndpoint {
-                endpoint,
-                surface_metrics,
-            },
-        );
+        self.by_method.insert(method, routed);
         Ok(())
     }
 
@@ -984,7 +985,7 @@ async fn dispatch_request(
     match body {
         Some(body) => {
             handle_request_with_body(
-                routed.endpoint,
+                routed,
                 host_policy,
                 method,
                 headers,
@@ -993,13 +994,12 @@ async fn dispatch_request(
                 raw_path,
                 matched_route,
                 path_params,
-                routed.surface_metrics,
             )
             .await
         }
         None => {
             handle_request_no_body(
-                routed.endpoint,
+                routed,
                 host_policy,
                 method,
                 headers,
@@ -1007,7 +1007,6 @@ async fn dispatch_request(
                 raw_path,
                 matched_route,
                 path_params,
-                routed.surface_metrics,
             )
             .await
         }
@@ -1047,14 +1046,29 @@ fn content_type_matches(provided: Option<&str>, expected: &str) -> bool {
     provided.eq_ignore_ascii_case(expected)
 }
 
-fn resolve_effective_auth(managed: &ManagedRouteInfo) -> Option<AuthPolicy> {
-    if let Some(route_auth) = &managed.route_policy.auth {
-        return Some(route_auth.clone());
-    }
-    managed
+fn resolve_managed_auth(
+    managed: &ManagedRouteInfo,
+    path: &str,
+) -> Result<Option<AuthPolicy>, WebError> {
+    let surface_auth = managed
         .surface_policy
         .as_ref()
-        .and_then(|policy| policy.auth.clone())
+        .and_then(|policy| policy.auth.as_ref());
+    if let Some(required) = surface_auth.filter(|auth| !matches!(auth, AuthPolicy::None)) {
+        if managed
+            .route_policy
+            .auth
+            .as_ref()
+            .is_some_and(|route_auth| route_auth != required)
+        {
+            return Err(WebError::EndpointRegistrationFailed {
+                path: path.to_string(),
+                message: "Route auth conflicts with required surface auth".to_string(),
+            });
+        }
+        return Ok(Some(required.clone()));
+    }
+    Ok(managed.route_policy.auth.as_ref().or(surface_auth).cloned())
 }
 
 pub(crate) fn is_control_plane_path(path: &str) -> bool {
@@ -1093,18 +1107,40 @@ fn is_loopback_host(host: &str) -> bool {
             .unwrap_or(false)
 }
 
+// Keep only a fixed reason on failure. VarError::NotUnicode contains the secret
+// itself and must never reach Display, Debug, tracing, or an error source chain.
+fn validate_secret_material(
+    value: Result<String, std::env::VarError>,
+) -> Result<String, &'static str> {
+    match value {
+        Ok(value) if value.is_empty() => Err("empty"),
+        Ok(value) => Ok(value),
+        Err(std::env::VarError::NotPresent) => Err("missing"),
+        Err(std::env::VarError::NotUnicode(_)) => Err("non-Unicode"),
+    }
+}
+
+fn resolve_auth_secret(env_name: &str, policy: &str) -> Result<String, WebError> {
+    validate_secret_material(std::env::var(env_name)).map_err(|reason| WebError::StartupFailed {
+        message: format!(
+            "AuthPolicy::{policy} expects non-empty environment variable `{env_name}` ({reason})"
+        ),
+        source: None,
+    })
+}
+
+fn request_auth_secret(env_name: &str, policy: &str) -> Result<String, Response> {
+    resolve_auth_secret(env_name, policy).map_err(|error| {
+        tracing::error!(%error, "Authentication policy is misconfigured");
+        Response::internal_error().with_text("Internal Server Error")
+    })
+}
+
 fn validate_auth_policy_startup(auth: &AuthPolicy) -> Result<(), WebError> {
     match auth {
         AuthPolicy::None => Ok(()),
         AuthPolicy::ApiKey { value_env, .. } => {
-            std::env::var(value_env)
-                .map(|_| ())
-                .map_err(|err| WebError::StartupFailed {
-                    message: format!(
-                        "Control-plane AuthPolicy::ApiKey expects env var `{value_env}`: {err}"
-                    ),
-                    source: None,
-                })
+            resolve_auth_secret(value_env, "ApiKey").map(|_| ())
         }
         AuthPolicy::HmacSha256 {
             secret_env,
@@ -1114,19 +1150,12 @@ fn validate_auth_policy_startup(auth: &AuthPolicy) -> Result<(), WebError> {
         } => {
             if replay_window_secs.is_some() && timestamp_header.is_none() {
                 return Err(WebError::StartupFailed {
-                    message: "Control-plane AuthPolicy::HmacSha256 requires timestamp_header when replay_window_secs is configured".to_string(),
+                    message: "AuthPolicy::HmacSha256 requires timestamp_header when replay_window_secs is configured".to_string(),
                     source: None,
                 });
             }
 
-            std::env::var(secret_env)
-                .map(|_| ())
-                .map_err(|err| WebError::StartupFailed {
-                    message: format!(
-                        "Control-plane AuthPolicy::HmacSha256 expects env var `{secret_env}`: {err}"
-                    ),
-                    source: None,
-                })
+            resolve_auth_secret(secret_env, "HmacSha256").map(|_| ())
         }
     }
 }
@@ -1230,19 +1259,11 @@ fn enforce_auth_policy(
         AuthPolicy::ApiKey { header, value_env } => {
             use subtle::ConstantTimeEq;
 
-            let expected = match std::env::var(value_env) {
-                Ok(v) => v,
-                Err(err) => {
-                    tracing::error!(
-                        value_env = %value_env,
-                        error = %err,
-                        "AuthPolicy::ApiKey is misconfigured: expected env var not present"
-                    );
-                    return Err(Response::internal_error().with_text("Internal Server Error"));
-                }
+            let expected = request_auth_secret(value_env, "ApiKey")?;
+            let Some(provided) = header_value(headers, header) else {
+                return Err(Response::new(401).with_text("Unauthorized"));
             };
 
-            let provided = header_value(headers, header).unwrap_or_default();
             let ok: bool = provided.as_bytes().ct_eq(expected.as_bytes()).into();
             if ok {
                 Ok(())
@@ -1267,17 +1288,7 @@ fn enforce_auth_policy(
                 return Err(Response::internal_error().with_text("Internal Server Error"));
             }
 
-            let secret = match std::env::var(secret_env) {
-                Ok(v) => v,
-                Err(err) => {
-                    tracing::error!(
-                        secret_env = %secret_env,
-                        error = %err,
-                        "AuthPolicy::HmacSha256 is misconfigured: expected env var not present"
-                    );
-                    return Err(Response::internal_error().with_text("Internal Server Error"));
-                }
-            };
+            let secret = request_auth_secret(secret_env, "HmacSha256")?;
 
             let provided_sig = match header_value(headers, signature_header) {
                 Some(v) => v,
@@ -1298,8 +1309,8 @@ fn enforce_auth_policy(
                     Err(_) => return Err(Response::new(401).with_text("Unauthorized")),
                 };
                 let now = Utc::now().timestamp();
-                let window = i64::try_from(*window_secs).unwrap_or(i64::MAX);
-                if (now - ts).abs() > window {
+                let window = (*window_secs).min(i64::MAX as u64);
+                if now.abs_diff(ts) > window {
                     return Err(Response::new(401).with_text("Unauthorized"));
                 }
             }
@@ -1355,9 +1366,10 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
         return None;
     }
 
-    let bytes: Option<Vec<u8>> = (0..value.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&value[i..i + 2], 16).ok())
+    let bytes: Option<Vec<u8>> = value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
         .collect();
     bytes
 }
@@ -1379,7 +1391,7 @@ fn reply_from_response(response: Response) -> Result<Box<dyn Reply>, Rejection> 
 /// Helper function to handle requests without body (GET, HEAD, DELETE, OPTIONS)
 #[allow(clippy::too_many_arguments)]
 async fn handle_request_no_body(
-    endpoint: Arc<dyn HttpEndpoint>,
+    routed: RoutedEndpoint,
     host_policy: HostPolicy,
     method: HttpMethod,
     headers: warp::http::HeaderMap,
@@ -1387,8 +1399,13 @@ async fn handle_request_no_body(
     path: String,
     matched_route: String,
     path_params: HashMap<String, String>,
-    surface_metrics: Option<SurfaceMetricsRouteContext>,
 ) -> Result<Box<dyn Reply>, Rejection> {
+    let RoutedEndpoint {
+        endpoint,
+        managed,
+        auth,
+        surface_metrics,
+    } = routed;
     // Check if endpoint supports this method
     let supported_methods = endpoint.methods();
     if !supported_methods.is_empty() && !supported_methods.contains(&method) {
@@ -1400,7 +1417,6 @@ async fn handle_request_no_body(
     // Convert headers
     let req_headers = headers_to_owned_map(&headers);
 
-    let managed = endpoint.managed_route();
     let effective_timeout =
         resolve_effective_timeout(host_policy.request_timeout, managed.as_ref());
     let log_ctx = if managed.is_some() {
@@ -1409,9 +1425,9 @@ async fn handle_request_no_body(
         None
     };
 
-    if let Some(managed) = managed.as_ref() {
-        if let Some(auth) = resolve_effective_auth(managed) {
-            if let Err(response) = enforce_auth_policy(&auth, &req_headers, &[]) {
+    if managed.is_some() {
+        if let Some(auth) = auth.as_ref() {
+            if let Err(response) = enforce_auth_policy(auth, &req_headers, &[]) {
                 if let Some(metrics) = &surface_metrics {
                     metrics.observe(
                         method,
@@ -1529,7 +1545,7 @@ async fn handle_request_no_body(
 /// Helper function to handle requests with body (POST, PUT, PATCH)
 #[allow(clippy::too_many_arguments)]
 async fn handle_request_with_body(
-    endpoint: Arc<dyn HttpEndpoint>,
+    routed: RoutedEndpoint,
     host_policy: HostPolicy,
     method: HttpMethod,
     headers: warp::http::HeaderMap,
@@ -1538,8 +1554,13 @@ async fn handle_request_with_body(
     path: String,
     matched_route: String,
     path_params: HashMap<String, String>,
-    surface_metrics: Option<SurfaceMetricsRouteContext>,
 ) -> Result<Box<dyn Reply>, Rejection> {
+    let RoutedEndpoint {
+        endpoint,
+        managed,
+        auth,
+        surface_metrics,
+    } = routed;
     // Check if endpoint supports this method
     let supported_methods = endpoint.methods();
     if !supported_methods.is_empty() && !supported_methods.contains(&method) {
@@ -1552,7 +1573,6 @@ async fn handle_request_with_body(
     // Convert headers
     let req_headers = headers_to_owned_map(&headers);
 
-    let managed = endpoint.managed_route();
     let effective_timeout =
         resolve_effective_timeout(host_policy.request_timeout, managed.as_ref());
     let log_ctx = if managed.is_some() {
@@ -1594,8 +1614,8 @@ async fn handle_request_with_body(
             }
         }
 
-        if let Some(auth) = resolve_effective_auth(managed) {
-            if let Err(response) = enforce_auth_policy(&auth, &req_headers, body.as_ref()) {
+        if let Some(auth) = auth.as_ref() {
+            if let Err(response) = enforce_auth_policy(auth, &req_headers, body.as_ref()) {
                 if let Some(metrics) = &surface_metrics {
                     metrics.observe(
                         method,
@@ -1743,14 +1763,13 @@ fn sse_frame_to_warp(frame: SseFrame) -> SseEvent {
     ev
 }
 
-#[async_trait]
-impl WebServer for WarpServer {
-    fn register_endpoint(&mut self, endpoint: Box<dyn HttpEndpoint>) -> Result<(), WebError> {
-        self.endpoints.push(Arc::from(endpoint));
-        Ok(())
-    }
-
-    async fn start(self, config: ServerConfig) -> Result<(), WebError> {
+impl WarpServer {
+    /// Admit authentication and retain route declarations before spawning the listener task.
+    /// Socket binding and task supervision remain part of the existing serving future.
+    pub(crate) fn prepare_start(
+        self,
+        config: ServerConfig,
+    ) -> Result<impl std::future::Future<Output = Result<(), WebError>> + Send, WebError> {
         let addr: SocketAddr = config.address().parse().map_err(|e| WebError::BindFailed {
             address: config.address(),
             source: Some(Box::new(e)),
@@ -1798,29 +1817,43 @@ impl WebServer for WarpServer {
                 .boxed()
         };
 
-        // Start the server. With a shutdown signal attached, the listener
-        // closes gracefully after it fires (FLOWIP-114d gap 8); SSE producers
-        // self-close separately, since transport-level graceful shutdown
-        // never ends an infinite stream.
-        match self.shutdown.clone() {
-            Some(mut shutdown) => {
-                let (_bound, server) =
-                    warp::serve(routes_with_cors).bind_with_graceful_shutdown(addr, async move {
-                        // A dropped sender also means: close now.
-                        while !*shutdown.borrow() {
-                            if shutdown.changed().await.is_err() {
-                                break;
+        Ok(async move {
+            // Start the server. With a shutdown signal attached, the listener
+            // closes gracefully after it fires (FLOWIP-114d gap 8); SSE producers
+            // self-close separately, since transport-level graceful shutdown
+            // never ends an infinite stream.
+            match self.shutdown.clone() {
+                Some(mut shutdown) => {
+                    let (_bound, server) = warp::serve(routes_with_cors)
+                        .bind_with_graceful_shutdown(addr, async move {
+                            // A dropped sender also means: close now.
+                            while !*shutdown.borrow() {
+                                if shutdown.changed().await.is_err() {
+                                    break;
+                                }
                             }
-                        }
-                    });
-                server.await;
+                        });
+                    server.await;
+                }
+                None => {
+                    warp::serve(routes_with_cors).run(addr).await;
+                }
             }
-            None => {
-                warp::serve(routes_with_cors).run(addr).await;
-            }
-        }
 
+            Ok(())
+        })
+    }
+}
+
+#[async_trait]
+impl WebServer for WarpServer {
+    fn register_endpoint(&mut self, endpoint: Box<dyn HttpEndpoint>) -> Result<(), WebError> {
+        self.endpoints.push(Arc::from(endpoint));
         Ok(())
+    }
+
+    async fn start(self, config: ServerConfig) -> Result<(), WebError> {
+        self.prepare_start(config)?.await
     }
 
     fn shutdown_handle(&self) -> Option<Box<dyn ServerShutdownHandle>> {
@@ -1829,6 +1862,10 @@ impl WebServer for WarpServer {
         None
     }
 }
+
+#[cfg(test)]
+#[path = "auth_tests.rs"]
+mod auth_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2102,7 +2139,7 @@ mod tests {
             WebError::EndpointRegistrationFailed { path, message } => {
                 assert_eq!(path, "/weak");
                 assert!(
-                    message.contains("must not weaken"),
+                    message.contains("conflicts with required surface auth"),
                     "unexpected message: {message}"
                 );
             }
@@ -2257,7 +2294,11 @@ mod tests {
 
     #[tokio::test]
     async fn managed_surface_enforces_api_key_auth() {
-        std::env::set_var("OBZENFLOW_TEST_API_KEY_V1", "sekret");
+        if !super::auth_tests::with_auth_env(
+            "web::warp::warp_server::tests::managed_surface_enforces_api_key_auth",
+        ) {
+            return;
+        }
 
         let mut server = WarpServer::new();
         server
@@ -2338,7 +2379,9 @@ mod tests {
     async fn managed_surface_enforces_hmac_replay_window_when_configured() {
         use ring::hmac;
 
-        std::env::set_var("OBZENFLOW_TEST_HMAC_SECRET_V1", "sekret");
+        if !super::auth_tests::with_auth_env("web::warp::warp_server::tests::managed_surface_enforces_hmac_replay_window_when_configured") {
+            return;
+        }
 
         let mut server = WarpServer::new();
         server
@@ -2510,7 +2553,11 @@ mod tests {
 
     #[tokio::test]
     async fn control_plane_auth_enforces_raw_metrics_endpoint() {
-        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+        if !super::auth_tests::with_auth_env(
+            "web::warp::warp_server::tests::control_plane_auth_enforces_raw_metrics_endpoint",
+        ) {
+            return;
+        }
 
         let mut server = WarpServer::new();
         server
@@ -2546,7 +2593,11 @@ mod tests {
 
     #[tokio::test]
     async fn control_plane_auth_does_not_gate_health_endpoint() {
-        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+        if !super::auth_tests::with_auth_env(
+            "web::warp::warp_server::tests::control_plane_auth_does_not_gate_health_endpoint",
+        ) {
+            return;
+        }
 
         let mut server = WarpServer::new();
         server
@@ -2574,7 +2625,11 @@ mod tests {
 
     #[tokio::test]
     async fn control_plane_auth_does_not_gate_ready_endpoint() {
-        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+        if !super::auth_tests::with_auth_env(
+            "web::warp::warp_server::tests::control_plane_auth_does_not_gate_ready_endpoint",
+        ) {
+            return;
+        }
 
         let mut server = WarpServer::new();
         server
@@ -2602,7 +2657,11 @@ mod tests {
 
     #[tokio::test]
     async fn control_plane_auth_enforces_topology_endpoint() {
-        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+        if !super::auth_tests::with_auth_env(
+            "web::warp::warp_server::tests::control_plane_auth_enforces_topology_endpoint",
+        ) {
+            return;
+        }
 
         let mut server = WarpServer::new();
         server
@@ -2638,7 +2697,11 @@ mod tests {
 
     #[tokio::test]
     async fn control_plane_auth_enforces_api_flow_prefix_endpoint() {
-        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+        if !super::auth_tests::with_auth_env(
+            "web::warp::warp_server::tests::control_plane_auth_enforces_api_flow_prefix_endpoint",
+        ) {
+            return;
+        }
 
         let mut server = WarpServer::new();
         server
@@ -2679,7 +2742,11 @@ mod tests {
     /// with them, exactly like `/api/topology`.
     #[tokio::test]
     async fn control_plane_auth_enforces_config_endpoints() {
-        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+        if !super::auth_tests::with_auth_env(
+            "web::warp::warp_server::tests::control_plane_auth_enforces_config_endpoints",
+        ) {
+            return;
+        }
 
         struct RawConfigEndpoint(&'static str);
 
@@ -2754,7 +2821,11 @@ mod tests {
 
     #[tokio::test]
     async fn control_plane_auth_covers_flow_events_special_route() {
-        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+        if !super::auth_tests::with_auth_env(
+            "web::warp::warp_server::tests::control_plane_auth_covers_flow_events_special_route",
+        ) {
+            return;
+        }
 
         let mut server = WarpServer::new();
         server.with_system_journal(Arc::new(MemoryJournal::<SystemEvent>::new()));
