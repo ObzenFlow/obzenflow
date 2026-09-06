@@ -4,13 +4,15 @@
 
 //! Snapshot DTOs for metrics collection
 //!
-//! These DTOs define the contract between metrics collectors and exporters,
+//! These DTOs define the observations published by execution and host samplers,
 //! implementing the dual collection pattern for application and infrastructure metrics.
 
 use crate::event::context::StageType;
 use crate::event::observability::HttpSurfaceRouteMetricsSnapshot;
 use crate::event::status::processing_status::ErrorKind;
-use crate::event::system_event::{ContractName, ContractResultStatusLabel, SystemFeedRole};
+use crate::event::system_event::{
+    ContractName, ContractResultStatusLabel, EdgeLivenessState, StageActivity, SystemFeedRole,
+};
 use crate::event::types::EventType;
 use crate::event::SinkOperationPhase;
 use crate::id::{FlowId, StageId};
@@ -176,9 +178,9 @@ pub struct AppMetricsSnapshot {
 
     /// Edge liveness state per edge (upstream, downstream) (FLOWIP-063e).
     ///
-    /// This is a transition-derived gauge from `SystemEventType::EdgeLiveness`:
-    /// 1=Healthy, 0.5=Idle, 0.25=Suspect, 0=Stalled.
-    pub edge_liveness_state: HashMap<(StageId, StageId), f64>,
+    /// The latest semantic state from `SystemEventType::EdgeLiveness`.
+    /// Reporting encodings belong to the consuming projection.
+    pub edge_liveness_state: HashMap<(StageId, StageId), EdgeLivenessState>,
 
     /// Contract verification metrics per edge (upstream/downstream)
     pub contract_metrics: ContractMetricsSnapshot,
@@ -356,8 +358,8 @@ pub struct LivenessMetricsSnapshot {
     /// Stage handler blocked time (seconds). 0 when not processing.
     pub stage_handler_blocked_seconds: HashMap<StageId, f64>,
 
-    /// Stage activity state code: 0=polling, 1=processing, 2=draining, 3=completed.
-    pub stage_activity_state: HashMap<StageId, f64>,
+    /// Latest observed activity, independent of its reporting representation.
+    pub stage_activity: HashMap<StageId, StageActivity>,
 
     /// Edge idle time (seconds) per edge (upstream, downstream).
     pub edge_idle_seconds: HashMap<(StageId, StageId), f64>,

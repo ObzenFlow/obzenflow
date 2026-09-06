@@ -204,7 +204,7 @@
 //! - [`obzenflow_runtime`] contains the execution engine (stage supervisors,
 //!   pipeline orchestration, metrics).
 //! - [`obzenflow_adapters`] provides middleware, concrete sources/sinks, and
-//!   monitoring exporters.
+//!   Prometheus reporting projections.
 //! - [`obzenflow_dsl`] implements the `flow!` macro and stage descriptor
 //!   macros.
 //! - [`obzenflow_infra`] houses `FlowApplication`, journal backends, and the

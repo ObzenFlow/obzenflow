@@ -17,7 +17,6 @@ pub mod application;
 pub mod env;
 pub mod http_client;
 pub mod journal;
-mod metrics_reporting;
 pub mod sources;
 #[cfg(feature = "test-support")]
 pub mod testing;

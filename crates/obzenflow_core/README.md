@@ -9,7 +9,7 @@ The business-domain nucleus of the framework, defining the types and traits the 
 - Event model (`ChainEvent`, `SystemEvent`, payloads, context blocks)
 - Journaling contracts (`Journal<T>`, `JournalReader<T>`, `EventEnvelope<T>`)
 - Verification contracts between stages (`Contract` + built-in contracts)
-- Metrics and observability interfaces (wide-events DTOs, observer/exporter traits)
+- Measurement snapshots, observability contracts, and the synchronous `MetricsSnapshotSink` publication port
 - Ports for outer layers (HTTP client and web server abstractions, control-middleware ports)
 - Strong identifiers and time primitives (typed IDs, `MetricsDuration`)
 - Typed payloads (`TypedPayload`) for compile-time event type resolution and schema versioning

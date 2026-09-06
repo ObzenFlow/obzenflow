@@ -21,6 +21,8 @@ fn check_inner_sources(dir: &Path) {
                 "MetricsReporter",
                 "render_metrics",
                 "run_with_metrics",
+                "edge_liveness_state_gauge_value",
+                "stage_activity_gauge_value",
             ] {
                 assert!(
                     !source.contains(forbidden),
@@ -48,10 +50,19 @@ fn provider_selection_and_rendering_stay_outside_core_runtime_and_dsl() {
         "obzenflow_infra/src/monitoring_backend/console.rs",
         "obzenflow_adapters/src/monitoring/projections/console.rs",
         "obzenflow_infra/src/web/metrics_server.rs",
+        "obzenflow_infra/src/metrics_reporting/mod.rs",
+        "obzenflow_adapters/src/monitoring/aggregator/mod.rs",
+        "obzenflow_adapters/src/monitoring/metrics/mod.rs",
+        "obzenflow_adapters/src/monitoring/exporters/mod.rs",
     ] {
         assert!(
             !root.join("crates").join(removed).exists(),
             "removed provider facade returned: {removed}"
         );
     }
+    let config =
+        std::fs::read_to_string(root.join("crates/obzenflow_infra/src/application/config.rs"))
+            .unwrap();
+    assert!(!config.contains("enum MetricsReporter"));
+    assert!(!config.contains("fn parse_metrics_exporter"));
 }

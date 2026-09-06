@@ -368,7 +368,7 @@ async fn monitoring_modes_preserve_live_and_replay_journal_outcomes() {
         .prefix("monitoring-replay-")
         .tempdir_in(root)
         .unwrap();
-    let mut modes = vec!["disabled", "noop"];
+    let mut modes = vec!["disabled"];
     if cfg!(all(feature = "prometheus", feature = "web-host")) {
         modes.push("prometheus");
     }
@@ -390,14 +390,9 @@ async fn monitoring_modes_preserve_live_and_replay_journal_outcomes() {
             &config,
             format!(
                 "[server]\nenabled = {}\nhost = \"127.0.0.1\"\nport = {port}\nstartup_mode = \"auto\"\n\
-             [metrics]\nenabled = {}\nexporter = \"{}\"\n",
+             [metrics]\nenabled = {}\n",
                 mode == "prometheus",
-                mode != "disabled",
-                if mode == "disabled" {
-                    "prometheus"
-                } else {
-                    mode
-                }
+                mode == "prometheus"
             ),
         )
         .unwrap();

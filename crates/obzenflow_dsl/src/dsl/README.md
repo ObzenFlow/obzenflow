@@ -8,7 +8,7 @@ This document holds the detailed “how it works” diagrams for `obzenflow_dsl`
 flowchart LR
   Core["obzenflow_core<br/>(domain types + traits)"]
   Runtime["obzenflow_runtime<br/>(supervised execution + stage builders)"]
-  Adapters["obzenflow_adapters<br/>(middleware + exporters + integrations)"]
+  Adapters["obzenflow_adapters<br/>(middleware + Prometheus projections + integrations)"]
   DSL["obzenflow_dsl<br/>(flow! + composition root)"]
   Infra["obzenflow_infra<br/>(journal implementations, app runner)"]
   Topology["obzenflow-topology<br/>(graph validation + SCC/cycles)"]

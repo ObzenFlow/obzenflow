@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 //! Composable middleware, concrete source/sink adapters, and monitoring
-//! exporters for ObzenFlow pipelines. Middleware factories (rate limiting,
+//! projections for ObzenFlow pipelines. Middleware factories (rate limiting,
 //! circuit breakers) are applied at the flow or stage level through the
 //! `flow!` macro. Sources and sinks provide the I/O boundary for ingesting
 //! and emitting events.

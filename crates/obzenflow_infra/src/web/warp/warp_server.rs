@@ -1887,8 +1887,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_flow_totals_reach_sse_independently_of_metrics_reporting() {
-        use crate::application::config::{MetricsReporter, ResolvedMetricsConfig};
-        use crate::metrics_reporting::MetricsReporting;
+        use obzenflow_adapters::monitoring::MetricsReadModel;
         use obzenflow_core::event::{PipelineLifecycleEvent, SystemEventType};
         use obzenflow_dsl::{flow, sink, source, FlowDefinition};
         use obzenflow_runtime::run_context::FlowBuildContext;
@@ -1906,10 +1905,7 @@ mod tests {
             vec![false]
         };
         for enabled in enabled_modes {
-            let reporting = MetricsReporting::new(&ResolvedMetricsConfig {
-                enabled,
-                exporter: MetricsReporter::Prometheus,
-            });
+            let model = enabled.then(|| Arc::new(MetricsReadModel::default()));
             let definition = FlowDefinition::materialize(move |_| {
                 let input = obzenflow_adapters::sources::finite(vec![Item(1), Item(2), Item(3)]);
                 let output = SinkTyped::new(|_: Item| async {}).idempotent();
@@ -1924,8 +1920,8 @@ mod tests {
                 })
             });
             let mut context = FlowBuildContext::for_tests();
-            if let Some(sink) = reporting.sink() {
-                context = context.with_metrics_sink(sink);
+            if let Some(model) = model {
+                context = context.with_metrics_sink(model);
             }
             let handle = definition.build(context).await.unwrap();
             let journal = handle.system_journal().unwrap();
@@ -1998,23 +1994,16 @@ mod tests {
 
     #[cfg(feature = "prometheus")]
     #[tokio::test]
-    async fn reporter_selection_preserves_the_metrics_wire_contract() {
-        use crate::application::config::{MetricsReporter, ResolvedMetricsConfig};
-        use crate::metrics_reporting::MetricsReporting;
+    async fn reporting_enablement_preserves_the_metrics_wire_contract() {
+        use obzenflow_adapters::monitoring::MetricsReadModel;
         use obzenflow_core::event::context::StageType;
+        use obzenflow_core::metrics::MetricsSnapshotSink;
         use obzenflow_core::metrics::{AppMetricsSnapshot, StageMetadata};
 
-        for (enabled, selection, expected_status) in [
-            (true, MetricsReporter::Prometheus, 200),
-            (true, MetricsReporter::Noop, 404),
-            (false, MetricsReporter::Prometheus, 404),
-        ] {
-            let backend = MetricsReporting::new(&ResolvedMetricsConfig {
-                enabled,
-                exporter: selection,
-            });
+        for (enabled, expected_status) in [(true, 200), (false, 404)] {
+            let model = enabled.then(|| Arc::new(MetricsReadModel::default()));
             let stage = obzenflow_core::StageId::new();
-            if let Some(sink) = backend.sink() {
+            if let Some(sink) = &model {
                 let mut app = AppMetricsSnapshot::default();
                 app.pipeline_state = "Running".into();
                 app.stage_metadata.insert(
@@ -2031,7 +2020,8 @@ mod tests {
                 sink.publish_app_snapshot(app);
             }
             let mut server = WarpServer::new();
-            if let Some(endpoint) = backend.prometheus_endpoint() {
+            if let Some(model) = model {
+                let endpoint = crate::web::endpoints::PrometheusMetricsEndpoint::new(model);
                 server.register_endpoint(Box::new(endpoint)).unwrap();
             }
             let filter = server.build_filter(test_host_policy()).unwrap();

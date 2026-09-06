@@ -16,6 +16,27 @@ use obzenflow_core::{FlowId, StageId};
 use std::error::Error;
 use std::fmt::Write;
 
+fn edge_liveness_state_gauge_value(state: &obzenflow_core::event::EdgeLivenessState) -> f64 {
+    match state {
+        obzenflow_core::event::EdgeLivenessState::Healthy => 1.0,
+        obzenflow_core::event::EdgeLivenessState::Idle => 0.5,
+        obzenflow_core::event::EdgeLivenessState::Suspect => 0.25,
+        obzenflow_core::event::EdgeLivenessState::Stalled => 0.0,
+        obzenflow_core::event::EdgeLivenessState::Recovered => 1.0,
+    }
+}
+
+fn stage_activity_gauge_value(activity: &obzenflow_core::event::system_event::StageActivity) -> u8 {
+    use obzenflow_core::event::system_event::StageActivity;
+    match activity {
+        StageActivity::Polling => 0,
+        StageActivity::Processing { .. } => 1,
+        StageActivity::Draining => 2,
+        StageActivity::Completed => 3,
+        StageActivity::WaitingOnQuietInput { .. } => 4,
+    }
+}
+
 /// Deterministic Prometheus exposition over an owned read view.
 #[derive(Default)]
 pub struct PrometheusProjection;
@@ -1620,7 +1641,8 @@ impl PrometheusProjection {
             )?;
             writeln!(output, "# TYPE obzenflow_edge_liveness_state gauge")?;
 
-            for ((upstream, downstream), value) in &snapshot.edge_liveness_state {
+            for ((upstream, downstream), state) in &snapshot.edge_liveness_state {
+                let value = edge_liveness_state_gauge_value(state);
                 let upstream_id = upstream.to_string();
                 let downstream_id = downstream.to_string();
 
@@ -2473,13 +2495,14 @@ impl PrometheusProjection {
             writeln!(output)?;
         }
 
-        if !snapshot.liveness_metrics.stage_activity_state.is_empty() {
+        if !snapshot.liveness_metrics.stage_activity.is_empty() {
             writeln!(
                 output,
                 "# HELP obzenflow_stage_activity_state Stage activity state code (0=polling,1=processing,2=draining,3=completed)"
             )?;
             writeln!(output, "# TYPE obzenflow_stage_activity_state gauge")?;
-            for (stage_id, state) in &snapshot.liveness_metrics.stage_activity_state {
+            for (stage_id, activity) in &snapshot.liveness_metrics.stage_activity {
+                let state = stage_activity_gauge_value(activity);
                 writeln!(
                     output,
                     "obzenflow_stage_activity_state{{stage=\"{}\"}} {}",
@@ -2890,6 +2913,72 @@ mod tests {
     }
 
     #[test]
+    fn semantic_liveness_states_preserve_prometheus_wire_values() {
+        use obzenflow_core::event::system_event::{EdgeLivenessState, StageActivity};
+        use obzenflow_core::event::types::{DurationMs, EventId};
+
+        let upstream = StageId::new();
+        let downstream = StageId::new();
+        for (state, expected) in [
+            (EdgeLivenessState::Healthy, "1"),
+            (EdgeLivenessState::Idle, "0.5"),
+            (EdgeLivenessState::Suspect, "0.25"),
+            (EdgeLivenessState::Stalled, "0"),
+            (EdgeLivenessState::Recovered, "1"),
+        ] {
+            let mut snapshot = AppMetricsSnapshot::default();
+            snapshot
+                .edge_liveness_state
+                .insert((upstream, downstream), state);
+            let view = MetricsReadView {
+                app: Some(std::sync::Arc::new(snapshot)),
+                ..Default::default()
+            };
+            let output = PrometheusProjection::new().render(&view).unwrap();
+            assert!(output.lines().any(|line| line == format!(
+                "obzenflow_edge_liveness_state{{flow=\"unknown\",upstream_stage_id=\"{upstream}\",downstream_stage_id=\"{downstream}\",upstream=\"unknown\",downstream=\"unknown\"}} {expected}"
+            )), "{state:?}: {output}");
+        }
+
+        for (activity, expected) in [
+            (StageActivity::Polling, "0"),
+            (
+                StageActivity::Processing {
+                    event_id: EventId::new(),
+                    elapsed_ms: DurationMs(7),
+                },
+                "1",
+            ),
+            (StageActivity::Draining, "2"),
+            (StageActivity::Completed, "3"),
+            (
+                StageActivity::WaitingOnQuietInput {
+                    upstream: Some(upstream),
+                },
+                "4",
+            ),
+        ] {
+            let mut snapshot = InfraMetricsSnapshot::default();
+            snapshot
+                .liveness_metrics
+                .stage_activity
+                .insert(downstream, activity);
+            let view = MetricsReadView {
+                infra: Some(std::sync::Arc::new(snapshot)),
+                ..Default::default()
+            };
+            let output = PrometheusProjection::new().render(&view).unwrap();
+            assert!(
+                output.lines().any(|line| line
+                    == format!(
+                        "obzenflow_stage_activity_state{{stage=\"{downstream}\"}} {expected}"
+                    )),
+                "{activity:?}: {output}"
+            );
+        }
+    }
+
+    #[test]
     fn test_liveness_metrics_rendered() {
         let exporter = PrometheusProjection::new();
 
@@ -2901,10 +2990,13 @@ mod tests {
             .liveness_metrics
             .stage_handler_blocked_seconds
             .insert(downstream, 12.5);
-        snapshot
-            .liveness_metrics
-            .stage_activity_state
-            .insert(downstream, 1.0);
+        snapshot.liveness_metrics.stage_activity.insert(
+            downstream,
+            obzenflow_core::event::system_event::StageActivity::Processing {
+                event_id: obzenflow_core::event::types::EventId::new(),
+                elapsed_ms: obzenflow_core::event::types::DurationMs(0),
+            },
+        );
         snapshot
             .liveness_metrics
             .edge_idle_seconds

@@ -7,4 +7,3 @@ value_env = "OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH"
 
 [metrics]
 enabled = true
-exporter = "prometheus"

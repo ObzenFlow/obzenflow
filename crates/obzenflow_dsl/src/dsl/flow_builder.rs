@@ -1375,7 +1375,6 @@ where
             obzenflow_adapters::middleware::control::ControlMiddlewareAggregator::new(),
         );
 
-        // Create metrics exporter using the builder pattern
 
         // Create stage supervisors using resources from StageResourcesBuilder
         let mut stages = Vec::new();

@@ -245,7 +245,7 @@ pub struct MetricsStore {
     // Edge liveness state (FLOWIP-063e).
     //
     // Gauge semantics: 1=Healthy, 0.5=Idle, 0.25=Suspect, 0=Stalled.
-    pub edge_liveness_state: HashMap<(StageId, StageId), f64>,
+    pub edge_liveness_state: HashMap<(StageId, StageId), obzenflow_core::event::EdgeLivenessState>,
 
     // Hosted web surface metrics (FLOWIP-093a)
     pub http_surface_metrics:
@@ -1368,16 +1368,6 @@ fn normalize_circuit_breaker_state_label(state: &str) -> Option<&'static str> {
     }
 }
 
-fn edge_liveness_state_gauge_value(state: &obzenflow_core::event::EdgeLivenessState) -> f64 {
-    match state {
-        obzenflow_core::event::EdgeLivenessState::Healthy => 1.0,
-        obzenflow_core::event::EdgeLivenessState::Idle => 0.5,
-        obzenflow_core::event::EdgeLivenessState::Suspect => 0.25,
-        obzenflow_core::event::EdgeLivenessState::Stalled => 0.0,
-        obzenflow_core::event::EdgeLivenessState::Recovered => 1.0,
-    }
-}
-
 #[async_trait::async_trait]
 impl FsmAction for MetricsAggregatorAction {
     type Context = MetricsAggregatorContext;
@@ -1578,7 +1568,7 @@ impl FsmAction for MetricsAggregatorAction {
                     } => {
                         store
                             .edge_liveness_state
-                            .insert((*upstream, *reader), edge_liveness_state_gauge_value(state));
+                            .insert((*upstream, *reader), *state);
                     }
                     obzenflow_core::event::SystemEventType::HttpSurfaceSnapshot { snapshot } => {
                         for route in &snapshot.routes {

@@ -21,6 +21,7 @@ use crate::web::endpoints::event_ingestion::{HttpIngress, IngressDecoder, Ingres
 #[cfg(feature = "warp-server")]
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
 use crate::web::RuntimeInstanceId;
+use obzenflow_adapters::monitoring::MetricsReadModel;
 use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsSnapshotSink};
 use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_core::TypedPayload;
@@ -37,6 +38,66 @@ use tokio::task::JoinHandle;
 
 type FlowHandleHook =
     Box<dyn Fn(&Arc<FlowHandle>) -> Result<JoinHandle<()>, ApplicationError> + Send + Sync>;
+
+/// Cancels an application-owned task even if launch or shutdown is dropped.
+/// This guard has no reporting or provider responsibilities.
+struct ApplicationTask(JoinHandle<()>);
+
+impl ApplicationTask {
+    async fn stop(mut self) {
+        self.0.abort();
+        let _ = (&mut self.0).await;
+    }
+}
+
+impl Drop for ApplicationTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[cfg(test)]
+mod application_task_tests {
+    use super::ApplicationTask;
+    use tokio::sync::oneshot;
+
+    struct Cancelled(Option<oneshot::Sender<()>>);
+
+    impl Drop for Cancelled {
+        fn drop(&mut self) {
+            let _ = self.0.take().unwrap().send(());
+        }
+    }
+
+    async fn pending_task() -> (ApplicationTask, oneshot::Receiver<()>) {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (cancelled_tx, cancelled_rx) = oneshot::channel();
+        let task = ApplicationTask(tokio::spawn(async move {
+            let _cancelled = Cancelled(Some(cancelled_tx));
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        }));
+        started_rx.await.unwrap();
+        (task, cancelled_rx)
+    }
+
+    #[tokio::test]
+    async fn stopping_application_task_joins_its_cleanup() {
+        let (task, mut cancelled) = pending_task().await;
+        task.stop().await;
+        assert_eq!(cancelled.try_recv(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn dropping_application_task_cancels_pending_work() {
+        let (task, cancelled) = pending_task().await;
+        drop(task);
+        tokio::time::timeout(std::time::Duration::from_secs(1), cancelled)
+            .await
+            .expect("application drop must not leave a detached task")
+            .unwrap();
+    }
+}
 
 #[derive(Default)]
 struct LaunchParams {
@@ -1181,7 +1242,12 @@ impl FlowApplication {
         // Background tasks spawned by FlowHandle hooks and/or web surface wiring closures.
         // These must not be allowed to outlive FlowApplication, even on early-return paths.
         let mut managed_tasks: Vec<JoinHandle<()>> = Vec::new();
-        let mut reporting = crate::metrics_reporting::MetricsReporting::new(&config.metrics);
+        let metrics_model = (cfg!(feature = "prometheus") && config.metrics.enabled)
+            .then(|| Arc::new(MetricsReadModel::default()));
+        let metrics_sink = metrics_model
+            .as_ref()
+            .map(|model| model.clone() as Arc<dyn MetricsSnapshotSink>);
+        let mut metrics_collector: Option<ApplicationTask> = None;
         // FLOWIP-114d gap 24: the Studio heartbeat is tracked here rather than in
         // `managed_tasks` so the shutdown sequence can join its fenced deregistration
         // before the generic managed-task abort would cancel the in-flight DELETE.
@@ -1265,7 +1331,7 @@ impl FlowApplication {
             let build_context = obzenflow_runtime::run_context::FlowBuildContext::new(
                 config.runtime_config.clone(),
             );
-            let build_context = match reporting.sink() {
+            let build_context = match metrics_sink.clone() {
                 Some(sink) => build_context.with_metrics_sink(sink),
                 None => build_context,
             };
@@ -1305,7 +1371,7 @@ impl FlowApplication {
                 }
             }
 
-            if let Some(sink) = reporting.sink() {
+            if let Some(sink) = metrics_sink.clone() {
                 let liveness = flow_handle.liveness_snapshots();
                 Self::publish_infra_snapshot(&sink, liveness.as_ref());
                 let collector = Self::spawn_infra_metrics_collector(
@@ -1313,7 +1379,7 @@ impl FlowApplication {
                     liveness,
                     config.runtime.surface_metrics_interval,
                 );
-                reporting.start(collector);
+                metrics_collector = Some(ApplicationTask(collector));
             }
 
             #[cfg(feature = "warp-server")]
@@ -1412,7 +1478,9 @@ impl FlowApplication {
                             all_extra_endpoints,
                             surface_metrics_collector,
                             #[cfg(feature = "prometheus")]
-                            reporting.prometheus_endpoint(),
+                            metrics_model.as_ref().map(|model| {
+                                crate::web::endpoints::PrometheusMetricsEndpoint::new(model.clone())
+                            }),
                             HostLifecycle {
                                 runtime_config: config.runtime_config.clone(),
                                 instance_id: runtime_instance_id.clone(),
@@ -1758,7 +1826,9 @@ impl FlowApplication {
                     // terminal event on this signal; the listener close carries
                     // a bounded deadline with abort as the escalation backstop,
                     // mirroring the flow's own graceful-to-cancel ladder.
-                    reporting.finish().await;
+                    if let Some(task) = metrics_collector.take() {
+                        task.stop().await;
+                    }
                     let _ = server_shutdown_tx.send(true);
                     const SERVER_CLOSE_GRACE: Duration = Duration::from_secs(5);
                     let mut server_task = server_task;
@@ -1839,7 +1909,9 @@ impl FlowApplication {
                 .run()
                 .await
                 .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
-            reporting.finish().await;
+            if let Some(task) = metrics_collector.take() {
+                task.stop().await;
+            }
             if result.is_ok() && !presentation_enabled {
                 if let Some(locator) = run_state.as_ref().and_then(|s| s.locator()) {
                     print_replay_hint(locator);
@@ -1848,7 +1920,9 @@ impl FlowApplication {
             break 'run (result, Some(flow_name), run_state, false);
         };
 
-        reporting.finish().await;
+        if let Some(task) = metrics_collector.take() {
+            task.stop().await;
+        }
 
         #[cfg(feature = "warp-server")]
         if let Some(emitter) = &surface_metrics_emitter {
@@ -2034,21 +2108,10 @@ impl FlowApplication {
                                 .unwrap_or(0.0),
                         );
 
-                    let activity_state = match &stage.activity {
-                        obzenflow_core::event::system_event::StageActivity::Polling => 0.0,
-                        obzenflow_core::event::system_event::StageActivity::Processing {
-                            ..
-                        } => 1.0,
-                        obzenflow_core::event::system_event::StageActivity::Draining => 2.0,
-                        obzenflow_core::event::system_event::StageActivity::Completed => 3.0,
-                        obzenflow_core::event::system_event::StageActivity::WaitingOnQuietInput {
-                            ..
-                        } => 4.0,
-                    };
                     snapshot
                         .liveness_metrics
-                        .stage_activity_state
-                        .insert(*stage_id, activity_state);
+                        .stage_activity
+                        .insert(*stage_id, stage.activity);
 
                     for edge in &stage.edges {
                         snapshot

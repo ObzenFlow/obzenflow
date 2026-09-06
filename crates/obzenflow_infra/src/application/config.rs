@@ -243,17 +243,9 @@ pub(crate) struct ResolvedStartupRuntimeConfig {
     pub surface_metrics_interval: Duration,
 }
 
-/// Deployment selection, never passed into Runtime or DSL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MetricsReporter {
-    Prometheus,
-    Noop,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedMetricsConfig {
     pub enabled: bool,
-    pub exporter: MetricsReporter,
 }
 
 #[derive(Debug, Clone)]
@@ -594,7 +586,6 @@ pub(crate) struct RawFileAiModelsConfig {
 #[serde(default, deny_unknown_fields)]
 struct RawFileMetricsConfig {
     enabled: Option<bool>,
-    exporter: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -634,6 +625,12 @@ impl FlowConfig {
         builder_config_file: Option<PathBuf>,
         enable_autodiscovery: bool,
     ) -> Result<ResolvedStartupConfig, ConfigError> {
+        if std::env::var_os("OBZENFLOW_METRICS_EXPORTER").is_some() {
+            return Err(ConfigError::at(
+                "OBZENFLOW_METRICS_EXPORTER",
+                "removed; Prometheus is the supported format, use OBZENFLOW_METRICS_ENABLED to enable or disable reporting",
+            ));
+        }
         let file_path = self
             .config
             .clone()
@@ -785,15 +782,8 @@ impl FlowConfig {
             parse_env_bool("OBZENFLOW_METRICS_ENABLED", "metrics.enabled")?,
             studio_enabled,
         );
-        let metrics_exporter = resolve_scalar(
-            None,
-            parse_metrics_exporter(file.metrics.exporter.as_deref(), "metrics.exporter")?,
-            parse_env_metrics_exporter()?,
-            MetricsReporter::Prometheus,
-        );
         let metrics = ResolvedMetricsConfig {
             enabled: metrics_enabled,
-            exporter: metrics_exporter,
         };
 
         admit_metrics_reporting(studio_enabled, &server, &metrics)?;
@@ -1044,7 +1034,19 @@ pub(crate) fn load_file_config(path: Option<&Path>) -> Result<RawFileStartupConf
 
     let text = std::fs::read_to_string(path)
         .map_err(|err| ConfigError::global(format!("failed to read {}: {err}", path.display())))?;
-    toml::from_str::<RawFileStartupConfig>(&text)
+    let raw: toml::Value = toml::from_str(&text)
+        .map_err(|err| ConfigError::global(format!("failed to parse {}: {err}", path.display())))?;
+    if raw
+        .get("metrics")
+        .and_then(|metrics| metrics.get("exporter"))
+        .is_some()
+    {
+        return Err(ConfigError::at(
+            "metrics.exporter",
+            "removed; Prometheus is the supported format, use metrics.enabled to enable or disable reporting",
+        ));
+    }
+    raw.try_into()
         .map_err(|err| ConfigError::global(format!("failed to parse {}: {err}", path.display())))
 }
 
@@ -1305,12 +1307,6 @@ fn admit_metrics_reporting(
                 "Studio requires true; remove the explicit disable or disable Studio",
             ));
         }
-        if metrics.exporter != MetricsReporter::Prometheus {
-            return Err(ConfigError::at(
-                "metrics.exporter",
-                "Studio requires prometheus",
-            ));
-        }
     }
     if server.enabled && !cfg!(feature = "warp-server") {
         return Err(ConfigError::at(
@@ -1318,11 +1314,11 @@ fn admit_metrics_reporting(
             "requires the compiled web-host capability",
         ));
     }
-    if metrics.enabled && metrics.exporter == MetricsReporter::Prometheus {
+    if metrics.enabled {
         if !cfg!(feature = "prometheus") {
             return Err(ConfigError::at(
-                "metrics.exporter",
-                "prometheus requires the compiled prometheus capability",
+                "metrics.enabled",
+                "requires the compiled prometheus capability",
             ));
         }
         if !server.enabled {
@@ -1332,30 +1328,13 @@ fn admit_metrics_reporting(
             ));
         }
     }
-    tracing::debug!(studio, host_enabled = server.enabled, metrics_enabled = metrics.enabled,
-        reporter = ?metrics.exporter, "Metrics reporting configuration admitted");
+    tracing::debug!(
+        studio,
+        host_enabled = server.enabled,
+        metrics_enabled = metrics.enabled,
+        "Prometheus reporting configuration admitted"
+    );
     Ok(())
-}
-
-fn parse_metrics_exporter(
-    value: Option<&str>,
-    path: &str,
-) -> Result<Option<MetricsReporter>, ConfigError> {
-    match value.map(normalise_enum_token) {
-        None => Ok(None),
-        Some(value) if value == "prometheus" => Ok(Some(MetricsReporter::Prometheus)),
-        Some(value) if value == "noop" => Ok(Some(MetricsReporter::Noop)),
-        Some(value) => Err(ConfigError::at(
-            path,
-            format!("unknown value {value:?}; expected one of prometheus, noop"),
-        )),
-    }
-}
-
-fn parse_env_metrics_exporter() -> Result<Option<MetricsReporter>, ConfigError> {
-    let value = env_var::<String>("OBZENFLOW_METRICS_EXPORTER")
-        .map_err(|err| ConfigError::at("metrics.exporter", err.to_string()))?;
-    parse_metrics_exporter(value.as_deref(), "metrics.exporter")
 }
 
 fn parse_non_negative_u64(value: Option<i64>, path: &str) -> Result<Option<u64>, ConfigError> {
@@ -1501,23 +1480,19 @@ mod tests {
         for startup in ["auto", "manual"] {
             for host in [false, true] {
                 for enabled in [false, true] {
-                    for exporter in ["prometheus", "noop"] {
-                        let contents = format!(
-                            "[server]\nenabled = {host}\nstartup_mode = \"{startup}\"\n\
-                             [metrics]\nenabled = {enabled}\nexporter = \"{exporter}\"\n"
-                        );
-                        let result = resolve_studio_file(&contents, &[]);
-                        let supported = (!host || cfg!(feature = "warp-server"))
-                            && (!enabled
-                                || exporter != "prometheus"
-                                || (host && cfg!(feature = "prometheus")));
-                        assert_eq!(result.is_ok(), supported, "{contents}: {result:?}");
-                        if let Ok(resolved) = result {
-                            assert_eq!(resolved.server.enabled, host);
-                            assert_eq!(resolved.metrics.enabled, enabled);
-                            #[cfg(feature = "studio-registration")]
-                            assert!(resolved.studio.is_none());
-                        }
+                    let contents = format!(
+                        "[server]\nenabled = {host}\nstartup_mode = \"{startup}\"\n\
+                         [metrics]\nenabled = {enabled}\n"
+                    );
+                    let result = resolve_studio_file(&contents, &[]);
+                    let supported = (!host || cfg!(feature = "warp-server"))
+                        && (!enabled || (host && cfg!(feature = "prometheus")));
+                    assert_eq!(result.is_ok(), supported, "{contents}: {result:?}");
+                    if let Ok(resolved) = result {
+                        assert_eq!(resolved.server.enabled, host);
+                        assert_eq!(resolved.metrics.enabled, enabled);
+                        #[cfg(feature = "studio-registration")]
+                        assert!(resolved.studio.is_none());
                     }
                 }
             }
@@ -1525,28 +1500,32 @@ mod tests {
     }
 
     #[test]
-    fn removed_console_reporter_is_rejected_even_when_disabled() {
+    fn retired_metrics_selectors_are_rejected_even_when_disabled() {
         let _lock = env_lock();
-        for enabled in [false, true] {
-            let contents = format!("[metrics]\nenabled = {enabled}\nexporter = \"console\"");
-            let error = resolve_studio_file(&contents, &[]).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "config error at metrics.exporter: unknown value \"console\"; expected one of prometheus, noop"
-            );
-        }
         let guard = EnvGuard::new(&["OBZENFLOW_METRICS_ENABLED", "OBZENFLOW_METRICS_EXPORTER"]);
-        guard.set("OBZENFLOW_METRICS_ENABLED", "false");
-        guard.set("OBZENFLOW_METRICS_EXPORTER", "console");
-        let error = FlowConfig::try_parse_from(["obzenflow"])
-            .unwrap()
-            .resolve(None, false)
-            .unwrap_err();
-        assert!(error.to_string().contains("metrics.exporter"));
+        for enabled in [false, true] {
+            for selector in ["prometheus", "noop", "console", "otlp", ""] {
+                guard.remove("OBZENFLOW_METRICS_EXPORTER");
+                let contents = format!("[metrics]\nenabled = {enabled}\nexporter = \"{selector}\"");
+                let error = resolve_studio_file(&contents, &[]).unwrap_err();
+                assert_eq!(error.to_string(),
+                    "config error at metrics.exporter: removed; Prometheus is the supported format, use metrics.enabled to enable or disable reporting");
+
+                guard.set(
+                    "OBZENFLOW_METRICS_ENABLED",
+                    if enabled { "true" } else { "false" },
+                );
+                guard.set("OBZENFLOW_METRICS_EXPORTER", selector);
+                // An explicit file disable must not hide a retired environment selector.
+                let error = resolve_studio_file("[metrics]\nenabled = false", &[]).unwrap_err();
+                assert_eq!(error.to_string(),
+                    "config error at OBZENFLOW_METRICS_EXPORTER: removed; Prometheus is the supported format, use OBZENFLOW_METRICS_ENABLED to enable or disable reporting");
+            }
+        }
     }
 
     #[test]
-    fn compiled_capabilities_and_exporter_selection_activate_nothing() {
+    fn compiled_capabilities_activate_nothing() {
         let _lock = env_lock();
         let guard = EnvGuard::new(&[
             "OBZENFLOW_METRICS_ENABLED",
@@ -1556,11 +1535,7 @@ mod tests {
         guard.remove("OBZENFLOW_METRICS_ENABLED");
         guard.remove("OBZENFLOW_METRICS_EXPORTER");
         guard.remove("OBZENFLOW_STUDIO_ENABLED");
-        for contents in [
-            "",
-            "[metrics]\nexporter = \"prometheus\"",
-            "[metrics]\nexporter = \"noop\"",
-        ] {
+        for contents in ["", "[metrics]", "[metrics]\nenabled = false"] {
             let resolved = resolve_studio_file(contents, &[]).unwrap();
             assert!(!resolved.server.enabled);
             assert!(!resolved.metrics.enabled);
@@ -1573,31 +1548,20 @@ mod tests {
     #[test]
     fn studio_rejects_explicit_reporting_conflicts_and_preserves_precedence() {
         let _lock = env_lock();
-        for (settings, field) in [
-            ("enabled = false", "metrics.enabled"),
-            ("exporter = \"console\"", "metrics.exporter"),
-            ("exporter = \"noop\"", "metrics.exporter"),
-        ] {
-            let contents = format!("{}\n[metrics]\n{settings}\n", studio_config_toml());
-            assert!(resolve_studio_file(&contents, &[])
-                .unwrap_err()
-                .to_string()
-                .contains(field));
-        }
         let guard = EnvGuard::new(&["OBZENFLOW_METRICS_ENABLED", "OBZENFLOW_METRICS_EXPORTER"]);
+        guard.remove("OBZENFLOW_METRICS_EXPORTER");
+        let contents = format!("{}\n[metrics]\nenabled = false\n", studio_config_toml());
+        assert!(resolve_studio_file(&contents, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("metrics.enabled"));
         guard.set("OBZENFLOW_METRICS_ENABLED", "false");
-        guard.set("OBZENFLOW_METRICS_EXPORTER", "noop");
         assert!(resolve_studio_file(studio_config_toml(), &[])
             .unwrap_err()
             .to_string()
             .contains("metrics.enabled"));
-        let explicit = format!(
-            "{}\n[metrics]\nenabled = true\nexporter = \"prometheus\"",
-            studio_config_toml()
-        );
-        let resolved = resolve_studio_file(&explicit, &[]).unwrap();
-        assert!(resolved.metrics.enabled);
-        assert_eq!(resolved.metrics.exporter, MetricsReporter::Prometheus);
+        let explicit = format!("{}\n[metrics]\nenabled = true", studio_config_toml());
+        assert!(resolve_studio_file(&explicit, &[]).unwrap().metrics.enabled);
     }
 
     #[cfg(not(feature = "studio-registration"))]
@@ -1624,7 +1588,6 @@ enabled = false
 
 [metrics]
 enabled = false
-exporter = "noop"
 "#,
         )
         .unwrap();
@@ -1642,7 +1605,6 @@ exporter = "noop"
             let resolved = result.unwrap();
             assert!(resolved.server.enabled);
             assert!(!resolved.metrics.enabled);
-            assert_eq!(resolved.metrics.exporter, MetricsReporter::Noop);
         } else {
             assert!(result.unwrap_err().to_string().contains("web-host"));
         }
@@ -1689,7 +1651,6 @@ advertise_url = "http://127.0.0.1:9090"
         let resolved = resolve_studio_file(studio_config_toml(), &[]).unwrap();
         assert!(resolved.server.enabled);
         assert!(resolved.metrics.enabled);
-        assert_eq!(resolved.metrics.exporter, MetricsReporter::Prometheus);
         let studio = resolved.studio.expect("studio enabled");
         assert_eq!(studio.job_id, "demo_job");
         assert_eq!(studio.lease_ttl_secs, 15);
@@ -2136,29 +2097,6 @@ resume_from = "/tmp/recorded"
     }
 
     #[test]
-    fn invalid_metrics_exporter_reports_path() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let config_path = tempdir.path().join("obzenflow.toml");
-        fs::write(
-            &config_path,
-            r#"
-[metrics]
-exporter = "statsd"
-"#,
-        )
-        .unwrap();
-
-        let cli =
-            FlowConfig::try_parse_from(["obzenflow", "--config", config_path.to_str().unwrap()])
-                .unwrap();
-        let err = cli.resolve(None, false).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "config error at metrics.exporter: unknown value \"statsd\"; expected one of prometheus, noop"
-        );
-    }
-
-    #[test]
     fn builder_config_file_is_used_when_cli_has_no_config() {
         let tempdir = tempfile::tempdir().unwrap();
         let config_path = tempdir.path().join("obzenflow.toml");
@@ -2217,12 +2155,11 @@ port = 2222
         let _lock = env_lock();
         let guard = EnvGuard::new(&["OBZENFLOW_METRICS_ENABLED", "OBZENFLOW_METRICS_EXPORTER"]);
         guard.set("OBZENFLOW_METRICS_ENABLED", "false");
-        guard.set("OBZENFLOW_METRICS_EXPORTER", "noop");
+        guard.remove("OBZENFLOW_METRICS_EXPORTER");
 
         let cli = FlowConfig::try_parse_from(["obzenflow"]).unwrap();
         let resolved = cli.resolve(None, false).unwrap();
         assert!(!resolved.metrics.enabled);
-        assert_eq!(resolved.metrics.exporter, MetricsReporter::Noop);
     }
 
     #[test]

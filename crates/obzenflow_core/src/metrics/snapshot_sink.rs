@@ -10,7 +10,7 @@ use super::{AppMetricsSnapshot, InfraMetricsSnapshot};
 /// Each publication preserves the other stream and works without readers.
 /// Implementations perform only controlled in-memory work: no formatting, I/O,
 /// delivery acknowledgement, or unbounded queues. Read views must release locks
-/// before formatting or output. Backend lifecycle belongs to the host.
+/// before formatting or output. Application resources and delivery belong to the host.
 pub trait MetricsSnapshotSink: Send + Sync {
     fn publish_app_snapshot(&self, snapshot: AppMetricsSnapshot);
     fn publish_infra_snapshot(&self, snapshot: InfraMetricsSnapshot);
