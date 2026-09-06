@@ -5,7 +5,7 @@
 //! The same explicit sink presence governs preflight and Runtime collection.
 use obzenflow::{sinks, sources};
 use obzenflow_adapters::monitoring::MetricsReadModel;
-use obzenflow_core::event::{ChainEvent, SystemEvent, SystemEventType};
+use obzenflow_core::event::{ChainEvent, PipelineLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::journal::{
     journal_name::JournalName, journal_owner::JournalOwner, Journal, JournalError,
 };
@@ -97,7 +97,19 @@ async fn ordinary_and_materialised_builds_use_only_the_injected_sink() {
             );
             let mut reader = system.reader_from(0).await.unwrap();
             let mut coordination_seen = false;
+            let mut terminal_totals = None;
             while let Some(envelope) = reader.next().await.unwrap() {
+                if let SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Completed {
+                    metrics,
+                    ..
+                }) = &envelope.event.event
+                {
+                    terminal_totals = Some((
+                        metrics.events_in_total,
+                        metrics.events_out_total,
+                        metrics.errors_total,
+                    ));
+                }
                 coordination_seen |= matches!(
                     envelope.event.event,
                     SystemEventType::MetricsCoordination(_)
@@ -106,6 +118,11 @@ async fn ordinary_and_materialised_builds_use_only_the_injected_sink() {
             assert_eq!(
                 coordination_seen, enabled,
                 "None must not start an aggregator"
+            );
+            assert_eq!(
+                terminal_totals,
+                Some((2, 2, 0)),
+                "Studio's terminal lifecycle totals must survive without reporting"
             );
         }
     }

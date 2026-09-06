@@ -110,4 +110,4 @@ More niche examples that target specific API surfaces or topology patterns. We u
 - **`topology_patterns_demo`** — Homogeneous fan-in with content-based routing (three sources of the same type into one aggregator, then one router to three priority sinks). Paired with `multi_source_ingest_demo` for the heterogeneous case.
 - **`multi_source_ingest_demo`** — Heterogeneous fan-in via per-branch alignment transforms (three sources of three different types normalised to one envelope, then a typed aggregator). The canonical reference for FLOWIP-114c typed authoring, including a long header comment that doubles as the authoring guide for multi-input stages.
 - **`flow_middleware_config`** — Targeted source middleware configuration
-- **`prometheus_demo`** — [Explicit Prometheus, console, and disabled monitoring modes](prometheus_demo/README.md) with fixed-input live/replay verification
+- **`prometheus_demo`** — [Opt-in Prometheus and disabled metrics reporting](prometheus_demo/README.md) with fixed-input live/replay verification

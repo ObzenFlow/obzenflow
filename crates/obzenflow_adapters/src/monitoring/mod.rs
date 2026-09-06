@@ -9,4 +9,4 @@ pub mod exporters;
 pub mod metrics;
 pub mod projections;
 pub mod read_model;
-pub use read_model::{MetricsReadModel, MetricsReadView, MetricsSubscription};
+pub use read_model::{MetricsReadModel, MetricsReadView};

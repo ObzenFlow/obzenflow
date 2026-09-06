@@ -12,18 +12,18 @@ use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Re
 use std::sync::Arc;
 
 /// HTTP endpoint for Prometheus metrics
-pub struct MetricsHttpEndpoint {
+pub struct PrometheusMetricsEndpoint {
     model: Arc<MetricsReadModel>,
 }
 
-impl MetricsHttpEndpoint {
+impl PrometheusMetricsEndpoint {
     pub fn new(model: Arc<MetricsReadModel>) -> Self {
         Self { model }
     }
 }
 
 #[async_trait]
-impl HttpEndpoint for MetricsHttpEndpoint {
+impl HttpEndpoint for PrometheusMetricsEndpoint {
     fn path(&self) -> &str {
         "/metrics"
     }
@@ -58,7 +58,7 @@ mod tests {
     #[tokio::test]
     async fn portable_endpoint_uses_current_owned_view_and_exact_media_type() {
         let model = Arc::new(MetricsReadModel::default());
-        let endpoint = MetricsHttpEndpoint::new(model.clone());
+        let endpoint = PrometheusMetricsEndpoint::new(model.clone());
         assert_eq!(endpoint.path(), "/metrics");
         assert_eq!(endpoint.methods(), &[HttpMethod::Get]);
         for state in [None, Some("Running"), Some("quoted\"state\\with\nnewline")] {

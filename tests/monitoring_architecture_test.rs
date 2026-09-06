@@ -18,7 +18,7 @@ fn check_inner_sources(dir: &Path) {
                 "DefaultMetricsConfig",
                 "PrometheusProjection",
                 "ConsoleProjection",
-                "MonitoringSelection",
+                "MetricsReporter",
                 "render_metrics",
                 "run_with_metrics",
             ] {
@@ -45,6 +45,8 @@ fn provider_selection_and_rendering_stay_outside_core_runtime_and_dsl() {
         "obzenflow_adapters/src/monitoring/exporters/prometheus_exporter.rs",
         "obzenflow_adapters/src/monitoring/exporters/console_summary.rs",
         "obzenflow_infra/src/monitoring_backend/prometheus.rs",
+        "obzenflow_infra/src/monitoring_backend/console.rs",
+        "obzenflow_adapters/src/monitoring/projections/console.rs",
         "obzenflow_infra/src/web/metrics_server.rs",
     ] {
         assert!(

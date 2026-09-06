@@ -14,5 +14,5 @@ pub mod topology;
 pub use config::{ConfigHttpEndpoint, ConfigReadModel, ConfigRoute};
 pub use flow_control::FlowControlEndpoint;
 #[cfg(feature = "prometheus")]
-pub use metrics::MetricsHttpEndpoint;
+pub use metrics::PrometheusMetricsEndpoint;
 pub use topology::TopologyHttpEndpoint;

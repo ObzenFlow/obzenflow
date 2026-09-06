@@ -91,7 +91,7 @@ cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai post
   --config examples/hn_ai_digest_demo/obzenflow.toml
 ```
 
-No features are enabled by default. Ordinary launches start neither an HTTP host nor monitoring. `--features web-host` compiles the Warp host; configuration must explicitly enable it. Hosted Prometheus monitoring additionally needs `--features prometheus`, `[server] enabled = true`, and `[metrics] enabled = true`. The `studio` capability includes both, and `studio.enabled = true` supplies omitted host and metrics defaults while rejecting explicit conflicts. Compiling capabilities alone activates nothing. `--features http-pull` enables HTTP pull sources, and `--features postgres` enables the PostgreSQL sink. PostgreSQL applications accept an externally supplied `OBZENFLOW_POSTGRES_URL`; they do not depend on repository tooling to launch the backing service.
+No features are enabled by default. Ordinary launches start neither an HTTP host nor metrics reporting. `--features web-host` compiles the Warp host; configuration must explicitly enable it. Hosted Prometheus reporting additionally needs `--features prometheus`, `[server] enabled = true`, and `[metrics] enabled = true`. The `studio` capability includes both, and `studio.enabled = true` supplies omitted host and metrics defaults while rejecting explicit conflicts. Compiling capabilities alone activates nothing. `--features http-pull` enables HTTP pull sources, and `--features postgres` enables the PostgreSQL sink. PostgreSQL applications accept an externally supplied `OBZENFLOW_POSTGRES_URL`; they do not depend on repository tooling to launch the backing service.
 
 ## Project organization
 

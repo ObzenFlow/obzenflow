@@ -26,21 +26,7 @@ impl Default for MetricsReadModel {
     }
 }
 
-/// Coalesced change notification without exposing a publication lock.
-pub struct MetricsSubscription(watch::Receiver<MetricsReadView>);
-
-impl MetricsSubscription {
-    pub async fn changed(&mut self) -> Result<MetricsReadView, watch::error::RecvError> {
-        self.0.changed().await?;
-        Ok(self.0.borrow_and_update().clone())
-    }
-}
-
 impl MetricsReadModel {
-    pub fn subscribe(&self) -> MetricsSubscription {
-        MetricsSubscription(self.latest.subscribe())
-    }
-
     pub fn snapshot(&self) -> MetricsReadView {
         self.latest.borrow().clone()
     }
@@ -173,23 +159,20 @@ mod tests {
     }
 
     #[test]
-    fn closing_view_is_immutable_under_late_publication() {
+    fn read_view_is_immutable_under_late_publication() {
         let model = MetricsReadModel::default();
         let stage = StageId::new();
         model.publish_app_snapshot(app(stage, 1));
         model.publish_infra_snapshot(infra(2));
-        let closing = model.snapshot();
-        let app_time = closing.app.as_ref().unwrap().timestamp;
-        let infra_time = closing.infra.as_ref().unwrap().timestamp;
+        let held = model.snapshot();
+        let app_time = held.app.as_ref().unwrap().timestamp;
+        let infra_time = held.infra.as_ref().unwrap().timestamp;
         model.publish_app_snapshot(app(stage, 3));
         model.publish_infra_snapshot(infra(4));
-        assert_eq!(closing.app.as_ref().unwrap().event_counts[&stage], 1);
-        assert_eq!(
-            closing.infra.as_ref().unwrap().journal_metrics.writes_total,
-            2
-        );
-        assert_eq!(closing.app.as_ref().unwrap().timestamp, app_time);
-        assert_eq!(closing.infra.as_ref().unwrap().timestamp, infra_time);
+        assert_eq!(held.app.as_ref().unwrap().event_counts[&stage], 1);
+        assert_eq!(held.infra.as_ref().unwrap().journal_metrics.writes_total, 2);
+        assert_eq!(held.app.as_ref().unwrap().timestamp, app_time);
+        assert_eq!(held.infra.as_ref().unwrap().timestamp, infra_time);
         assert_eq!(model.snapshot().app.unwrap().event_counts[&stage], 3);
     }
 

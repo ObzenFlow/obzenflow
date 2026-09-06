@@ -4,7 +4,5 @@
 
 //! Deterministic provider projections. Hosting and output belong to Infra.
 
-pub mod console;
 pub mod prometheus;
-pub use console::ConsoleProjection;
 pub use prometheus::PrometheusProjection;

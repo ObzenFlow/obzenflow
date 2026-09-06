@@ -368,7 +368,7 @@ async fn monitoring_modes_preserve_live_and_replay_journal_outcomes() {
         .prefix("monitoring-replay-")
         .tempdir_in(root)
         .unwrap();
-    let mut modes = vec!["disabled", "console", "noop"];
+    let mut modes = vec!["disabled", "noop"];
     if cfg!(all(feature = "prometheus", feature = "web-host")) {
         modes.push("prometheus");
     }
@@ -377,10 +377,19 @@ async fn monitoring_modes_preserve_live_and_replay_journal_outcomes() {
         let journal_base = dir.path().join(mode);
         std::fs::create_dir_all(&journal_base).unwrap();
         let config = journal_base.join("obzenflow.toml");
+        let port = if mode == "prometheus" {
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port()
+        } else {
+            9090
+        };
         std::fs::write(
             &config,
             format!(
-                "[server]\nenabled = {}\nhost = \"127.0.0.1\"\nport = 0\nstartup_mode = \"auto\"\n\
+                "[server]\nenabled = {}\nhost = \"127.0.0.1\"\nport = {port}\nstartup_mode = \"auto\"\n\
              [metrics]\nenabled = {}\nexporter = \"{}\"\n",
                 mode == "prometheus",
                 mode != "disabled",
@@ -417,16 +426,38 @@ async fn monitoring_modes_preserve_live_and_replay_journal_outcomes() {
                     &verify_run_dirs(&baseline, &archive, &VerifyOptions::default()).unwrap(),
                 );
             } else {
-                if let Some(first) = &first_live {
-                    assert_certified_match(
-                        &verify_run_dirs(first, &archive, &VerifyOptions::default()).unwrap(),
-                    );
-                } else {
+                if first_live.is_none() {
                     first_live = Some(archive.clone());
                 }
                 live = Some(archive.into_os_string());
             }
         }
+
+        // Failure facts carry the recorded flow ID inside their payload. Compare
+        // reporting modes against one recorded namespace, while the loop above
+        // separately proves every mode's live run and its own replay.
+        let baseline = first_live.as_ref().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        FlowApplication::builder()
+            .with_config_file(&config)
+            .with_cli_args([
+                OsString::from("reporting-shared-baseline"),
+                OsString::from("--replay-from"),
+                baseline.as_os_str().to_owned(),
+                OsString::from("--verify"),
+            ])
+            .run_async(build_flow(journal_base.clone(), calls.clone()))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_certified_match(
+            &verify_run_dirs(
+                baseline,
+                &latest_run_dir(&journal_base),
+                &VerifyOptions::default(),
+            )
+            .unwrap(),
+        );
     }
 }
 
@@ -434,7 +465,7 @@ fn assert_certified_match(outcome: &VerifyOutcome) -> &obzenflow_infra::verify::
     assert_eq!(
         outcome.exit_code(),
         0,
-        "expected a fully certified match: {}",
+        "expected a fully certified match: {}\n{outcome:#?}",
         obzenflow_infra::verify::render_verdict(outcome)
     );
     let VerifyOutcome::Completed { report, .. } = outcome else {

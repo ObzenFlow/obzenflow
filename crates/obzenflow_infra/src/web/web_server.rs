@@ -35,7 +35,7 @@ pub struct WebServerResources {
     /// `Topology`.
     pub contract_attachments: Option<ContractAttachments>,
     #[cfg(feature = "prometheus")]
-    pub metrics_endpoint: Option<super::endpoints::MetricsHttpEndpoint>,
+    pub metrics_endpoint: Option<super::endpoints::PrometheusMetricsEndpoint>,
     pub flow_handle: Option<Arc<FlowHandle>>,
     pub extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
     pub surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,

@@ -195,7 +195,7 @@ fn main() -> Result<()> {
         .run_blocking(FlowDefinition::materialize(move |_runtime_config| {
             let high_volume_source_handler = sources::finite_from_fn(move |index| {
                 if index >= total_events {
-                    eprintln!("🏁 Source complete: Generated {index} total events");
+                    println!("🏁 Source complete: Generated {index} total events");
                     return None;
                 }
 
@@ -203,7 +203,7 @@ fn main() -> Result<()> {
                 let next_count = index + 1;
 
                 if next_count.is_multiple_of(10_000) {
-                    eprintln!("📊 Generated {next_count} events...");
+                    println!("📊 Generated {next_count} events...");
                 }
 
                 Some(DataRequest {
@@ -218,7 +218,7 @@ fn main() -> Result<()> {
                 |state: &mut EventCountState, _event: &ProcessedEvent| {
                     state.event_count += 1;
                     if state.event_count.is_multiple_of(10_000) {
-                        eprintln!("📊 Counted {} events so far...", state.event_count);
+                        println!("📊 Counted {} events so far...", state.event_count);
                     }
                 },
             )
@@ -227,20 +227,20 @@ fn main() -> Result<()> {
                     let count = summary.event_count;
                     let errors = total_events.saturating_sub(count);
 
-                    eprintln!();
-                    eprintln!("=====================================");
-                    eprintln!("📊 Business-Level Event Count (FLOWIP-080j):");
-                    eprintln!("   Successfully processed: {count} events");
-                    eprintln!(
+                    println!();
+                    println!("=====================================");
+                    println!("📊 Business-Level Event Count (FLOWIP-080j):");
+                    println!("   Successfully processed: {count} events");
+                    println!(
                         "   Note: {total_events} generated - {count} = {errors} errors (routed to error journal)"
                     );
-                    eprintln!("=====================================");
-                    eprintln!();
-                    eprintln!("💡 Key Improvement:");
-                    eprintln!("   59-line EventCounter StatefulHandler → ReduceTyped helper");
-                    eprintln!("   Type-safe accumulation with zero ChainEvent manipulation!");
-                    eprintln!();
-                    eprintln!("=====================================");
+                    println!("=====================================");
+                    println!();
+                    println!("💡 Key Improvement:");
+                    println!("   59-line EventCounter StatefulHandler → ReduceTyped helper");
+                    println!("   Type-safe accumulation with zero ChainEvent manipulation!");
+                    println!();
+                    println!("=====================================");
                 })
                 .idempotent();
             let completion_sink_handler = CompletionSink::new();
