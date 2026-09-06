@@ -539,9 +539,12 @@ enabled = false
                     warp::reply::with_status(warp::reply(), warp::http::StatusCode::NO_CONTENT)
                 })
         };
-        let (phonebook_addr, phonebook_server) =
-            warp::serve(register.or(deregister)).bind_ephemeral(([127, 0, 0, 1], 0));
-        let phonebook_task = tokio::spawn(phonebook_server);
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let phonebook_addr = listener.local_addr().unwrap();
+        let phonebook_server = warp::serve(register.or(deregister)).incoming(listener);
+        let phonebook_task = tokio::spawn(phonebook_server.run());
         let phonebook_url = format!("http://{phonebook_addr}");
 
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -573,9 +576,6 @@ renew_interval_secs = 1
 
 [runtime]
 shutdown_timeout_secs = 2
-
-[metrics]
-enabled = false
 "#
             ),
         )

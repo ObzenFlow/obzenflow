@@ -1742,7 +1742,16 @@ async fn handle_request_with_body(
 fn sse_body_reply(body: SseBody) -> impl Reply {
     use tokio_stream::StreamExt;
 
-    let stream = body.map(|frame: SseFrame| Ok::<SseEvent, Infallible>(sse_frame_to_warp(frame)));
+    // Warp requires Sync, while Core permits Send-only producers. Polling still
+    // needs exclusive access: get_mut satisfies that without acquiring a lock.
+    let mut body = std::sync::Mutex::new(body);
+    let stream = futures::stream::poll_fn(move |cx| {
+        futures::Stream::poll_next(
+            std::pin::Pin::new(body.get_mut().expect("exclusive SSE body access")),
+            cx,
+        )
+    });
+    let stream = stream.map(|frame: SseFrame| Ok::<SseEvent, Infallible>(sse_frame_to_warp(frame)));
     warp::sse::reply(warp::sse::keep_alive().stream(stream))
 }
 
@@ -1770,6 +1779,8 @@ impl WarpServer {
         self,
         config: ServerConfig,
     ) -> Result<impl std::future::Future<Output = Result<(), WebError>> + Send, WebError> {
+        use futures::FutureExt;
+
         let addr: SocketAddr = config.address().parse().map_err(|e| WebError::BindFailed {
             address: config.address(),
             source: Some(Box::new(e)),
@@ -1822,21 +1833,28 @@ impl WarpServer {
             // closes gracefully after it fires (FLOWIP-114d gap 8); SSE producers
             // self-close separately, since transport-level graceful shutdown
             // never ends an infinite stream.
+            // Box Warp's bind/run futures at this boundary so their borrowed
+            // Tokio I/O and shutdown futures have an explicit Send type.
             match self.shutdown.clone() {
                 Some(mut shutdown) => {
-                    let (_bound, server) = warp::serve(routes_with_cors)
-                        .bind_with_graceful_shutdown(addr, async move {
+                    warp::serve(routes_with_cors)
+                        .bind(addr)
+                        .boxed()
+                        .await
+                        .graceful(async move {
                             // A dropped sender also means: close now.
                             while !*shutdown.borrow() {
                                 if shutdown.changed().await.is_err() {
                                     break;
                                 }
                             }
-                        });
-                    server.await;
+                        })
+                        .run()
+                        .boxed()
+                        .await;
                 }
                 None => {
-                    warp::serve(routes_with_cors).run(addr).await;
+                    warp::serve(routes_with_cors).run(addr).boxed().await;
                 }
             }
 
@@ -1857,8 +1875,8 @@ impl WebServer for WarpServer {
     }
 
     fn shutdown_handle(&self) -> Option<Box<dyn ServerShutdownHandle>> {
-        // Warp doesn't provide easy shutdown handles in this simple implementation
-        // For production, we'd need to use warp::Server::bind_with_graceful_shutdown
+        // The managed application supplies its shutdown receiver before startup;
+        // Warp's graceful serving future consumes it directly.
         None
     }
 }
@@ -2000,7 +2018,9 @@ mod tests {
         use obzenflow_core::metrics::MetricsSnapshotSink;
         use obzenflow_core::metrics::{AppMetricsSnapshot, StageMetadata};
 
-        for (enabled, expected_status) in [(true, 200), (false, 404)] {
+        // The host's method-first filters return 405 for an unregistered path.
+        // Preserve that existing behavior when metrics reporting is disabled.
+        for (enabled, expected_status) in [(true, 200), (false, 405)] {
             let model = enabled.then(|| Arc::new(MetricsReadModel::default()));
             let stage = obzenflow_core::StageId::new();
             if let Some(sink) = &model {
@@ -2044,6 +2064,7 @@ mod tests {
                 let post = warp::test::request()
                     .method("POST")
                     .path("/metrics")
+                    .body("")
                     .reply(&filter)
                     .await;
                 assert_eq!(post.status(), 405);
