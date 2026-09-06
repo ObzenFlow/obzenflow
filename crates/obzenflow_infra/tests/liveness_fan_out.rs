@@ -59,11 +59,15 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 struct DelayedTwoEventSource {
     emitted: usize,
+    finish_gate: Arc<tokio::sync::Notify>,
 }
 
 impl DelayedTwoEventSource {
-    fn new() -> Self {
-        Self { emitted: 0 }
+    fn new(finish_gate: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            emitted: 0,
+            finish_gate,
+        }
     }
 }
 
@@ -82,7 +86,13 @@ impl TypedAsyncFiniteSourceHandler for DelayedTwoEventSource {
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 Ok(Some(vec![ProbeEvent { value: 2 }]))
             }
-            _ => Ok(None),
+            _ => {
+                // Keep the resumed edge observable until the test driver sees
+                // recovery. Immediate EOF can otherwise end the fast branch
+                // before the watcher samples it, depending on unrelated tasks.
+                self.finish_gate.notified().await;
+                Ok(None)
+            }
         }
     }
 }
@@ -203,6 +213,8 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
     let registry_slot: Arc<Mutex<Option<LivenessSnapshots>>> = Arc::new(Mutex::new(None));
     let system_journal_slot_hook = system_journal_slot.clone();
     let registry_slot_hook = registry_slot.clone();
+    let finish_gate = Arc::new(tokio::sync::Notify::new());
+    let source_finish_gate = finish_gate.clone();
 
     let hook = Box::new(move |handle: &Arc<FlowHandle>| {
         let system_journal = handle.system_journal().expect("system journal available");
@@ -217,7 +229,7 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
     });
 
     let flow_definition = FlowDefinition::materialize(move |_runtime_config| {
-        let numbers_handler = DelayedTwoEventSource::new();
+        let numbers_handler = DelayedTwoEventSource::new(source_finish_gate);
         let slow_handler = SlowTransform::new();
         let fast_handler = FastTransform::new();
         let slow_sink_handler = NoopSink::<SlowProbeEvent>::new();
@@ -265,6 +277,29 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
             Poll::Pending => {
                 tokio::time::advance(Duration::from_secs(1)).await;
                 tokio::task::yield_now().await;
+                let journal = system_journal_slot.lock().unwrap().clone();
+                let fast = registry_slot.lock().unwrap().as_ref().and_then(|registry| {
+                    registry.with_read(|entries| {
+                        entries.iter().find_map(|(id, snapshot)| {
+                            (snapshot.stage_name == "fast").then_some(*id)
+                        })
+                    })
+                });
+                if let (Some(journal), Some(fast)) = (journal, fast) {
+                    if journal
+                        .read_causally_ordered()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|envelope| {
+                            matches!(envelope.event.event, SystemEventType::EdgeLiveness {
+                            reader, state: EdgeLivenessState::Recovered, ..
+                        } if reader == fast)
+                        })
+                    {
+                        finish_gate.notify_one();
+                    }
+                }
             }
         }
     }

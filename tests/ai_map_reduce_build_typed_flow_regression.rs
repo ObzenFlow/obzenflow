@@ -588,6 +588,10 @@ async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
 
 #[tokio::test]
 async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_sink(metrics_model.clone());
     let delivered = Arc::new(AtomicUsize::new(0));
     let delivered_for_flow = delivered.clone();
     let total = Arc::new(AtomicU64::new(0));
@@ -615,15 +619,15 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(metrics_context)
     .await
     .expect("ai_map_reduce runtime flow should build");
 
-    let metrics = handle
-        .run_with_metrics()
+    handle
+        .run()
         .await
-        .expect("ai_map_reduce should commit planning manifests and tagged partials")
-        .expect("test flow should expose its terminal metrics snapshot");
+        .expect("ai_map_reduce should commit planning manifests and tagged partials");
+    let metrics = metrics_model.clone();
 
     assert_eq!(
         delivered.load(Ordering::SeqCst),
@@ -636,8 +640,8 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
         "collector should route tagged partials and finalise their sum"
     );
 
-    let rendered = metrics
-        .render_metrics()
+    let rendered = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
+        .render(&metrics.snapshot())
         .expect("terminal backpressure metrics should render");
     let duration_count = rendered
         .lines()

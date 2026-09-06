@@ -395,7 +395,8 @@ async fn invalid_authentication_reaches_the_startup_caller_before_spawn() {
                     .unwrap(),
             ),
             contract_attachments: None,
-            metrics_exporter: None,
+            #[cfg(feature = "prometheus")]
+            metrics_endpoint: None,
             flow_handle: None,
             extra_endpoints: vec![Box::new(CountingEndpoint {
                 path: "/reports",

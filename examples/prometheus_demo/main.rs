@@ -15,12 +15,12 @@
 //! **FLOWIP-080j Update**: Replaced 59-line EventCounter StatefulHandler with ReduceTyped
 //! **FLOWIP-082a Update**: Added TypedPayload with EVENT_TYPE and SCHEMA_VERSION constants
 //!
-//! Run with: cargo run -p obzenflow --example prometheus_demo --features obzenflow_infra/warp-server
+//! Run with: cargo run -p obzenflow --example prometheus_demo --features prometheus,web-host
 //!
 //! Event volume is operator-tunable via `PROMETHEUS_EVENT_COUNT` (default
 //! 100000), so varying the load needs no code change.
 //!
-//! The default startup config starts the web server with:
+//! This example explicitly opts into hosting and monitoring through its config:
 //! - /metrics endpoint for Prometheus metrics (framework-level metrics)
 //! - /api/topology endpoint for flow structure
 //! - /health and /ready endpoints for monitoring
@@ -178,7 +178,7 @@ fn main() -> Result<()> {
             )
             .section(
                 "Usage",
-                "Default:     cargo run --package obzenflow --example prometheus_demo --features obzenflow_infra/warp-server\nVolume:      PROMETHEUS_EVENT_COUNT=1000 cargo run --package obzenflow --example prometheus_demo --features obzenflow_infra/warp-server\nCustom port: cargo run --package obzenflow --example prometheus_demo --features obzenflow_infra/warp-server -- --server-port 8080",
+                "Default:     cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host\nVolume:      PROMETHEUS_EVENT_COUNT=1000 cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host\nCustom port: cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host -- --server-port 8080",
             ),
     )
     .with_footer(|outcome| {
@@ -195,7 +195,7 @@ fn main() -> Result<()> {
         .run_blocking(FlowDefinition::materialize(move |_runtime_config| {
             let high_volume_source_handler = sources::finite_from_fn(move |index| {
                 if index >= total_events {
-                    println!("🏁 Source complete: Generated {index} total events");
+                    eprintln!("🏁 Source complete: Generated {index} total events");
                     return None;
                 }
 
@@ -203,7 +203,7 @@ fn main() -> Result<()> {
                 let next_count = index + 1;
 
                 if next_count.is_multiple_of(10_000) {
-                    println!("📊 Generated {next_count} events...");
+                    eprintln!("📊 Generated {next_count} events...");
                 }
 
                 Some(DataRequest {
@@ -218,7 +218,7 @@ fn main() -> Result<()> {
                 |state: &mut EventCountState, _event: &ProcessedEvent| {
                     state.event_count += 1;
                     if state.event_count.is_multiple_of(10_000) {
-                        println!("📊 Counted {} events so far...", state.event_count);
+                        eprintln!("📊 Counted {} events so far...", state.event_count);
                     }
                 },
             )
@@ -227,24 +227,20 @@ fn main() -> Result<()> {
                     let count = summary.event_count;
                     let errors = total_events.saturating_sub(count);
 
-                    println!();
-                    println!("=====================================");
-                    println!("📊 Business-Level Event Count (FLOWIP-080j):");
-                    println!("   Successfully processed: {count} events");
-                    println!(
+                    eprintln!();
+                    eprintln!("=====================================");
+                    eprintln!("📊 Business-Level Event Count (FLOWIP-080j):");
+                    eprintln!("   Successfully processed: {count} events");
+                    eprintln!(
                         "   Note: {total_events} generated - {count} = {errors} errors (routed to error journal)"
                     );
-                    println!("=====================================");
-                    println!();
-                    println!("💡 Key Improvement:");
-                    println!("   59-line EventCounter StatefulHandler → ReduceTyped helper");
-                    println!("   Type-safe accumulation with zero ChainEvent manipulation!");
-                    println!();
-                    println!("📈 To view framework-level Prometheus metrics:");
-                    println!("   1. Run the example with the default config");
-                    println!("   2. Visit http://localhost:9090/metrics");
-                    println!("   3. See detailed per-stage metrics, errors, latencies, etc.");
-                    println!("=====================================");
+                    eprintln!("=====================================");
+                    eprintln!();
+                    eprintln!("💡 Key Improvement:");
+                    eprintln!("   59-line EventCounter StatefulHandler → ReduceTyped helper");
+                    eprintln!("   Type-safe accumulation with zero ChainEvent manipulation!");
+                    eprintln!();
+                    eprintln!("=====================================");
                 })
                 .idempotent();
             let completion_sink_handler = CompletionSink::new();

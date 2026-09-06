@@ -6,8 +6,7 @@ use crate::monitoring::metrics::core::Metric;
 
 /// Low-level exporter interface for adapter-side helpers and tests.
 ///
-/// This is not the main runtime metrics contract. The public runtime/export path uses
-/// `obzenflow_core::metrics::MetricsExporter`.
+/// Runtime publishes snapshots through the Core snapshot sink.
 pub(crate) trait MetricExporter<T> {
     /// Export a single metric to the target format
     fn export(&self, metric: &dyn Metric) -> Result<T, ExportError>;
@@ -46,18 +45,6 @@ pub enum ExportError {
 
 // Always available for testing
 pub mod test;
-
-// Supported adapter-side exporters
-pub mod console_summary;
-pub mod prometheus_exporter;
-
-// Builder for creating exporters
-pub mod builder;
-
-// Re-exports
-pub use self::builder::{ExporterType, MetricsExporterBuilder};
-pub use self::console_summary::ConsoleSummaryExporter;
-pub use self::prometheus_exporter::PrometheusExporter;
 pub use self::test::TestExporter;
 
 #[cfg(test)]

@@ -2,45 +2,59 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Console summary exporter that provides user-friendly metrics output
-//!
-//! This exporter stores metrics and provides a formatted summary when requested,
-//! making it easy to get flow statistics without parsing Prometheus text.
+//! Console text projection over an immutable, independently owned read view.
 
+use crate::monitoring::read_model::MetricsReadView;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::id::StageId;
-use obzenflow_core::metrics::{
-    AppMetricsSnapshot, InfraMetricsSnapshot, MetricsExporter, Percentile, PercentileExt,
-    StageMetadata,
-};
+use obzenflow_core::metrics::{Percentile, PercentileExt, StageMetadata};
 use std::error::Error;
-use std::sync::RwLock;
+use std::time::Instant;
 
-/// Console exporter that stores metrics and can render a summary
-pub struct ConsoleSummaryExporter {
-    /// Latest application metrics snapshot
-    app_snapshot: RwLock<Option<AppMetricsSnapshot>>,
+/// Deterministic console summary of the latest available observations.
+#[derive(Default)]
+pub struct ConsoleProjection;
 
-    /// Latest infrastructure metrics snapshot  
-    infra_snapshot: RwLock<Option<InfraMetricsSnapshot>>,
-}
-
-impl ConsoleSummaryExporter {
+impl ConsoleProjection {
     pub fn new() -> Self {
-        Self {
-            app_snapshot: RwLock::new(None),
-            infra_snapshot: RwLock::new(None),
-        }
+        Self
     }
 
-    /// Get a formatted summary of the metrics
-    pub fn summary(&self) -> Result<String, Box<dyn Error + Send + Sync>> {
-        let app_snapshot = self
-            .app_snapshot
-            .read()
-            .map_err(|_| "Failed to acquire read lock")?;
+    pub fn render(&self, view: &MetricsReadView) -> Result<String, Box<dyn Error + Send + Sync>> {
+        self.render_until(view, None)
+    }
 
-        if let Some(snapshot) = app_snapshot.as_ref() {
+    /// Render with an optional caller-owned deadline. Oversized reports are
+    /// declined before sorting or allocating their text, keeping output work
+    /// bounded even when application metadata is unexpectedly large.
+    pub fn render_until(
+        &self,
+        view: &MetricsReadView,
+        deadline: Option<Instant>,
+    ) -> Result<String, Box<dyn Error + Send + Sync>> {
+        let check_budget = || -> Result<(), Box<dyn Error + Send + Sync>> {
+            if deadline.is_some_and(|end| Instant::now() >= end) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "console projection deadline expired",
+                )
+                .into());
+            }
+            Ok(())
+        };
+        check_budget()?;
+        if let Some(snapshot) = view.app.as_ref() {
+            if snapshot.stage_metadata.len() > 4096 {
+                return Err(std::io::Error::other("console report exceeds 4096 stages").into());
+            }
+            for metadata in snapshot.stage_metadata.values() {
+                check_budget()?;
+                if metadata.name.len() > 4096 || metadata.flow_name.len() > 4096 {
+                    return Err(
+                        std::io::Error::other("console stage label exceeds 4096 bytes").into(),
+                    );
+                }
+            }
             let mut summary = String::new();
 
             // Count events by stage type
@@ -53,6 +67,7 @@ impl ConsoleSummaryExporter {
 
             // Process event counts using stage metadata
             for (stage_id, count) in &snapshot.event_counts {
+                check_budget()?;
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     match metadata.stage_type {
                         StageType::FiniteSource | StageType::InfiniteSource => {
@@ -70,11 +85,13 @@ impl ConsoleSummaryExporter {
 
             // Count total errors
             for errors in snapshot.error_counts.values() {
+                check_budget()?;
                 total_errors += errors;
             }
 
             // Calculate processing times
             for hist in snapshot.processing_times.values() {
+                check_budget()?;
                 total_time_ms += hist.sum / 1_000_000.0; // Convert nanoseconds to ms
                 total_event_count += hist.count;
             }
@@ -182,6 +199,7 @@ impl ConsoleSummaryExporter {
             });
 
             for (stage_id, metadata) in stages {
+                check_budget()?;
                 let events = snapshot.event_counts.get(stage_id).unwrap_or(&0);
                 let errors = snapshot.error_counts.get(stage_id).unwrap_or(&0);
 
@@ -244,9 +262,20 @@ impl ConsoleSummaryExporter {
             summary.push('\n');
 
             // Runtime State (from FSM instrumentation)
-            let total_in_flight: f64 = snapshot.in_flight.values().sum();
+            let total_in_flight: f64 =
+                snapshot.in_flight.values().try_fold(0.0, |sum, value| {
+                    check_budget()?;
+                    Ok::<_, Box<dyn Error + Send + Sync>>(sum + value)
+                })?;
             // events_behind removed - calculate in PromQL instead
-            let total_failures: u64 = snapshot.failures_total.values().sum();
+            let total_failures: u64 =
+                snapshot
+                    .failures_total
+                    .values()
+                    .try_fold(0u64, |sum, value| {
+                        check_budget()?;
+                        Ok::<_, Box<dyn Error + Send + Sync>>(sum + value)
+                    })?;
 
             summary.push_str("Runtime State:\n");
             summary.push_str(&format!(
@@ -261,8 +290,22 @@ impl ConsoleSummaryExporter {
             // e.g., events_processed_total{stage="transform"} - events_processed_total{stage="sink"}
 
             // Calculate utilization if event loop data available
-            let total_loops: u64 = snapshot.event_loops_total.values().sum();
-            let loops_with_work: u64 = snapshot.event_loops_with_work_total.values().sum();
+            let total_loops: u64 =
+                snapshot
+                    .event_loops_total
+                    .values()
+                    .try_fold(0u64, |sum, value| {
+                        check_budget()?;
+                        Ok::<_, Box<dyn Error + Send + Sync>>(sum + value)
+                    })?;
+            let loops_with_work: u64 =
+                snapshot
+                    .event_loops_with_work_total
+                    .values()
+                    .try_fold(0u64, |sum, value| {
+                        check_budget()?;
+                        Ok::<_, Box<dyn Error + Send + Sync>>(sum + value)
+                    })?;
             if total_loops > 0 {
                 let utilization = (loops_with_work as f64 / total_loops as f64) * 100.0;
                 summary.push_str(&format!("\n  Utilization: {utilization:.1}%"));
@@ -288,11 +331,16 @@ impl ConsoleSummaryExporter {
             }
             summary.push('\n');
 
+            let has_dropped =
+                snapshot
+                    .dropped_events
+                    .values()
+                    .try_fold(false, |found, value| {
+                        check_budget()?;
+                        Ok::<_, Box<dyn Error + Send + Sync>>(found || *value > 0.0)
+                    })?;
             // Errors, failures and drops
-            if total_errors > 0
-                || total_failures > 0
-                || snapshot.dropped_events.values().sum::<f64>() > 0.0
-            {
+            if total_errors > 0 || total_failures > 0 || has_dropped {
                 summary.push_str("\nIssues:\n");
                 if total_errors > 0 {
                     summary.push_str(&format!("  Errors: {total_errors}\n"));
@@ -300,7 +348,14 @@ impl ConsoleSummaryExporter {
                 if total_failures > 0 {
                     summary.push_str(&format!("  Failures: {total_failures} (critical)\n"));
                 }
-                let total_dropped: f64 = snapshot.dropped_events.values().sum();
+                let total_dropped: f64 =
+                    snapshot
+                        .dropped_events
+                        .values()
+                        .try_fold(0.0, |sum, value| {
+                            check_budget()?;
+                            Ok::<_, Box<dyn Error + Send + Sync>>(sum + value)
+                        })?;
                 if total_dropped > 0.0 {
                     summary.push_str(&format!("  Dropped: {}\n", total_dropped as u64));
                 }
@@ -308,46 +363,10 @@ impl ConsoleSummaryExporter {
 
             summary.push_str(&format!("\n{}\n", "=".repeat(50)));
 
+            check_budget()?;
             Ok(summary)
         } else {
             Ok("No metrics available yet\n".to_string())
         }
-    }
-}
-
-impl Default for ConsoleSummaryExporter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MetricsExporter for ConsoleSummaryExporter {
-    fn update_app_metrics(
-        &self,
-        snapshot: AppMetricsSnapshot,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut app_snapshot = self
-            .app_snapshot
-            .write()
-            .map_err(|_| "Failed to acquire write lock")?;
-        *app_snapshot = Some(snapshot);
-        Ok(())
-    }
-
-    fn update_infra_metrics(
-        &self,
-        snapshot: InfraMetricsSnapshot,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut infra_snapshot = self
-            .infra_snapshot
-            .write()
-            .map_err(|_| "Failed to acquire write lock")?;
-        *infra_snapshot = Some(snapshot);
-        Ok(())
-    }
-
-    fn render_metrics(&self) -> Result<String, Box<dyn Error + Send + Sync>> {
-        // For render_metrics, return the summary
-        self.summary()
     }
 }

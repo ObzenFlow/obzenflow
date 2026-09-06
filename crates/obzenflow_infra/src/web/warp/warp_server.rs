@@ -1885,6 +1885,73 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "prometheus")]
+    #[tokio::test]
+    async fn monitoring_selection_preserves_the_metrics_wire_contract() {
+        use crate::application::config::{MonitoringSelection, ResolvedMetricsConfig};
+        use crate::monitoring_backend::MonitoringBackend;
+        use obzenflow_core::event::context::StageType;
+        use obzenflow_core::metrics::{AppMetricsSnapshot, StageMetadata};
+
+        for (enabled, selection, expected_status) in [
+            (true, MonitoringSelection::Prometheus, 200),
+            (true, MonitoringSelection::Console, 404),
+            (true, MonitoringSelection::Noop, 404),
+            (false, MonitoringSelection::Prometheus, 404),
+            (false, MonitoringSelection::Console, 404),
+        ] {
+            let backend = MonitoringBackend::new(&ResolvedMetricsConfig {
+                enabled,
+                exporter: selection,
+            });
+            let stage = obzenflow_core::StageId::new();
+            if let Some(sink) = backend.sink() {
+                let mut app = AppMetricsSnapshot::default();
+                app.pipeline_state = "Running".into();
+                app.stage_metadata.insert(
+                    stage,
+                    StageMetadata {
+                        name: "quoted\"stage\\name\nline".into(),
+                        flow_name: "wire".into(),
+                        stage_type: StageType::Transform,
+                        reference_mode: None,
+                        flow_id: None,
+                    },
+                );
+                app.event_counts.insert(stage, 17);
+                sink.publish_app_snapshot(app);
+            }
+            let mut server = WarpServer::new();
+            if let Some(endpoint) = backend.prometheus_endpoint() {
+                server.register_endpoint(Box::new(endpoint)).unwrap();
+            }
+            let filter = server.build_filter(test_host_policy()).unwrap();
+            let response = warp::test::request()
+                .method("GET")
+                .path("/metrics")
+                .reply(&filter)
+                .await;
+            assert_eq!(response.status(), expected_status);
+            if expected_status == 200 {
+                assert_eq!(
+                    response.headers()["content-type"],
+                    "text/plain; version=0.0.4; charset=utf-8"
+                );
+                let text = std::str::from_utf8(response.body()).unwrap();
+                assert!(text.contains("# TYPE obzenflow_events_total counter\n"));
+                assert!(text.contains(&format!("obzenflow_events_total{{flow=\"wire\",stage=\"quoted\\\"stage\\\\name\\nline\",stage_id=\"{stage}\"}} 17\n")));
+                assert!(text.contains("obzenflow_pipeline_state{state=\"Running\"} 1\n"));
+                assert_eq!(text.matches("# TYPE obzenflow_build_info gauge").count(), 1);
+                let post = warp::test::request()
+                    .method("POST")
+                    .path("/metrics")
+                    .reply(&filter)
+                    .await;
+                assert_eq!(post.status(), 405);
+            }
+        }
+    }
+
     struct EchoEndpoint;
 
     #[async_trait]

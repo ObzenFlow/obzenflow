@@ -188,6 +188,9 @@ mod tests {
 
     #[tokio::test]
     async fn materialize_invokes_factory_once_and_forwards_the_same_snapshot() {
+        let sink: std::sync::Arc<dyn obzenflow_core::metrics::MetricsSnapshotSink> =
+            std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+        let inner_sink = sink.clone();
         let snapshot = Arc::new(ResolvedRuntimeConfig::builtin_defaults());
         let factory_snapshot = Arc::clone(&snapshot);
         let inner_snapshot = Arc::clone(&snapshot);
@@ -200,13 +203,17 @@ mod tests {
 
             Ok(FlowDefinition::new(move |ctx| async move {
                 assert!(Arc::ptr_eq(ctx.runtime_config(), &inner_snapshot));
+                assert!(Arc::ptr_eq(ctx.metrics_sink().unwrap(), &inner_sink));
                 Err(FlowBuildFailure::from(
                     FlowBuildError::StageResourcesFailed("inner sentinel".to_string()),
                 ))
             }))
         });
 
-        let failure = match flow.build(FlowBuildContext::new(snapshot)).await {
+        let failure = match flow
+            .build(FlowBuildContext::new(snapshot).with_metrics_sink(sink))
+            .await
+        {
             Ok(_) => panic!("the inner sentinel must end the focused build"),
             Err(failure) => failure,
         };

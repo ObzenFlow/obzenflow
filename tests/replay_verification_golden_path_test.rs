@@ -361,6 +361,75 @@ async fn run_flow(journal_base: &Path, replay_from: Option<&Path>) -> Arc<Atomic
     calls
 }
 
+#[tokio::test]
+async fn monitoring_modes_preserve_live_and_replay_journal_outcomes() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
+    let dir = tempfile::Builder::new()
+        .prefix("monitoring-replay-")
+        .tempdir_in(root)
+        .unwrap();
+    let mut modes = vec!["disabled", "console", "noop"];
+    if cfg!(all(feature = "prometheus", feature = "web-host")) {
+        modes.push("prometheus");
+    }
+    let mut first_live: Option<PathBuf> = None;
+    for mode in modes {
+        let journal_base = dir.path().join(mode);
+        std::fs::create_dir_all(&journal_base).unwrap();
+        let config = journal_base.join("obzenflow.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[server]\nenabled = {}\nhost = \"127.0.0.1\"\nport = 0\nstartup_mode = \"auto\"\n\
+             [metrics]\nenabled = {}\nexporter = \"{}\"\n",
+                mode == "prometheus",
+                mode != "disabled",
+                if mode == "disabled" {
+                    "prometheus"
+                } else {
+                    mode
+                }
+            ),
+        )
+        .unwrap();
+        let mut live: Option<OsString> = None;
+        for replay in [false, true] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut args = vec![OsString::from("monitoring-replay")];
+            if replay {
+                args.extend([
+                    OsString::from("--replay-from"),
+                    live.as_ref().unwrap().clone(),
+                    OsString::from("--verify"),
+                ]);
+            }
+            FlowApplication::builder()
+                .with_config_file(&config)
+                .with_cli_args(args)
+                .run_async(build_flow(journal_base.clone(), calls.clone()))
+                .await
+                .unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), if replay { 0 } else { 4 });
+            let archive = latest_run_dir(&journal_base);
+            if replay {
+                let baseline = PathBuf::from(live.as_ref().unwrap());
+                assert_certified_match(
+                    &verify_run_dirs(&baseline, &archive, &VerifyOptions::default()).unwrap(),
+                );
+            } else {
+                if let Some(first) = &first_live {
+                    assert_certified_match(
+                        &verify_run_dirs(first, &archive, &VerifyOptions::default()).unwrap(),
+                    );
+                } else {
+                    first_live = Some(archive.clone());
+                }
+                live = Some(archive.into_os_string());
+            }
+        }
+    }
+}
+
 fn assert_certified_match(outcome: &VerifyOutcome) -> &obzenflow_infra::verify::VerificationReport {
     assert_eq!(
         outcome.exit_code(),

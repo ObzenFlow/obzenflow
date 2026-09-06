@@ -139,6 +139,10 @@ impl InlineSink for CollectorSink {
 
 #[tokio::test]
 async fn test_dropped_events_detection() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_sink(metrics_model.clone());
     // Enable debug logging
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
@@ -174,22 +178,22 @@ async fn test_dropped_events_detection() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(metrics_context)
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 
     println!("Running flow...");
 
     // Run the flow and obtain metrics exporter after completion
-    let metrics_exporter = flow_handle
-        .run_with_metrics()
+    flow_handle
+        .run()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
-        .expect("Metrics should be enabled by default");
+        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?;
+    let metrics_exporter = metrics_model.clone();
 
     // Get metrics
-    let metrics_text = metrics_exporter
-        .render_metrics()
+    let metrics_text = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
+        .render(&metrics_exporter.snapshot())
         .map_err(|e| anyhow::anyhow!("Failed to render metrics: {e}"))?;
 
     println!("\n=== Metrics Output ===");

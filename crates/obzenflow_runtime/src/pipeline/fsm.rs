@@ -300,7 +300,7 @@ pub(crate) struct PipelineContext {
     pub(crate) completion_subscription: Option<SystemSubscription<SystemEvent>>,
 
     /// Metrics exporter for accessing aggregated metrics
-    pub(crate) metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
+    pub(crate) metrics_sink: Option<Arc<dyn obzenflow_core::metrics::MetricsSnapshotSink>>,
 
     /// Stage data journals (for metrics aggregator)
     pub(crate) stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
@@ -1078,7 +1078,7 @@ impl FsmAction for PipelineAction {
                 }
 
                 // Start metrics aggregator if we have an exporter configured.
-                let Some(exporter) = context.metrics_exporter.clone() else {
+                let Some(exporter) = context.metrics_sink.clone() else {
                     tracing::info!("No metrics exporter configured, skipping metrics aggregator");
                     return Ok(());
                 };

@@ -8,7 +8,6 @@
 
 use obzenflow_core::composite::{CompositeDefinition, CompositeLifecycleProjection};
 use obzenflow_core::id::{CompositeId, RoleId};
-use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, ServerConfig, WebError, WebServer};
 use obzenflow_core::StageId;
 use obzenflow_runtime::pipeline::FlowHandle;
@@ -35,7 +34,8 @@ pub struct WebServerResources {
     /// from the topology shape and are not yet baked into the canonical
     /// `Topology`.
     pub contract_attachments: Option<ContractAttachments>,
-    pub metrics_exporter: Option<Arc<dyn MetricsExporter>>,
+    #[cfg(feature = "prometheus")]
+    pub metrics_endpoint: Option<super::endpoints::MetricsHttpEndpoint>,
     pub flow_handle: Option<Arc<FlowHandle>>,
     pub extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
     pub surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
@@ -192,7 +192,7 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
 ///
 /// This function creates a single server with all endpoints:
 /// - `/api/topology` - Flow structure and stage information
-/// - `/metrics` - Prometheus metrics (if metrics_exporter provided)
+/// - `/metrics` - Prometheus metrics (if metrics endpoint provided)
 /// - `/health` - Health check endpoint
 /// - `/ready` - Readiness check endpoint
 ///
@@ -204,7 +204,7 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
 /// let handle = start_web_server(WebServerResources {
 ///     topology: flow_topology,
 ///     contract_attachments: None,
-///     metrics_exporter: Some(metrics_exporter),
+///     metrics_endpoint: Some(metrics_endpoint),
 ///     flow_handle: None,
 ///     extra_endpoints: vec![],
 ///     surface_metrics: None,
@@ -228,12 +228,13 @@ pub async fn start_web_server_with_config(
     server_config: ServerConfig,
 ) -> Result<tokio::task::JoinHandle<()>, WebError> {
     use super::endpoints::topology::{StageMetadata, StageStatus};
-    use super::endpoints::{FlowControlEndpoint, MetricsHttpEndpoint, TopologyHttpEndpoint};
+    use super::endpoints::{FlowControlEndpoint, TopologyHttpEndpoint};
 
     let WebServerResources {
         topology,
         contract_attachments,
-        metrics_exporter,
+        #[cfg(feature = "prometheus")]
+        metrics_endpoint,
         flow_handle,
         extra_endpoints,
         surface_metrics,
@@ -328,9 +329,11 @@ pub async fn start_web_server_with_config(
         }
     }
 
-    let has_metrics_endpoint = metrics_exporter.is_some();
-    if let Some(exporter) = metrics_exporter {
-        server.register_endpoint(Box::new(MetricsHttpEndpoint::new(exporter)))?;
+    #[cfg(feature = "prometheus")]
+    let has_metrics_endpoint = metrics_endpoint.is_some();
+    #[cfg(feature = "prometheus")]
+    if let Some(endpoint) = metrics_endpoint {
+        server.register_endpoint(Box::new(endpoint))?;
     }
 
     // Add flow control endpoint if a handle is available
@@ -346,7 +349,7 @@ pub async fn start_web_server_with_config(
         server.register_endpoint(endpoint)?;
     }
 
-    // Add health and ready endpoints (reuse from metrics_server)
+    // Add health and ready endpoints
     server.register_endpoint(Box::new(SimpleHealthEndpoint))?;
     if let Some(pipeline_ready) = pipeline_ready {
         server.register_endpoint(Box::new(PipelineReadyEndpoint::new(pipeline_ready)))?;
@@ -366,6 +369,7 @@ pub async fn start_web_server_with_config(
     // Log available endpoints
     tracing::info!("📊 Web server started on http://{}", addr);
     tracing::info!("   /api/topology  - Flow structure");
+    #[cfg(feature = "prometheus")]
     if has_metrics_endpoint {
         tracing::info!("   /metrics       - Prometheus metrics");
     }
@@ -375,7 +379,7 @@ pub async fn start_web_server_with_config(
     Ok(handle)
 }
 
-// Reuse simple endpoints from metrics_server module
+// Built-in health and readiness endpoints
 use async_trait::async_trait;
 use obzenflow_core::web::{ManagedResponse, Request, Response};
 

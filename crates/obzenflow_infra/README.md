@@ -22,7 +22,7 @@ No default features are enabled. Opt in as needed:
 | `warp-server` | HTTP server, `--server` CLI flag, hosting endpoints |
 | `console` | `tokio-console` support for async debugging |
 | `reqwest-client` | Outbound HTTP client for pull/poll sources |
-| `prometheus` | Convenience re-export of the Prometheus exporter |
+| `prometheus` | Prometheus backend assembly and portable `/metrics` endpoint |
 
 ## `FlowApplication` entry points
 

@@ -9,7 +9,7 @@
 //! **How to observe rate limiting in real-time:**
 //!   1. Run the example (requires `warp-server` feature):
 //!      ```
-//!      cargo run -p obzenflow --example flow_middleware_config --features obzenflow_infra/warp-server
+//!      cargo run -p obzenflow --example flow_middleware_config --features prometheus,web-host
 //!      ```
 //!   2. Query metrics while flow runs:
 //!      ```
@@ -136,7 +136,7 @@ fn main() -> Result<()> {
             )
             .section(
                 "How to observe in real-time",
-                "1. Run the example (requires warp-server feature):\n   cargo run -p obzenflow --example flow_middleware_config \\\n     --features obzenflow_infra/warp-server\n2. Query metrics while flow runs:\n   curl http://localhost:9090/metrics | grep events_processed_total\n3. Watch the rate differences between stages!",
+                "1. Run the example (requires warp-server feature):\n   cargo run -p obzenflow --example flow_middleware_config \\\n     --features prometheus,web-host\n2. Query metrics while flow runs:\n   curl http://localhost:9090/metrics | grep events_processed_total\n3. Watch the rate differences between stages!",
             )
             .section(
                 "Run duration",

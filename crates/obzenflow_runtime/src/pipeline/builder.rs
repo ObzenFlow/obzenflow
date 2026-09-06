@@ -27,7 +27,7 @@ use crate::{
 use obzenflow_core::event::{ChainEvent, SystemEvent, WriterId};
 use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::metrics::MetricsExporter;
+use obzenflow_core::metrics::MetricsSnapshotSink;
 use obzenflow_core::StageId;
 use obzenflow_core::{DeliveryContract, SourceContract, TransportContract};
 use obzenflow_topology::Topology;
@@ -67,7 +67,7 @@ pub struct PipelineBuilder {
     flow_id: FlowId,
     stages: Vec<BoxedStageHandle>,
     sources: Vec<BoxedStageHandle>,
-    metrics_exporter: Option<Arc<dyn MetricsExporter>>,
+    metrics_sink: Option<Arc<dyn MetricsSnapshotSink>>,
     stage_journals: Option<StageJournalList>,
     error_journals: Option<StageJournalList>,
     flow_name: Option<String>,
@@ -92,7 +92,7 @@ impl PipelineBuilder {
             flow_id,
             stages: Vec::new(),
             sources: Vec::new(),
-            metrics_exporter: None,
+            metrics_sink: None,
             stage_journals: None,
             error_journals: None,
             flow_name: None,
@@ -134,9 +134,9 @@ impl PipelineBuilder {
         self
     }
 
-    /// Add metrics exporter
-    pub fn with_metrics(mut self, exporter: Arc<dyn MetricsExporter>) -> Self {
-        self.metrics_exporter = Some(exporter);
+    /// Inject the run-owned destination for application observations.
+    pub fn with_metrics_sink(mut self, sink: Arc<dyn MetricsSnapshotSink>) -> Self {
+        self.metrics_sink = Some(sink);
         self
     }
 
@@ -331,7 +331,7 @@ impl SupervisorBuilder for PipelineBuilder {
             stage_error_journals: self.error_journals.unwrap_or_default(),
             backpressure_registry: self.backpressure_registry.clone(),
             completion_subscription: None,
-            metrics_exporter: self.metrics_exporter.clone(),
+            metrics_sink: self.metrics_sink.clone(),
             metrics_handle: None,
             contract_status: HashMap::new(),
             contract_pairs: HashMap::new(),
@@ -377,7 +377,6 @@ impl SupervisorBuilder for PipelineBuilder {
 
         // Clone what we need for the task
         let state_watcher_for_task = state_watcher.clone();
-        let metrics_exporter = self.metrics_exporter.clone();
 
         // Spawn the supervisor task with proper FSM lifecycle
         tracing::debug!("About to create pipeline supervisor task");
@@ -444,7 +443,6 @@ impl SupervisorBuilder for PipelineBuilder {
 
         Ok(FlowHandle::new(
             standard_handle,
-            metrics_exporter,
             FlowHandleExtras {
                 topology,
                 flow_name,

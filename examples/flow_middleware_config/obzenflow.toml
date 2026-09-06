@@ -1,2 +1,6 @@
 [server]
 enabled = true
+
+[metrics]
+enabled = true
+exporter = "prometheus"

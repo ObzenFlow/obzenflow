@@ -160,6 +160,7 @@ where
 
     // FLOWIP-010 §7: the resolved snapshot arrives as build input.
     let __runtime_config = build_ctx.runtime_config().clone();
+    let metrics_sink = build_ctx.metrics_sink().cloned();
 
     // FLOWIP-120u F2: pair the build result with the substrate state known
     // at the failure point. Set once at the factory seam; None means the
@@ -978,9 +979,7 @@ where
 
         // Create services
         use obzenflow_runtime::pipeline::config::StageConfig;
-        use obzenflow_runtime::metrics::DefaultMetricsConfig;
         use obzenflow_core::{SystemId, FlowId};
-        use obzenflow_adapters::monitoring::exporters::MetricsExporterBuilder;
 
         // Create stage-local journals using the builder pattern (FLOWIP-008)
         let flow_id = FlowId::new();
@@ -1000,7 +999,7 @@ where
             &obzenflow_runtime::journal::RunResourcePlan {
                 stage_count: topology.stages().count(),
                 edge_count: topology.edges().len(),
-                metrics_enabled: DefaultMetricsConfig::default().is_enabled(),
+                metrics_enabled: metrics_sink.is_some(),
             },
         )
         .map_err(|e| FlowBuildError::ResourcePreflightFailed(format!("{e}")))?;
@@ -1377,11 +1376,6 @@ where
         );
 
         // Create metrics exporter using the builder pattern
-        let metrics_exporter = if DefaultMetricsConfig::default().is_enabled() {
-            Some(MetricsExporterBuilder::from_bootstrap().build())
-        } else {
-            None
-        };
 
         // Create stage supervisors using resources from StageResourcesBuilder
         let mut stages = Vec::new();
@@ -1694,8 +1688,8 @@ where
             .with_run_substrate(__substrate.clone())
             .with_flow_effective_config(__flow_effective.clone());
 
-        let builder = if let Some(exporter) = metrics_exporter {
-            builder.with_metrics(exporter)
+        let builder = if let Some(sink) = metrics_sink {
+            builder.with_metrics_sink(sink)
         } else {
             builder
         };

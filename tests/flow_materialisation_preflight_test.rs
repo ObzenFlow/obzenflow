@@ -58,6 +58,51 @@ fn materialised_probe(
 }
 
 #[tokio::test]
+async fn monitoring_conflicts_fail_before_materialisation_journals_or_replay_open() {
+    for startup in ["auto", "manual"] {
+        for selection in [
+            "[metrics]\nenabled = true\nexporter = \"prometheus\"",
+            "[metrics]\nexporter = \"unknown\"",
+            "[studio]\nenabled = true\n[metrics]\nenabled = false",
+        ] {
+            let dir = workspace_tempdir("flowip-140h-admission-");
+            let config = dir.path().join("obzenflow.toml");
+            std::fs::write(
+                &config,
+                format!("[server]\nenabled = false\nstartup_mode = \"{startup}\"\n{selection}"),
+            )
+            .unwrap();
+            let journal_root = dir.path().join("journals-must-not-exist");
+            let calls = Arc::new(AtomicUsize::new(0));
+            let result = FlowApplication::builder()
+                .with_config_file(config)
+                .with_cli_args([
+                    "flowip-140h-admission",
+                    "--replay-from",
+                    "archive-must-not-be-opened",
+                ])
+                .run_async(materialised_probe(journal_root.clone(), calls.clone()))
+                .await;
+            let error = result
+                .expect_err("incompatible selection must fail")
+                .to_string();
+            assert!(
+                error.contains("metrics.")
+                    || error.contains("server.enabled")
+                    || error.contains("studio.enabled"),
+                "{error}"
+            );
+            assert!(
+                !error.contains("archive-must-not-be-opened"),
+                "monitoring admission must precede archive opening: {error}"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert!(!journal_root.exists());
+        }
+    }
+}
+
+#[tokio::test]
 async fn invalid_configuration_does_not_construct_handlers_or_select_a_run_substrate() {
     let tempdir = workspace_tempdir("flowip-133a-invalid-config-");
     let config_path = tempdir.path().join("invalid.toml");

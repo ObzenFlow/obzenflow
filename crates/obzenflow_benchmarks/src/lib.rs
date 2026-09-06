@@ -32,7 +32,7 @@
 
 // This is primarily a benchmark crate, but we can expose some common utilities
 // that benchmarks might share
-use obzenflow_runtime::bootstrap::{set_bootstrap_config, BootstrapConfig, MetricsBootstrap};
+use obzenflow_runtime::bootstrap::{set_bootstrap_config, BootstrapConfig};
 
 /// Re-export commonly used types for benchmarks
 pub mod prelude {
@@ -58,13 +58,7 @@ pub mod prelude {
 fn configure_benchmark_defaults() {
     // Metrics add substantial overhead (extra journal readers, extra parsing) and can
     // push deep disk-journal benchmarks over OS file-descriptor limits.
-    set_bootstrap_config(BootstrapConfig {
-        metrics: MetricsBootstrap {
-            enabled: false,
-            ..MetricsBootstrap::default()
-        },
-        ..BootstrapConfig::default()
-    });
+    set_bootstrap_config(BootstrapConfig::default());
 }
 
 fn bump_nofile_limit() {

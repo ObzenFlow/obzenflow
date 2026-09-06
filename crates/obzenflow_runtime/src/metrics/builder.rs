@@ -8,7 +8,6 @@
 //! according to the FSM architecture patterns, returning only a handle for control.
 
 use super::{
-    config::DefaultMetricsConfig,
     fsm::{MetricsAggregatorContext, MetricsAggregatorEvent, MetricsAggregatorState},
     inputs::MetricsInputs,
     supervisor::MetricsAggregatorSupervisor,
@@ -20,7 +19,7 @@ use crate::supervised_base::{
 use obzenflow_core::{
     event::SystemEvent,
     journal::Journal,
-    metrics::{CompositeBoundary, MetricsExporter, StageMetadata},
+    metrics::{CompositeBoundary, MetricsSnapshotSink, StageMetadata},
     StageId,
 };
 use std::collections::HashMap;
@@ -34,8 +33,8 @@ pub struct MetricsAggregatorBuilder {
     /// System journal for reporting
     system_journal: Arc<dyn Journal<SystemEvent>>,
 
-    /// Metrics exporter
-    exporter: Arc<dyn MetricsExporter>,
+    /// Metrics snapshot_sink
+    snapshot_sink: Arc<dyn MetricsSnapshotSink>,
 
     /// Stage metadata for display and categorization
     stage_metadata: HashMap<StageId, StageMetadata>,
@@ -43,7 +42,6 @@ pub struct MetricsAggregatorBuilder {
     /// Composite boundaries for composite RED projection (FLOWIP-128a B4).
     composite_boundaries: Vec<CompositeBoundary>,
 
-    config: DefaultMetricsConfig,
     export_interval_secs: u64,
 }
 
@@ -52,23 +50,16 @@ impl MetricsAggregatorBuilder {
     pub fn new(
         inputs: MetricsInputs,
         system_journal: Arc<dyn Journal<SystemEvent>>,
-        exporter: Arc<dyn MetricsExporter>,
+        snapshot_sink: Arc<dyn MetricsSnapshotSink>,
     ) -> Self {
         Self {
             inputs,
             system_journal,
-            exporter,
+            snapshot_sink,
             stage_metadata: HashMap::new(),
             composite_boundaries: Vec::new(),
-            config: DefaultMetricsConfig::default(),
             export_interval_secs: 10, // Default to 10 seconds
         }
-    }
-
-    /// Set a custom configuration
-    pub fn with_config(mut self, config: DefaultMetricsConfig) -> Self {
-        self.config = config;
-        self
     }
 
     /// Set the export interval in seconds
@@ -104,7 +95,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         let (metrics_context, metrics_io) = MetricsAggregatorContext::new(
             self.inputs.clone(),
             self.system_journal.clone(),
-            Some(self.exporter),
+            self.snapshot_sink,
             self.export_interval_secs,
             system_id,
             self.stage_metadata,

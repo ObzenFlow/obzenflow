@@ -14,9 +14,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::bootstrap::{
-    install_bootstrap_config, BootstrapConfig, MetricsBootstrap, StartupMode,
-};
+use obzenflow_runtime::bootstrap::{install_bootstrap_config, BootstrapConfig, StartupMode};
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
@@ -100,10 +98,6 @@ fn create_temp_journals_base(test_name: &str) -> anyhow::Result<(std::path::Path
 async fn measure_waiting_for_gun_cpu() -> anyhow::Result<f64> {
     let _bootstrap_guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Manual,
-        metrics: MetricsBootstrap {
-            enabled: false,
-            ..MetricsBootstrap::default()
-        },
         ..BootstrapConfig::default()
     });
 

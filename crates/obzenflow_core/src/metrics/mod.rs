@@ -9,10 +9,10 @@
 
 #[doc(hidden)]
 pub mod composite;
-pub mod exporter;
 pub mod observer;
 pub mod percentile;
 pub mod primitives;
+pub mod snapshot_sink;
 pub mod snapshots;
 
 pub use composite::{
@@ -24,9 +24,9 @@ pub use composite::{
     BoundaryMetricsView, CompositeBoundary, CompositeBoundaryEdge, CompositeBoundaryPort,
     CompositeDurationAccumulator,
 };
-pub use exporter::{MetricsExporter, NoOpMetricsExporter};
 pub use percentile::{Percentile, PercentileExt};
 pub use primitives::{Counter, Gauge, Histogram};
+pub use snapshot_sink::MetricsSnapshotSink;
 pub use snapshots::{
     AiChunkingMetricsSnapshot, AppMetricsSnapshot, ContractMetricEdgeKey, ContractMetricResultKey,
     ContractMetricViolationKey, ContractMetricsSnapshot, ContractViolationCauseLabel,

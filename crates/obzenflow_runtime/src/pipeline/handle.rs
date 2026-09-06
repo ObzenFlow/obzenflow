@@ -87,9 +87,6 @@ pub struct FlowHandle {
     /// The standard handle for FSM control
     handle: StandardHandle<PipelineEvent, PipelineState>,
 
-    /// Pipeline-specific: Metrics access (read-only)
-    metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
-
     /// Flow topology for visualization (read-only)
     topology: Option<Arc<Topology>>,
 
@@ -125,7 +122,6 @@ impl FlowHandle {
     /// Create a new flow handle from a standard handle and extras
     pub(crate) fn new(
         handle: StandardHandle<PipelineEvent, PipelineState>,
-        metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
         extras: FlowHandleExtras,
     ) -> Self {
         let FlowHandleExtras {
@@ -141,7 +137,6 @@ impl FlowHandle {
 
         Self {
             handle,
-            metrics_exporter,
             topology,
             flow_name,
             contract_attachments,
@@ -171,7 +166,7 @@ impl FlowHandle {
     ///
     /// This is intended for non-blocking control surfaces such as HTTP Play.
     /// It does not wait for readiness. Callers that want blocking startup
-    /// semantics should use `start()`, `run()`, or `run_with_metrics()`.
+    /// semantics should use `start()` or `run()`.
     pub async fn start_if_ready_now(&self) -> Result<FlowStartControlOutcome, FlowError> {
         const NOT_READY_REASON: &str = "pipeline is not ready for run";
 
@@ -249,7 +244,7 @@ impl FlowHandle {
     ///
     /// If a finite flow reaches a terminal state before the post-readiness state
     /// check can send `Run`, this returns an error. Use `run()` or
-    /// `run_with_metrics()` for finite flows that should be driven to completion.
+    /// `run()` for finite flows that should be driven to completion.
     /// Intended for long-running/server flows where lifecycle is driven
     /// externally (e.g. via HTTP control API) rather than by awaiting
     /// `run()` to completion.
@@ -294,7 +289,10 @@ impl FlowHandle {
     /// already `Running`, it waits for completion without sending another `Run`.
     /// This is the primary method users should call after creating a flow.
     pub async fn run(self) -> Result<(), FlowError> {
-        self.wait_for_ready().await?;
+        if let Err(error) = self.wait_for_ready().await {
+            let _ = self.wait_for_completion().await;
+            return Err(error);
+        }
         let current_state = self.current_state();
         tracing::debug!(
             "FlowHandle::run() - Current pipeline state: {:?}",
@@ -302,7 +300,10 @@ impl FlowHandle {
         );
         if matches!(current_state, PipelineState::ReadyForRun) {
             tracing::debug!("FlowHandle::run() - Sending PipelineEvent::Run to start flow");
-            self.send_event(PipelineEvent::Run).await?;
+            if let Err(error) = self.send_event(PipelineEvent::Run).await {
+                let _ = self.wait_for_completion().await;
+                return Err(error);
+            }
         }
         tracing::debug!("FlowHandle::run() - Waiting for completion");
 
@@ -333,86 +334,6 @@ impl FlowHandle {
             )),
             _ => Ok(()),
         }
-    }
-
-    /// Run the pipeline and wait for completion, returning the metrics exporter
-    /// Use this when you need to access metrics after the flow completes
-    /// Typically used with finite sources (not infinite sources). This waits for
-    /// `ReadyForRun` before sending `Run`; if the pipeline is already `Running`,
-    /// it does not send a duplicate `Run`.
-    pub async fn run_with_metrics(
-        self,
-    ) -> Result<Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>, FlowError> {
-        self.wait_for_ready().await?;
-        if matches!(self.current_state(), PipelineState::ReadyForRun) {
-            self.send_event(PipelineEvent::Run).await?;
-        }
-
-        let state_rx = self.state_receiver();
-
-        // Save metrics exporter before consuming self
-        let metrics = self.metrics_exporter.clone();
-        let system_journal = self.system_journal.clone();
-
-        // Now wait for it to complete
-        self.wait_for_completion().await?;
-
-        let final_state = state_rx.borrow().clone();
-        match final_state {
-            PipelineState::Failed { reason, .. } => {
-                return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
-                    reason,
-                ))));
-            }
-            PipelineState::AbortRequested { reason, .. } => {
-                return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
-                    format!("{reason:?}"),
-                ))));
-            }
-            _ => {}
-        }
-
-        // Best-effort: wait for the metrics subsystem to complete its final export.
-        //
-        // Many tests (and UI clients) assume `/metrics` becomes accurate shortly after
-        // pipeline completion; in practice, the metrics aggregator may still be draining.
-        // We use the system journal's MetricsCoordination events as a synchronization point.
-        if let Some(journal) = system_journal {
-            use obzenflow_core::event::system_event::MetricsCoordinationEvent;
-            use obzenflow_core::event::SystemEventType;
-            use std::time::Duration;
-
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while std::time::Instant::now() < deadline {
-                match journal.read_last_n(256).await {
-                    Ok(events) => {
-                        let drained = events.iter().any(|envelope| {
-                            matches!(
-                                envelope.event.event,
-                                SystemEventType::MetricsCoordination(
-                                    MetricsCoordinationEvent::Drained
-                                        | MetricsCoordinationEvent::Shutdown
-                                )
-                            )
-                        });
-                        if drained {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            journal_error = %e,
-                            "Failed to read system journal while waiting for metrics drain"
-                        );
-                        break;
-                    }
-                }
-
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        }
-
-        Ok(metrics)
     }
 
     /// User-initiated stop request.
@@ -497,15 +418,6 @@ impl FlowHandle {
         self.handle.current_state()
     }
 
-    /// Get the metrics exporter for concurrent access during flow execution
-    ///
-    /// This allows starting a metrics server before running the flow,
-    /// enabling real-time monitoring of long-running flows.
-    /// The exporter is thread-safe and can be accessed concurrently.
-    pub fn metrics_exporter(&self) -> Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>> {
-        self.metrics_exporter.clone()
-    }
-
     /// Get the flow topology for visualization
     ///
     /// This provides access to the flow's structure (stages and connections)
@@ -544,19 +456,6 @@ impl FlowHandle {
     /// which may differ from the auto-generated topology-based name.
     pub fn flow_name(&self) -> &str {
         &self.flow_name
-    }
-
-    /// Render metrics based on the wrapped exporter's format
-    pub async fn render_metrics(&self) -> Result<String, FlowError> {
-        if let Some(ref exporter) = self.metrics_exporter {
-            exporter.render_metrics().map_err(|e| {
-                FlowError::ExecutionFailed(Box::new(std::io::Error::other(e.to_string())))
-            })
-        } else {
-            Err(FlowError::ExecutionFailed(Box::new(std::io::Error::other(
-                "No metrics exporter configured",
-            ))))
-        }
     }
 }
 
@@ -665,7 +564,7 @@ mod tests {
             .build_standard()
             .expect("standard handle should build");
 
-        FlowHandle::new(handle, None, empty_extras())
+        FlowHandle::new(handle, empty_extras())
     }
 
     fn flow_handle_for_start_admission(
@@ -685,10 +584,7 @@ mod tests {
             .build_standard()
             .expect("standard handle should build");
 
-        (
-            FlowHandle::new(handle, None, empty_extras()),
-            event_receiver,
-        )
+        (FlowHandle::new(handle, empty_extras()), event_receiver)
     }
 
     #[tokio::test]
@@ -816,18 +712,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_with_metrics_returns_failed_terminal_state_as_error() {
+    async fn run_returns_failed_terminal_state_as_error() {
         let handle = flow_handle_that_finishes_in(PipelineState::Failed {
             reason: "terminal failure".to_string(),
             failure_cause: None,
         });
 
-        let result = handle.run_with_metrics().await;
+        let result = handle.run().await;
         assert!(
             result.is_err(),
             "Failed terminal state must surface as an error"
         );
-        let err = result.err().expect("error should be present");
+        let err = result.expect_err("error should be present");
         let source = err.source().expect("source error should be present");
 
         assert!(
@@ -837,18 +733,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_with_metrics_returns_abort_terminal_state_as_error() {
+    async fn run_returns_abort_terminal_state_as_error() {
         let handle = flow_handle_that_finishes_in(PipelineState::AbortRequested {
             reason: ViolationCause::Other("abort requested".to_string()),
             upstream: None,
         });
 
-        let result = handle.run_with_metrics().await;
+        let result = handle.run().await;
         assert!(
             result.is_err(),
             "AbortRequested terminal state must surface as an error"
         );
-        let err = result.err().expect("error should be present");
+        let err = result.expect_err("error should be present");
         let source = err.source().expect("source error should be present");
 
         assert!(
@@ -858,14 +754,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_with_metrics_allows_successful_terminal_state() {
+    async fn run_allows_successful_terminal_state() {
         let handle = flow_handle_that_finishes_in(PipelineState::Drained);
 
-        let metrics = handle
-            .run_with_metrics()
+        handle
+            .run()
             .await
             .expect("Drained terminal state should remain successful");
-
-        assert!(metrics.is_none());
     }
 }

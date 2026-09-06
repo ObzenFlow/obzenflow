@@ -21,7 +21,7 @@ use crate::web::endpoints::event_ingestion::{HttpIngress, IngressDecoder, Ingres
 #[cfg(feature = "warp-server")]
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
 use crate::web::RuntimeInstanceId;
-use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsExporter};
+use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsSnapshotSink};
 use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
@@ -58,6 +58,14 @@ impl LaunchParams {
             ..Self::default()
         }
     }
+}
+
+/// Application identity and shutdown ownership passed together to the host.
+#[cfg(feature = "warp-server")]
+struct HostLifecycle {
+    runtime_config: Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>,
+    instance_id: RuntimeInstanceId,
+    shutdown: tokio::sync::watch::Receiver<bool>,
 }
 
 #[cfg(all(test, feature = "warp-server"))]
@@ -954,7 +962,9 @@ impl FlowApplicationBuilder {
             let spawn_probe = async move {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 match tokio::net::TcpStream::connect(addr_for_probe).await {
-                    Ok(_) => eprintln!("✅ tokio-console TCP probe successful on {addr_for_probe}"),
+                    Ok(_) => {
+                        eprintln!("✅ tokio-console TCP probe successful on {addr_for_probe}")
+                    }
                     Err(err) => {
                         eprintln!("❌ tokio-console TCP probe failed on {addr_for_probe}: {err}")
                     }
@@ -972,7 +982,7 @@ impl FlowApplicationBuilder {
 
             tracing_subscriber::registry()
                 .with(console_layer)
-                .with(tracing_subscriber::fmt::layer())
+                .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
                 .with(filter)
                 .try_init()
                 .ok();
@@ -993,7 +1003,7 @@ impl FlowApplicationBuilder {
 
         // Standard tracing setup (no console-subscriber)
         let _ = tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .with(filter)
             .try_init();
     }
@@ -1131,7 +1141,7 @@ impl FlowApplication {
             let filter = tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
             let _ = tracing_subscriber::registry()
-                .with(tracing_subscriber::fmt::layer())
+                .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
                 .with(filter)
                 .try_init();
         }
@@ -1171,6 +1181,9 @@ impl FlowApplication {
         // Background tasks spawned by FlowHandle hooks and/or web surface wiring closures.
         // These must not be allowed to outlive FlowApplication, even on early-return paths.
         let mut managed_tasks: Vec<JoinHandle<()>> = Vec::new();
+        let mut monitoring = crate::monitoring_backend::MonitoringBackend::new(&config.metrics);
+        let mut monitoring_cleanup_complete = false;
+        let mut monitoring_shutdown_deadline = None;
         // FLOWIP-114d gap 24: the Studio heartbeat is tracked here rather than in
         // `managed_tasks` so the shutdown sequence can join its fenced deregistration
         // before the generic managed-task abort would cancel the in-flight DELETE.
@@ -1184,7 +1197,7 @@ impl FlowApplication {
             for warning in rendered.warnings {
                 tracing::warn!("{warning}");
             }
-            print!("{}", rendered.text);
+            eprint!("{}", rendered.text);
         }
 
         let (result, flow_name, run_state, stopped) = 'run: {
@@ -1254,6 +1267,10 @@ impl FlowApplication {
             let build_context = obzenflow_runtime::run_context::FlowBuildContext::new(
                 config.runtime_config.clone(),
             );
+            let build_context = match monitoring.sink() {
+                Some(sink) => build_context.with_metrics_sink(sink),
+                None => build_context,
+            };
             let flow_handle = match flow.build(build_context).await {
                 Ok(handle) => handle,
                 Err(failure) => {
@@ -1275,9 +1292,9 @@ impl FlowApplication {
             let run_state = Some(flow_handle.run_substrate().clone());
 
             let print_replay_hint = |locator: &CurrentRunLocator| {
-                println!("FlowApplication complete!");
-                println!("To replay, add: --replay-from {locator}");
-                println!("(Source config env vars are ignored during replay)");
+                eprintln!("FlowApplication complete!");
+                eprintln!("To replay, add: --replay-from {locator}");
+                eprintln!("(Source config env vars are ignored during replay)");
             };
 
             let flow_handle = Arc::new(flow_handle);
@@ -1290,14 +1307,18 @@ impl FlowApplication {
                 }
             }
 
-            if let Some(exporter) = flow_handle.metrics_exporter() {
-                let liveness_snapshots = flow_handle.liveness_snapshots();
-                Self::publish_infra_snapshot(&exporter, liveness_snapshots.as_ref());
-                managed_tasks.push(Self::spawn_infra_metrics_collector(
-                    exporter,
-                    liveness_snapshots,
+            if let Some(sink) = monitoring.sink() {
+                let liveness = flow_handle.liveness_snapshots();
+                Self::publish_infra_snapshot(&sink, liveness.as_ref());
+                let console_flow = (config.server.enabled && monitoring.is_console())
+                    .then(|| Arc::downgrade(&flow_handle));
+                let collector = Self::spawn_infra_metrics_collector(
+                    sink,
+                    liveness,
                     config.runtime.surface_metrics_interval,
-                ));
+                    console_flow.clone(),
+                );
+                monitoring.start(collector, console_flow, flow_handle.system_journal());
             }
 
             #[cfg(feature = "warp-server")]
@@ -1395,9 +1416,13 @@ impl FlowApplication {
                             server_config,
                             all_extra_endpoints,
                             surface_metrics_collector,
-                            config.runtime_config.clone(),
-                            runtime_instance_id.clone(),
-                            server_shutdown_rx.clone(),
+                            #[cfg(feature = "prometheus")]
+                            monitoring.prometheus_endpoint(),
+                            HostLifecycle {
+                                runtime_config: config.runtime_config.clone(),
+                                instance_id: runtime_instance_id.clone(),
+                                shutdown: server_shutdown_rx.clone(),
+                            },
                         )
                         .await
                     }
@@ -1468,47 +1493,14 @@ impl FlowApplication {
 
             if config.server.enabled {
                 if server_handle.is_none() {
-                    match config.server.startup_mode {
-                        StartupMode::Manual => {
-                            break 'run (
-                                Err(ApplicationError::FeatureNotEnabled(
-                                    "warp-server".to_string(),
-                                )),
-                                Some(flow_name),
-                                run_state,
-                                false,
-                            );
-                        }
-                        StartupMode::Auto => {
-                            tracing::warn!("⚠️  Continuing without HTTP server");
-                            tracing::info!("▶️  Starting flow execution (no server)");
-                            let handle = match Arc::try_unwrap(flow_handle) {
-                                Ok(handle) => handle,
-                                Err(_) => {
-                                    break 'run (
-                                        Err(ApplicationError::FlowExecutionFailed(
-                                            "Failed to unwrap FlowHandle for non-server execution"
-                                                .to_string(),
-                                        )),
-                                        Some(flow_name),
-                                        run_state,
-                                        false,
-                                    );
-                                }
-                            };
-                            let result = handle
-                                .run()
-                                .await
-                                .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
-                            if result.is_ok() && !presentation_enabled {
-                                if let Some(locator) = run_state.as_ref().and_then(|s| s.locator())
-                                {
-                                    print_replay_hint(locator);
-                                }
-                            }
-                            break 'run (result, Some(flow_name), run_state, false);
-                        }
-                    }
+                    break 'run (
+                        Err(ApplicationError::ServerStartFailed(
+                            "Enabled web host did not start".into(),
+                        )),
+                        Some(flow_name),
+                        run_state,
+                        false,
+                    );
                 }
 
                 // Server mode: lifecycle is controlled via HTTP (and optionally startup_mode).
@@ -1684,6 +1676,9 @@ impl FlowApplication {
                     };
 
                     if let Some(first_signal) = signal_phase {
+                        let deadline = tokio::time::Instant::now() + grace_timeout;
+                        monitoring_shutdown_deadline = Some(deadline);
+                        monitoring.shutdown_deadline(deadline);
                         let mut phase = first_signal;
                         let mut phase_deadline = match first_signal {
                             ShutdownSignal::Sigint => Instant::now() + grace_timeout,
@@ -1771,6 +1766,15 @@ impl FlowApplication {
                     // terminal event on this signal; the listener close carries
                     // a bounded deadline with abort as the escalation backstop,
                     // mirroring the flow's own graceful-to-cancel ladder.
+                    monitoring_cleanup_complete = !flow_handle.is_running();
+                    monitoring
+                        .finish(
+                            monitoring_shutdown_deadline.unwrap_or_else(|| {
+                                tokio::time::Instant::now() + Duration::from_secs(1)
+                            }),
+                            monitoring_cleanup_complete,
+                        )
+                        .await;
                     let _ = server_shutdown_tx.send(true);
                     const SERVER_CLOSE_GRACE: Duration = Duration::from_secs(5);
                     let mut server_task = server_task;
@@ -1851,6 +1855,10 @@ impl FlowApplication {
                 .run()
                 .await
                 .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
+            monitoring_cleanup_complete = true;
+            monitoring
+                .finish(tokio::time::Instant::now() + Duration::from_secs(1), true)
+                .await;
             if result.is_ok() && !presentation_enabled {
                 if let Some(locator) = run_state.as_ref().and_then(|s| s.locator()) {
                     print_replay_hint(locator);
@@ -1858,6 +1866,14 @@ impl FlowApplication {
             }
             break 'run (result, Some(flow_name), run_state, false);
         };
+
+        monitoring
+            .finish(
+                monitoring_shutdown_deadline
+                    .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(1)),
+                monitoring_cleanup_complete,
+            )
+            .await;
 
         #[cfg(feature = "warp-server")]
         if let Some(emitter) = &surface_metrics_emitter {
@@ -1904,15 +1920,15 @@ impl FlowApplication {
                     let rendered_footer_banner = presentation.render_footer_banner();
                     let footer = presentation.render_footer(outcome);
                     if rendered_footer_banner.is_some() || !footer.trim().is_empty() {
-                        println!();
+                        eprintln!();
                         if let Some(rendered_banner) = rendered_footer_banner {
                             for warning in rendered_banner.warnings {
                                 tracing::warn!("{warning}");
                             }
-                            print!("{}", rendered_banner.text);
+                            eprint!("{}", rendered_banner.text);
                         }
                         if !footer.trim().is_empty() {
-                            println!("{footer}");
+                            eprintln!("{footer}");
                         }
                     }
                 }
@@ -1940,15 +1956,15 @@ impl FlowApplication {
                         run_mode: run_mode.clone(),
                     });
                     if rendered_footer_banner.is_some() || !footer.trim().is_empty() {
-                        println!();
+                        eprintln!();
                         if let Some(rendered_banner) = rendered_footer_banner {
                             for warning in rendered_banner.warnings {
                                 tracing::warn!("{warning}");
                             }
-                            print!("{}", rendered_banner.text);
+                            eprint!("{}", rendered_banner.text);
                         }
                         if !footer.trim().is_empty() {
-                            println!("{footer}");
+                            eprintln!("{footer}");
                         }
                     }
                 }
@@ -1966,7 +1982,7 @@ impl FlowApplication {
         candidate: Option<PathBuf>,
     ) -> Result<(), ApplicationError> {
         let skip = |summary: String| {
-            println!("\n{summary}");
+            eprintln!("\n{summary}");
             Err(ApplicationError::Verification {
                 exit_code: 3,
                 summary,
@@ -1997,7 +2013,7 @@ impl FlowApplication {
         .map_err(|err| ApplicationError::Other(Box::new(err)))?;
 
         let rendered = crate::verify::render_verdict(&outcome);
-        println!("\n{rendered}");
+        eprintln!("\n{rendered}");
 
         match outcome.exit_code() {
             0 => Ok(()),
@@ -2073,28 +2089,31 @@ impl FlowApplication {
     }
 
     fn publish_infra_snapshot(
-        exporter: &Arc<dyn MetricsExporter>,
+        sink: &Arc<dyn MetricsSnapshotSink>,
         liveness_snapshots: Option<&LivenessSnapshots>,
     ) {
         let snapshot = Self::build_infra_snapshot(liveness_snapshots);
-        if let Err(err) = exporter.update_infra_metrics(snapshot) {
-            tracing::warn!("Failed to export infrastructure metrics: {}", err);
-        }
+        sink.publish_infra_snapshot(snapshot);
     }
 
     fn spawn_infra_metrics_collector(
-        exporter: Arc<dyn MetricsExporter>,
+        sink: Arc<dyn MetricsSnapshotSink>,
         liveness_snapshots: Option<LivenessSnapshots>,
         interval: Duration,
+        console_flow: Option<std::sync::Weak<FlowHandle>>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             loop {
                 ticker.tick().await;
-                let snapshot = Self::build_infra_snapshot(liveness_snapshots.as_ref());
-                if let Err(err) = exporter.update_infra_metrics(snapshot) {
-                    tracing::warn!("Failed to export infrastructure metrics: {}", err);
+                if console_flow
+                    .as_ref()
+                    .is_some_and(|flow| flow.upgrade().is_none_or(|flow| !flow.is_running()))
+                {
+                    break;
                 }
+                let snapshot = Self::build_infra_snapshot(liveness_snapshots.as_ref());
+                sink.publish_infra_snapshot(snapshot);
             }
         })
     }
@@ -2106,9 +2125,10 @@ impl FlowApplication {
         _server_config: ServerConfig,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
         surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
-        runtime_config: Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>,
-        runtime_instance_id: RuntimeInstanceId,
-        shutdown: tokio::sync::watch::Receiver<bool>,
+        #[cfg(feature = "prometheus")] metrics_endpoint: Option<
+            crate::web::endpoints::MetricsHttpEndpoint,
+        >,
+        lifecycle: HostLifecycle,
     ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
         use crate::web::start_web_server_with_config;
         use crate::web::web_server::WebServerResources;
@@ -2119,8 +2139,8 @@ impl FlowApplication {
                 "Flow missing topology - this should never happen".to_string(),
             )
         })?;
-        let metrics = _flow_handle.metrics_exporter();
-        let has_metrics = metrics.is_some();
+        #[cfg(feature = "prometheus")]
+        let has_metrics = metrics_endpoint.is_some();
         let addr = _server_config.address();
 
         // FLOWIP-114b: stage typing, join metadata, middleware, and
@@ -2132,13 +2152,14 @@ impl FlowApplication {
             WebServerResources {
                 topology,
                 contract_attachments,
-                metrics_exporter: metrics,
+                #[cfg(feature = "prometheus")]
+                metrics_endpoint,
                 flow_handle: Some(_flow_handle.clone()),
                 extra_endpoints,
                 surface_metrics,
-                runtime_config: Some(runtime_config),
-                runtime_instance_id: Some(runtime_instance_id),
-                shutdown: Some(shutdown),
+                runtime_config: Some(lifecycle.runtime_config),
+                runtime_instance_id: Some(lifecycle.instance_id),
+                shutdown: Some(lifecycle.shutdown),
             },
             _server_config,
         )
@@ -2148,6 +2169,7 @@ impl FlowApplication {
         tracing::info!("📊 Web server started on http://{}", addr);
         tracing::info!("   /api/topology  - Flow structure");
         tracing::info!("   /api/config    - Resolved configuration (read-only)");
+        #[cfg(feature = "prometheus")]
         if has_metrics {
             tracing::info!("   /metrics       - Prometheus metrics");
         }
@@ -2166,15 +2188,7 @@ impl FlowApplication {
         _runtime_instance_id: RuntimeInstanceId,
         _shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
-        if !extra_endpoints.is_empty() {
-            return Err(ApplicationError::FeatureNotEnabled(
-                "warp-server".to_string(),
-            ));
-        }
-        tracing::warn!("⚠️  --server flag requires warp-server feature");
-        tracing::warn!("   Recompile with --features obzenflow_infra/warp-server");
-        tracing::warn!("");
-        tracing::warn!("   Continuing without HTTP server...");
-        Ok(None)
+        let _ = extra_endpoints;
+        Err(ApplicationError::FeatureNotEnabled("web-host".to_string()))
     }
 }
