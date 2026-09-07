@@ -120,6 +120,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked ${{ matrix.cargo_args }} -- -D warnings
 
   test:
+    # Required-check names must stay stable when the Cargo feature list changes.
+    name: Tests (${{ matrix.name }})
     needs: fmt
     runs-on: ubuntu-latest
     env:
