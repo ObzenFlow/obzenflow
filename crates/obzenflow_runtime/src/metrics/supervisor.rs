@@ -724,7 +724,7 @@ mod tests {
             stage_error_journals: HashMap::new(),
             backpressure_registry: None,
             include_error_journals: true,
-            snapshot_sink: Arc::new(crate::metrics::RecordingSnapshots::default()),
+            metrics_exporter: Arc::new(crate::metrics::RecordingSnapshots::default()),
             metrics_store: MetricsStore::default(),
             export_interval_secs: 10,
             system_id,

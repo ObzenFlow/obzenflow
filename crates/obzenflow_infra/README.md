@@ -21,7 +21,7 @@ No default features are enabled. Opt in as needed:
 | Feature | What it enables |
 |---------|-----------------|
 | `warp-server` | HTTP server, `--server` CLI flag, hosting endpoints |
-| `console` | `tokio-console` support for async debugging |
+| `tokio-console` | Tokio Console support for async debugging |
 | `reqwest-client` | Outbound HTTP client for pull/poll sources |
 | `prometheus` | Application wiring and portable `/metrics` endpoint for Prometheus reporting |
 

@@ -163,7 +163,7 @@ pub struct MetricsAggregatorContext {
     /// Whether to include error journals in metrics collection
     pub include_error_journals: bool,
 
-    pub snapshot_sink: Arc<dyn obzenflow_core::metrics::MetricsSnapshotSink>,
+    pub metrics_exporter: Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>,
     pub metrics_store: MetricsStore,
     pub export_interval_secs: u64,
     pub system_id: SystemId,
@@ -421,7 +421,7 @@ impl MetricsAggregatorContext {
     pub(crate) async fn new(
         inputs: crate::metrics::inputs::MetricsInputs,
         system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
-        snapshot_sink: Arc<dyn obzenflow_core::metrics::MetricsSnapshotSink>,
+        metrics_exporter: Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>,
         export_interval_secs: u64,
         system_id: SystemId,
         stage_metadata: HashMap<StageId, StageMetadata>,
@@ -720,7 +720,7 @@ impl MetricsAggregatorContext {
             stage_error_journals,
             backpressure_registry: inputs.backpressure_registry.clone(),
             include_error_journals: true, // Default to true per FLOWIP-082g
-            snapshot_sink,
+            metrics_exporter,
             metrics_store,
             export_interval_secs,
             system_id,
@@ -1084,7 +1084,7 @@ impl MetricsAggregatorContext {
 
         // FLOWIP-128a B5: re-key the boundary members' contract facts to the
         // composite boundary. Pure relabel of the contract_metrics set just
-        // built; the snapshot_sink renders these as composite contract families.
+        // built; reporting projections render these as composite contract families.
         use obzenflow_core::metrics::CompositeContract;
         snapshot.composite_contracts = self
             .composite_boundaries
@@ -1657,7 +1657,7 @@ impl FsmAction for MetricsAggregatorAction {
                     }
 
                     // Best-effort: infer join reference mode from the observed FSM state.
-                    // This enables snapshot_sinks to attach a `reference_mode` label for joins
+                    // This enables reporting projections to attach a `reference_mode` label for joins
                     // without requiring the pipeline to plumb join config into metrics metadata.
                     if meta.reference_mode.is_none() && meta.stage_type == StageType::Join {
                         if let Some(runtime_ctx) = &event.runtime_context {
@@ -1998,7 +1998,7 @@ impl FsmAction for MetricsAggregatorAction {
                     }
                 }
 
-                ctx.snapshot_sink
+                ctx.metrics_exporter
                     .publish_app_snapshot(ctx.build_app_metrics_snapshot());
 
                 // FLOWIP-059c: Emit a metrics watermark event so SSE clients can "pull-on-push"
@@ -2866,7 +2866,7 @@ mod tests {
             stage_error_journals: HashMap::new(),
             backpressure_registry: None,
             include_error_journals: true,
-            snapshot_sink: Arc::new(crate::metrics::RecordingSnapshots::default()),
+            metrics_exporter: Arc::new(crate::metrics::RecordingSnapshots::default()),
             metrics_store: store,
             export_interval_secs: 10,
             system_id: obzenflow_core::SystemId::new(),

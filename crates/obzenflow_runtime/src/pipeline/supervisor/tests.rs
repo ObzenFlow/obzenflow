@@ -185,7 +185,7 @@ fn test_context(
         completed_stages: Vec::new(),
         running_stages: HashSet::new(),
         completion_subscription,
-        metrics_sink: None,
+        metrics_exporter: None,
         metrics_handle: None,
         stage_data_journals: Vec::new(),
         stage_error_journals: Vec::new(),

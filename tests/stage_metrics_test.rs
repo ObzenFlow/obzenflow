@@ -132,7 +132,7 @@ async fn test_stage_level_metrics_automatic() -> Result<()> {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     println!("\n=== Stage-Level Metrics Test ===\n");
 
     let collected_events = Arc::new(Mutex::new(Vec::new()));

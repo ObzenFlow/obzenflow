@@ -142,7 +142,7 @@ async fn test_dropped_events_detection() -> Result<()> {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     // Enable debug logging
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)

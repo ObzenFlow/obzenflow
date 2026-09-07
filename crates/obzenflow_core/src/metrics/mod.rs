@@ -12,7 +12,7 @@ pub mod composite;
 pub mod observer;
 pub mod percentile;
 pub mod primitives;
-pub mod snapshot_sink;
+pub mod snapshot_exporter;
 pub mod snapshots;
 
 pub use composite::{
@@ -26,7 +26,7 @@ pub use composite::{
 };
 pub use percentile::{Percentile, PercentileExt};
 pub use primitives::{Counter, Gauge, Histogram};
-pub use snapshot_sink::MetricsSnapshotSink;
+pub use snapshot_exporter::MetricsSnapshotExporter;
 pub use snapshots::{
     AiChunkingMetricsSnapshot, AppMetricsSnapshot, ContractMetricEdgeKey, ContractMetricResultKey,
     ContractMetricViolationKey, ContractMetricsSnapshot, ContractViolationCauseLabel,

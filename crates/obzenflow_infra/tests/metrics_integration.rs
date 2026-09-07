@@ -12,7 +12,7 @@ use obzenflow_core::id::{StageId, SystemId};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::{
-    AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotSink, StageMetadata,
+    AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter, StageMetadata,
 };
 use obzenflow_core::EventEnvelope;
 use obzenflow_fsm::FsmAction;
@@ -30,7 +30,7 @@ struct RecordingExporter {
     infra_snapshots: Mutex<Vec<InfraMetricsSnapshot>>,
 }
 
-impl MetricsSnapshotSink for RecordingExporter {
+impl MetricsSnapshotExporter for RecordingExporter {
     fn publish_app_snapshot(&self, snapshot: AppMetricsSnapshot) {
         self.app_snapshots.lock().unwrap().push(snapshot);
     }
@@ -72,7 +72,7 @@ fn make_empty_context(
         stage_error_journals: std::collections::HashMap::new(),
         backpressure_registry: None,
         include_error_journals: true,
-        snapshot_sink: exporter,
+        metrics_exporter: exporter,
         metrics_store: MetricsStore::default(),
         export_interval_secs: 60,
         system_id,

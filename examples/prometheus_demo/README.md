@@ -44,8 +44,8 @@ Terminal lifecycle snapshots remain journaled when reporting is disabled. Studio
 In/Out/Errors and duration through lifecycle SSE; detailed measurements come from `/metrics`.
 Set `[metrics] enabled = true` or `false`; there is no provider selector. The retired
 `metrics.exporter` and `OBZENFLOW_METRICS_EXPORTER` settings are rejected, including Prometheus,
-noop, and console values. Console metrics reporting is removed. The `console` Cargo feature
-still enables Tokio console instrumentation independently.
+noop, and console values. Console metrics reporting is removed. The `tokio-console` Cargo feature
+enables Tokio Console instrumentation independently.
 
 The backend `studio` capability supplies `prometheus` and `web-host`. Its existing connection
 configuration (`obzenflow.studio.toml`) opts in through `studio.enabled = true`; omitted host and

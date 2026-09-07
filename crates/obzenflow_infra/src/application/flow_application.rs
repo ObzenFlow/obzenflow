@@ -22,7 +22,7 @@ use crate::web::endpoints::event_ingestion::{HttpIngress, IngressDecoder, Ingres
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
 use crate::web::RuntimeInstanceId;
 use obzenflow_adapters::monitoring::MetricsReadModel;
-use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsSnapshotSink};
+use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
@@ -775,13 +775,13 @@ impl FlowApplicationBuilder {
     /// This allows you to connect with `tokio-console` CLI tool to inspect
     /// tasks, async operations, and resource usage in real-time.
     ///
-    /// This method is always available, but only takes effect when the `console`
+    /// This method is always available, but only takes effect when the `tokio-console`
     /// feature is enabled at compile time. This allows user code to be written
     /// once without #[cfg] attributes.
     ///
     /// # Example
     /// ```ignore
-    /// // This works whether or not 'console' feature is enabled!
+    /// // This works whether or not 'tokio-console' feature is enabled!
     /// FlowApplication::builder()
     ///     .with_console_subscriber()  // No-op if feature disabled
     ///     .run_blocking(build_flow())
@@ -988,7 +988,7 @@ impl FlowApplicationBuilder {
             EnvFilter::new(level)
         });
 
-        #[cfg(feature = "console")]
+        #[cfg(feature = "tokio-console")]
         if self.console_subscriber {
             // Set bind address for console-subscriber (honor existing env override)
             let bind = std::env::var("TOKIO_CONSOLE_BIND")
@@ -1056,10 +1056,10 @@ impl FlowApplicationBuilder {
             return;
         }
 
-        #[cfg(not(feature = "console"))]
+        #[cfg(not(feature = "tokio-console"))]
         if self.console_subscriber {
-            eprintln!("⚠️  Console subscriber requested but 'console' feature not enabled");
-            eprintln!("   Recompile with --features obzenflow_infra/console");
+            eprintln!("⚠️  Console subscriber requested but 'tokio-console' feature not enabled");
+            eprintln!("   Recompile with --features obzenflow_infra/tokio-console");
         }
 
         // Standard tracing setup (no console-subscriber)
@@ -1244,9 +1244,9 @@ impl FlowApplication {
         let mut managed_tasks: Vec<JoinHandle<()>> = Vec::new();
         let metrics_model = (cfg!(feature = "prometheus") && config.metrics.enabled)
             .then(|| Arc::new(MetricsReadModel::default()));
-        let metrics_sink = metrics_model
+        let metrics_exporter = metrics_model
             .as_ref()
-            .map(|model| model.clone() as Arc<dyn MetricsSnapshotSink>);
+            .map(|model| model.clone() as Arc<dyn MetricsSnapshotExporter>);
         let mut metrics_collector: Option<ApplicationTask> = None;
         // FLOWIP-114d gap 24: the Studio heartbeat is tracked here rather than in
         // `managed_tasks` so the shutdown sequence can join its fenced deregistration
@@ -1331,8 +1331,8 @@ impl FlowApplication {
             let build_context = obzenflow_runtime::run_context::FlowBuildContext::new(
                 config.runtime_config.clone(),
             );
-            let build_context = match metrics_sink.clone() {
-                Some(sink) => build_context.with_metrics_sink(sink),
+            let build_context = match metrics_exporter.clone() {
+                Some(exporter) => build_context.with_metrics_exporter(exporter),
                 None => build_context,
             };
             let flow_handle = match flow.build(build_context).await {
@@ -1371,11 +1371,11 @@ impl FlowApplication {
                 }
             }
 
-            if let Some(sink) = metrics_sink.clone() {
+            if let Some(exporter) = metrics_exporter.clone() {
                 let liveness = flow_handle.liveness_snapshots();
-                Self::publish_infra_snapshot(&sink, liveness.as_ref());
+                Self::publish_infra_snapshot(&exporter, liveness.as_ref());
                 let collector = Self::spawn_infra_metrics_collector(
-                    sink,
+                    exporter,
                     liveness,
                     config.runtime.surface_metrics_interval,
                 );
@@ -2127,15 +2127,15 @@ impl FlowApplication {
     }
 
     fn publish_infra_snapshot(
-        sink: &Arc<dyn MetricsSnapshotSink>,
+        exporter: &Arc<dyn MetricsSnapshotExporter>,
         liveness_snapshots: Option<&LivenessSnapshots>,
     ) {
         let snapshot = Self::build_infra_snapshot(liveness_snapshots);
-        sink.publish_infra_snapshot(snapshot);
+        exporter.publish_infra_snapshot(snapshot);
     }
 
     fn spawn_infra_metrics_collector(
-        sink: Arc<dyn MetricsSnapshotSink>,
+        exporter: Arc<dyn MetricsSnapshotExporter>,
         liveness_snapshots: Option<LivenessSnapshots>,
         interval: Duration,
     ) -> JoinHandle<()> {
@@ -2144,7 +2144,7 @@ impl FlowApplication {
             loop {
                 ticker.tick().await;
                 let snapshot = Self::build_infra_snapshot(liveness_snapshots.as_ref());
-                sink.publish_infra_snapshot(snapshot);
+                exporter.publish_infra_snapshot(snapshot);
             }
         })
     }

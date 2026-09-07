@@ -17,10 +17,10 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotSink};
+use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter};
 #[derive(Default)]
 struct RecordingSnapshots(std::sync::Mutex<Vec<AppMetricsSnapshot>>);
-impl MetricsSnapshotSink for RecordingSnapshots {
+impl MetricsSnapshotExporter for RecordingSnapshots {
     fn publish_app_snapshot(&self, value: AppMetricsSnapshot) {
         self.0.lock().unwrap().push(value);
     }
@@ -141,7 +141,7 @@ fn make_context(
     system_id: SystemId,
     system_journal: Arc<dyn Journal<SystemEvent>>,
     stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-    metrics_sink: Option<Arc<dyn MetricsSnapshotSink>>,
+    metrics_exporter: Option<Arc<dyn MetricsSnapshotExporter>>,
 ) -> PipelineContext {
     PipelineContext {
         system_id,
@@ -154,7 +154,7 @@ fn make_context(
         completed_stages: Vec::new(),
         running_stages: HashSet::new(),
         completion_subscription: None,
-        metrics_sink,
+        metrics_exporter,
         metrics_handle: None,
         stage_data_journals,
         stage_error_journals: Vec::new(),

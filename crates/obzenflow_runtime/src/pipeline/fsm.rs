@@ -299,8 +299,8 @@ pub(crate) struct PipelineContext {
     /// System subscription for stage completion events from system journal
     pub(crate) completion_subscription: Option<SystemSubscription<SystemEvent>>,
 
-    /// Optional publication sink for aggregated metrics snapshots
-    pub(crate) metrics_sink: Option<Arc<dyn obzenflow_core::metrics::MetricsSnapshotSink>>,
+    /// Optional exporter for aggregated metrics snapshots
+    pub(crate) metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>>,
 
     /// Stage data journals (for metrics aggregator)
     pub(crate) stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
@@ -1077,15 +1077,15 @@ impl FsmAction for PipelineAction {
                     return Ok(());
                 }
 
-                // Start the optional aggregator only when a snapshot sink is supplied.
-                let Some(snapshot_sink) = context.metrics_sink.clone() else {
+                // Start the optional aggregator only when a snapshot exporter is supplied.
+                let Some(metrics_exporter) = context.metrics_exporter.clone() else {
                     tracing::info!(
-                        "No metrics snapshot sink supplied, skipping metrics aggregator"
+                        "No metrics snapshot exporter supplied, skipping metrics aggregator"
                     );
                     return Ok(());
                 };
 
-                tracing::info!("Metrics snapshot sink supplied, starting metrics aggregator");
+                tracing::info!("Metrics snapshot exporter supplied, starting metrics aggregator");
 
                 // Get stage journals from context
                 let stage_journals = context.stage_data_journals.clone();
@@ -1180,7 +1180,7 @@ impl FsmAction for PipelineAction {
                     .with_backpressure_registry_opt(backpressure_registry);
 
                 let composite_boundaries = composite_boundaries_from_topology(&context.topology);
-                match MetricsAggregatorBuilder::new(inputs, system_journal, snapshot_sink)
+                match MetricsAggregatorBuilder::new(inputs, system_journal, metrics_exporter)
                     .with_stage_metadata(stage_metadata)
                     .with_composite_boundaries(composite_boundaries)
                     .with_export_interval(1) // 10 second interval

@@ -11,30 +11,30 @@
 //! that name belongs to the core metrics snapshot.
 
 use crate::runtime_config::ResolvedRuntimeConfig;
-use obzenflow_core::metrics::MetricsSnapshotSink;
+use obzenflow_core::metrics::MetricsSnapshotExporter;
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct FlowBuildContext {
     runtime_config: Arc<ResolvedRuntimeConfig>,
-    metrics_sink: Option<Arc<dyn MetricsSnapshotSink>>,
+    metrics_exporter: Option<Arc<dyn MetricsSnapshotExporter>>,
 }
 
 impl FlowBuildContext {
     pub fn new(runtime_config: Arc<ResolvedRuntimeConfig>) -> Self {
         Self {
             runtime_config,
-            metrics_sink: None,
+            metrics_exporter: None,
         }
     }
 
-    pub fn with_metrics_sink(mut self, sink: Arc<dyn MetricsSnapshotSink>) -> Self {
-        self.metrics_sink = Some(sink);
+    pub fn with_metrics_exporter(mut self, exporter: Arc<dyn MetricsSnapshotExporter>) -> Self {
+        self.metrics_exporter = Some(exporter);
         self
     }
 
-    pub fn metrics_sink(&self) -> Option<&Arc<dyn MetricsSnapshotSink>> {
-        self.metrics_sink.as_ref()
+    pub fn metrics_exporter(&self) -> Option<&Arc<dyn MetricsSnapshotExporter>> {
+        self.metrics_exporter.as_ref()
     }
 
     pub fn runtime_config(&self) -> &Arc<ResolvedRuntimeConfig> {
@@ -52,7 +52,7 @@ impl std::fmt::Debug for FlowBuildContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FlowBuildContext")
             .field("runtime_config", &self.runtime_config)
-            .field("metrics_enabled", &self.metrics_sink.is_some())
+            .field("metrics_enabled", &self.metrics_exporter.is_some())
             .finish()
     }
 }

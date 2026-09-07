@@ -153,7 +153,7 @@ async fn prometheus_100k_typed_try_map_errors_are_unknown_only() -> Result<()> {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     // Use a dedicated journal directory for this test run.
     let journal_root = std::path::PathBuf::from("target/prometheus_100k_error_kinds_test_journal");
 

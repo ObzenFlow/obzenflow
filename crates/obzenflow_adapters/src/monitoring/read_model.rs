@@ -4,7 +4,7 @@
 
 //! Bounded, per-run latest-value observations with owned read views.
 
-use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotSink};
+use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter};
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -32,7 +32,7 @@ impl MetricsReadModel {
     }
 }
 
-impl MetricsSnapshotSink for MetricsReadModel {
+impl MetricsSnapshotExporter for MetricsReadModel {
     fn publish_app_snapshot(&self, snapshot: AppMetricsSnapshot) {
         let next = Arc::new(snapshot);
         let mut retired = None;

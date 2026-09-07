@@ -1939,7 +1939,7 @@ mod tests {
             });
             let mut context = FlowBuildContext::for_tests();
             if let Some(model) = model {
-                context = context.with_metrics_sink(model);
+                context = context.with_metrics_exporter(model);
             }
             let handle = definition.build(context).await.unwrap();
             let journal = handle.system_journal().unwrap();
@@ -2015,7 +2015,7 @@ mod tests {
     async fn reporting_enablement_preserves_the_metrics_wire_contract() {
         use obzenflow_adapters::monitoring::MetricsReadModel;
         use obzenflow_core::event::context::StageType;
-        use obzenflow_core::metrics::MetricsSnapshotSink;
+        use obzenflow_core::metrics::MetricsSnapshotExporter;
         use obzenflow_core::metrics::{AppMetricsSnapshot, StageMetadata};
 
         // The host's method-first filters return 405 for an unregistered path.
@@ -2023,7 +2023,7 @@ mod tests {
         for (enabled, expected_status) in [(true, 200), (false, 405)] {
             let model = enabled.then(|| Arc::new(MetricsReadModel::default()));
             let stage = obzenflow_core::StageId::new();
-            if let Some(sink) = &model {
+            if let Some(exporter) = &model {
                 let mut app = AppMetricsSnapshot::default();
                 app.pipeline_state = "Running".into();
                 app.stage_metadata.insert(
@@ -2037,7 +2037,7 @@ mod tests {
                     },
                 );
                 app.event_counts.insert(stage, 17);
-                sink.publish_app_snapshot(app);
+                exporter.publish_app_snapshot(app);
             }
             let mut server = WarpServer::new();
             if let Some(model) = model {

@@ -53,7 +53,7 @@ impl HttpEndpoint for PrometheusMetricsEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::metrics::{AppMetricsSnapshot, MetricsSnapshotSink};
+    use obzenflow_core::metrics::{AppMetricsSnapshot, MetricsSnapshotExporter};
 
     #[tokio::test]
     async fn portable_endpoint_uses_current_owned_view_and_exact_media_type() {

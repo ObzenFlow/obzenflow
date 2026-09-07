@@ -591,7 +591,7 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     let delivered = Arc::new(AtomicUsize::new(0));
     let delivered_for_flow = delivered.clone();
     let total = Arc::new(AtomicU64::new(0));

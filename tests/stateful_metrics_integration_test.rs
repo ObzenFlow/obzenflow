@@ -289,7 +289,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
 
     let total_events: usize = 20;
@@ -535,7 +535,7 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
 
     let reference_events: usize = 10;

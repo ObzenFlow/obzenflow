@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The same explicit sink presence governs preflight and Runtime collection.
+//! The same explicit exporter presence governs preflight and Runtime collection.
 use obzenflow::{sinks, sources};
 use obzenflow_adapters::monitoring::MetricsReadModel;
 use obzenflow_core::event::{ChainEvent, PipelineLifecycleEvent, SystemEvent, SystemEventType};
@@ -52,7 +52,7 @@ impl FlowJournalFactory for RecordingFactory {
 }
 
 #[tokio::test]
-async fn ordinary_and_materialised_builds_use_only_the_injected_sink() {
+async fn ordinary_and_materialised_builds_use_only_the_injected_exporter() {
     for materialised in [false, true] {
         for enabled in [false, true] {
             let model = Arc::new(MetricsReadModel::default());
@@ -84,7 +84,7 @@ async fn ordinary_and_materialised_builds_use_only_the_injected_sink() {
             };
             let mut context = FlowBuildContext::for_tests();
             if enabled {
-                context = context.with_metrics_sink(model.clone());
+                context = context.with_metrics_exporter(model.clone());
             }
             let handle = definition.build(context).await.unwrap();
             let system = handle.system_journal().unwrap();

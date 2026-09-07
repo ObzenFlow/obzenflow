@@ -319,7 +319,7 @@ async fn metrics_barrier_smoke_current_thread_paused_time() -> Result<()> {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     let source = BurstSource::new(10);
     let transform = PassthroughTransform;
     let (sink, _count) = CountingSink::new();
@@ -375,7 +375,7 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
     let source = BurstSource::new(50);
     let transform = DropTransform;
@@ -441,7 +441,7 @@ async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
 
     let per_event = Duration::from_millis(10);
@@ -539,7 +539,7 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let source = BurstSource::new(1001);
@@ -622,7 +622,7 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let source = ErrorAfterFirstSource::new();
@@ -774,7 +774,7 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
     let source = ErrorAfterFirstSource::new();
     let transform = DropTransform;
@@ -871,7 +871,7 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let total_events: usize = 250;
@@ -1035,7 +1035,7 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     // This regression test exercises the pre-fix failure mode:
     // Summary events are emitted periodically (>=1000 or 10s). For short runs,
     // Summary-based counters undercount or stay at 0. Wide-event RuntimeContext
@@ -1112,7 +1112,7 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     // Same regression class as CB: WindowUtilization events are periodic.
     // Wide-event RuntimeContext snapshots must carry cumulative RL counters, and
     // utilization must be derivable from bucket state even when no summaries emit.
@@ -1225,7 +1225,7 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
-        .with_metrics_sink(metrics_model.clone());
+        .with_metrics_exporter(metrics_model.clone());
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let source = BurstSource::new(10);

@@ -19,7 +19,7 @@ use crate::supervised_base::{
 use obzenflow_core::{
     event::SystemEvent,
     journal::Journal,
-    metrics::{CompositeBoundary, MetricsSnapshotSink, StageMetadata},
+    metrics::{CompositeBoundary, MetricsSnapshotExporter, StageMetadata},
     StageId,
 };
 use std::collections::HashMap;
@@ -33,8 +33,8 @@ pub struct MetricsAggregatorBuilder {
     /// System journal for reporting
     system_journal: Arc<dyn Journal<SystemEvent>>,
 
-    /// Metrics snapshot_sink
-    snapshot_sink: Arc<dyn MetricsSnapshotSink>,
+    /// Publishes the latest snapshots to the reporting read model.
+    metrics_exporter: Arc<dyn MetricsSnapshotExporter>,
 
     /// Stage metadata for display and categorization
     stage_metadata: HashMap<StageId, StageMetadata>,
@@ -50,12 +50,12 @@ impl MetricsAggregatorBuilder {
     pub fn new(
         inputs: MetricsInputs,
         system_journal: Arc<dyn Journal<SystemEvent>>,
-        snapshot_sink: Arc<dyn MetricsSnapshotSink>,
+        metrics_exporter: Arc<dyn MetricsSnapshotExporter>,
     ) -> Self {
         Self {
             inputs,
             system_journal,
-            snapshot_sink,
+            metrics_exporter,
             stage_metadata: HashMap::new(),
             composite_boundaries: Vec::new(),
             export_interval_secs: 10, // Default to 10 seconds
@@ -95,7 +95,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         let (metrics_context, metrics_io) = MetricsAggregatorContext::new(
             self.inputs.clone(),
             self.system_journal.clone(),
-            self.snapshot_sink,
+            self.metrics_exporter,
             self.export_interval_secs,
             system_id,
             self.stage_metadata,

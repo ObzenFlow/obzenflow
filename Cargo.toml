@@ -167,7 +167,7 @@ csv = { workspace = true }
 prometheus = ["obzenflow_infra/prometheus"]
 web-host = ["obzenflow_infra/warp-server"]
 studio = ["prometheus", "web-host", "obzenflow_infra/studio-registration"]
-console = ["obzenflow_infra/console"]
+tokio-console = ["obzenflow_infra/tokio-console"]
 http-pull = ["obzenflow_infra/reqwest-client"]
 ai = ["obzenflow_infra/ai-rig", "obzenflow_infra/ai-tiktoken"]
 postgres = ["obzenflow_adapters/postgres"]

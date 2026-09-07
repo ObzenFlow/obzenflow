@@ -68,7 +68,7 @@ tiktoken-rs = { version = "0.9", optional = true }
 default = []
 prometheus = []
 warp-server = ["dep:warp", "dep:bytes", "dep:tokio-stream"]
-console = ["dep:console-subscriber"]
+tokio-console = ["dep:console-subscriber"]
 reqwest-client = ["dep:reqwest", "dep:rustls-native-certs"]
 # FLOWIP-114d: Studio phonebook registration (heartbeat client + [studio] config).
 studio-registration = ["prometheus", "warp-server", "reqwest-client"]

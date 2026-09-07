@@ -32,7 +32,7 @@ pub(crate) struct RecordingSnapshots {
     infra: std::sync::Mutex<Option<obzenflow_core::metrics::InfraMetricsSnapshot>>,
 }
 #[cfg(test)]
-impl obzenflow_core::metrics::MetricsSnapshotSink for RecordingSnapshots {
+impl obzenflow_core::metrics::MetricsSnapshotExporter for RecordingSnapshots {
     fn publish_app_snapshot(&self, value: obzenflow_core::metrics::AppMetricsSnapshot) {
         *self.app.lock().unwrap() = Some(value);
     }
