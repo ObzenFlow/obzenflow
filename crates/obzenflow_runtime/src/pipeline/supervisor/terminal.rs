@@ -51,6 +51,7 @@ pub(super) async fn dispatch_drained(
                 journal_error = %e,
                 "Failed to write pipeline cancelled event"
             );
+            return Err(Box::new(e));
         } else {
             tracing::info!(
                 pipeline = %supervisor.name,
@@ -67,6 +68,7 @@ pub(super) async fn dispatch_drained(
                 journal_error = %e,
                 "Failed to write pipeline completed event"
             );
+            return Err(Box::new(e));
         } else {
             tracing::info!(
                 pipeline = %supervisor.name,
@@ -129,6 +131,7 @@ pub(super) async fn dispatch_failed(
                 journal_error = %e,
                 "Failed to write pipeline cancelled event"
             );
+            return Err(Box::new(e));
         } else {
             tracing::info!(
                 pipeline = %supervisor.name,
@@ -152,6 +155,7 @@ pub(super) async fn dispatch_failed(
                 journal_error = %e,
                 "Failed to write pipeline failed event"
             );
+            return Err(Box::new(e));
         } else {
             tracing::error!(
                 pipeline = %supervisor.name,

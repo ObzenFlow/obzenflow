@@ -373,6 +373,8 @@ mod tests {
             .expect("dummy handle should build");
 
         let extras = FlowHandleExtras {
+            stage_cleanup: Vec::new(),
+            stop_status: crate::pipeline::fsm::StopIntent::default().status_receiver(),
             topology,
             flow_name: "dummy".to_string(),
             contract_attachments: None,
@@ -404,6 +406,8 @@ mod tests {
             .expect("dummy handle should build");
 
         let extras = FlowHandleExtras {
+            stage_cleanup: Vec::new(),
+            stop_status: crate::pipeline::fsm::StopIntent::default().status_receiver(),
             topology,
             flow_name: "dummy".to_string(),
             contract_attachments: None,

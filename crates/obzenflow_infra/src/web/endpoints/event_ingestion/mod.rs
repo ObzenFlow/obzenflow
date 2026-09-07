@@ -261,7 +261,7 @@ where
 /// Create ingestion endpoints along with the receiver for wiring into `HttpSource`.
 ///
 /// Returns `(endpoints, rx, state)`:
-/// - `endpoints`: register with `start_web_server(..., extra_endpoints, port)`
+/// - `endpoints`: attach to `FlowApplication` with `with_http_ingress`
 /// - `rx`: pass into `obzenflow_adapters::sources::http::HttpSource`
 /// - `state`: call `state.watch_pipeline_state(flow_handle.state_receiver())` (optional)
 #[allow(dead_code)]

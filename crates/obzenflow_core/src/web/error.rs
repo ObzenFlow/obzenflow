@@ -2,83 +2,79 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Web server error types
+//! Failure to produce a portable endpoint response.
 
+use std::error::Error;
 use std::fmt;
 
-/// Errors that can occur in web server operations
-#[derive(Debug)]
-pub enum WebError {
-    /// Server failed to start
-    StartupFailed {
-        message: String,
-        source: Option<Box<dyn std::error::Error + Send + Sync>>,
-    },
-
-    /// Server failed to bind to address
-    BindFailed {
-        address: String,
-        source: Option<Box<dyn std::error::Error + Send + Sync>>,
-    },
-
-    /// Endpoint registration failed
-    EndpointRegistrationFailed { path: String, message: String },
-
-    /// Request handling failed
-    RequestHandlingFailed {
-        message: String,
-        source: Option<Box<dyn std::error::Error + Send + Sync>>,
-    },
-
-    /// Server shutdown failed
-    ShutdownFailed {
-        message: String,
-        source: Option<Box<dyn std::error::Error + Send + Sync>>,
-    },
-
-    /// Generic implementation error
-    Implementation {
-        message: String,
-        source: Option<Box<dyn std::error::Error + Send + Sync>>,
-    },
+/// An endpoint could not produce its response.
+///
+/// Intentional HTTP outcomes, including refusals, belong in `ManagedResponse`.
+/// The managed host renders this failure as a controlled 500. The static context
+/// is suitable for diagnostics; arbitrary source contents are never included in
+/// `Display` or `Debug` and must not be copied into a response.
+pub struct EndpointError {
+    context: &'static str,
+    source: Option<Box<dyn Error + Send + Sync>>,
 }
 
-impl fmt::Display for WebError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WebError::StartupFailed { message, .. } => {
-                write!(f, "Server startup failed: {message}")
-            }
-            WebError::BindFailed { address, .. } => {
-                write!(f, "Failed to bind to address {address}")
-            }
-            WebError::EndpointRegistrationFailed { path, message } => {
-                write!(f, "Failed to register endpoint at {path}: {message}")
-            }
-            WebError::RequestHandlingFailed { message, .. } => {
-                write!(f, "Request handling failed: {message}")
-            }
-            WebError::ShutdownFailed { message, .. } => {
-                write!(f, "Server shutdown failed: {message}")
-            }
-            WebError::Implementation { message, .. } => {
-                write!(f, "Implementation error: {message}")
-            }
+impl EndpointError {
+    pub const fn new(context: &'static str) -> Self {
+        Self {
+            context,
+            source: None,
         }
+    }
+
+    pub fn with_source(context: &'static str, source: impl Error + Send + Sync + 'static) -> Self {
+        Self {
+            context,
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub const fn context(&self) -> &'static str {
+        self.context
     }
 }
 
-impl std::error::Error for WebError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            WebError::StartupFailed { source, .. }
-            | WebError::BindFailed { source, .. }
-            | WebError::RequestHandlingFailed { source, .. }
-            | WebError::ShutdownFailed { source, .. }
-            | WebError::Implementation { source, .. } => source
-                .as_ref()
-                .map(|s| s.as_ref() as &(dyn std::error::Error + 'static)),
-            WebError::EndpointRegistrationFailed { .. } => None,
-        }
+impl fmt::Display for EndpointError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Endpoint failed: {}", self.context)
+    }
+}
+
+impl fmt::Debug for EndpointError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EndpointError")
+            .field("context", &self.context)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Error for EndpointError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn Error + 'static))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostics_redact_source_but_preserve_error_chain() {
+        let error = EndpointError::with_source(
+            "Serialising response",
+            std::io::Error::other("private-source-sentinel"),
+        );
+        assert!(!format!("{error}").contains("private-source-sentinel"));
+        assert!(!format!("{error:?}").contains("private-source-sentinel"));
+        assert_eq!(
+            error.source().unwrap().to_string(),
+            "private-source-sentinel"
+        );
     }
 }

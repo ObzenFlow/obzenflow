@@ -10,7 +10,7 @@ The business-domain nucleus of the framework, defining the types and traits the 
 - Journaling contracts (`Journal<T>`, `JournalReader<T>`, `EventEnvelope<T>`)
 - Verification contracts between stages (`Contract` + built-in contracts)
 - Measurement snapshots, observability contracts, and the synchronous `MetricsSnapshotExporter` publication port
-- Ports for outer layers (HTTP client and web server abstractions, control-middleware ports)
+- Ports for outer layers (HTTP client and portable web endpoint interfaces, control-middleware ports)
 - Strong identifiers and time primitives (typed IDs, `MetricsDuration`)
 - Typed payloads (`TypedPayload`) for compile-time event type resolution and schema versioning
 - Effect outcome carriers (`EffectOutcomeFacts`, `TypedFactSet`) binding an effect's possible outcomes to the exact typed facts a stage may author

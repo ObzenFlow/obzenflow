@@ -10,7 +10,7 @@ use obzenflow_core::event::SystemEvent;
 use obzenflow_core::ingress::HostedIngressBindingSlot;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::web::{
-    EndpointMetadata, HttpEndpoint, ManagedResponse, ManagedRouteInfo, Request, WebError,
+    EndpointError, EndpointMetadata, HttpEndpoint, ManagedResponse, ManagedRouteInfo, Request,
     WebSurface,
 };
 use obzenflow_runtime::pipeline::PipelineState;
@@ -63,7 +63,7 @@ impl WebSurfaceWiring {
 /// # Example
 /// ```ignore
 /// use obzenflow_infra::application::{FlowApplication, WebSurfaceAttachment, WebSurfaceWiring, WebSurfaceWiringContext};
-/// use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
+/// use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, EndpointError};
 /// use async_trait::async_trait;
 ///
 /// struct Hello;
@@ -71,7 +71,7 @@ impl WebSurfaceWiring {
 /// impl HttpEndpoint for Hello {
 ///     fn path(&self) -> &str { "/hello" }
 ///     fn methods(&self) -> &[HttpMethod] { &[HttpMethod::Get] }
-///     async fn handle(&self, _req: Request) -> Result<ManagedResponse, WebError> {
+///     async fn handle(&self, _req: Request) -> Result<ManagedResponse, EndpointError> {
 ///         Ok(Response::ok().with_text("hello").into())
 ///     }
 /// }
@@ -161,12 +161,8 @@ impl HttpEndpoint for SurfaceTaggedEndpoint {
         self.inner.methods()
     }
 
-    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
         self.inner.handle(request).await
-    }
-
-    fn is_healthy(&self) -> bool {
-        self.inner.is_healthy()
     }
 
     fn metadata(&self) -> Option<EndpointMetadata> {

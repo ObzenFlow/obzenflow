@@ -6,4 +6,4 @@
 
 pub(crate) mod warp_server;
 
-pub use warp_server::WarpServer;
+pub(crate) use warp_server::WarpWebHost;

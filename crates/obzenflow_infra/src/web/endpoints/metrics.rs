@@ -8,7 +8,9 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::monitoring::{projections::PrometheusProjection, MetricsReadModel};
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
+use obzenflow_core::web::{
+    EndpointError, HttpEndpoint, HttpMethod, ManagedResponse, Request, Response,
+};
 use std::sync::Arc;
 
 /// HTTP endpoint for Prometheus metrics
@@ -32,7 +34,7 @@ impl HttpEndpoint for PrometheusMetricsEndpoint {
         &[HttpMethod::Get]
     }
 
-    async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+    async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
         match PrometheusProjection::new().render(&self.model.snapshot()) {
             Ok(metrics) => {
                 let mut response = Response::ok();

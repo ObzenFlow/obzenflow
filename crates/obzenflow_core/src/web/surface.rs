@@ -9,7 +9,7 @@
 
 use crate::web::auth::AuthPolicy;
 use crate::web::endpoint::{HttpEndpoint, ManagedRouteInfo};
-use crate::web::error::WebError;
+use crate::web::error::EndpointError;
 use crate::web::managed::ManagedResponse;
 use crate::web::types::{HttpMethod, Request};
 use async_trait::async_trait;
@@ -38,16 +38,16 @@ pub struct RoutePolicy {
 
 #[async_trait]
 pub trait RouteHandler: Send + Sync {
-    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError>;
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError>;
 }
 
 #[async_trait]
 impl<F, Fut> RouteHandler for F
 where
     F: Fn(Request) -> Fut + Send + Sync,
-    Fut: Future<Output = Result<ManagedResponse, WebError>> + Send,
+    Fut: Future<Output = Result<ManagedResponse, EndpointError>> + Send,
 {
-    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
         (self)(request).await
     }
 }
@@ -275,7 +275,7 @@ struct EndpointAdapter(Arc<dyn HttpEndpoint>);
 
 #[async_trait]
 impl RouteHandler for EndpointAdapter {
-    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
         self.0.handle(request).await
     }
 }
@@ -299,7 +299,7 @@ impl HttpEndpoint for ManagedRouteEndpoint {
         &self.methods
     }
 
-    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
         // The declared kind is a contract signal; the handler is still responsible for returning
         // the appropriate ManagedResponse variant.
         self.handler.handle(request).await

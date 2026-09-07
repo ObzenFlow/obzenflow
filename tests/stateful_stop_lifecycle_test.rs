@@ -61,11 +61,12 @@ impl InlineSink for NoopSink {
 #[derive(Clone, Debug)]
 struct SlowSink {
     sleep: Duration,
+    entered: Arc<tokio::sync::Notify>,
 }
 
 impl SlowSink {
-    fn new(sleep: Duration) -> Self {
-        Self { sleep }
+    fn new(sleep: Duration, entered: Arc<tokio::sync::Notify>) -> Self {
+        Self { sleep, entered }
     }
 }
 
@@ -82,6 +83,7 @@ impl InlineSink for SlowSink {
         _event: LifecycleEvent,
         _context: SinkWriteContext,
     ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+        self.entered.notify_one();
         tokio::time::sleep(self.sleep).await;
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Noop".to_string()),
@@ -169,22 +171,6 @@ async fn wait_for_running(handle: &FlowHandle) -> Result<()> {
     })
     .await
     .map_err(|_| anyhow!("timeout waiting for pipeline to reach Running"))?
-}
-
-async fn wait_for_draining(handle: &FlowHandle) -> Result<()> {
-    let mut rx = handle.state_receiver();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if matches!(*rx.borrow(), PipelineState::Draining) {
-                return Ok(());
-            }
-            rx.changed()
-                .await
-                .map_err(|_| anyhow!("pipeline state channel closed"))?;
-        }
-    })
-    .await
-    .map_err(|_| anyhow!("timeout waiting for pipeline to reach Draining"))?
 }
 
 async fn terminal_lifecycle_event(
@@ -330,13 +316,15 @@ async fn stop_finite_source_reports_cancelled() -> Result<()> {
 }
 
 #[tokio::test]
-async fn stop_cancel_timeout_overrides_cancel_reason() -> Result<()> {
+async fn graceful_timeout_is_admitted_once_with_runtime_and_handle_contenders() -> Result<()> {
     let dir = tempdir()?;
     let journal_root = dir.path().join("journals");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let sink_entered = entered.clone();
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
         let source_handler = SlowInfiniteSource::new(Duration::from_millis(1));
-        let sink_handler = SlowSink::new(Duration::from_millis(250));
+        let sink_handler = SlowSink::new(Duration::from_secs(1), sink_entered);
 
         Ok(flow! {
             name: "stateful_stop_cancel_timeout_reason",
@@ -362,18 +350,37 @@ async fn stop_cancel_timeout_overrides_cancel_reason() -> Result<()> {
 
     wait_for_running(&handle).await?;
 
-    // First request a graceful stop so the pipeline records stop intent as user_stop.
-    handle.stop_graceful(Duration::from_secs(60)).await?;
-    wait_for_draining(&handle).await?;
-
-    // Then simulate a process-level timeout escalation and ensure the terminal lifecycle reason
-    // reflects stop_timeout (not user_stop).
-    handle.stop_cancel_timeout().await?;
+    // Ensure real work is pending before establishing a short graceful deadline.
+    tokio::time::timeout(Duration::from_secs(5), entered.notified()).await?;
+    let mut stop = handle.stop_status_receiver();
+    handle.stop_graceful(Duration::from_millis(50)).await?;
+    let deadline = loop {
+        match *stop.borrow_and_update() {
+            obzenflow_runtime::pipeline::FlowStopStatus::Graceful { deadline }
+            | obzenflow_runtime::pipeline::FlowStopStatus::Cancelling {
+                graceful_deadline: Some(deadline),
+                ..
+            } => break deadline,
+            _ => {}
+        }
+        stop.changed().await?;
+    };
+    tokio::time::sleep_until(deadline.into()).await;
+    // Runtime may win this race and terminate first; both contenders use the reducer.
+    let _ = handle.stop_cancel_timeout().await;
 
     tokio::time::timeout(Duration::from_secs(5), handle.wait_for_completion())
         .await
         .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
 
+    let facts = system_journal.read_all_unordered().await?;
+    let cancel_facts = facts.iter().filter(|fact| matches!(&fact.event.event,
+        SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::StopRequested { mode, .. }) if mode == "cancel"
+    )).count();
+    assert_eq!(
+        cancel_facts, 1,
+        "timeout cancellation must be admitted once"
+    );
     let terminal = terminal_lifecycle_event(system_journal).await?;
     match terminal {
         Some(PipelineLifecycleEvent::Cancelled { reason, .. }) if reason == "stop_timeout" => {

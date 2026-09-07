@@ -74,3 +74,44 @@ supported rotation mechanism. SSE authentication occurs when a stream opens.
 
 On upgrade, provision non-empty material and remove route declarations that replace a protected
 surface's policy. Inherit the surface requirement or regroup routes into separately protected surfaces.
+
+## Managed host lifecycle
+
+`FlowApplication` validates the route policies and binds the real socket before reporting startup
+or releasing automatic `Run`. An occupied port is a startup error and leaves sources unstarted.
+Startup logs and Studio registration use the actual bound address. `/ready` reads Runtime's current
+pipeline state: only `Running` returns 200.
+
+Unexpected listener completion or panic makes the application fail. That failure stays primary even
+if the flow finishes successfully or a shutdown signal arrives concurrently. A live flow receives a
+bounded graceful stop; an existing stop keeps its admitted deadline. Runtime owns stop admission,
+cancellation and terminal journal publication. Repeating a graceful stop changes neither its deadline
+nor its actions. Cancellation is absorbing; timeout cancellation requires an expired graceful stop.
+`FlowHandle::stop_status_receiver()` observes admission, while a successful stop call only queues a
+request. `wait_for_termination()` joins terminal publication and can be used once per flow handle.
+
+The listener remains available through normal drain and terminal publication. Closing then stops
+new requests, allows five seconds for existing responses, and aborts and joins remaining connection,
+HTTP/2 and framework SSE tasks. The same ownership applies when using `run_async` inside a runtime
+that continues after the application exits. Restart requires another `FlowApplication` invocation.
+
+## Endpoint errors and API migration
+
+Implement `HttpEndpoint` or attach a `WebSurface` through `FlowApplication`; listener construction is
+private to Infra. The former Core server SPI, server configuration and TLS placeholder types, Infra
+server factory, concrete Warp server export and standalone start functions have been removed without
+compatibility aliases. Existing application server configuration keys remain supported.
+
+Both `HttpEndpoint::handle` and `RouteHandler::handle` return
+`Result<ManagedResponse, EndpointError>`. Return intentional HTTP outcomes, including 4xx and 5xx,
+as `Ok(ManagedResponse::Unary(response))`. Use `EndpointError::new("Static authored context")` or
+`EndpointError::with_source("Static authored context", error)` when a handler cannot produce a
+response. `Display` and `Debug` omit the source; `std::error::Error::source` retains it for explicit
+diagnostic access. Keep the context free of request values and credentials.
+
+An endpoint error or invalid unary status/header metadata selects a 500 response with
+`Content-Type: text/plain` and body `Internal Server Error`. Infra logs the method, registered route and safe context,
+then records the selected response once in the existing surface metrics. It does not retry the endpoint
+or fail the host. Intentional responses, authentication refusals, 504 timeouts, `Retry-After`, and SSE
+error-frame behaviour retain their existing meanings. `HttpEndpoint::is_healthy` has been removed;
+readiness belongs to the pipeline state observation.

@@ -21,6 +21,11 @@ pub(crate) enum ExternalEventMode {
 }
 
 pub(crate) trait ExternalEventPolicy: Supervisor {
+    /// Expired internal work takes priority over another queued control request.
+    fn priority_event(_state: &Self::State, _context: &Self::Context) -> Option<Self::Event> {
+        None
+    }
+
     fn external_event_mode(state: &Self::State) -> ExternalEventMode;
     fn on_external_event_channel_closed(state: &Self::State) -> Option<Self::Event>;
 }
@@ -94,6 +99,9 @@ where
             self.last_state = Some(new_state);
         }
 
+        if let Some(event) = <S as ExternalEventPolicy>::priority_event(state, context) {
+            return Ok(EventLoopDirective::Transition(event));
+        }
         match <S as ExternalEventPolicy>::external_event_mode(state) {
             ExternalEventMode::Ignore => {}
             ExternalEventMode::Block => match self.external_events.recv().await {
@@ -206,6 +214,9 @@ where
             self.last_state = Some(new_state);
         }
 
+        if let Some(event) = <S as ExternalEventPolicy>::priority_event(state, context) {
+            return Ok(EventLoopDirective::Transition(event));
+        }
         match <S as ExternalEventPolicy>::external_event_mode(state) {
             ExternalEventMode::Ignore => {}
             ExternalEventMode::Block => match self.external_events.recv().await {

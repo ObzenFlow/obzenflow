@@ -8,7 +8,9 @@
 //! for visualization in UI tools.
 
 use async_trait::async_trait;
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
+use obzenflow_core::web::{
+    EndpointError, HttpEndpoint, HttpMethod, ManagedResponse, Request, Response,
+};
 use obzenflow_core::StageId;
 use std::sync::Arc;
 
@@ -169,16 +171,12 @@ impl HttpEndpoint for TopologyHttpEndpoint {
         &[HttpMethod::Get]
     }
 
-    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
         let include = parse_include_flags(&request);
         let topology_response = self.build_response(include);
 
-        let json_body = serde_json::to_string(&topology_response).map_err(|e| {
-            WebError::RequestHandlingFailed {
-                message: format!("Failed to serialize topology: {e}"),
-                source: None,
-            }
-        })?;
+        let json_body = serde_json::to_string(&topology_response)
+            .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
 
         let mut response = Response::ok();
         response

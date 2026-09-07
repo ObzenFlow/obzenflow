@@ -21,6 +21,8 @@ use std::time::Duration;
 type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 
 pub(crate) struct FlowHandleExtras {
+    pub stage_cleanup: Vec<Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
+    pub stop_status: tokio::sync::watch::Receiver<super::FlowStopStatus>,
     pub topology: Option<Arc<Topology>>,
     pub flow_name: String,
     pub contract_attachments: Option<ContractAttachments>,
@@ -84,6 +86,8 @@ pub enum FlowStartControlOutcome {
 /// This is the only supervisor handle that gets exposed to DSL users,
 /// so it needs to provide all functionality they might need.
 pub struct FlowHandle {
+    stage_cleanup: Vec<Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
+    stop_status: tokio::sync::watch::Receiver<super::FlowStopStatus>,
     /// The standard handle for FSM control
     handle: StandardHandle<PipelineEvent, PipelineState>,
 
@@ -125,6 +129,8 @@ impl FlowHandle {
         extras: FlowHandleExtras,
     ) -> Self {
         let FlowHandleExtras {
+            stage_cleanup,
+            stop_status,
             topology,
             flow_name,
             contract_attachments,
@@ -136,6 +142,8 @@ impl FlowHandle {
         } = extras;
 
         Self {
+            stage_cleanup,
+            stop_status,
             handle,
             topology,
             flow_name,
@@ -146,6 +154,22 @@ impl FlowHandle {
             run_substrate,
             flow_effective_config,
         }
+    }
+
+    /// Observe the last stop request admitted by Runtime. Sending a stop request
+    /// only queues it; this watch changes when the reducer admits that request.
+    pub fn stop_status_receiver(&self) -> tokio::sync::watch::Receiver<super::FlowStopStatus> {
+        self.stop_status.clone()
+    }
+
+    /// Join the pipeline supervisor, including terminal publication. A terminal
+    /// state notification alone does not establish this boundary. The task may
+    /// be joined once; cancelling this wait retains it for a later wait or abort.
+    pub async fn wait_for_termination(&self) -> Result<(), FlowError> {
+        self.handle
+            .join()
+            .await
+            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)))
     }
 
     /// The run substrate selected at composition: durable with its current-run
@@ -510,9 +534,15 @@ impl SupervisorHandle for FlowHandle {
     }
 
     async fn abort_and_wait(&self) -> Result<(), Self::Error> {
-        self.handle.abort_and_wait().await.map_err(|error| {
+        let result = self.handle.abort_and_wait().await.map_err(|error| {
             FlowError::ExecutionFailed(Box::new(std::io::Error::other(error.to_string())))
-        })
+        });
+        for stage in &self.stage_cleanup {
+            if let Err(error) = stage.abort_and_join().await {
+                tracing::warn!(stage = stage.stage_name(), %error, "Emergency stage teardown failed");
+            }
+        }
+        result
     }
 }
 
@@ -526,6 +556,8 @@ mod tests {
 
     fn empty_extras() -> FlowHandleExtras {
         FlowHandleExtras {
+            stage_cleanup: Vec::new(),
+            stop_status: super::super::fsm::StopIntent::default().status_receiver(),
             topology: None,
             flow_name: "test_flow".to_string(),
             contract_attachments: None,

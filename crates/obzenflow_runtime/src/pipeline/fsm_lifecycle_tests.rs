@@ -32,6 +32,115 @@ use obzenflow_topology::TopologyBuilder;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+#[tokio::test]
+async fn repeated_raw_graceful_controls_have_no_actions_and_cancel_folds_once() {
+    use std::time::Duration;
+    for (first, second) in [(1, 60), (60, 1)] {
+        let mut context = make_fsm_context();
+        let mut fsm = build_pipeline_fsm_with_initial(PipelineState::Running);
+        let event = |seconds| PipelineEvent::StopRequested {
+            mode: FlowStopMode::Graceful {
+                timeout: Duration::from_secs(seconds),
+            },
+            reason: None,
+        };
+        let initial = fsm.handle(event(first), &mut context).await.unwrap();
+        assert_eq!(
+            initial
+                .iter()
+                .filter(|a| matches!(a, PipelineAction::StopSources))
+                .count(),
+            1
+        );
+        let deadline = context.stop_intent.deadline;
+        for _ in 0..20 {
+            assert!(fsm
+                .handle(event(second), &mut context)
+                .await
+                .unwrap()
+                .is_empty());
+            assert_eq!(context.stop_intent.deadline, deadline);
+        }
+        let cancel = PipelineEvent::StopRequested {
+            mode: FlowStopMode::Cancel,
+            reason: None,
+        };
+        let admitted = fsm.handle(cancel.clone(), &mut context).await.unwrap();
+        assert_eq!(
+            admitted
+                .iter()
+                .filter(|a| matches!(a, PipelineAction::WritePipelineStopRequested { .. }))
+                .count(),
+            1
+        );
+        assert!(fsm.handle(cancel, &mut context).await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn expired_stop_is_dispatched_before_a_full_external_control_queue() {
+    use crate::pipeline::supervisor::PipelineSupervisor;
+    use crate::supervised_base::{
+        ChannelBuilder, EventLoopDirective, SelfSupervised, SelfSupervisedWithExternalEvents,
+    };
+    let mut context = make_fsm_context();
+    context.stop_intent.apply_request(
+        FlowStopMode::Graceful {
+            timeout: std::time::Duration::ZERO,
+        },
+        None,
+    );
+    let supervisor = PipelineSupervisor {
+        name: "deadline_priority".into(),
+        system_id: context.system_id,
+        system_journal: context.system_journal.clone(),
+        last_barrier_log: None,
+        last_manual_wait_log: None,
+        drain_idle_iters: 0,
+    };
+    let (sender, receiver, watcher) = ChannelBuilder::<PipelineEvent, PipelineState>::new()
+        .with_event_buffer(32)
+        .build(PipelineState::Draining);
+    for _ in 0..32 {
+        sender
+            .send(PipelineEvent::StopRequested {
+                mode: FlowStopMode::Graceful {
+                    timeout: std::time::Duration::from_secs(60),
+                },
+                reason: None,
+            })
+            .await
+            .unwrap();
+    }
+    let mut supervisor = SelfSupervisedWithExternalEvents::new(supervisor, receiver, watcher);
+    let directive = supervisor
+        .dispatch_state(&PipelineState::Draining, &mut context)
+        .await
+        .unwrap();
+    let EventLoopDirective::Transition(event) = directive else {
+        panic!("expected timeout transition")
+    };
+    assert!(
+        matches!(&event, PipelineEvent::StopRequested { mode: FlowStopMode::Cancel, reason: Some(reason) } if reason == "stop_timeout")
+    );
+    assert!(
+        matches!(
+            context.stop_intent.mode,
+            Some(FlowStopMode::Graceful { .. })
+        ),
+        "dispatch must not mutate stop intent before the reducer"
+    );
+    let mut fsm = build_pipeline_fsm_with_initial(PipelineState::Draining);
+    let actions = fsm.handle(event, &mut context).await.unwrap();
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|a| matches!(a, PipelineAction::WritePipelineStopRequested { .. }))
+            .count(),
+        1
+    );
+}
+
 /// Minimal in-memory journal with a live reader (sees newly appended events).
 struct MemoryJournal<T: JournalEvent> {
     id: JournalId,

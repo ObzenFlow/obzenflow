@@ -114,6 +114,20 @@ where
         !self.supervisor_abort.is_finished()
     }
 
+    /// Join without consuming the enclosing flow handle. Cancellation retains the
+    /// task in the handle so a bounded coordinator can still abort and join it.
+    pub(crate) async fn join(&self) -> Result<(), HandleError> {
+        let mut slot = self.supervisor_task.lock().await;
+        let task = slot.as_mut().ok_or(HandleError::SupervisorNotRunning)?;
+        let result = task.await;
+        slot.take();
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(HandleError::SupervisorFailed(error.to_string())),
+            Err(error) => Err(HandleError::SupervisorPanicked(error.to_string())),
+        }
+    }
+
     /// Abort the supervisor task (best-effort).
     ///
     /// This does not await completion; callers should follow with

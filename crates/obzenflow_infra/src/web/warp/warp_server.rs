@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Warp implementation of the WebServer trait
+//! Private Warp route adapter for the managed application host.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -10,6 +10,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
 use async_trait::async_trait;
 use chrono::Utc;
 use matchit::Router as MatchItRouter;
@@ -18,6 +19,8 @@ use warp::sse::Event as SseEvent;
 use warp::{filters::BoxedFilter, Filter, Rejection, Reply};
 
 use crate::web::endpoint_tags::SURFACE_NAME_TAG_PREFIX;
+use crate::web::host_config::{HostConfig, HostCorsMode};
+use crate::web::host_error::ManagedWebHostError;
 use crate::web::routing::{matchit_template_to_public, public_template_to_matchit};
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceObservation};
 use crate::web::RuntimeInstanceId;
@@ -27,10 +30,11 @@ use obzenflow_core::composite::{
 use obzenflow_core::event::event_envelope::SystemEventEnvelope;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
+#[cfg(test)]
+use obzenflow_core::web::EndpointError;
 use obzenflow_core::web::{
-    server::ServerShutdownHandle, AuthPolicy, CorsMode, HttpEndpoint, HttpMethod, ManagedResponse,
-    ManagedRouteInfo, Request, Response, RouteKind, ServerConfig, SseBody, SseFrame, WebError,
-    WebServer,
+    AuthPolicy, HttpEndpoint, HttpMethod, ManagedResponse, ManagedRouteInfo, Request, Response,
+    RouteKind, SseBody, SseFrame,
 };
 use obzenflow_core::{EventId, StageId};
 
@@ -56,13 +60,13 @@ struct ContractBoundaryAliasIndex {
 }
 
 impl ContractBoundaryAliasIndex {
-    fn from_topology(topology: &obzenflow_topology::Topology) -> Result<Self, WebError> {
-        topology
-            .validate_composite_boundaries()
-            .map_err(|error| WebError::Implementation {
+    fn from_topology(topology: &obzenflow_topology::Topology) -> Result<Self, ManagedWebHostError> {
+        topology.validate_composite_boundaries().map_err(|error| {
+            ManagedWebHostError::Implementation {
                 message: format!("invalid composite contract boundary projection: {error}"),
                 source: Some(Box::new(error)),
-            })?;
+            }
+        })?;
 
         let subgraphs = topology
             .subgraphs()
@@ -76,7 +80,7 @@ impl ContractBoundaryAliasIndex {
             for port_ref in &edge.composite_ports {
                 let subgraph = subgraphs
                     .get(port_ref.subgraph_id.as_str())
-                    .ok_or_else(|| WebError::Implementation {
+                    .ok_or_else(|| ManagedWebHostError::Implementation {
                         message: format!(
                             "edge {} -> {} references missing composite {}",
                             edge.from, edge.to, port_ref.subgraph_id
@@ -87,7 +91,7 @@ impl ContractBoundaryAliasIndex {
                     .boundary_ports
                     .iter()
                     .find(|port| port.name == port_ref.port_name)
-                    .ok_or_else(|| WebError::Implementation {
+                    .ok_or_else(|| ManagedWebHostError::Implementation {
                         message: format!(
                             "edge {} -> {} references missing port {}.{}",
                             edge.from, edge.to, port_ref.subgraph_id, port_ref.port_name
@@ -136,7 +140,8 @@ impl ContractBoundaryAliasIndex {
 }
 
 /// Warp-based web server implementation
-pub struct WarpServer {
+pub(crate) struct WarpWebHost {
+    tasks: crate::web::managed_host::HostTasks,
     endpoints: Vec<Arc<dyn HttpEndpoint>>,
     /// Optional system journal for SSE lifecycle events
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
@@ -164,10 +169,11 @@ struct HostPolicy {
     control_plane_auth: Option<AuthPolicy>,
 }
 
-impl WarpServer {
+impl WarpWebHost {
     /// Create a new Warp server
     pub fn new() -> Self {
         Self {
+            tasks: Default::default(),
             endpoints: Vec::new(),
             system_journal: None,
             composite_definitions: Vec::new(),
@@ -193,7 +199,7 @@ impl WarpServer {
     pub(crate) fn with_contract_boundary_aliases(
         &mut self,
         topology: &obzenflow_topology::Topology,
-    ) -> Result<(), WebError> {
+    ) -> Result<(), ManagedWebHostError> {
         self.contract_boundary_aliases = ContractBoundaryAliasIndex::from_topology(topology)?;
         Ok(())
     }
@@ -217,7 +223,7 @@ impl WarpServer {
     fn build_filter(
         &self,
         host_policy: HostPolicy,
-    ) -> Result<BoxedFilter<(Box<dyn Reply>,)>, WebError> {
+    ) -> Result<BoxedFilter<(Box<dyn Reply>,)>, ManagedWebHostError> {
         let router = Arc::new(self.build_route_router()?);
 
         let query = warp::filters::query::query::<HashMap<String, String>>()
@@ -425,7 +431,7 @@ impl WarpServer {
         Ok(combined_route)
     }
 
-    fn build_route_router(&self) -> Result<MatchItRouter<RouteDispatch>, WebError> {
+    fn build_route_router(&self) -> Result<MatchItRouter<RouteDispatch>, ManagedWebHostError> {
         const ALL_METHODS: [HttpMethod; 7] = [
             HttpMethod::Get,
             HttpMethod::Post,
@@ -498,7 +504,7 @@ impl WarpServer {
         let mut router = MatchItRouter::new();
         for (template, dispatch) in entries {
             let matchit_path = public_template_to_matchit(&template).map_err(|message| {
-                WebError::EndpointRegistrationFailed {
+                ManagedWebHostError::EndpointRegistrationFailed {
                     path: template.clone(),
                     message,
                 }
@@ -512,7 +518,7 @@ impl WarpServer {
                     ),
                     other => other.to_string(),
                 };
-                return Err(WebError::EndpointRegistrationFailed {
+                return Err(ManagedWebHostError::EndpointRegistrationFailed {
                     path: template,
                     message,
                 });
@@ -533,6 +539,7 @@ impl WarpServer {
         shutdown: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> impl Filter<Extract = (Box<dyn Reply>,), Error = Rejection> + Clone {
         let journal_filter = warp::any().map(move || system_journal.clone());
+        let tasks = self.tasks.clone();
 
         warp::path!("api" / "flow" / "events")
             .and(warp::get())
@@ -543,6 +550,7 @@ impl WarpServer {
                 move |headers: warp::http::HeaderMap,
                       last_event_id: Option<String>,
                       journal: Arc<dyn Journal<SystemEvent>>| {
+                    let tasks = tasks.clone();
                     let host_policy = host_policy.clone();
                     let composite_definitions = composite_definitions.clone();
                     let contract_boundary_aliases = contract_boundary_aliases.clone();
@@ -576,8 +584,10 @@ impl WarpServer {
                     let (tx, rx) =
                         tokio::sync::mpsc::unbounded_channel::<Result<SseEvent, Infallible>>();
 
-                    // Spawn a background task to stream system events into the channel
-                    tokio::spawn(async move {
+                    // This producer belongs to the host and also ends on response drop,
+                    // including while the journal reader is still opening.
+                    let disconnected = tx.clone();
+                    let producer = async move {
                         use tokio::time::{sleep, Duration};
 
                         let resume_event_id = match last_event_id {
@@ -851,6 +861,13 @@ impl WarpServer {
                                 }
                             }
                         }
+                    };
+                    tasks.spawn(async move {
+                        tokio::select! {
+                            biased;
+                            _ = disconnected.closed() => {}
+                            _ = producer => {}
+                        }
                     });
 
                     let stream = UnboundedReceiverStream::new(rx);
@@ -863,7 +880,7 @@ impl WarpServer {
     }
 }
 
-impl Default for WarpServer {
+impl Default for WarpWebHost {
     fn default() -> Self {
         Self::new()
     }
@@ -933,9 +950,9 @@ impl RouteDispatch {
         method: HttpMethod,
         routed: RoutedEndpoint,
         template_for_error: &str,
-    ) -> Result<(), WebError> {
+    ) -> Result<(), ManagedWebHostError> {
         if self.by_method.contains_key(&method) {
-            return Err(WebError::EndpointRegistrationFailed {
+            return Err(ManagedWebHostError::EndpointRegistrationFailed {
                 path: template_for_error.to_string(),
                 message: format!(
                     "Duplicate endpoint registered for {} {}",
@@ -1049,7 +1066,7 @@ fn content_type_matches(provided: Option<&str>, expected: &str) -> bool {
 fn resolve_managed_auth(
     managed: &ManagedRouteInfo,
     path: &str,
-) -> Result<Option<AuthPolicy>, WebError> {
+) -> Result<Option<AuthPolicy>, ManagedWebHostError> {
     let surface_auth = managed
         .surface_policy
         .as_ref()
@@ -1061,7 +1078,7 @@ fn resolve_managed_auth(
             .as_ref()
             .is_some_and(|route_auth| route_auth != required)
         {
-            return Err(WebError::EndpointRegistrationFailed {
+            return Err(ManagedWebHostError::EndpointRegistrationFailed {
                 path: path.to_string(),
                 message: "Route auth conflicts with required surface auth".to_string(),
             });
@@ -1120,12 +1137,14 @@ fn validate_secret_material(
     }
 }
 
-fn resolve_auth_secret(env_name: &str, policy: &str) -> Result<String, WebError> {
-    validate_secret_material(std::env::var(env_name)).map_err(|reason| WebError::StartupFailed {
-        message: format!(
+fn resolve_auth_secret(env_name: &str, policy: &str) -> Result<String, ManagedWebHostError> {
+    validate_secret_material(std::env::var(env_name)).map_err(|reason| {
+        ManagedWebHostError::StartupFailed {
+            message: format!(
             "AuthPolicy::{policy} expects non-empty environment variable `{env_name}` ({reason})"
         ),
-        source: None,
+            source: None,
+        }
     })
 }
 
@@ -1136,7 +1155,7 @@ fn request_auth_secret(env_name: &str, policy: &str) -> Result<String, Response>
     })
 }
 
-fn validate_auth_policy_startup(auth: &AuthPolicy) -> Result<(), WebError> {
+fn validate_auth_policy_startup(auth: &AuthPolicy) -> Result<(), ManagedWebHostError> {
     match auth {
         AuthPolicy::None => Ok(()),
         AuthPolicy::ApiKey { value_env, .. } => {
@@ -1149,7 +1168,7 @@ fn validate_auth_policy_startup(auth: &AuthPolicy) -> Result<(), WebError> {
             ..
         } => {
             if replay_window_secs.is_some() && timestamp_header.is_none() {
-                return Err(WebError::StartupFailed {
+                return Err(ManagedWebHostError::StartupFailed {
                     message: "AuthPolicy::HmacSha256 requires timestamp_header when replay_window_secs is configured".to_string(),
                     source: None,
                 });
@@ -1161,10 +1180,10 @@ fn validate_auth_policy_startup(auth: &AuthPolicy) -> Result<(), WebError> {
 }
 
 fn build_host_policy(
-    config: &ServerConfig,
+    config: &HostConfig,
     endpoints: &[Arc<dyn HttpEndpoint>],
     has_flow_events_route: bool,
-) -> Result<HostPolicy, WebError> {
+) -> Result<HostPolicy, ManagedWebHostError> {
     let max_body_size_bytes = config.max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE_BYTES) as u64;
     let request_timeout_secs = config
         .request_timeout_secs
@@ -1193,7 +1212,7 @@ fn build_host_policy(
             Some(AuthPolicy::ApiKey { .. } | AuthPolicy::HmacSha256 { .. })
         )
     {
-        return Err(WebError::StartupFailed {
+        return Err(ManagedWebHostError::StartupFailed {
             message: format!(
                 "Non-loopback host `{}` requires control-plane auth for built-in routes",
                 config.host
@@ -1388,6 +1407,44 @@ fn reply_from_response(response: Response) -> Result<Box<dyn Reply>, Rejection> 
     Ok(Box::new(reply) as Box<dyn Reply>)
 }
 
+/// Response metadata is untrusted endpoint output. Select the fallback before
+/// observing the request, so journalled snapshots describe the reply on the wire.
+fn finalise_unary(
+    response: Response,
+    method: HttpMethod,
+    route: &str,
+    metrics: Option<&SurfaceMetricsRouteContext>,
+    start: std::time::Instant,
+    request_bytes: u64,
+) -> Box<dyn Reply> {
+    let mut builder = warp::http::Response::builder().status(response.status);
+    for (name, value) in response.headers {
+        builder = builder.header(name, value);
+    }
+    let reply = builder.body(response.body).unwrap_or_else(|_| {
+        tracing::error!(
+            method = method.as_str(),
+            matched_route = route,
+            "Invalid endpoint response metadata"
+        );
+        warp::http::Response::builder()
+            .status(500)
+            .header("Content-Type", "text/plain")
+            .body(b"Internal Server Error".to_vec())
+            .expect("static fallback response is valid")
+    });
+    if let Some(metrics) = metrics {
+        metrics.observe(
+            method,
+            reply.status().as_u16(),
+            start.elapsed().as_millis() as u64,
+            request_bytes,
+            reply.body().len() as u64,
+        );
+    }
+    Box::new(reply)
+}
+
 /// Helper function to handle requests without body (GET, HEAD, DELETE, OPTIONS)
 #[allow(clippy::too_many_arguments)]
 async fn handle_request_no_body(
@@ -1466,8 +1523,19 @@ async fn handle_request_no_body(
         endpoint.handle(request).await
     };
 
-    match handler_result {
-        Ok(ManagedResponse::Unary(mut response)) => {
+    let response = handler_result.unwrap_or_else(|error| {
+        tracing::error!(
+            method = method.as_str(),
+            matched_route = endpoint.path(),
+            context = error.context(),
+            "Managed endpoint failed",
+        );
+        Response::internal_error()
+            .with_text("Internal Server Error")
+            .into()
+    });
+    match response {
+        ManagedResponse::Unary(mut response) => {
             if let Some(managed) = managed.as_ref() {
                 if matches!(managed.kind, RouteKind::Sse) && response.status < 400 {
                     if let Some((raw_path, template)) = log_ctx.as_ref() {
@@ -1491,30 +1559,16 @@ async fn handle_request_no_body(
                 }
             }
 
-            let response_bytes = response.body.len() as u64;
-            if let Some(metrics) = &surface_metrics {
-                metrics.observe(
-                    method,
-                    response.status,
-                    start.elapsed().as_millis() as u64,
-                    0,
-                    response_bytes,
-                );
-            }
-
-            let mut builder = warp::http::Response::builder().status(response.status);
-
-            for (key, value) in response.headers {
-                builder = builder.header(key, value);
-            }
-
-            let reply = builder
-                .body(response.body)
-                .map_err(|_| warp::reject::reject())?;
-
-            Ok(Box::new(reply) as Box<dyn Reply>)
+            Ok(finalise_unary(
+                response,
+                method,
+                endpoint.path(),
+                surface_metrics.as_ref(),
+                start,
+                0,
+            ))
         }
-        Ok(ManagedResponse::Sse(body)) => {
+        ManagedResponse::Sse(body) => {
             if let Some(managed) = managed.as_ref() {
                 if matches!(managed.kind, RouteKind::Unary) {
                     if let Some((raw_path, template)) = log_ctx.as_ref() {
@@ -1532,12 +1586,6 @@ async fn handle_request_no_body(
             // FLOWIP-093a: streaming responses do not fit the unary request/response metrics model,
             // so we intentionally skip surface-metrics observation for SSE replies.
             Ok(Box::new(sse_body_reply(body)) as Box<dyn Reply>)
-        }
-        Err(_) => {
-            if let Some(metrics) = &surface_metrics {
-                metrics.observe(method, 500, start.elapsed().as_millis() as u64, 0, 0);
-            }
-            Err(warp::reject::reject())
         }
     }
 }
@@ -1657,8 +1705,19 @@ async fn handle_request_with_body(
         endpoint.handle(request).await
     };
 
-    match handler_result {
-        Ok(ManagedResponse::Unary(mut response)) => {
+    let response = handler_result.unwrap_or_else(|error| {
+        tracing::error!(
+            method = method.as_str(),
+            matched_route = endpoint.path(),
+            context = error.context(),
+            "Managed endpoint failed",
+        );
+        Response::internal_error()
+            .with_text("Internal Server Error")
+            .into()
+    });
+    match response {
+        ManagedResponse::Unary(mut response) => {
             if let Some(managed) = managed.as_ref() {
                 if matches!(managed.kind, RouteKind::Sse) && response.status < 400 {
                     if let Some((raw_path, template)) = log_ctx.as_ref() {
@@ -1682,30 +1741,16 @@ async fn handle_request_with_body(
                 }
             }
 
-            let response_bytes = response.body.len() as u64;
-            if let Some(metrics) = &surface_metrics {
-                metrics.observe(
-                    method,
-                    response.status,
-                    start.elapsed().as_millis() as u64,
-                    request_bytes,
-                    response_bytes,
-                );
-            }
-
-            let mut builder = warp::http::Response::builder().status(response.status);
-
-            for (key, value) in response.headers {
-                builder = builder.header(key, value);
-            }
-
-            let reply = builder
-                .body(response.body)
-                .map_err(|_| warp::reject::reject())?;
-
-            Ok(Box::new(reply) as Box<dyn Reply>)
+            Ok(finalise_unary(
+                response,
+                method,
+                endpoint.path(),
+                surface_metrics.as_ref(),
+                start,
+                request_bytes,
+            ))
         }
-        Ok(ManagedResponse::Sse(body)) => {
+        ManagedResponse::Sse(body) => {
             if let Some(managed) = managed.as_ref() {
                 if matches!(managed.kind, RouteKind::Unary) {
                     if let Some((raw_path, template)) = log_ctx.as_ref() {
@@ -1723,18 +1768,6 @@ async fn handle_request_with_body(
             // FLOWIP-093a: streaming responses do not fit the unary request/response metrics model,
             // so we intentionally skip surface-metrics observation for SSE replies.
             Ok(Box::new(sse_body_reply(body)) as Box<dyn Reply>)
-        }
-        Err(_) => {
-            if let Some(metrics) = &surface_metrics {
-                metrics.observe(
-                    method,
-                    500,
-                    start.elapsed().as_millis() as u64,
-                    request_bytes,
-                    0,
-                );
-            }
-            Err(warp::reject::reject())
         }
     }
 }
@@ -1772,19 +1805,23 @@ fn sse_frame_to_warp(frame: SseFrame) -> SseEvent {
     ev
 }
 
-impl WarpServer {
-    /// Admit authentication and retain route declarations before spawning the listener task.
-    /// Socket binding and task supervision remain part of the existing serving future.
-    pub(crate) fn prepare_start(
-        self,
-        config: ServerConfig,
-    ) -> Result<impl std::future::Future<Output = Result<(), WebError>> + Send, WebError> {
-        use futures::FutureExt;
+impl WarpWebHost {
+    /// Validate all route policy and bind the real socket before returning success.
+    pub(crate) async fn bind(
+        mut self,
+        config: HostConfig,
+        shutdown: tokio::sync::watch::Sender<bool>,
+    ) -> Result<crate::web::managed_host::ManagedWebHost, ManagedWebHostError> {
+        self.with_shutdown(shutdown.subscribe());
 
-        let addr: SocketAddr = config.address().parse().map_err(|e| WebError::BindFailed {
-            address: config.address(),
-            source: Some(Box::new(e)),
-        })?;
+        let addr: SocketAddr =
+            config
+                .address()
+                .parse()
+                .map_err(|e| ManagedWebHostError::BindFailed {
+                    address: config.address(),
+                    source: Some(Box::new(e)),
+                })?;
 
         let host_policy =
             build_host_policy(&config, &self.endpoints, self.system_journal.is_some())?;
@@ -1793,7 +1830,7 @@ impl WarpServer {
 
         let cors_config = config.cors.unwrap_or_default();
         let cors_mode = cors_config.mode;
-        if matches!(&cors_mode, CorsMode::AllowAnyOrigin) && !cfg!(debug_assertions) {
+        if matches!(&cors_mode, HostCorsMode::AllowAnyOrigin) && !cfg!(debug_assertions) {
             tracing::warn!(
                 "CORS is configured as AllowAnyOrigin in a release build; prefer an explicit allow-list for production"
             );
@@ -1801,19 +1838,19 @@ impl WarpServer {
 
         // Add CORS support (configurable).
         //
-        // Note: `CorsMode::SameOrigin` means "do not add CORS headers"; browsers will enforce
+        // Note: `HostCorsMode::SameOrigin` means "do not add CORS headers"; browsers will enforce
         // the same-origin policy by default.
-        let routes_with_cors = if matches!(&cors_mode, CorsMode::SameOrigin) {
+        let routes_with_cors = if matches!(&cors_mode, HostCorsMode::SameOrigin) {
             routes
         } else {
             let mut cors = warp::cors();
             cors = match cors_mode {
-                CorsMode::AllowAnyOrigin => cors.allow_any_origin(),
-                CorsMode::AllowList(origins) => {
+                HostCorsMode::AllowAnyOrigin => cors.allow_any_origin(),
+                HostCorsMode::AllowList(origins) => {
                     let origins: Vec<&str> = origins.iter().map(String::as_str).collect();
                     cors.allow_origins(origins)
                 }
-                CorsMode::SameOrigin => cors,
+                HostCorsMode::SameOrigin => cors,
             };
 
             cors = cors
@@ -1828,56 +1865,16 @@ impl WarpServer {
                 .boxed()
         };
 
-        Ok(async move {
-            // Start the server. With a shutdown signal attached, the listener
-            // closes gracefully after it fires (FLOWIP-114d gap 8); SSE producers
-            // self-close separately, since transport-level graceful shutdown
-            // never ends an infinite stream.
-            // Box Warp's bind/run futures at this boundary so their borrowed
-            // Tokio I/O and shutdown futures have an explicit Send type.
-            match self.shutdown.clone() {
-                Some(mut shutdown) => {
-                    warp::serve(routes_with_cors)
-                        .bind(addr)
-                        .boxed()
-                        .await
-                        .graceful(async move {
-                            // A dropped sender also means: close now.
-                            while !*shutdown.borrow() {
-                                if shutdown.changed().await.is_err() {
-                                    break;
-                                }
-                            }
-                        })
-                        .run()
-                        .boxed()
-                        .await;
-                }
-                None => {
-                    warp::serve(routes_with_cors).run(addr).boxed().await;
-                }
-            }
-
-            Ok(())
-        })
+        crate::web::managed_host::ManagedWebHost::bind(addr, routes_with_cors, self.tasks, shutdown)
+            .await
     }
-}
 
-#[async_trait]
-impl WebServer for WarpServer {
-    fn register_endpoint(&mut self, endpoint: Box<dyn HttpEndpoint>) -> Result<(), WebError> {
+    pub(crate) fn register_endpoint(
+        &mut self,
+        endpoint: Box<dyn HttpEndpoint>,
+    ) -> Result<(), ManagedWebHostError> {
         self.endpoints.push(Arc::from(endpoint));
         Ok(())
-    }
-
-    async fn start(self, config: ServerConfig) -> Result<(), WebError> {
-        self.prepare_start(config)?.await
-    }
-
-    fn shutdown_handle(&self) -> Option<Box<dyn ServerShutdownHandle>> {
-        // The managed application supplies its shutdown receiver before startup;
-        // Warp's graceful serving future consumes it directly.
-        None
     }
 }
 
@@ -1886,13 +1883,17 @@ impl WebServer for WarpServer {
 mod auth_tests;
 
 #[cfg(test)]
+#[path = "response_tests.rs"]
+mod response_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::journal::MemoryJournal;
     use async_trait::async_trait;
     use obzenflow_core::web::{
         AuthPolicy, HttpMethod, ManagedResponse, ManagedRouteInfo, Request, Response, RouteKind,
-        RoutePolicy, ServerConfig, SurfacePolicy, WebError,
+        RoutePolicy, SurfacePolicy,
     };
 
     fn test_host_policy() -> HostPolicy {
@@ -1965,7 +1966,7 @@ mod tests {
             // Resume an attached session's cursor after the entire finite run has
             // completed. No periodic metrics scrape is needed for these totals.
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-            let mut server = WarpServer::new();
+            let mut server = WarpWebHost::new();
             server.with_system_journal(journal);
             server.with_shutdown(shutdown_rx);
             let filter = server.build_filter(test_host_policy()).unwrap();
@@ -2039,7 +2040,7 @@ mod tests {
                 app.event_counts.insert(stage, 17);
                 exporter.publish_app_snapshot(app);
             }
-            let mut server = WarpServer::new();
+            let mut server = WarpWebHost::new();
             if let Some(model) = model {
                 let endpoint = crate::web::endpoints::PrometheusMetricsEndpoint::new(model);
                 server.register_endpoint(Box::new(endpoint)).unwrap();
@@ -2084,14 +2085,14 @@ mod tests {
             &[HttpMethod::Post]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("OK").into())
         }
     }
 
     #[tokio::test]
     async fn build_filter_enforces_content_length_limit() {
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server.register_endpoint(Box::new(EchoEndpoint)).unwrap();
         let filter = server.build_filter(test_host_policy()).unwrap();
 
@@ -2129,7 +2130,7 @@ mod tests {
             &[HttpMethod::Get]
         }
 
-        async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
             assert_eq!(request.path, "/items/123");
             assert_eq!(request.matched_route, "/items/:id");
             assert_eq!(
@@ -2142,7 +2143,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_filter_populates_path_params_and_matched_route() {
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server
             .register_endpoint(Box::new(PathParamsEndpoint))
             .unwrap();
@@ -2170,7 +2171,7 @@ mod tests {
             &[HttpMethod::Get]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("STATIC").into())
         }
     }
@@ -2187,14 +2188,14 @@ mod tests {
             &[HttpMethod::Get]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("PARAM").into())
         }
     }
 
     #[tokio::test]
     async fn build_filter_prefers_static_routes_over_parameterised_routes() {
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server.register_endpoint(Box::new(ParamEndpoint)).unwrap();
         server.register_endpoint(Box::new(StaticEndpoint)).unwrap();
         let filter = server.build_filter(test_host_policy()).unwrap();
@@ -2230,7 +2231,7 @@ mod tests {
             &[HttpMethod::Get]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("A").into())
         }
     }
@@ -2247,14 +2248,14 @@ mod tests {
             &[HttpMethod::Get]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("B").into())
         }
     }
 
     #[tokio::test]
     async fn build_filter_rejects_conflicting_parameterised_routes() {
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server
             .register_endpoint(Box::new(ConflictEndpointA))
             .unwrap();
@@ -2264,7 +2265,7 @@ mod tests {
 
         let err = server.build_filter(test_host_policy()).unwrap_err();
         match err {
-            WebError::EndpointRegistrationFailed { path, message } => {
+            ManagedWebHostError::EndpointRegistrationFailed { path, message } => {
                 assert_eq!(path, "/conflict/:name");
                 assert!(
                     message.contains("conflicts"),
@@ -2291,7 +2292,7 @@ mod tests {
             &[HttpMethod::Get]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("OK").into())
         }
 
@@ -2315,7 +2316,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_filter_rejects_route_local_auth_that_weakens_surface_auth() {
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server
             .register_endpoint(Box::new(WeakeningAuthEndpoint))
             .unwrap();
@@ -2323,7 +2324,7 @@ mod tests {
         let err = server.build_filter(test_host_policy()).unwrap_err();
 
         match err {
-            WebError::EndpointRegistrationFailed { path, message } => {
+            ManagedWebHostError::EndpointRegistrationFailed { path, message } => {
                 assert_eq!(path, "/weak");
                 assert!(
                     message.contains("conflicts with required surface auth"),
@@ -2346,7 +2347,7 @@ mod tests {
             &[HttpMethod::Post]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("OK").into())
         }
 
@@ -2364,7 +2365,7 @@ mod tests {
 
     #[tokio::test]
     async fn managed_surface_enforces_surface_max_body_size() {
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server
             .register_endpoint(Box::new(ManagedBodySizeEndpoint))
             .unwrap();
@@ -2402,7 +2403,7 @@ mod tests {
             &[HttpMethod::Post]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("OK").into())
         }
 
@@ -2420,7 +2421,7 @@ mod tests {
 
     #[tokio::test]
     async fn managed_surface_enforces_request_content_type_when_declared() {
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server
             .register_endpoint(Box::new(ManagedContentTypeEndpoint))
             .unwrap();
@@ -2460,7 +2461,7 @@ mod tests {
             &[HttpMethod::Get]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("OK").into())
         }
 
@@ -2487,7 +2488,7 @@ mod tests {
             return;
         }
 
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server
             .register_endpoint(Box::new(ManagedApiKeyEndpoint))
             .unwrap();
@@ -2540,7 +2541,7 @@ mod tests {
             &[HttpMethod::Get]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("OK").into())
         }
 
@@ -2570,7 +2571,7 @@ mod tests {
             return;
         }
 
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server
             .register_endpoint(Box::new(ManagedHmacEndpoint))
             .unwrap();
@@ -2626,7 +2627,7 @@ mod tests {
             &[HttpMethod::Get]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             tokio::time::sleep(Duration::from_millis(20)).await;
             Ok(Response::ok().with_text("OK").into())
         }
@@ -2634,7 +2635,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_policy_enforces_request_timeout() {
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server.register_endpoint(Box::new(SlowEndpoint)).unwrap();
         let filter = server
             .build_filter(HostPolicy {
@@ -2665,7 +2666,7 @@ mod tests {
             &[HttpMethod::Get]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("metrics").into())
         }
     }
@@ -2682,7 +2683,7 @@ mod tests {
             &[HttpMethod::Get]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("healthy").into())
         }
     }
@@ -2699,7 +2700,7 @@ mod tests {
             &[HttpMethod::Get]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("ready").into())
         }
     }
@@ -2716,7 +2717,7 @@ mod tests {
             &[HttpMethod::Get]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("topology").into())
         }
     }
@@ -2733,7 +2734,7 @@ mod tests {
             &[HttpMethod::Post]
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().with_text("control").into())
         }
     }
@@ -2746,7 +2747,7 @@ mod tests {
             return;
         }
 
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server
             .register_endpoint(Box::new(RawMetricsEndpoint))
             .unwrap();
@@ -2786,7 +2787,7 @@ mod tests {
             return;
         }
 
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server
             .register_endpoint(Box::new(RawHealthEndpoint))
             .unwrap();
@@ -2818,7 +2819,7 @@ mod tests {
             return;
         }
 
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server
             .register_endpoint(Box::new(RawReadyEndpoint))
             .unwrap();
@@ -2850,7 +2851,7 @@ mod tests {
             return;
         }
 
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server
             .register_endpoint(Box::new(RawTopologyEndpoint))
             .unwrap();
@@ -2890,7 +2891,7 @@ mod tests {
             return;
         }
 
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server
             .register_endpoint(Box::new(RawFlowControlEndpoint))
             .unwrap();
@@ -2947,7 +2948,7 @@ mod tests {
                 &[HttpMethod::Get]
             }
 
-            async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
                 Ok(Response::ok().with_text("config").into())
             }
         }
@@ -2961,7 +2962,7 @@ mod tests {
             "/api/config/flows/:flow_id",
             "/api/config/flows/:flow_id/stages/:stage_key",
         ];
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         for template in templates {
             server
                 .register_endpoint(Box::new(RawConfigEndpoint(template)))
@@ -3014,7 +3015,7 @@ mod tests {
             return;
         }
 
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server.with_system_journal(Arc::new(MemoryJournal::<SystemEvent>::new()));
         let filter = server
             .build_filter(HostPolicy {
@@ -3037,12 +3038,12 @@ mod tests {
 
     #[test]
     fn build_host_policy_requires_control_plane_auth_for_non_loopback_built_ins() {
-        let config = ServerConfig::new("0.0.0.0".to_string(), 9090);
+        let config = HostConfig::new("0.0.0.0".to_string(), 9090);
         let endpoints: Vec<Arc<dyn HttpEndpoint>> = vec![Arc::new(RawMetricsEndpoint)];
 
         let err = build_host_policy(&config, &endpoints, false).unwrap_err();
         match err {
-            WebError::StartupFailed { message, .. } => {
+            ManagedWebHostError::StartupFailed { message, .. } => {
                 assert!(
                     message.contains("requires control-plane auth"),
                     "unexpected message: {message}"
@@ -3054,7 +3055,7 @@ mod tests {
 
     #[test]
     fn build_host_policy_allows_non_loopback_when_no_control_plane_routes_exist() {
-        let config = ServerConfig::new("0.0.0.0".to_string(), 9090);
+        let config = HostConfig::new("0.0.0.0".to_string(), 9090);
         let endpoints: Vec<Arc<dyn HttpEndpoint>> = vec![Arc::new(EchoEndpoint)];
 
         let host_policy = build_host_policy(&config, &endpoints, false).unwrap();
@@ -3063,7 +3064,7 @@ mod tests {
 
     #[test]
     fn build_host_policy_validates_control_plane_auth_env_at_startup() {
-        let mut config = ServerConfig::new("127.0.0.1".to_string(), 9090);
+        let mut config = HostConfig::new("127.0.0.1".to_string(), 9090);
         config.control_plane_auth = Some(AuthPolicy::ApiKey {
             header: "Authorization".to_string(),
             value_env: "OBZENFLOW_TEST_MISSING_CONTROL_PLANE_ENV".to_string(),
@@ -3072,7 +3073,7 @@ mod tests {
 
         let err = build_host_policy(&config, &endpoints, false).unwrap_err();
         match err {
-            WebError::StartupFailed { message, .. } => {
+            ManagedWebHostError::StartupFailed { message, .. } => {
                 assert!(
                     message.contains("OBZENFLOW_TEST_MISSING_CONTROL_PLANE_ENV"),
                     "unexpected message: {message}"
@@ -4017,7 +4018,7 @@ mod contract_boundary_sse_tests {
             .unwrap();
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server.with_system_journal(journal);
         server.with_contract_boundary_aliases(&topology).unwrap();
         server.with_shutdown(shutdown_rx);
@@ -5316,7 +5317,7 @@ mod composite_status_route_acceptance_tests {
         last_event_id: Option<EventId>,
     ) -> String {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let mut server = WarpServer::new();
+        let mut server = WarpWebHost::new();
         server.with_system_journal(journal);
         server.with_composite_definitions(definitions);
         server.with_shutdown(shutdown_rx);
@@ -5552,11 +5553,54 @@ mod composite_status_route_acceptance_tests {
         }
     }
 
+    #[derive(Default)]
+    struct PendingOpen {
+        entered: tokio::sync::Notify,
+        dropped: tokio::sync::Notify,
+    }
+
+    struct PendingOpenGuard(Arc<PendingOpen>);
+    impl Drop for PendingOpenGuard {
+        fn drop(&mut self) {
+            self.0.dropped.notify_one();
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_flow_events_response_cancels_pending_journal_open() {
+        let mut journal = ScriptedJournal::new(SystemId::new());
+        let probe = Arc::new(PendingOpen::default());
+        journal.pending_open = Some(probe.clone());
+        let mut host = WarpWebHost::new();
+        host.with_system_journal(Arc::new(journal));
+        let filter = host
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 100,
+                request_timeout: None,
+                control_plane_auth: None,
+            })
+            .unwrap();
+        let reply = warp::test::request()
+            .method("GET")
+            .path("/api/flow/events")
+            .filter(&filter)
+            .await
+            .unwrap();
+        probe.entered.notified().await;
+        drop(reply);
+        tokio::time::timeout(Duration::from_secs(1), probe.dropped.notified())
+            .await
+            .expect("SSE response drop must cancel an opening journal reader");
+        host.tasks.drain().await;
+    }
+
     struct ScriptedJournal {
         inner: MemoryJournal<SystemEvent>,
         fail_at: Option<usize>,
         fail_open: bool,
+        pending_open: Option<Arc<PendingOpen>>,
         reader_dropped: Arc<AtomicBool>,
+        reader_opened: tokio::sync::Notify,
     }
 
     impl ScriptedJournal {
@@ -5565,7 +5609,9 @@ mod composite_status_route_acceptance_tests {
                 inner: MemoryJournal::with_owner(JournalOwner::system(system_id)),
                 fail_at: None,
                 fail_open: false,
+                pending_open: None,
                 reader_dropped: Arc::new(AtomicBool::new(false)),
+                reader_opened: tokio::sync::Notify::new(),
             }
         }
     }
@@ -5603,15 +5649,22 @@ mod composite_status_route_acceptance_tests {
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<SystemEvent>>, JournalError> {
+            if let Some(probe) = &self.pending_open {
+                let _guard = PendingOpenGuard(probe.clone());
+                probe.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
             if self.fail_open {
                 return Err(JournalError::SubscriptionClosed);
             }
-            Ok(Box::new(ScriptedReader {
+            let reader = Box::new(ScriptedReader {
                 events: self.inner.read_all_unordered().await?,
                 position: position as usize,
                 fail_at: self.fail_at,
                 dropped: self.reader_dropped.clone(),
-            }))
+            });
+            self.reader_opened.notify_one();
+            Ok(reader)
         }
 
         async fn read_last_n(
@@ -5667,8 +5720,8 @@ mod composite_status_route_acceptance_tests {
         let system_id = SystemId::new();
         let journal = Arc::new(ScriptedJournal::new(system_id));
         let reader_dropped = journal.reader_dropped.clone();
-        let mut server = WarpServer::new();
-        server.with_system_journal(journal);
+        let mut server = WarpWebHost::new();
+        server.with_system_journal(journal.clone());
         let filter = server.build_filter(host_policy()).expect("route builds");
 
         let reply = warp::test::request()
@@ -5677,6 +5730,11 @@ mod composite_status_route_acceptance_tests {
             .filter(&filter)
             .await
             .expect("route accepts request");
+        // Establish that a reader exists before checking its cancellation. An
+        // already-disconnected response may now cancel before opening one.
+        tokio::time::timeout(Duration::from_secs(1), journal.reader_opened.notified())
+            .await
+            .unwrap();
         drop(reply);
 
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -5686,5 +5744,6 @@ mod composite_status_route_acceptance_tests {
         })
         .await
         .expect("dropping the response must cancel and drop the journal reader");
+        server.tasks.drain().await;
     }
 }
