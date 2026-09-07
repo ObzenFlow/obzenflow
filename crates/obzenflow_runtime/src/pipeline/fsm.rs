@@ -394,6 +394,8 @@ pub(crate) struct PipelineContext {
 
     pub(crate) stop_intent: StopIntent,
 
+    pub(crate) termination: super::termination::TerminationState,
+
     /// FLOWIP-010: build-resolved `contracts.source_contract_strict_mode`.
     pub(crate) source_contract_strict: crate::pipeline::supervisor::SourceContractStrictMode,
 
@@ -402,6 +404,26 @@ pub(crate) struct PipelineContext {
 }
 
 impl PipelineContext {
+    /// Legacy timeout errors retain the existing admission gate. Every other
+    /// error selects a failure without manufacturing an external stop intent.
+    fn record_error(
+        &mut self,
+        message: &str,
+    ) -> Option<obzenflow_core::event::types::ViolationCause> {
+        if message == STOP_REASON_TIMEOUT {
+            let outcome = self
+                .stop_intent
+                .apply_request(FlowStopMode::Cancel, Some(STOP_REASON_TIMEOUT.to_string()));
+            if matches!(outcome, StopRequestOutcome::Applied { .. }) {
+                return Some(obzenflow_core::event::types::ViolationCause::Other(
+                    message.into(),
+                ));
+            }
+        }
+        self.termination.fail(message.to_string(), None);
+        None
+    }
+
     pub(crate) fn contract_keys_for_stage_pair(
         &self,
         upstream: StageId,
@@ -1599,10 +1621,11 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 })
             };
 
-            on PipelineEvent::Error => |_state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
+            on PipelineEvent::Error => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
+                        ctx.termination.fail(message.clone(), None);
                         Ok(Transition {
                             next_state: PipelineState::Failed { reason: message, failure_cause: None },
                             actions: vec![
@@ -1693,20 +1716,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
-                        if message == STOP_REASON_TIMEOUT {
-                            ctx.stop_intent.apply_request(
-                                FlowStopMode::Cancel,
-                                Some(STOP_REASON_TIMEOUT.to_string()),
-                            );
-                        }
-
-                        let failure_cause = if message == STOP_REASON_TIMEOUT {
-                            Some(obzenflow_core::event::types::ViolationCause::Other(
-                                STOP_REASON_TIMEOUT.into(),
-                            ))
-                        } else {
-                            None
-                        };
+                        let failure_cause = ctx.record_error(&message);
 
                         Ok(Transition {
                             next_state: PipelineState::Failed {
@@ -1772,20 +1782,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
-                        if message == STOP_REASON_TIMEOUT {
-                            ctx.stop_intent.apply_request(
-                                FlowStopMode::Cancel,
-                                Some(STOP_REASON_TIMEOUT.to_string()),
-                            );
-                        }
-
-                        let failure_cause = if message == STOP_REASON_TIMEOUT {
-                            Some(obzenflow_core::event::types::ViolationCause::Other(
-                                STOP_REASON_TIMEOUT.into(),
-                            ))
-                        } else {
-                            None
-                        };
+                        let failure_cause = ctx.record_error(&message);
 
                         Ok(Transition {
                             next_state: PipelineState::Failed {
@@ -1962,10 +1959,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
-                        ctx.stop_intent.apply_request(
-                            FlowStopMode::Cancel,
-                            Some(message.clone()),
-                        );
+                        ctx.termination.fail(message.clone(), None);
                         Ok(Transition {
                             next_state: PipelineState::Failed {
                                 reason: message,
@@ -2083,10 +2077,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
-                        ctx.stop_intent.apply_request(
-                            FlowStopMode::Cancel,
-                            Some(message.clone()),
-                        );
+                        ctx.termination.fail(message.clone(), None);
 
                         Ok(Transition {
                             next_state: PipelineState::Failed {
@@ -2238,20 +2229,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
-                        if message == STOP_REASON_TIMEOUT {
-                            ctx.stop_intent.apply_request(
-                                FlowStopMode::Cancel,
-                                Some(STOP_REASON_TIMEOUT.to_string()),
-                            );
-                        }
-
-                        let failure_cause = if message == STOP_REASON_TIMEOUT {
-                            Some(obzenflow_core::event::types::ViolationCause::Other(
-                                STOP_REASON_TIMEOUT.into(),
-                            ))
-                        } else {
-                            None
-                        };
+                        let failure_cause = ctx.record_error(&message);
 
                         Ok(Transition {
                             next_state: PipelineState::Failed {
@@ -2285,7 +2263,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 })
             };
 
-            on PipelineEvent::Error => |state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
+            on PipelineEvent::Error => |state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
                 let event = event.clone();
                 let state = state.clone();
                 Box::pin(async move {
@@ -2294,6 +2272,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                             PipelineState::AbortRequested { reason: abort_reason, .. },
                             PipelineEvent::Error { message },
                         ) => {
+                            ctx.termination.fail(message.clone(), Some(abort_reason.clone()));
                             Ok(Transition {
                                 next_state: PipelineState::Failed {
                                     reason: message,

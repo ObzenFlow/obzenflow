@@ -1805,6 +1805,22 @@ fn sse_frame_to_warp(frame: SseFrame) -> SseEvent {
     ev
 }
 
+// Match both conversions in Warp's panicking IntoOrigin implementation. Keep
+// this deployment admission at the private host boundary, before socket binding.
+fn validate_cors_origin(raw: &str, index: usize) -> Result<(), ManagedWebHostError> {
+    let invalid = || ManagedWebHostError::StartupFailed {
+        message: format!("server.cors.allow_origins[{index}]: invalid origin"),
+        source: None,
+    };
+    let (scheme, authority) = raw.split_once("://").ok_or_else(&invalid)?;
+    let origin = headers::Origin::try_from_parts(scheme, authority, None).map_err(|_| invalid())?;
+    origin
+        .to_string()
+        .parse::<warp::http::HeaderValue>()
+        .map_err(|_| invalid())?;
+    Ok(())
+}
+
 impl WarpWebHost {
     /// Validate all route policy and bind the real socket before returning success.
     pub(crate) async fn bind(
@@ -1847,6 +1863,9 @@ impl WarpWebHost {
             cors = match cors_mode {
                 HostCorsMode::AllowAnyOrigin => cors.allow_any_origin(),
                 HostCorsMode::AllowList(origins) => {
+                    for (index, origin) in origins.iter().enumerate() {
+                        validate_cors_origin(origin, index)?;
+                    }
                     let origins: Vec<&str> = origins.iter().map(String::as_str).collect();
                     cors.allow_origins(origins)
                 }
@@ -1895,6 +1914,35 @@ mod tests {
         AuthPolicy, HttpMethod, ManagedResponse, ManagedRouteInfo, Request, Response, RouteKind,
         RoutePolicy, SurfacePolicy,
     };
+
+    #[test]
+    fn cors_origin_admission_matches_warps_normalised_representation() {
+        for origin in [
+            "http://localhost:7010",
+            "https://example.com",
+            "https://example.com/",
+            "http://[::1]:7010",
+            "HTTPS://EXAMPLE.COM:443",
+        ] {
+            validate_cors_origin(origin, 0).unwrap();
+            // Preserve Warp's existing accepted origins and normalisation.
+            let _ = warp::cors().allow_origins([origin]).build();
+        }
+        for origin in [
+            "not-an-origin",
+            "null",
+            "",
+            "https://",
+            "https://example.com/path",
+            "http://example.com\n",
+        ] {
+            let error = validate_cors_origin(origin, 3).unwrap_err();
+            assert!(
+                matches!(error, ManagedWebHostError::StartupFailed { ref message, .. }
+                if message == "server.cors.allow_origins[3]: invalid origin")
+            );
+        }
+    }
 
     fn test_host_policy() -> HostPolicy {
         HostPolicy {

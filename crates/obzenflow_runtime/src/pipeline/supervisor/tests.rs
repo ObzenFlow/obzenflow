@@ -218,6 +218,7 @@ fn test_context(
         flow_start_time: None,
         last_system_event_id_seen: None,
         stop_intent: Default::default(),
+        termination: Default::default(),
         source_contract_strict: Default::default(),
         metrics_drain_timeout_ms: 5_000,
     }
@@ -1022,6 +1023,7 @@ async fn supervisor_join_waits_for_terminal_publication_and_propagates_append_fa
                     .stop_intent
                     .apply_request(FlowStopMode::Cancel, Some("test_stop".into()));
             }
+            let published = context.termination.published.clone();
             let state = PipelineState::Draining;
             let (sender, receiver, watcher) =
                 ChannelBuilder::<PipelineEvent, PipelineState>::new().build(state.clone());
@@ -1047,6 +1049,10 @@ async fn supervisor_join_waits_for_terminal_publication_and_propagates_append_fa
                 !task.is_finished(),
                 "terminal state alone must not complete the supervisor join"
             );
+            assert!(
+                published.get().is_none(),
+                "a blocked append is not published"
+            );
             let event_type = format!("system.pipeline.{terminal}");
             assert!(!journal
                 .read_all_unordered()
@@ -1064,7 +1070,13 @@ async fn supervisor_join_waits_for_terminal_publication_and_propagates_append_fa
                 fail,
                 "{terminal} publication error must reach the joining caller"
             );
+            assert_eq!(published.get().is_some(), !fail);
             let events = journal.read_all_unordered().await.unwrap();
+            if let Some(retained) = published.get() {
+                assert!(events
+                    .iter()
+                    .any(|event| Some(event.event.id) == retained.event_id));
+            }
             assert_eq!(
                 events
                     .iter()
@@ -1074,4 +1086,123 @@ async fn supervisor_join_waits_for_terminal_publication_and_propagates_append_fa
             );
         }
     }
+}
+
+#[tokio::test]
+async fn unexpected_errors_preserve_failed_outcomes_before_and_during_stop() {
+    use crate::pipeline::termination::ExecutionOutcome;
+    use obzenflow_fsm::FsmAction;
+    for (state, stopping) in [
+        (PipelineState::Materializing, false),
+        (PipelineState::Materialized, false),
+        (PipelineState::ReadyForRun, false),
+        (PipelineState::Running, false),
+        (PipelineState::SourceCompleted, false),
+        (PipelineState::Draining, false),
+        (PipelineState::Draining, true),
+    ] {
+        let system_id = SystemId::new();
+        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+        let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
+        context.flow_start_time = Some(std::time::Instant::now());
+        if stopping {
+            context.stop_intent.apply_request(
+                FlowStopMode::Graceful {
+                    timeout: std::time::Duration::from_secs(60),
+                },
+                None,
+            );
+        }
+        let admitted = context.stop_intent.status_receiver();
+        let original_admission = admitted.borrow().clone();
+        let published = context.termination.published.clone();
+        // Enter the precise handler under test before dispatch. Materializing
+        // and SourceCompleted dispatch can otherwise produce an earlier event.
+        let mut fsm = crate::pipeline::fsm::build_pipeline_fsm_with_initial(state.clone());
+        let actions = fsm
+            .handle(
+                PipelineEvent::Error {
+                    message: "unexpected pipeline failure".into(),
+                },
+                &mut context,
+            )
+            .await
+            .unwrap();
+        for action in actions {
+            action.execute(&mut context).await.unwrap();
+        }
+        let directive = test_supervisor(system_id, journal.clone())
+            .dispatch_state(fsm.state(), &mut context)
+            .await
+            .unwrap();
+        assert!(matches!(directive, EventLoopDirective::Terminate));
+        assert_eq!(
+            *admitted.borrow(),
+            original_admission,
+            "failure must not manufacture or renew a stop"
+        );
+        assert!(
+            matches!(&published.get().unwrap().outcome, ExecutionOutcome::Failed(failure)
+            if failure.reason == "unexpected pipeline failure"),
+            "{state:?}, stopping={stopping}: {:?}",
+            published.get()
+        );
+        let events = journal.read_all_unordered().await.unwrap();
+        let terminal: Vec<_> = events
+            .iter()
+            .map(|event| event.event.event_type_name())
+            .filter(|name| {
+                matches!(
+                    *name,
+                    "system.pipeline.completed"
+                        | "system.pipeline.cancelled"
+                        | "system.pipeline.failed"
+                )
+            })
+            .collect();
+        assert_eq!(terminal, ["system.pipeline.failed"]);
+    }
+}
+
+#[tokio::test]
+async fn pre_execution_teardown_is_explicit_and_failures_stay_selected() {
+    use crate::pipeline::termination::{execution_result, ExecutionOutcome};
+    let system_id = SystemId::new();
+    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
+    let mut supervisor = test_supervisor(system_id, journal.clone());
+    assert!(
+        execution_result(&context.termination.published).is_err(),
+        "absent evidence cannot mean success"
+    );
+    terminal::dispatch_drained(&mut supervisor, &mut context)
+        .await
+        .unwrap();
+    assert!(matches!(
+        context.termination.published.get().unwrap().outcome,
+        ExecutionOutcome::NotStarted
+    ));
+    assert!(execution_result(&context.termination.published).is_ok());
+    assert!(journal.read_all_unordered().await.unwrap().is_empty());
+
+    let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
+    context.termination.fail("first failure".into(), None);
+    context.termination.fail("cleanup failure".into(), None);
+    context
+        .stop_intent
+        .apply_request(FlowStopMode::Cancel, None);
+    terminal::dispatch_failed(&mut supervisor, &mut context, "cleanup failure", &None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&context.termination.published.get().unwrap().outcome,
+        ExecutionOutcome::Failed(failure) if failure.reason == "first failure")
+    );
+    assert!(execution_result(&context.termination.published).is_err());
+    assert_eq!(
+        journal.read_all_unordered().await.unwrap()[0]
+            .event
+            .event_type_name(),
+        "system.pipeline.failed"
+    );
 }

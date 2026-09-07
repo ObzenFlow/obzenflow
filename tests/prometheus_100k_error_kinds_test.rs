@@ -362,3 +362,173 @@ enabled = false
         "hosting must preserve the finite example's durable results"
     );
 }
+
+#[cfg(all(feature = "web-host", feature = "prometheus"))]
+mod managed_lifecycle_regressions {
+    use futures::FutureExt;
+    use obzenflow_infra::application::{ApplicationError, FlowApplication, LogLevel};
+    use obzenflow_runtime::pipeline::FlowHandle;
+    use std::sync::{Arc, Mutex};
+
+    use super::prometheus_demo;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_cors_returns_startup_error_and_stops_the_materialised_flow() {
+        use obzenflow_core::event::JournalEvent;
+        for startup in ["auto", "manual"] {
+            for from_cli in [false, true] {
+                let dir = tempfile::tempdir_in("target").unwrap();
+                let config = dir.path().join("invalid-cors.toml");
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let port = listener.local_addr().unwrap().port();
+                drop(listener);
+                std::fs::write(
+                    &config,
+                    r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = PROBE_PORT
+startup_mode = "STARTUP_MODE"
+on_terminal = "exit"
+[server.cors]
+mode = "allow-list"
+allow_origins = ["CORS_ORIGIN"]
+[metrics]
+enabled = false
+"#
+                    .replace("PROBE_PORT", &port.to_string())
+                    .replace("STARTUP_MODE", startup)
+                    .replace(
+                        "CORS_ORIGIN",
+                        if from_cli {
+                            "https://example.com"
+                        } else {
+                            "not-an-origin"
+                        },
+                    ),
+                )
+                .unwrap();
+                let mut args = vec!["cors-regression"];
+                if from_cli {
+                    args.extend(["--cors-allow-origin", "not-an-origin"]);
+                }
+                let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
+                let hook_observed = observed.clone();
+                let app = FlowApplication::builder()
+                    .with_config_file(config)
+                    .with_cli_args(args)
+                    .with_log_level(LogLevel::Error)
+                    .with_flow_handle_hook(move |flow| {
+                        *hook_observed.lock().unwrap() = Some(flow.clone());
+                        tokio::spawn(async {})
+                    });
+                let outcome = std::panic::AssertUnwindSafe(app.run_async(
+                    prometheus_demo::flow_definition(10, dir.path().join("journals")),
+                ))
+                .catch_unwind()
+                .await;
+                let flow = observed.lock().unwrap().take();
+                let still_running = flow.as_ref().is_some_and(|flow| flow.is_running());
+                // Preserve cleanup if this regression reintroduces an admission panic.
+                if let Some(flow) = flow.as_ref().filter(|_| still_running) {
+                    flow.stop_cancel().await.unwrap();
+                    let _ = flow.wait_for_termination().await;
+                }
+                assert!(outcome.is_ok(), "CORS admission panicked; materialised supervisor still running: {still_running}");
+                assert!(
+                    matches!(outcome, Ok(Err(ApplicationError::ServerStartFailed(_)))),
+                    "unexpected result: {outcome:?}"
+                );
+                assert!(
+                    !still_running,
+                    "startup failure left the materialised supervisor running"
+                );
+                let flow = flow.expect("admission follows materialisation");
+                let events = flow
+                    .system_journal()
+                    .unwrap()
+                    .read_all_unordered()
+                    .await
+                    .unwrap();
+                assert!(!events
+                    .iter()
+                    .any(|event| event.event.event_type_name() == "system.pipeline.running"));
+                let _rebound = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn public_terminal_wait_in_a_hook_does_not_fail_a_successful_application() {
+        let dir = tempfile::tempdir_in("target").unwrap();
+        let config = dir.path().join("terminal-wait.toml");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        std::fs::write(
+            &config,
+            format!(
+                r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = {}
+startup_mode = "manual"
+on_terminal = "exit"
+[metrics]
+enabled = false
+"#,
+                address.port()
+            ),
+        )
+        .unwrap();
+        let (handle_tx, handle_rx) = tokio::sync::oneshot::channel();
+        let handle_tx = Arc::new(Mutex::new(Some(handle_tx)));
+        let app = FlowApplication::builder()
+            .with_config_file(config)
+            .with_cli_args(["inspection-probe"])
+            .with_log_level(LogLevel::Error)
+            .with_flow_handle_hook(move |flow| {
+                let flow = flow.clone();
+                let tx = handle_tx.lock().unwrap().take().unwrap();
+                tokio::spawn(async move {
+                    let mut wait = Box::pin(flow.wait_for_termination());
+                    // Poll the public wait before releasing the handle to this test.
+                    tokio::select! {
+                        biased;
+                        result = &mut wait => panic!("flow ended before manual Run: {result:?}"),
+                        _ = async { assert!(tx.send(flow.clone()).is_ok()); } => {}
+                    }
+                    wait.await
+                        .expect("the hook observes successful terminal publication");
+                })
+            });
+        let app = tokio::spawn(app.run_async(prometheus_demo::flow_definition(
+            10,
+            dir.path().join("journals"),
+        )));
+        let flow = handle_rx.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if tokio::net::TcpStream::connect(address).await.is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        flow.start().await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), app)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result.is_ok(),
+            "successful flow became an application error: {result:?}"
+        );
+        flow.wait_for_termination().await.unwrap();
+        flow.wait_for_termination().await.unwrap();
+    }
+}

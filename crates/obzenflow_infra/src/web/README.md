@@ -77,8 +77,11 @@ surface's policy. Inherit the surface requirement or regroup routes into separat
 
 ## Managed host lifecycle
 
-`FlowApplication` validates the route policies and binds the real socket before reporting startup
-or releasing automatic `Run`. An occupied port is a startup error and leaves sources unstarted.
+`FlowApplication` validates the route policies and CORS origins, then binds the real socket before
+reporting startup or releasing automatic `Run`. Invalid CORS origins and occupied ports return
+startup errors and leave sources unstarted; the materialised flow is stopped and joined. CORS
+validation uses Warp's origin representation and normalised header conversion, preserving valid
+allow-list behaviour. Diagnostics name the invalid configuration entry without echoing its value.
 Startup logs and Studio registration use the actual bound address. `/ready` reads Runtime's current
 pipeline state: only `Running` returns 200.
 
@@ -88,7 +91,32 @@ bounded graceful stop; an existing stop keeps its admitted deadline. Runtime own
 cancellation and terminal journal publication. Repeating a graceful stop changes neither its deadline
 nor its actions. Cancellation is absorbing; timeout cancellation requires an expired graceful stop.
 `FlowHandle::stop_status_receiver()` observes admission, while a successful stop call only queues a
-request. `wait_for_termination()` joins terminal publication and can be used once per flow handle.
+request.
+
+Runtime retains the first accepted execution failure independently of stop admission. A later
+SIGINT or SIGTERM cannot turn that failure into successful application exit or a cancelled journal
+outcome. The application interprets Runtime's retained outcome only after the supervisor joins;
+append failure, missing terminal publication for an executed flow, panic and task abortion remain
+errors. Host failures retain precedence over execution or cleanup failures.
+
+A successful graceful drain of a started flow with only finite sources publishes
+`pipeline_completed`. This means admitted work drained, not that unread source input was exhausted.
+Finite and infinite sources, both synchronous and asynchronous, publish already-polled output
+before their graceful EOF. Waiting for output credit still uses the existing cancellation bounds.
+Graceful stop with an infinite source, explicit cancellation and timeout escalation publish
+`pipeline_cancelled`. Accepted execution failure publishes `pipeline_failed` in every case.
+Intentional cancellation is a successful application teardown. Once execution is admitted,
+`FlowHandle::run()` uses the same Runtime outcome, so acknowledged cancellation returns `Ok(())`
+instead of being mistaken for failure because cancellation shares the historical `Failed` FSM
+cleanup state.
+
+The cross-crate `FlowHandle::wait_for_termination()` seam is now `#[doc(hidden)] pub` and is not a
+supported public completion-observer API. Internally, all completion paths share one physical join
+and retain its result. Concurrent, dropped and repeated waits cannot consume another caller's
+completion capability. `SupervisorHandle::wait_for_completion()` remains a physical task join;
+it does not interpret the pipeline's execution outcome. `HandleError` adds `SupervisorAborted`,
+so exhaustive downstream matches need that case. Emergency `abort_and_wait()` accepts confirmed
+abortion as successful teardown, while ordinary completion observation still reports it as an error.
 
 The listener remains available through normal drain and terminal publication. Closing then stops
 new requests, allows five seconds for existing responses, and aborts and joins remaining connection,

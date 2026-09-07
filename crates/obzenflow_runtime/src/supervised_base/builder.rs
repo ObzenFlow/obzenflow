@@ -194,6 +194,9 @@ pub enum HandleError {
     #[error("Supervisor task panicked: {0}")]
     SupervisorPanicked(String),
 
+    #[error("Supervisor task was aborted")]
+    SupervisorAborted,
+
     #[error("Supervisor task failed: {0}")]
     SupervisorFailed(String),
 }

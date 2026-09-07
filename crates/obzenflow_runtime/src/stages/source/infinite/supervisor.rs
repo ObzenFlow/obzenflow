@@ -365,7 +365,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                 Ok(EventLoopDirective::Continue)
             }
 
-            InfiniteSourceState::Running => {
+            InfiniteSourceState::Running | InfiniteSourceState::Draining => {
                 // Drain any pending outputs first so backpressure doesn't let sources
                 // accumulate unbounded in-memory batches.
                 let flow_id = ctx.flow_id.to_string();
@@ -395,6 +395,21 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                 .await?
                 {
                     return Ok(EventLoopDirective::Continue);
+                }
+
+                // Graceful stop must publish already-polled output before EOF.
+                // Reuse the running path's bounded, control-aware credit drain.
+                if matches!(state, InfiniteSourceState::Draining) {
+                    if let Some(error) = self.pending_boundary_error.take() {
+                        return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                            error,
+                        )));
+                    }
+                    self.idle_backoff.reset();
+                    self.pending_idle_delay = None;
+                    return Ok(EventLoopDirective::Transition(
+                        InfiniteSourceEvent::Completed,
+                    ));
                 }
 
                 if let Some(error) = self.pending_boundary_error.take() {
@@ -849,15 +864,6 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                         },
                     }
                 }
-            }
-
-            InfiniteSourceState::Draining => {
-                self.idle_backoff.reset();
-                self.pending_idle_delay = None;
-                // Draining state - prepare to send EOF
-                Ok(EventLoopDirective::Transition(
-                    InfiniteSourceEvent::Completed,
-                ))
             }
 
             InfiniteSourceState::Drained => {

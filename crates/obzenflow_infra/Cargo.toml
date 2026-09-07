@@ -50,6 +50,7 @@ matchit = { workspace = true }
 
 # Web frameworks (optional)
 warp = { workspace = true, features = ["server"], optional = true }
+headers = { workspace = true, optional = true }
 hyper = { workspace = true, features = ["server", "http1", "http2"], optional = true }
 hyper-util = { workspace = true, features = ["server-auto", "http1", "http2", "tokio"], optional = true }
 tower-service = { workspace = true, optional = true }
@@ -70,7 +71,7 @@ tiktoken-rs = { version = "0.9", optional = true }
 [features]
 default = []
 prometheus = []
-warp-server = ["dep:warp", "dep:bytes", "dep:tokio-stream", "dep:hyper", "dep:hyper-util", "dep:tower-service"]
+warp-server = ["dep:warp", "dep:headers", "dep:bytes", "dep:tokio-stream", "dep:hyper", "dep:hyper-util", "dep:tower-service"]
 tokio-console = ["dep:console-subscriber"]
 reqwest-client = ["dep:reqwest", "dep:rustls-native-certs"]
 # FLOWIP-114d: Studio phonebook registration (heartbeat client + [studio] config).

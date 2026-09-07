@@ -374,7 +374,7 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                 Ok(EventLoopDirective::Continue)
             }
 
-            FiniteSourceState::Running => {
+            FiniteSourceState::Running | FiniteSourceState::Draining => {
                 // Drain any pending outputs first so backpressure doesn't let sources
                 // accumulate unbounded in-memory batches.
                 let flow_id = ctx.flow_id.to_string();
@@ -404,6 +404,19 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                 .await?
                 {
                     return Ok(EventLoopDirective::Continue);
+                }
+
+                // Graceful stop must publish already-polled output before EOF.
+                // Reuse the running path's bounded, control-aware credit drain.
+                if matches!(state, FiniteSourceState::Draining) {
+                    if let Some(error) = self.pending_boundary_error.take() {
+                        return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                            error,
+                        )));
+                    }
+                    self.idle_backoff.reset();
+                    self.pending_idle_delay = None;
+                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
                 }
 
                 if self.pending_boundary_eof {
@@ -772,13 +785,6 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                         },
                     }
                 }
-            }
-
-            FiniteSourceState::Draining => {
-                self.idle_backoff.reset();
-                self.pending_idle_delay = None;
-                // Draining state - prepare to send EOF
-                Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
             }
 
             FiniteSourceState::Drained => {

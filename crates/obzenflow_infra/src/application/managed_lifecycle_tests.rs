@@ -421,3 +421,257 @@ enabled = false
         assert_eq!(tokio::spawn(async { 42 }).await.unwrap(), 42);
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signals_preserve_published_failures_and_repeatable_observation() {
+    use obzenflow_core::event::JournalEvent;
+    use obzenflow_runtime::pipeline::{FlowStopStatus, PipelineEvent};
+    use obzenflow_runtime::supervised_base::SupervisorHandle;
+    for started in [false, true] {
+        for on_terminal in ["park", "exit"] {
+            for signal in [ShutdownSignal::Sigint, ShutdownSignal::Sigterm] {
+                let dir = tempfile::tempdir().unwrap();
+                let config = dir.path().join("obzenflow.toml");
+                let port = available_local_port();
+                std::fs::write(
+                    &config,
+                    format!(
+                        r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = {port}
+startup_mode = "manual"
+on_terminal = "{on_terminal}"
+[metrics]
+enabled = false
+"#
+                    ),
+                )
+                .unwrap();
+                let (signal_tx, signal_rx) = oneshot::channel();
+                let signal_tx = Arc::new(Mutex::new(Some(signal_tx)));
+                let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
+                let hook_observed = observed.clone();
+                let (admitted_tx, admitted_rx) = oneshot::channel();
+                let admitted_tx = Mutex::new(Some(admitted_tx));
+                let application = FlowApplication::launch(
+                    FlowDefinition::materialize(move |_| {
+                        let source = IdleInfiniteSource;
+                        let sink = NoopSink;
+                        Ok(flow! {
+                            name: "failed_exit_signal", journals: crate::journal::memory_journals(),
+                            stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                            topology: { src |> sink; }
+                        })
+                    }),
+                    LaunchParams {
+                        cli_args: Some(vec![
+                            "regression".into(),
+                            "--config".into(),
+                            config.into_os_string(),
+                        ]),
+                        test_shutdown_signal: Some(signal_rx),
+                        flow_handle_hooks: vec![Box::new(move |flow| {
+                            *hook_observed.lock().unwrap() = Some(flow.clone());
+                            admitted_tx
+                                .lock()
+                                .unwrap()
+                                .take()
+                                .unwrap()
+                                .send(())
+                                .unwrap();
+                            let flow = flow.clone();
+                            let signal_tx = signal_tx.lock().unwrap().take().unwrap();
+                            Ok(tokio::spawn(async move {
+                                flow.wait_for_ready().await.unwrap();
+                                if started {
+                                    flow.start().await.unwrap();
+                                }
+                                flow.send_event(PipelineEvent::Error {
+                                    message: "actual pipeline failure".into(),
+                                })
+                                .await
+                                .unwrap();
+                                // In park mode, the signal is strictly later than publication
+                                // and this observer cannot consume the application's join.
+                                assert!(flow.wait_for_termination().await.is_err());
+                                let _ = signal_tx.send(signal);
+                            }))
+                        })],
+                        ..LaunchParams::default()
+                    },
+                );
+                tokio::pin!(application);
+                // Bootstrap installs are serialised within a test process.
+                // Bound this application's work after it acquires that slot.
+                let result = tokio::select! {
+                    result = &mut application => result,
+                    admitted = admitted_rx => {
+                        admitted.unwrap();
+                        tokio::time::timeout(Duration::from_secs(5), application).await
+                            .expect("failed application must settle after admission")
+                    }
+                };
+                let flow = observed.lock().unwrap().take().unwrap();
+                assert!(
+                    matches!(result, Err(ApplicationError::FlowExecutionFailed(ref reason))
+                    if reason.contains("actual pipeline failure")),
+                    "{result:?}"
+                );
+                assert!(!flow.is_running());
+                assert!(matches!(
+                    *flow.stop_status_receiver().borrow(),
+                    FlowStopStatus::NotRequested
+                ));
+                assert!(flow.wait_for_termination().await.is_err());
+                let events = flow
+                    .system_journal()
+                    .unwrap()
+                    .read_all_unordered()
+                    .await
+                    .unwrap();
+                let terminal: Vec<_> = events
+                    .iter()
+                    .map(|event| event.event.event_type_name())
+                    .filter(|kind| {
+                        matches!(
+                            *kind,
+                            "system.pipeline.failed"
+                                | "system.pipeline.cancelled"
+                                | "system.pipeline.completed"
+                        )
+                    })
+                    .collect();
+                assert_eq!(terminal, ["system.pipeline.failed"]);
+                let _rebound = TcpListener::bind(("127.0.0.1", port)).unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graceful_finite_completion_and_infinite_cancellation_match_application_results() {
+    use obzenflow_core::event::JournalEvent;
+    #[derive(Clone, Debug)]
+    struct WaitingFiniteSource;
+    impl TypedFiniteSourceHandler for WaitingFiniteSource {
+        type Output = IdlePayload;
+        fn next(&mut self) -> Result<Option<Vec<IdlePayload>>, SourceError> {
+            Ok(Some(Vec::new()))
+        }
+    }
+    for finite in [false, true] {
+        for cancel in [false, true] {
+            let definition = if finite {
+                FlowDefinition::materialize(move |_| {
+                    let source = WaitingFiniteSource;
+                    let sink = NoopSink;
+                    Ok(flow! {
+                        name: "finite_stop_outcome", journals: crate::journal::memory_journals(),
+                        stages: { src = source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                        topology: { src |> sink; }
+                    })
+                })
+            } else {
+                FlowDefinition::materialize(move |_| {
+                    let source = IdleInfiniteSource;
+                    let sink = NoopSink;
+                    Ok(flow! {
+                        name: "infinite_stop_outcome", journals: crate::journal::memory_journals(),
+                        stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                        topology: { src |> sink; }
+                    })
+                })
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join("obzenflow.toml");
+            std::fs::write(
+                &config,
+                format!(
+                    r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = {}
+startup_mode = "manual"
+on_terminal = "exit"
+[metrics]
+enabled = false
+"#,
+                    available_local_port()
+                ),
+            )
+            .unwrap();
+            let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
+            let hook_observed = observed.clone();
+            let (admitted_tx, admitted_rx) = oneshot::channel();
+            let admitted_tx = Mutex::new(Some(admitted_tx));
+            let application = FlowApplication::builder()
+                .with_cli_args(["regression"])
+                .with_config_file(config)
+                .with_flow_handle_hook(move |flow| {
+                    *hook_observed.lock().unwrap() = Some(flow.clone());
+                    admitted_tx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send(())
+                        .unwrap();
+                    let flow = flow.clone();
+                    tokio::spawn(async move {
+                        flow.start().await.unwrap();
+                        if cancel {
+                            flow.stop_cancel().await.unwrap();
+                        } else {
+                            flow.stop_graceful(Duration::from_secs(2)).await.unwrap();
+                        }
+                        flow.wait_for_termination().await.unwrap();
+                    })
+                })
+                .run_async(definition);
+            tokio::pin!(application);
+            let result = tokio::select! {
+                result = &mut application => result,
+                admitted = admitted_rx => {
+                    admitted.unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), application).await
+                        .expect("stopped application must settle after admission")
+                }
+            };
+            assert!(
+                result.is_ok(),
+                "finite={finite} cancel={cancel}: {result:?}"
+            );
+            let flow = observed.lock().unwrap().take().unwrap();
+            flow.wait_for_termination().await.unwrap();
+            let facts = flow
+                .system_journal()
+                .unwrap()
+                .read_all_unordered()
+                .await
+                .unwrap();
+            let terminals: Vec<_> = facts
+                .iter()
+                .map(|event| event.event.event_type_name())
+                .filter(|kind| {
+                    matches!(
+                        *kind,
+                        "system.pipeline.failed"
+                            | "system.pipeline.cancelled"
+                            | "system.pipeline.completed"
+                    )
+                })
+                .collect();
+            assert_eq!(
+                terminals,
+                [if finite && !cancel {
+                    "system.pipeline.completed"
+                } else {
+                    "system.pipeline.cancelled"
+                }]
+            );
+        }
+    }
+}

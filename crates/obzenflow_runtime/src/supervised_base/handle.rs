@@ -8,11 +8,36 @@
 //! with consistent behavior and proper trait implementations.
 
 use super::builder::{EventSender, HandleError, StateWatcher, SupervisorHandle};
+use futures::future::{BoxFuture, Shared};
+use futures::FutureExt;
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use tokio::task::{AbortHandle, JoinHandle};
 
 type SupervisorTask = JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>;
+
+// Physical task completion is retained independently of each observer's wait.
+// Aborted remains distinct even when emergency teardown accepts that result.
+enum SupervisorExit {
+    Returned,
+    Failed(Box<dyn std::error::Error + Send + Sync>),
+    Panicked(tokio::task::JoinError),
+    Aborted,
+}
+
+type SupervisorCompletion = Shared<BoxFuture<'static, Arc<SupervisorExit>>>;
+
+impl SupervisorExit {
+    fn result(&self) -> Result<(), HandleError> {
+        match self {
+            Self::Returned => Ok(()),
+            Self::Failed(error) => Err(HandleError::SupervisorFailed(error.to_string())),
+            Self::Panicked(error) => Err(HandleError::SupervisorPanicked(error.to_string())),
+            Self::Aborted => Err(HandleError::SupervisorAborted),
+        }
+    }
+}
 
 /// Builder for creating supervisor handles with proper trait implementation
 ///
@@ -70,11 +95,22 @@ where
         let state_watcher = self.state_watcher.ok_or("State watcher is required")?;
         let supervisor_task = self.supervisor_task.ok_or("Supervisor task is required")?;
 
+        let supervisor_abort = supervisor_task.abort_handle();
+        let completion = async move {
+            Arc::new(match supervisor_task.await {
+                Ok(Ok(())) => SupervisorExit::Returned,
+                Ok(Err(error)) => SupervisorExit::Failed(error),
+                Err(error) if error.is_cancelled() => SupervisorExit::Aborted,
+                Err(error) => SupervisorExit::Panicked(error),
+            })
+        }
+        .boxed()
+        .shared();
         Ok(StandardHandle {
             event_sender,
             state_watcher,
-            supervisor_abort: supervisor_task.abort_handle(),
-            supervisor_task: tokio::sync::Mutex::new(Some(supervisor_task)),
+            supervisor_abort,
+            completion,
         })
     }
 
@@ -96,7 +132,8 @@ pub struct StandardHandle<E, S> {
     event_sender: EventSender<E>,
     state_watcher: StateWatcher<S>,
     supervisor_abort: AbortHandle,
-    supervisor_task: tokio::sync::Mutex<Option<SupervisorTask>>,
+    // Never await this retained clone directly: every caller observes a clone.
+    completion: SupervisorCompletion,
 }
 
 impl<E, S> StandardHandle<E, S>
@@ -114,18 +151,10 @@ where
         !self.supervisor_abort.is_finished()
     }
 
-    /// Join without consuming the enclosing flow handle. Cancellation retains the
-    /// task in the handle so a bounded coordinator can still abort and join it.
+    /// Observe the retained physical join. Dropping or parking one wait does not
+    /// prevent other observers from completing it, and never aborts the task.
     pub(crate) async fn join(&self) -> Result<(), HandleError> {
-        let mut slot = self.supervisor_task.lock().await;
-        let task = slot.as_mut().ok_or(HandleError::SupervisorNotRunning)?;
-        let result = task.await;
-        slot.take();
-        match result {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(HandleError::SupervisorFailed(error.to_string())),
-            Err(error) => Err(HandleError::SupervisorPanicked(error.to_string())),
-        }
+        self.completion.clone().await.result()
     }
 
     /// Abort the supervisor task (best-effort).
@@ -141,26 +170,14 @@ where
     /// Returns:
     /// - `Ok(true)` if the supervisor finished within the timeout.
     /// - `Ok(false)` if the wait timed out (task is still running and retained).
-    /// - `Err(_)` if the supervisor finished but failed/panicked, or was not running.
+    /// - `Err(_)` if the supervisor finished but failed, panicked or was aborted.
     pub(crate) async fn try_wait_for_completion(
         &mut self,
         timeout: std::time::Duration,
     ) -> Result<bool, HandleError> {
-        let Some(mut task) = self.supervisor_task.get_mut().take() else {
-            return Err(HandleError::SupervisorNotRunning);
-        };
-
-        match tokio::time::timeout(timeout, &mut task).await {
-            Ok(join_result) => match join_result {
-                Ok(Ok(())) => Ok(true),
-                Ok(Err(e)) => Err(HandleError::SupervisorFailed(e.to_string())),
-                Err(e) => Err(HandleError::SupervisorPanicked(e.to_string())),
-            },
-            Err(_) => {
-                // Timed out. Put the JoinHandle back so callers can abort/await later.
-                *self.supervisor_task.get_mut() = Some(task);
-                Ok(false)
-            }
+        match tokio::time::timeout(timeout, self.join()).await {
+            Ok(result) => result.map(|()| true),
+            Err(_) => Ok(false),
         }
     }
 }
@@ -184,27 +201,15 @@ where
     }
 
     async fn wait_for_completion(self) -> Result<(), Self::Error> {
-        if let Some(task) = self.supervisor_task.into_inner() {
-            match task.await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(HandleError::SupervisorFailed(e.to_string())),
-                Err(e) => Err(HandleError::SupervisorPanicked(e.to_string())),
-            }
-        } else {
-            Err(HandleError::SupervisorNotRunning)
-        }
+        self.join().await
     }
 
     async fn abort_and_wait(&self) -> Result<(), Self::Error> {
         self.abort();
-        let Some(task) = self.supervisor_task.lock().await.take() else {
-            return Err(HandleError::SupervisorNotRunning);
-        };
-        match task.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(HandleError::SupervisorFailed(error.to_string())),
-            Err(error) if error.is_cancelled() => Ok(()),
-            Err(error) => Err(HandleError::SupervisorPanicked(error.to_string())),
+        let exit = self.completion.clone().await;
+        match exit.as_ref() {
+            SupervisorExit::Aborted => Ok(()),
+            _ => exit.result(),
         }
     }
 }
@@ -324,5 +329,90 @@ mod tests {
 
         assert!(dropped.load(Ordering::SeqCst));
         assert!(!handle.is_running());
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    use crate::supervised_base::ChannelBuilder;
+    use futures::poll;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Exit {
+        Success,
+        Failure,
+        Panic,
+        Abort,
+    }
+
+    #[tokio::test]
+    async fn parked_dropped_and_late_observers_share_every_completion_path() {
+        for exit in [Exit::Success, Exit::Failure, Exit::Panic, Exit::Abort] {
+            let (sender, _receiver, watcher) = ChannelBuilder::<(), bool>::new().build(false);
+            let (release, gate) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _ = gate.await;
+                match exit {
+                    Exit::Failure => Err(std::io::Error::other("supervisor failure").into()),
+                    Exit::Panic => panic!("supervisor panic"),
+                    _ => Ok::<(), Box<dyn std::error::Error + Send + Sync>>(()),
+                }
+            });
+            let mut handle = HandleBuilder::new()
+                .with_event_sender(sender)
+                .with_state_watcher(watcher)
+                .with_supervisor_task(task)
+                .build_standard()
+                .unwrap();
+            assert!(!handle
+                .try_wait_for_completion(std::time::Duration::ZERO)
+                .await
+                .unwrap());
+            let mut parked = Box::pin(handle.join());
+            assert!(poll!(parked.as_mut()).is_pending());
+            let mut dropped = Box::pin(handle.join());
+            assert!(poll!(dropped.as_mut()).is_pending());
+            drop(dropped);
+            if matches!(exit, Exit::Abort) {
+                tokio::time::timeout(std::time::Duration::from_secs(1), handle.abort_and_wait())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            } else {
+                release.send(()).unwrap();
+            }
+            let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle.join())
+                .await
+                .unwrap();
+            match exit {
+                Exit::Success => assert!(result.is_ok()),
+                Exit::Failure => assert!(matches!(result, Err(HandleError::SupervisorFailed(_)))),
+                Exit::Panic => assert!(matches!(result, Err(HandleError::SupervisorPanicked(_)))),
+                Exit::Abort => assert!(matches!(result, Err(HandleError::SupervisorAborted))),
+            }
+            assert_eq!(format!("{:?}", parked.await), format!("{result:?}"));
+            assert!(!handle.is_running());
+            assert_eq!(format!("{:?}", handle.join().await), format!("{result:?}"));
+            assert_eq!(
+                handle
+                    .try_wait_for_completion(std::time::Duration::ZERO)
+                    .await
+                    .is_ok(),
+                result.is_ok()
+            );
+            if matches!(exit, Exit::Abort) {
+                handle.abort_and_wait().await.unwrap();
+                assert!(matches!(
+                    handle.wait_for_completion().await,
+                    Err(HandleError::SupervisorAborted)
+                ));
+            } else {
+                assert_eq!(
+                    format!("{:?}", handle.wait_for_completion().await),
+                    format!("{result:?}")
+                );
+            }
+        }
     }
 }

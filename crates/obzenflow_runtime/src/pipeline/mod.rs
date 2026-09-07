@@ -10,6 +10,7 @@ pub(crate) mod fsm;
 pub mod handle;
 pub mod max_iterations;
 pub mod supervisor;
+mod termination;
 
 // Re-export commonly used types
 // Note: PipelineSupervisor is intentionally NOT exported - use PipelineBuilder

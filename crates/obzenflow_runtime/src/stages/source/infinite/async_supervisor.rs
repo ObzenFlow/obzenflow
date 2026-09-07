@@ -373,7 +373,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                 }
             }
 
-            InfiniteSourceState::Running => {
+            InfiniteSourceState::Running | InfiniteSourceState::Draining => {
                 // Drain any pending outputs first so backpressure doesn't let sources
                 // accumulate unbounded in-memory batches.
                 let flow_id = ctx.flow_id.to_string();
@@ -405,6 +405,38 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                 .await?
                 {
                     return Ok(directive);
+                }
+
+                // Graceful stop must publish already-polled output before EOF.
+                // Reuse the running path's bounded, control-aware credit drain.
+                if matches!(state, InfiniteSourceState::Draining) {
+                    if let Some(error) = self.pending_boundary_error.take() {
+                        return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                            error,
+                        )));
+                    }
+                    self.idle_backoff.reset();
+                    self.pending_idle_delay = None;
+                    if self.live_entered && !self.cleanup_attempted {
+                        self.cleanup_attempted = true;
+                        if let Err(e) = self.handler.drain().await {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                error = %e,
+                                "drain() failed; continuing shutdown"
+                            );
+                            record_source_cleanup_failed(
+                                self.stage_id,
+                                &ctx.stage_name,
+                                &e,
+                                &self.system_journal,
+                            )
+                            .await?;
+                        }
+                    }
+                    return Ok(EventLoopDirective::Transition(
+                        InfiniteSourceEvent::Completed,
+                    ));
                 }
 
                 if let Some(error) = self.pending_boundary_error.take() {
@@ -937,31 +969,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                         },
                     }
                 }
-            }
-
-            InfiniteSourceState::Draining => {
-                self.idle_backoff.reset();
-                self.pending_idle_delay = None;
-                if self.live_entered && !self.cleanup_attempted {
-                    self.cleanup_attempted = true;
-                    if let Err(e) = self.handler.drain().await {
-                        tracing::warn!(
-                            stage_name = %ctx.stage_name,
-                            error = %e,
-                            "drain() failed; continuing shutdown"
-                        );
-                        record_source_cleanup_failed(
-                            self.stage_id,
-                            &ctx.stage_name,
-                            &e,
-                            &self.system_journal,
-                        )
-                        .await?;
-                    }
-                }
-                Ok(EventLoopDirective::Transition(
-                    InfiniteSourceEvent::Completed,
-                ))
             }
 
             InfiniteSourceState::Drained => {

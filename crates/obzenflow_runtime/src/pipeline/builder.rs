@@ -354,6 +354,7 @@ impl SupervisorBuilder for PipelineBuilder {
             flow_start_time: None,
             last_system_event_id_seen: None,
             stop_intent: Default::default(),
+            termination: Default::default(),
             // FLOWIP-010: global knobs from the build-resolved effective
             // config; registry defaults when no snapshot is threaded (tests).
             source_contract_strict: self
@@ -373,6 +374,7 @@ impl SupervisorBuilder for PipelineBuilder {
         };
 
         let stop_status = pipeline_context.stop_intent.status_receiver();
+        let published_outcome = pipeline_context.termination.published.clone();
 
         // Create channels using the common infrastructure
         let (event_sender, event_receiver, state_watcher) =
@@ -461,6 +463,7 @@ impl SupervisorBuilder for PipelineBuilder {
             FlowHandleExtras {
                 stage_cleanup,
                 stop_status,
+                published_outcome,
                 topology,
                 flow_name,
                 contract_attachments,

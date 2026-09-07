@@ -1781,6 +1781,7 @@ dependencies = [
  "console-subscriber",
  "crc32fast",
  "futures",
+ "headers",
  "hyper",
  "hyper-util",
  "matchit",

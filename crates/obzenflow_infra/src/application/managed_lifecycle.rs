@@ -187,7 +187,6 @@ async fn settle(
 ) -> Result<(), ApplicationError> {
     // Subscribe before sending. A successful send only means it entered the queue.
     let mut stop = flow.stop_status_receiver();
-    let operator_stop = matches!(trigger, Trigger::Signal(_));
     let (mut host_error, mut other_error, command) = match trigger {
         Trigger::Host(error) => (Some(error), None, StopCommand::Graceful),
         Trigger::Startup(error) => (None, Some(error), StopCommand::Graceful),
@@ -232,7 +231,11 @@ async fn settle(
             error = host.failure(), if host_error.is_none() => host_error = Some(error),
             result = &mut publication => {
                 if let Err(error) = result {
-                    other_error.get_or_insert_with(|| ApplicationError::FlowExecutionFailed(error.to_string()));
+                    let message = match &error {
+                        obzenflow_runtime::errors::FlowError::ExecutionFailed(source) => format!("{error}: {source}"),
+                        _ => error.to_string(),
+                    };
+                    other_error.get_or_insert(ApplicationError::FlowExecutionFailed(message));
                 }
                 break;
             }
@@ -240,7 +243,7 @@ async fn settle(
                 other_error.get_or_insert_with(|| ApplicationError::FlowExecutionFailed(
                     "Pipeline did not finish terminal publication within the admitted shutdown bound".into()
                 ));
-                // Release the cancellable join before acquiring it to abort.
+                // The retained completion remains available to emergency teardown.
                 break;
             }
             changed = stop.changed(), if observation_open => {
@@ -263,7 +266,7 @@ async fn settle(
             }
         }
     }
-    // The pinned wait borrows the handle's join slot. Drop its future before abort.
+    // Drop this observer before emergency teardown; the shared join remains retained.
     drop(publication);
     if flow.is_running() {
         if let Err(error) = flow.abort_and_wait().await {
@@ -278,11 +281,6 @@ async fn settle(
     }
     if let Some(error) = other_error {
         return Err(error);
-    }
-    if !operator_stop {
-        if let PipelineState::Failed { reason, .. } = flow.current_state() {
-            return Err(ApplicationError::FlowExecutionFailed(reason));
-        }
     }
     Ok(())
 }

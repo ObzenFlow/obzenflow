@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::fsm::{FlowStopMode, PipelineEvent, PipelineState};
+use super::termination::{execution_result, PublishedOutcome};
 use crate::errors::FlowError;
 use crate::journal::RunSubstrateState;
 use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
@@ -23,6 +24,7 @@ type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 pub(crate) struct FlowHandleExtras {
     pub stage_cleanup: Vec<Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
     pub stop_status: tokio::sync::watch::Receiver<super::FlowStopStatus>,
+    pub published_outcome: PublishedOutcome,
     pub topology: Option<Arc<Topology>>,
     pub flow_name: String,
     pub contract_attachments: Option<ContractAttachments>,
@@ -88,6 +90,7 @@ pub enum FlowStartControlOutcome {
 pub struct FlowHandle {
     stage_cleanup: Vec<Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
     stop_status: tokio::sync::watch::Receiver<super::FlowStopStatus>,
+    published_outcome: PublishedOutcome,
     /// The standard handle for FSM control
     handle: StandardHandle<PipelineEvent, PipelineState>,
 
@@ -131,6 +134,7 @@ impl FlowHandle {
         let FlowHandleExtras {
             stage_cleanup,
             stop_status,
+            published_outcome,
             topology,
             flow_name,
             contract_attachments,
@@ -144,6 +148,7 @@ impl FlowHandle {
         Self {
             stage_cleanup,
             stop_status,
+            published_outcome,
             handle,
             topology,
             flow_name,
@@ -162,14 +167,17 @@ impl FlowHandle {
         self.stop_status.clone()
     }
 
-    /// Join the pipeline supervisor, including terminal publication. A terminal
-    /// state notification alone does not establish this boundary. The task may
-    /// be joined once; cancelling this wait retains it for a later wait or abort.
+    /// Framework integration: join the supervisor and interpret Runtime's
+    /// acknowledged execution outcome. Repeated/concurrent waits share one
+    /// physical join; dropping a wait neither stops execution nor consumes it.
+    /// This is not a supported public completion-observer API.
+    #[doc(hidden)]
     pub async fn wait_for_termination(&self) -> Result<(), FlowError> {
         self.handle
             .join()
             .await
-            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)))
+            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)))?;
+        execution_result(&self.published_outcome)
     }
 
     /// The run substrate selected at composition: durable with its current-run
@@ -331,33 +339,9 @@ impl FlowHandle {
         }
         tracing::debug!("FlowHandle::run() - Waiting for completion");
 
-        // Capture state receiver before consuming self so we can inspect the terminal state
-        let state_rx = self.state_receiver();
-
-        // Now wait for it to complete
-        let result = self.wait_for_completion().await;
-        tracing::debug!(
-            "FlowHandle::run() - wait_for_completion returned: {:?}",
-            result
-        );
-
-        // Surface aborts/failures instead of letting the example print success on error
-        if let Err(e) = result {
-            tracing::error!("FlowHandle::run() failed: {}", e);
-            return Err(e);
-        }
-
-        // Inspect final state to fail fast on pipeline aborts
-        let final_state = state_rx.borrow().clone();
-        match final_state {
-            PipelineState::Failed { reason, .. } => Err(FlowError::ExecutionFailed(Box::new(
-                io::Error::other(reason),
-            ))),
-            PipelineState::AbortRequested { reason, .. } => Err(FlowError::ExecutionFailed(
-                Box::new(io::Error::other(format!("{reason:?}"))),
-            )),
-            _ => Ok(()),
-        }
+        let published = self.published_outcome.clone();
+        self.wait_for_completion().await?;
+        execution_result(&published)
     }
 
     /// User-initiated stop request.
@@ -558,6 +542,7 @@ mod tests {
         FlowHandleExtras {
             stage_cleanup: Vec::new(),
             stop_status: super::super::fsm::StopIntent::default().status_receiver(),
+            published_outcome: Default::default(),
             topology: None,
             flow_name: "test_flow".to_string(),
             contract_attachments: None,
@@ -576,9 +561,36 @@ mod tests {
                 .build(PipelineState::ReadyForRun);
 
         let state_watcher_for_task = state_watcher.clone();
+        let extras = empty_extras();
+        let published = extras.published_outcome.clone();
         let task = tokio::spawn(async move {
             match event_receiver.recv().await {
                 Some(PipelineEvent::Run) => {
+                    use super::super::termination::{
+                        ExecutionFailure, ExecutionOutcome, PublishedTermination,
+                    };
+                    let outcome = match &final_state {
+                        PipelineState::Failed {
+                            reason,
+                            failure_cause,
+                        } => ExecutionOutcome::Failed(ExecutionFailure {
+                            reason: reason.clone(),
+                            cause: failure_cause.clone(),
+                        }),
+                        PipelineState::AbortRequested { reason, .. } => {
+                            ExecutionOutcome::Failed(ExecutionFailure {
+                                reason: format!("{reason:?}"),
+                                cause: Some(reason.clone()),
+                            })
+                        }
+                        _ => ExecutionOutcome::Completed,
+                    };
+                    published
+                        .set(PublishedTermination {
+                            outcome,
+                            event_id: Some(obzenflow_core::EventId::new()),
+                        })
+                        .unwrap();
                     state_watcher_for_task
                         .update(final_state)
                         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
@@ -596,7 +608,7 @@ mod tests {
             .build_standard()
             .expect("standard handle should build");
 
-        FlowHandle::new(handle, empty_extras())
+        FlowHandle::new(handle, extras)
     }
 
     fn flow_handle_for_start_admission(
@@ -783,6 +795,50 @@ mod tests {
             source.to_string().contains("abort requested"),
             "unexpected source error: {source}"
         );
+    }
+
+    #[tokio::test]
+    async fn termination_requires_publication_and_successful_physical_completion() {
+        use super::super::termination::{ExecutionOutcome, PublishedTermination};
+        for publish in [false, true] {
+            let (sender, _receiver, watcher) =
+                ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Running);
+            let extras = empty_extras();
+            let published = extras.published_outcome.clone();
+            let task = tokio::spawn(async move {
+                if publish {
+                    published
+                        .set(PublishedTermination {
+                            outcome: ExecutionOutcome::Completed,
+                            event_id: Some(obzenflow_core::EventId::new()),
+                        })
+                        .unwrap();
+                    panic!("failure after publication");
+                }
+                Ok(())
+            });
+            let handle = FlowHandle::new(
+                HandleBuilder::new()
+                    .with_event_sender(sender)
+                    .with_state_watcher(watcher)
+                    .with_supervisor_task(task)
+                    .build_standard()
+                    .unwrap(),
+                extras,
+            );
+            for _ in 0..2 {
+                let error = handle.wait_for_termination().await.unwrap_err();
+                let source = error.source().unwrap().to_string();
+                assert!(
+                    source.contains(if publish {
+                        "failure after publication"
+                    } else {
+                        "without an acknowledged terminal outcome"
+                    }),
+                    "{source}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

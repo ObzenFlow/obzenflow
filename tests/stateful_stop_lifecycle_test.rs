@@ -316,6 +316,83 @@ async fn stop_finite_source_reports_cancelled() -> Result<()> {
 }
 
 #[tokio::test]
+async fn graceful_finite_stop_completes_admitted_work_without_exhausting_input() -> Result<()> {
+    use obzenflow_runtime::pipeline::FlowStopStatus;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Clone, Debug)]
+    struct GatedSink {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        delivered: Arc<AtomicU64>,
+    }
+    #[async_trait]
+    impl InlineSink for GatedSink {
+        type Input = LifecycleEvent;
+        fn describe(&self) -> SinkDescription {
+            SinkDescription::unspecified()
+        }
+        async fn write(
+            &mut self,
+            _: LifecycleEvent,
+            _: SinkWriteContext,
+        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+            if self.delivered.load(Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.delivered.fetch_add(1, Ordering::SeqCst);
+            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+                DeliveryMethod::Custom("GatedSink".into()),
+                None,
+            )))
+        }
+    }
+    let dir = tempdir()?;
+    let journal_root = dir.path().join("journals");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let delivered = Arc::new(AtomicU64::new(0));
+    let sink = GatedSink {
+        entered: entered.clone(),
+        release: release.clone(),
+        delivered: delivered.clone(),
+    };
+    let handle = FlowDefinition::materialize(move |_| {
+        let source = SlowFiniteSource::new(10_000, Duration::from_millis(5));
+        Ok(flow! {
+            name: "graceful_finite_admitted_work", journals: disk_journals(journal_root.clone()),
+            stages: { src = source!(LifecycleEvent => source); snk = sink!(LifecycleEvent => sink); },
+            topology: { src |> snk; }
+        })
+    }).build(obzenflow_runtime::run_context::FlowBuildContext::for_tests()).await?;
+    let journal = handle.system_journal().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified()).await?;
+    let mut stop = handle.stop_status_receiver();
+    handle.stop_graceful(Duration::from_secs(2)).await?;
+    while matches!(*stop.borrow_and_update(), FlowStopStatus::NotRequested) {
+        stop.changed().await?;
+    }
+    assert!(matches!(*stop.borrow(), FlowStopStatus::Graceful { .. }));
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), handle.wait_for_termination()).await??;
+    match terminal_lifecycle_event(journal).await? {
+        Some(PipelineLifecycleEvent::Completed { metrics, .. }) => {
+            assert!(metrics.events_in_total > 0 && metrics.events_in_total < 10_000);
+            assert_eq!(metrics.events_in_total, metrics.events_out_total);
+            assert_eq!(metrics.events_out_total, delivered.load(Ordering::SeqCst));
+            assert_eq!(metrics.errors_total, 0);
+        }
+        terminal => {
+            return Err(anyhow!(
+                "expected completed admitted work, got {terminal:?}"
+            ))
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn graceful_timeout_is_admitted_once_with_runtime_and_handle_contenders() -> Result<()> {
     let dir = tempdir()?;
     let journal_root = dir.path().join("journals");
