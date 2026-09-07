@@ -11,13 +11,13 @@
 //! - Console sink (prints balances + a transaction table)
 //!
 //! Run with localhost-only defaults:
-//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server`
+//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host`
 //!
 //! Recommended control-plane auth example:
 //! Provision `OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH` out of band with the complete
 //! expected `Authorization` header value before starting the process. The repository
 //! guide at `crates/obzenflow_infra/src/web/README.md` explains the authentication scopes.
-//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`
+//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`
 //!
 //! 1) Open accounts (reference side; required before ledger entries):
 //!    `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account_opened","data":{"account_id":"acct-1","owner":"Alice","initial_balance_cents":1000}}'`

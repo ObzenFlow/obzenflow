@@ -7,7 +7,7 @@
 # --config wins over the example's built-in with_config_file(obzenflow.toml).
 
 [server]
-enabled = true
+# Studio supplies omitted host and Prometheus enablement defaults.
 host = "127.0.0.1"
 port = 9093
 startup_mode = "manual"

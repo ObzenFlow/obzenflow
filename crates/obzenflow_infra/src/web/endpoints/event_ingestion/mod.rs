@@ -828,7 +828,7 @@ mod tests {
             stage_error_journals: HashMap::new(),
             backpressure_registry: None,
             include_error_journals: true,
-            exporter: None,
+            metrics_exporter: Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default()),
             metrics_store: MetricsStore::default(),
             export_interval_secs: 60,
             system_id: SystemId::new(),

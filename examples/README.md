@@ -34,8 +34,8 @@ These are the flagship examples and the best place to start. Each one has a comp
 - **`http_ingestion_piggy_bank_demo`** — The canonical end-to-end service example: HTTP ingress, joins, stateful projection, and `/metrics` in one journal-backed flow.
   - Tutorial: [Model Bank Transactions as a Flow](https://obzenflow.dev/tutorials/model-bank-transactions/)
   - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [operational batteries](https://obzenflow.dev/product/how-obzenflow-works/#run-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it)
-  - Run: `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server`
-  - Auth override: provision `OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH` out of band with the complete expected `Authorization` header value, then run `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`. This protects built-in control-plane routes; the demo's ingress POSTs remain unauthenticated unless ingress-local auth is configured. See [Managed web authentication](../crates/obzenflow_infra/src/web/README.md).
+  - Run: `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host`
+  - Auth override: provision `OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH` out of band with the complete expected `Authorization` header value, then run `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`. This protects built-in control-plane routes; the demo's ingress POSTs remain unauthenticated unless ingress-local auth is configured. See [Managed web authentication](../crates/obzenflow_infra/src/web/README.md).
   - Code: [`examples/http_ingestion_piggy_bank_demo/flow.rs`](http_ingestion_piggy_bank_demo/flow.rs)
 
 - **`hn_ai_digest_demo`** — The canonical AI example: live HTTP pull, token budgeting, chunking, accumulation, and Rig-backed LLM inference with replayable evidence.
@@ -69,7 +69,7 @@ These examples don't have tutorials, but they demonstrate concrete framework con
 - **`payment_gateway_resilience`** — Per-effect circuit breaking, retry, rate limiting, fail-fast rejection, and operator-facing resilience against unreliable dependencies. Use this when you care about runtime protections and replay-stable failure semantics.
   - Shows: [declared effects](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [operational batteries](https://obzenflow.dev/product/how-obzenflow-works/#run-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it), and one passive `observers:` attachment
   - Run: `cargo run -p obzenflow --example payment_gateway_resilience`
-  - Run with metrics: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
+  - Run with the web host: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
   - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)
 
 - **`postgres_sink_payments`** — Typed payment events delivered to PostgreSQL with parameter binding, batching, an explicit transport policy, and a repeat-safe UPSERT. Direct configuration defaults to verified TLS; the optional repository service deliberately selects loopback-protected plaintext. Use this to learn the PostgreSQL sink's application-facing surface.
@@ -110,4 +110,4 @@ More niche examples that target specific API surfaces or topology patterns. We u
 - **`topology_patterns_demo`** — Homogeneous fan-in with content-based routing (three sources of the same type into one aggregator, then one router to three priority sinks). Paired with `multi_source_ingest_demo` for the heterogeneous case.
 - **`multi_source_ingest_demo`** — Heterogeneous fan-in via per-branch alignment transforms (three sources of three different types normalised to one envelope, then a typed aggregator). The canonical reference for FLOWIP-114c typed authoring, including a long header comment that doubles as the authoring guide for multi-input stages.
 - **`flow_middleware_config`** — Targeted source middleware configuration
-- **`prometheus_100k_demo`** — High-volume Prometheus `/metrics` demo
+- **`prometheus_demo`** — [Opt-in Prometheus and disabled metrics reporting](prometheus_demo/README.md) with fixed-input live/replay verification

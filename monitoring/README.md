@@ -71,34 +71,23 @@ If you prefer to skip `setup.sh`: `docker-compose up -d` starts the containers, 
 
 ## Building Your Own Flow with Live Metrics
 
-The concurrent metrics API (FLOWIP-058) lets a flow serve metrics while it runs:
+Run the flow through `FlowApplication` with the root `prometheus` and `web-host`
+features, and enable hosting and reporting in its application configuration:
 
-```rust
-use obzenflow_dsl::{flow, source, transform, sink};
-use obzenflow_infra::web::start_metrics_server;
+```toml
+[server]
+enabled = true
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Build your flow
-    let flow_handle = flow! {
-        name: "my_long_running_flow",
-        // ... your flow configuration
-    }.await?;
-    
-    // Start metrics server BEFORE running the flow
-    if let Some(exporter) = flow_handle.metrics_exporter() {
-        tokio::spawn(async move {
-            start_metrics_server(exporter, 9090).await
-        });
-        println!("Metrics available at http://localhost:9090/metrics");
-    }
-    
-    // Run flow while metrics are being served
-    flow_handle.run().await?;
-    
-    Ok(())
-}
+[metrics]
+enabled = true
 ```
+
+The application injects an Adapter read model into Runtime through Core's snapshot sink,
+and hosts the Adapter's Prometheus projection at `/metrics`. Runtime owns execution
+measurements and terminal totals; the application owns listener and sampler cleanup.
+There is no exporter accessor on `FlowHandle` or separate metrics-server task to start.
+See [the Prometheus example](../examples/prometheus_demo/README.md) for runnable
+configurations and live/replay verification.
 
 This pattern is especially useful for:
 - Long-running flows

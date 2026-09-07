@@ -17,7 +17,15 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::metrics::{MetricsExporter, NoOpMetricsExporter};
+use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter};
+#[derive(Default)]
+struct RecordingSnapshots(std::sync::Mutex<Vec<AppMetricsSnapshot>>);
+impl MetricsSnapshotExporter for RecordingSnapshots {
+    fn publish_app_snapshot(&self, value: AppMetricsSnapshot) {
+        self.0.lock().unwrap().push(value);
+    }
+    fn publish_infra_snapshot(&self, _value: InfraMetricsSnapshot) {}
+}
 use obzenflow_core::{EventEnvelope, StageId};
 use obzenflow_fsm::FsmAction;
 use obzenflow_topology::TopologyBuilder;
@@ -133,7 +141,7 @@ fn make_context(
     system_id: SystemId,
     system_journal: Arc<dyn Journal<SystemEvent>>,
     stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-    metrics_exporter: Option<Arc<dyn MetricsExporter>>,
+    metrics_exporter: Option<Arc<dyn MetricsSnapshotExporter>>,
 ) -> PipelineContext {
     PipelineContext {
         system_id,
@@ -323,7 +331,7 @@ async fn drain_metrics_skips_when_metrics_not_started() {
         system_id,
         system_journal.clone(),
         Vec::new(),
-        Some(Arc::new(NoOpMetricsExporter)),
+        Some(Arc::new(RecordingSnapshots::default())),
     );
 
     PipelineAction::DrainMetrics
@@ -352,7 +360,7 @@ async fn cancel_mode_drains_and_shuts_down_metrics_aggregator() {
         system_id,
         system_journal.clone(),
         vec![(stage_id, stage_journal)],
-        Some(Arc::new(NoOpMetricsExporter)),
+        Some(Arc::new(RecordingSnapshots::default())),
     );
 
     PipelineAction::StartMetricsAggregator

@@ -12,7 +12,7 @@ use obzenflow_core::id::{StageId, SystemId};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::{
-    AppMetricsSnapshot, InfraMetricsSnapshot, MetricsExporter, StageMetadata,
+    AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter, StageMetadata,
 };
 use obzenflow_core::EventEnvelope;
 use obzenflow_fsm::FsmAction;
@@ -30,29 +30,13 @@ struct RecordingExporter {
     infra_snapshots: Mutex<Vec<InfraMetricsSnapshot>>,
 }
 
-impl MetricsExporter for RecordingExporter {
-    fn update_app_metrics(
-        &self,
-        snapshot: AppMetricsSnapshot,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+impl MetricsSnapshotExporter for RecordingExporter {
+    fn publish_app_snapshot(&self, snapshot: AppMetricsSnapshot) {
         self.app_snapshots.lock().unwrap().push(snapshot);
-        Ok(())
     }
 
-    fn update_infra_metrics(
-        &self,
-        snapshot: InfraMetricsSnapshot,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn publish_infra_snapshot(&self, snapshot: InfraMetricsSnapshot) {
         self.infra_snapshots.lock().unwrap().push(snapshot);
-        Ok(())
-    }
-
-    fn render_metrics(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(String::new())
-    }
-
-    fn metric_count(&self) -> usize {
-        self.app_snapshots.lock().unwrap().len() + self.infra_snapshots.lock().unwrap().len()
     }
 }
 
@@ -88,7 +72,7 @@ fn make_empty_context(
         stage_error_journals: std::collections::HashMap::new(),
         backpressure_registry: None,
         include_error_journals: true,
-        exporter: Some(exporter),
+        metrics_exporter: exporter,
         metrics_store: MetricsStore::default(),
         export_interval_secs: 60,
         system_id,

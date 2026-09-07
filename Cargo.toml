@@ -113,7 +113,7 @@ ring = "0.17"
 subtle = "2"
 
 	# Web / networking (optional in crates that use them)
-	warp = "0.3"
+	warp = { version = "0.4.3", default-features = false }
 	reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "rustls-tls-native-roots", "system-proxy"] }
 	rustls-native-certs = "0.8"
 	matchit = "0.8"
@@ -164,7 +164,10 @@ toml = { workspace = true }
 csv = { workspace = true }
 
 [features]
-console = ["obzenflow_infra/console"]
+prometheus = ["obzenflow_infra/prometheus"]
+web-host = ["obzenflow_infra/warp-server"]
+studio = ["prometheus", "web-host", "obzenflow_infra/studio-registration"]
+tokio-console = ["obzenflow_infra/tokio-console"]
 http-pull = ["obzenflow_infra/reqwest-client"]
 ai = ["obzenflow_infra/ai-rig", "obzenflow_infra/ai-tiktoken"]
 postgres = ["obzenflow_adapters/postgres"]

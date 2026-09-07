@@ -619,7 +619,7 @@ mod tests {
             flow_effective_config: None,
         };
 
-        let handle = FlowHandle::new(standard_handle, None, extras);
+        let handle = FlowHandle::new(standard_handle, extras);
         FlowTestHarness::from_parts(handle, vec![(stage_id, stage_journal)])
             .unwrap_or_else(|e| panic!("failed to build FlowTestHarness for `{stage_name}`: {e}"))
     }

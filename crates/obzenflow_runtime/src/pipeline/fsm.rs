@@ -299,8 +299,8 @@ pub(crate) struct PipelineContext {
     /// System subscription for stage completion events from system journal
     pub(crate) completion_subscription: Option<SystemSubscription<SystemEvent>>,
 
-    /// Metrics exporter for accessing aggregated metrics
-    pub(crate) metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
+    /// Optional exporter for aggregated metrics snapshots
+    pub(crate) metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>>,
 
     /// Stage data journals (for metrics aggregator)
     pub(crate) stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
@@ -1077,13 +1077,15 @@ impl FsmAction for PipelineAction {
                     return Ok(());
                 }
 
-                // Start metrics aggregator if we have an exporter configured.
-                let Some(exporter) = context.metrics_exporter.clone() else {
-                    tracing::info!("No metrics exporter configured, skipping metrics aggregator");
+                // Start the optional aggregator only when a snapshot exporter is supplied.
+                let Some(metrics_exporter) = context.metrics_exporter.clone() else {
+                    tracing::info!(
+                        "No metrics snapshot exporter supplied, skipping metrics aggregator"
+                    );
                     return Ok(());
                 };
 
-                tracing::info!("Found metrics exporter, starting metrics aggregator");
+                tracing::info!("Metrics snapshot exporter supplied, starting metrics aggregator");
 
                 // Get stage journals from context
                 let stage_journals = context.stage_data_journals.clone();
@@ -1178,7 +1180,7 @@ impl FsmAction for PipelineAction {
                     .with_backpressure_registry_opt(backpressure_registry);
 
                 let composite_boundaries = composite_boundaries_from_topology(&context.topology);
-                match MetricsAggregatorBuilder::new(inputs, system_journal, exporter)
+                match MetricsAggregatorBuilder::new(inputs, system_journal, metrics_exporter)
                     .with_stage_metadata(stage_metadata)
                     .with_composite_boundaries(composite_boundaries)
                     .with_export_interval(1) // 10 second interval

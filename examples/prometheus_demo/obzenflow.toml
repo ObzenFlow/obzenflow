@@ -11,3 +11,7 @@ startup_mode = "manual"
 # obzenflow server on localhost:9090. Tighten to "allow-list" + populate
 # server.cors.allow_origins for production.
 mode = "allow-any-origin"
+
+# This example explicitly opts into monitoring; ordinary framework launches do not.
+[metrics]
+enabled = true

@@ -85,7 +85,6 @@ fn materialised_failure_probe(
         // The host bootstrap must already be installed when materialisation starts.
         let bootstrap = bootstrap_config();
         assert_eq!(bootstrap.shutdown_timeout, Duration::from_secs(marker));
-        assert!(!bootstrap.metrics.enabled);
 
         let _chat =
             ChatEffectBinding::from_config(&runtime_config.ai_models()).map_err(|error| {

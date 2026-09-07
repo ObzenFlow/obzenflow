@@ -8,9 +8,9 @@
 
 use super::log_record::{serialize_atomic_group, serialize_record, LogRecord};
 use super::reader::DiskJournalReader;
+use super::reverse_reader::ReverseFrameReader;
 use super::scanner::{
-    classify_frame, dispose, read_frame_async, read_frame_sync, Disposition, ParseOutcome,
-    ReadPolicy,
+    classify_frame, dispose, read_frame_async, read_frame_sync, Disposition, ReadPolicy,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -90,9 +90,6 @@ pub struct DiskJournal<T: JournalEvent> {
     admission_sequencer: Option<Arc<AtomicU64>>,
     _phantom: std::marker::PhantomData<T>,
 }
-
-/// Buffer size for backwards reading (64KB)
-const BACKWARD_READ_BUFFER_SIZE: usize = 64 * 1024;
 
 /// A successfully committed append: the byte offset the record was written at
 /// and the resulting end-of-file offset.
@@ -926,90 +923,69 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         }
 
         let mut results = Vec::with_capacity(count);
-        let mut pos = file_len;
-
-        // Read backwards chunk by chunk
-        while pos > 0 && results.len() < count {
-            let chunk_start = pos.saturating_sub(BACKWARD_READ_BUFFER_SIZE as u64);
-            let chunk_size = (pos - chunk_start) as usize;
-
-            file.seek(SeekFrom::Start(chunk_start)).await.map_err(|e| {
+        let mut reader = ReverseFrameReader::new(file, file_len);
+        let mut buffer = Vec::new();
+        while results.len() < count {
+            let Some(termination) = reader.read_frame(&mut buffer).await.map_err(|error| {
                 JournalError::Implementation {
-                    message: "Failed to seek backwards".to_string(),
-                    source: Box::new(e),
+                    message: format!("Failed to read journal backwards: {}", self.path.display()),
+                    source: Box::new(error),
                 }
-            })?;
-
-            let mut buffer = vec![0u8; chunk_size];
-            use tokio::io::AsyncReadExt;
-            let bytes_read =
-                file.read(&mut buffer)
-                    .await
-                    .map_err(|e| JournalError::Implementation {
-                        message: "Failed to read chunk".to_string(),
-                        source: Box::new(e),
-                    })?;
-            buffer.truncate(bytes_read);
-
-            // Process lines in this chunk from end to start
-            let chunk_str = String::from_utf8_lossy(&buffer);
-            let lines: Vec<&str> = chunk_str.lines().collect();
-
-            for line in lines.iter().rev() {
-                if results.len() >= count {
-                    break;
-                }
-
-                if line.trim().is_empty() {
-                    continue;
-                }
-
-                // read_last_n is a best-effort tail/observability helper
-                // (FLOWIP-120q): classify per line and skip anything that is not a
-                // committed record. It is never a replay/verification contract.
-                match classify_frame::<T>(line.as_bytes()) {
-                    ParseOutcome::Complete(frame) => {
-                        let journal_group_id = frame.group_id().map(str::to_string);
-                        let records = frame.into_records();
-                        let group_size = journal_group_id.as_ref().map(|_| {
-                            u32::try_from(records.len())
-                                .expect("a materialised journal frame fits in addressable memory")
-                        });
-                        for (index, record) in records.into_iter().enumerate().rev() {
-                            if results.len() >= count {
-                                break;
-                            }
-                            results.push(EventEnvelope {
-                                journal_writer_id: JournalWriterId::from(self.journal_id),
-                                vector_clock: record.vector_clock,
-                                timestamp: record.timestamp,
-                                journal_group_id: journal_group_id.clone(),
-                                journal_group_member: group_size.map(|size| JournalGroupMember {
-                                    index: u32::try_from(index)
-                                        .expect("group size was checked against u32 capacity"),
-                                    size,
-                                }),
-                                event: record.event,
-                            });
-                        }
-                    }
-                    ParseOutcome::Incomplete(_) => {
-                        // Likely a chunk-boundary fragment; skip.
-                        continue;
-                    }
-                    ParseOutcome::Corrupt(problem) => {
-                        tracing::warn!(
-                            path = %self.path.display(),
-                            parse_error = %problem,
-                            "Skipping corrupt record during backwards read"
-                        );
-                        continue;
-                    }
-                }
+            })?
+            else {
+                break;
+            };
+            if buffer.iter().all(u8::is_ascii_whitespace) {
+                continue;
             }
 
-            // Move to next chunk
-            pos = chunk_start;
+            // This remains a best-effort observability helper, but commitment
+            // and frame validation use the same policy as forward readers.
+            match dispose(
+                classify_frame::<T>(&buffer),
+                termination,
+                ReadPolicy::SealedScan {
+                    tolerate_torn_tail: true,
+                },
+            ) {
+                Disposition::Yield(frame) => {
+                    let journal_group_id = frame.group_id().map(str::to_string);
+                    let records = frame.into_records();
+                    let group_size = journal_group_id.as_ref().map(|_| {
+                        u32::try_from(records.len())
+                            .expect("a materialised journal frame fits in addressable memory")
+                    });
+                    for (index, record) in records.into_iter().enumerate().rev() {
+                        if results.len() >= count {
+                            break;
+                        }
+                        results.push(EventEnvelope {
+                            journal_writer_id: JournalWriterId::from(self.journal_id),
+                            vector_clock: record.vector_clock,
+                            timestamp: record.timestamp,
+                            journal_group_id: journal_group_id.clone(),
+                            journal_group_member: group_size.map(|size| JournalGroupMember {
+                                index: u32::try_from(index)
+                                    .expect("group size was checked against u32 capacity"),
+                                size,
+                            }),
+                            event: record.event,
+                        });
+                    }
+                }
+                Disposition::EndOfCommittedRecords | Disposition::Skip => {
+                    // Reverse traversal continues to older committed frames
+                    // after skipping an uncommitted final tail.
+                    continue;
+                }
+                Disposition::Corrupt(problem) => {
+                    tracing::warn!(
+                        path = %self.path.display(),
+                        parse_error = %problem,
+                        "Skipping corrupt record during backwards read"
+                    );
+                }
+            }
         }
 
         tracing::debug!(
@@ -1022,6 +998,10 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         Ok(results)
     }
 }
+
+#[cfg(test)]
+#[path = "journal_tail_tests.rs"]
+mod tail_tests;
 
 #[cfg(test)]
 mod tests {

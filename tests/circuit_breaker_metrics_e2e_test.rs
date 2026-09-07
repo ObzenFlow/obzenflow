@@ -145,6 +145,10 @@ impl InlineSink for MetricsSink {
 
 #[tokio::test]
 async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     // Initialize tracing
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
@@ -186,7 +190,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(metrics_context)
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 
@@ -194,10 +198,8 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
 
     // Keep a metrics exporter handle even if the strict source delivery contract
     // aborts after the circuit breaker rejects downstream traffic.
-    let metrics_exporter = flow_handle
-        .metrics_exporter()
-        .expect("Metrics should be enabled");
-    let run_result = flow_handle.run_with_metrics().await;
+    let metrics_exporter = metrics_model.clone();
+    let run_result = flow_handle.run().await;
     if let Err(e) = run_result {
         let error = format!("{e:?}");
         assert!(
@@ -213,8 +215,8 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
     println!("\n=== Verifying Circuit Breaker Metrics ===");
 
     // Get metrics
-    let metrics_text = metrics_exporter
-        .render_metrics()
+    let metrics_text = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
+        .render(&metrics_exporter.snapshot())
         .map_err(|e| anyhow::anyhow!("Failed to render metrics: {e}"))?;
 
     // Debug output
@@ -297,8 +299,8 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
 
     // Final metrics check
     sleep(Duration::from_millis(500)).await;
-    metrics_exporter
-        .render_metrics()
+    obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
+        .render(&metrics_exporter.snapshot())
         .map_err(|e| anyhow::anyhow!("Failed to render final metrics: {e}"))?;
 
     println!("\n✅ Circuit Breaker Metrics E2E Test PASSED!");
@@ -311,6 +313,10 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
 /// Test that verifies circuit breaker emits summary events periodically
 #[tokio::test]
 async fn test_circuit_breaker_summary_events() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     // Source that generates many events quickly
     #[derive(Clone, Debug)]
     struct RapidSource {
@@ -359,18 +365,18 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(metrics_context)
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 
-    let metrics_exporter = flow_handle
-        .run_with_metrics()
+    flow_handle
+        .run()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
-        .expect("Metrics should be enabled");
+        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?;
+    let metrics_exporter = metrics_model.clone();
     sleep(Duration::from_secs(2)).await;
-    let metrics = metrics_exporter
-        .render_metrics()
+    let metrics = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
+        .render(&metrics_exporter.snapshot())
         .map_err(|e| anyhow::anyhow!("Failed to render metrics: {e}"))?;
 
     // Should have circuit breaker metrics from summary events

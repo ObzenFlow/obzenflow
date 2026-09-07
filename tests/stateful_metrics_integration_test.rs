@@ -286,6 +286,10 @@ fn metric_line_value(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
 
     let total_events: usize = 20;
@@ -299,6 +303,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let accumulator = SlowAccumulator::new(sleep_per_event);
 
     let test_handle = test_flow! {
+        build_context: metrics_context,
         name: "stateful_metrics",
         journals: disk_journals(journal_dir_for_flow.clone()),
 
@@ -320,9 +325,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
         .await
         .map_err(|e| anyhow!("failed to construct MetricsBarrier: {e}"))?;
 
-    let exporter = test_handle
-        .metrics_exporter()
-        .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
+    let exporter = metrics_model.clone();
 
     tokio::time::timeout(timeout_flow, test_handle.into_inner().run())
         .await
@@ -336,8 +339,8 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
 
     let flow_label = "flow=\"stateful_metrics\"".to_string();
     let stage_label = "stage=\"counter\"".to_string();
-    let metrics_text = exporter
-        .render_metrics()
+    let metrics_text = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
+        .render(&exporter.snapshot())
         .map_err(|e| anyhow!("Failed to render metrics: {e}"))?;
 
     let events_total = metric_line_value(
@@ -529,6 +532,10 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
 
     let reference_events: usize = 10;
@@ -539,6 +546,7 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
     let (sink, _events) = CollectingSink::<JoinedMetricEvent>::new();
 
     let test_handle = test_flow! {
+        build_context: metrics_context,
         name: "stateful_join_metrics",
         journals: disk_journals(unique_journal_dir("stateful_join_metrics")),
 
@@ -561,9 +569,7 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
         .await
         .map_err(|e| anyhow!("failed to construct MetricsBarrier: {e}"))?;
 
-    let exporter = test_handle
-        .metrics_exporter()
-        .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
+    let exporter = metrics_model.clone();
 
     tokio::time::timeout(timeout_flow, test_handle.into_inner().run())
         .await
@@ -577,8 +583,8 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
 
     let flow_label = "flow=\"stateful_join_metrics\"".to_string();
     let stage_label = "stage=\"joiner\"".to_string();
-    let metrics_text = exporter
-        .render_metrics()
+    let metrics_text = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
+        .render(&exporter.snapshot())
         .map_err(|e| anyhow!("Failed to render metrics: {e}"))?;
 
     let events_total = metric_line_value(

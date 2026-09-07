@@ -229,9 +229,12 @@ mod tests {
                 })
         };
         let health = warp::path!("health").map(warp::reply);
-        let (addr, server) =
-            warp::serve(register.or(deregister).or(health)).bind_ephemeral(([127, 0, 0, 1], 0));
-        let handle = tokio::spawn(server);
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = warp::serve(register.or(deregister).or(health)).incoming(listener);
+        let handle = tokio::spawn(server.run());
         (format!("http://{addr}"), handle)
     }
 
@@ -351,8 +354,11 @@ mod tests {
         // Health must answer (self-probe target) while /register 404s, so the
         // renewal loop runs against a phonebook that rejects everything.
         let health_only = warp::path!("health").map(warp::reply);
-        let (addr, server) = warp::serve(health_only).bind_ephemeral(([127, 0, 0, 1], 0));
-        let server = tokio::spawn(server);
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(warp::serve(health_only).incoming(listener).run());
         let base = format!("http://{addr}");
 
         let system_id = SystemId::new();

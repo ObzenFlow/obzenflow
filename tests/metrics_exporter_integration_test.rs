@@ -12,8 +12,8 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{rate_limit_with_burst, CircuitBreaker};
+use obzenflow_adapters::monitoring::MetricsReadModel;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, StageOutputs};
 use obzenflow_dsl::{sink, source, test_flow, transform};
@@ -201,12 +201,12 @@ impl InlineSink for SleepingSink {
 }
 
 fn render_metrics_checked(
-    exporter: &Arc<dyn MetricsExporter>,
+    exporter: &Arc<MetricsReadModel>,
     debug_patterns: &[String],
     predicate: impl Fn(&str) -> bool,
 ) -> Result<String> {
-    let snapshot = exporter
-        .render_metrics()
+    let snapshot = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
+        .render(&exporter.snapshot())
         .map_err(|e| anyhow!("Failed to render metrics: {e}"))?;
 
     if predicate(&snapshot) {
@@ -254,10 +254,9 @@ fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
 async fn run_with_metrics_barrier(
     test_handle: obzenflow_runtime::testing::FlowTestHarness,
     timeout: Duration,
-) -> Result<Arc<dyn MetricsExporter>> {
-    let exporter = test_handle
-        .metrics_exporter()
-        .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
+    metrics_model: Arc<obzenflow_adapters::monitoring::MetricsReadModel>,
+) -> Result<Arc<MetricsReadModel>> {
+    let exporter = metrics_model.clone();
 
     let metrics_barrier = MetricsBarrier::try_on_flow(&test_handle)
         .await
@@ -317,10 +316,15 @@ fn metric_line_value(
 #[cfg(feature = "test-support")]
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn metrics_barrier_smoke_current_thread_paused_time() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     let source = BurstSource::new(10);
     let transform = PassthroughTransform;
     let (sink, _count) = CountingSink::new();
     let test_handle = test_flow! {
+        build_context: metrics_context,
         name: "metrics_barrier_paused_time_smoke",
         journals: memory_journals(),
 
@@ -338,9 +342,7 @@ async fn metrics_barrier_smoke_current_thread_paused_time() -> Result<()> {
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let exporter = test_handle
-        .metrics_exporter()
-        .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
+    let exporter = metrics_model.clone();
 
     let metrics_barrier = MetricsBarrier::try_on_flow(&test_handle)
         .await
@@ -357,8 +359,8 @@ async fn metrics_barrier_smoke_current_thread_paused_time() -> Result<()> {
         .await
         .map_err(|e| anyhow!("MetricsBarrier wait failed: {e}"))?;
 
-    let snapshot = exporter
-        .render_metrics()
+    let snapshot = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
+        .render(&exporter.snapshot())
         .map_err(|e| anyhow!("Failed to render metrics: {e}"))?;
     assert!(
         snapshot.contains("obzenflow_events_total"),
@@ -370,12 +372,17 @@ async fn metrics_barrier_smoke_current_thread_paused_time() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
     let source = BurstSource::new(50);
     let transform = DropTransform;
     let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
+        build_context: metrics_context,
         name: "metrics_flow_id_labels",
         journals: disk_journals(unique_journal_dir("metrics_flow_id_labels")),
 
@@ -397,7 +404,8 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
 
     let debug_patterns = vec![
         "stage_id=\"".to_string(),
@@ -430,6 +438,10 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
 
     let per_event = Duration::from_millis(10);
@@ -439,6 +451,7 @@ async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
     let sink = SleepingSink::new(per_event);
 
     let test_handle = test_flow! {
+        build_context: metrics_context,
         name: "metrics_processing_time_sum",
         journals: disk_journals(unique_journal_dir("metrics_processing_time_sum")),
 
@@ -456,7 +469,8 @@ async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
 
     let flow_label = "flow=\"metrics_processing_time_sum\"".to_string();
     let stage_label = "stage=\"snk\"".to_string();
@@ -522,6 +536,10 @@ async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let source = BurstSource::new(1001);
@@ -529,6 +547,7 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
     let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
+        build_context: metrics_context,
         name: "metrics_cb_exporter",
         journals: disk_journals(unique_journal_dir("metrics_cb_exporter")),
 
@@ -557,7 +576,8 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
         .expect("FlowHandle should expose the canonical topology with middleware annotations");
     let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
 
-    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
 
     let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
     let flow_label = "flow=\"metrics_cb_exporter\"".to_string();
@@ -599,6 +619,10 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let source = ErrorAfterFirstSource::new();
@@ -606,6 +630,7 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
     let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
+        build_context: metrics_context,
         name: "metrics_cb_cumulative",
         journals: disk_journals(unique_journal_dir("metrics_cb_cumulative")),
 
@@ -636,7 +661,8 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
         .expect("FlowHandle should expose the canonical topology with middleware annotations");
     let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
 
-    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
 
     let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
     let flow_label = "flow=\"metrics_cb_cumulative\"".to_string();
@@ -745,12 +771,17 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     let timeout_flow = Duration::from_secs(30);
     let source = ErrorAfterFirstSource::new();
     let transform = DropTransform;
     let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
+        build_context: metrics_context,
         name: "metrics_source_rate_based_cb",
         journals: disk_journals(unique_journal_dir("metrics_source_rate_based_cb")),
 
@@ -781,7 +812,8 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
         .expect("FlowHandle should expose the canonical topology with middleware annotations");
     let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
 
-    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
 
     let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
     let flow_label = "flow=\"metrics_source_rate_based_cb\"".to_string();
@@ -836,6 +868,10 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let total_events: usize = 250;
@@ -846,6 +882,7 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
     // Configure the limiter to produce at least one delayed event while keeping
     // the end-to-end run comfortably inside CI timing variance.
     let test_handle = test_flow! {
+        build_context: metrics_context,
         name: "metrics_rl_exporter",
         journals: disk_journals(unique_journal_dir("metrics_rl_exporter")),
 
@@ -875,7 +912,8 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
         .expect("FlowHandle should expose the canonical topology with middleware annotations");
     let rl_stage_id = stage_id_with_middleware(&topology, "rate_limiter")?;
 
-    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
 
     let rl_stage_label = format!("stage_id=\"{rl_stage_id}\"");
     let flow_label = "flow=\"metrics_rl_exporter\"".to_string();
@@ -994,6 +1032,10 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     // This regression test exercises the pre-fix failure mode:
     // Summary events are emitted periodically (>=1000 or 10s). For short runs,
     // Summary-based counters undercount or stay at 0. Wide-event RuntimeContext
@@ -1005,6 +1047,7 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
     let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
+        build_context: metrics_context,
         name: "metrics_cb_no_summary",
         journals: disk_journals(unique_journal_dir("metrics_cb_no_summary")),
 
@@ -1029,7 +1072,8 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
         .expect("FlowHandle should expose the canonical topology with middleware annotations");
     let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
 
-    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
 
     let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
     let flow_label = "flow=\"metrics_cb_no_summary\"".to_string();
@@ -1065,6 +1109,10 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     // Same regression class as CB: WindowUtilization events are periodic.
     // Wide-event RuntimeContext snapshots must carry cumulative RL counters, and
     // utilization must be derivable from bucket state even when no summaries emit.
@@ -1075,6 +1123,7 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
     let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
+        build_context: metrics_context,
         name: "metrics_rl_no_summary",
         journals: disk_journals(unique_journal_dir("metrics_rl_no_summary")),
 
@@ -1101,7 +1150,8 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
         .expect("FlowHandle should expose the canonical topology with middleware annotations");
     let rl_stage_id = stage_id_with_middleware(&topology, "rate_limiter")?;
 
-    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
 
     let rl_stage_label = format!("stage_id=\"{rl_stage_id}\"");
     let flow_label = "flow=\"metrics_rl_no_summary\"".to_string();
@@ -1172,12 +1222,17 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let source = BurstSource::new(10);
     let (sink, _count) = CountingSink::new();
 
     let test_handle = test_flow! {
+        build_context: metrics_context,
         name: "metrics_contracts_exporter",
         journals: disk_journals(unique_journal_dir("metrics_contracts_exporter")),
 
@@ -1201,7 +1256,8 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
         "expected at least one contract attachment"
     );
 
-    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
+    let exporter =
+        run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
 
     let debug_patterns = vec![
         "obzenflow_contract_results_total".to_string(),

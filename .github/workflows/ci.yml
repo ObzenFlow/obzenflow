@@ -120,6 +120,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked ${{ matrix.cargo_args }} -- -D warnings
 
   test:
+    # Required-check names must stay stable when the Cargo feature list changes.
+    name: Tests (${{ matrix.name }})
     needs: fmt
     runs-on: ubuntu-latest
     env:
@@ -135,7 +137,7 @@ jobs:
             features: ""
           - name: production-features
             # Keep this list in sync with the workspace root production features.
-            features: "console,http-pull,ai,postgres"
+            features: "tokio-console,http-pull,ai,postgres,prometheus,web-host,studio"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -270,6 +270,7 @@ macro_rules! flow {
 #[macro_export]
 macro_rules! test_flow {
     {
+        $(build_context: $build_ctx:expr,)?
         name: $flow_name:literal,
         journals: $journals:expr,
         $(backpressure: $flow_bp:expr,)?
@@ -279,6 +280,7 @@ macro_rules! test_flow {
     }};
 
     {
+        $(build_context: $build_ctx:expr,)?
         journals: $journals:expr,
         $(backpressure: $flow_bp:expr,)?
         effect_ports $($rest:tt)*
@@ -287,6 +289,7 @@ macro_rules! test_flow {
     }};
 
     {
+        $(build_context: $build_ctx:expr,)?
         name: $flow_name:literal,
         journals: $journals:expr,
         middleware: [$($removed_middleware:tt)*],
@@ -298,6 +301,7 @@ macro_rules! test_flow {
     }};
 
     {
+        $(build_context: $build_ctx:expr,)?
         journals: $journals:expr,
         middleware: [$($removed_middleware:tt)*],
         $($rest:tt)*
@@ -309,6 +313,7 @@ macro_rules! test_flow {
 
     // Canonical named form.
     {
+        $(build_context: $build_ctx:expr,)?
         name: $flow_name:literal,
         journals: $journals:expr,
         $(backpressure: $flow_bp:expr,)?
@@ -327,6 +332,7 @@ macro_rules! test_flow {
 
             let __build_ctx =
                 obzenflow_runtime::run_context::FlowBuildContext::for_tests();
+            $(let __build_ctx = $build_ctx;)?
             let mut members: HashMap<
                 String,
                 $crate::dsl::composition::FlowMember,
@@ -377,6 +383,7 @@ macro_rules! test_flow {
 
     // Canonical default-name form.
     {
+        $(build_context: $build_ctx:expr,)?
         journals: $journals:expr,
         $(backpressure: $flow_bp:expr,)?
 
@@ -389,6 +396,7 @@ macro_rules! test_flow {
         }
     } => {{
         $crate::test_flow! {
+            $(build_context: $build_ctx,)?
             name: "default",
             journals: $journals,
             $(backpressure: $flow_bp,)?
@@ -402,6 +410,7 @@ macro_rules! test_flow {
     }};
 
     {
+        $(build_context: $build_ctx:expr,)?
         name: $flow_name:literal,
         journals: $journals:expr,
         $(backpressure: $flow_bp:expr,)?
@@ -414,6 +423,7 @@ macro_rules! test_flow {
     }};
 
     {
+        $(build_context: $build_ctx:expr,)?
         journals: $journals:expr,
         $(backpressure: $flow_bp:expr,)?
         bindings: $($retired_bindings:tt)*

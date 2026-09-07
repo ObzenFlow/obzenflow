@@ -7,6 +7,7 @@ This crate is an internal implementation detail of the ObzenFlow project. Most u
 Wires the workspace together into a runnable application, providing journal backends, an optional HTTP server, and the `FlowApplication` entry point that most binaries use directly.
 
 - **`FlowApplication`** runner that turns a `flow! { ... }` definition into a managed process with tracing, CLI parsing, optional HTTP server, Prometheus metrics, and graceful shutdown.
+- **Prometheus hosting.** Application configuration resolves `metrics.enabled`, creates the Adapter read model, samples live host observations, and serves the portable `/metrics` endpoint. The application owns task cleanup; the Adapters crate owns reporting translation. Disabled reporting creates no reporting model, sampler, or endpoint; terminal lifecycle totals remain journaled.
 - **Journal backends.** Disk-backed (`disk_journals`) and in-memory (`memory_journals`) implementations of the journaling traits, plus replay archive support.
 - **Web server and endpoints** (feature `warp-server`). Topology, metrics, health/readiness, flow control, SSE event streaming, and HTTP ingestion endpoints.
   See [Managed web authentication](src/web/README.md) for deployment choices, credential scopes, and failure behaviour.
@@ -20,9 +21,9 @@ No default features are enabled. Opt in as needed:
 | Feature | What it enables |
 |---------|-----------------|
 | `warp-server` | HTTP server, `--server` CLI flag, hosting endpoints |
-| `console` | `tokio-console` support for async debugging |
+| `tokio-console` | Tokio Console support for async debugging |
 | `reqwest-client` | Outbound HTTP client for pull/poll sources |
-| `prometheus` | Convenience re-export of the Prometheus exporter |
+| `prometheus` | Application wiring and portable `/metrics` endpoint for Prometheus reporting |
 
 ## `FlowApplication` entry points
 

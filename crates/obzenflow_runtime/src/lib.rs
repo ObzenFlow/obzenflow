@@ -93,10 +93,6 @@ pub mod testing;
 /// [`SourceError`](crate::stages::SourceError) for source-specific error
 /// reporting.
 ///
-/// **Metrics** —
-/// [`DefaultMetricsConfig`](crate::metrics::DefaultMetricsConfig) for
-/// configuring the built-in metrics subsystem.
-///
 /// **Event flow** —
 /// [`UpstreamSubscription`](crate::messaging::UpstreamSubscription) for
 /// wiring journal-based message delivery between stages.
@@ -132,5 +128,4 @@ pub mod prelude {
     pub use crate::messaging::UpstreamSubscription;
 
     // Metrics
-    pub use crate::metrics::DefaultMetricsConfig;
 }

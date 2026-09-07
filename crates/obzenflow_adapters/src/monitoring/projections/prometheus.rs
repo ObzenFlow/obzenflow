@@ -2,82 +2,52 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Prometheus exporter implementation
-//!
-//! This module implements the MetricsExporter trait for Prometheus exposition format.
-//! It receives snapshots from collectors and renders them as Prometheus text.
-//! No collection logic, no dependencies on aggregators - pure export functionality.
+//! Deterministic Prometheus projection of application and infrastructure observations.
 
+use crate::monitoring::read_model::MetricsReadView;
 use obzenflow_core::event::observability::{HttpPullState, WaitReason};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{SinkOperationPhase, SinkWritePhase};
 use obzenflow_core::metrics::{
     AppMetricsSnapshot, ContractMetricEdgeKey, HistogramSnapshot, InfraMetricsSnapshot,
-    MetricsExporter, StageMetadata,
+    StageMetadata,
 };
 use obzenflow_core::{FlowId, StageId};
 use std::error::Error;
 use std::fmt::Write;
-use std::sync::RwLock;
 
-/// Prometheus exporter that formats metrics snapshots as Prometheus text
-pub struct PrometheusExporter {
-    /// Latest application metrics snapshot
-    app_snapshot: RwLock<Option<AppMetricsSnapshot>>,
-
-    /// Latest infrastructure metrics snapshot  
-    infra_snapshot: RwLock<Option<InfraMetricsSnapshot>>,
+fn edge_liveness_state_gauge_value(state: &obzenflow_core::event::EdgeLivenessState) -> f64 {
+    match state {
+        obzenflow_core::event::EdgeLivenessState::Healthy => 1.0,
+        obzenflow_core::event::EdgeLivenessState::Idle => 0.5,
+        obzenflow_core::event::EdgeLivenessState::Suspect => 0.25,
+        obzenflow_core::event::EdgeLivenessState::Stalled => 0.0,
+        obzenflow_core::event::EdgeLivenessState::Recovered => 1.0,
+    }
 }
 
-impl PrometheusExporter {
-    /// Create a new Prometheus exporter
+fn stage_activity_gauge_value(activity: &obzenflow_core::event::system_event::StageActivity) -> u8 {
+    use obzenflow_core::event::system_event::StageActivity;
+    match activity {
+        StageActivity::Polling => 0,
+        StageActivity::Processing { .. } => 1,
+        StageActivity::Draining => 2,
+        StageActivity::Completed => 3,
+        StageActivity::WaitingOnQuietInput { .. } => 4,
+    }
+}
+
+/// Deterministic Prometheus exposition over an owned read view.
+#[derive(Default)]
+pub struct PrometheusProjection;
+
+impl PrometheusProjection {
     pub fn new() -> Self {
-        Self {
-            app_snapshot: RwLock::new(None),
-            infra_snapshot: RwLock::new(None),
-        }
-    }
-}
-
-impl Default for PrometheusExporter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MetricsExporter for PrometheusExporter {
-    /// Update application metrics from event stream
-    fn update_app_metrics(
-        &self,
-        snapshot: AppMetricsSnapshot,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        tracing::debug!(
-            "update_app_metrics called with {} event counts",
-            snapshot.event_counts.len()
-        );
-        let mut app_snapshot = self
-            .app_snapshot
-            .write()
-            .map_err(|_| "Failed to acquire app snapshot write lock")?;
-        *app_snapshot = Some(snapshot);
-        Ok(())
-    }
-
-    /// Update infrastructure metrics from direct observation
-    fn update_infra_metrics(
-        &self,
-        snapshot: InfraMetricsSnapshot,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut infra_snapshot = self
-            .infra_snapshot
-            .write()
-            .map_err(|_| "Failed to acquire infra snapshot write lock")?;
-        *infra_snapshot = Some(snapshot);
-        Ok(())
+        Self
     }
 
     /// Render all metrics in Prometheus exposition format
-    fn render_metrics(&self) -> Result<String, Box<dyn Error + Send + Sync>> {
+    pub fn render(&self, view: &MetricsReadView) -> Result<String, Box<dyn Error + Send + Sync>> {
         let mut output = String::with_capacity(4096);
 
         // Header
@@ -87,37 +57,25 @@ impl MetricsExporter for PrometheusExporter {
             "# HELP obzenflow_build_info ObzenFlow build information"
         )?;
         writeln!(&mut output, "# TYPE obzenflow_build_info gauge")?;
-        writeln!(&mut output, "obzenflow_build_info{{version=\"0.1.0\"}} 1")?;
+        writeln!(
+            &mut output,
+            "obzenflow_build_info{{version=\"{}\"}} 1",
+            env!("CARGO_PKG_VERSION")
+        )?;
         writeln!(&mut output)?;
 
-        // Render application metrics
-        if let Ok(app_guard) = self.app_snapshot.read() {
-            if let Some(ref snapshot) = *app_guard {
-                tracing::debug!(
-                    "Rendering app metrics snapshot with {} event counts",
-                    snapshot.event_counts.len()
-                );
-                self.render_app_metrics(&mut output, snapshot)?;
-            } else {
-                tracing::debug!("No app metrics snapshot available");
-            }
+        if let Some(snapshot) = &view.app {
+            self.render_app_metrics(&mut output, snapshot)?;
         }
-
-        // Render infrastructure metrics
-        if let Ok(infra_guard) = self.infra_snapshot.read() {
-            if let Some(ref snapshot) = *infra_guard {
-                tracing::debug!("Rendering infra metrics snapshot");
-                self.render_infra_metrics(&mut output, snapshot)?;
-            } else {
-                tracing::debug!("No infra metrics snapshot available");
-            }
+        if let Some(snapshot) = &view.infra {
+            self.render_infra_metrics(&mut output, snapshot)?;
         }
 
         Ok(output)
     }
 }
 
-impl PrometheusExporter {
+impl PrometheusProjection {
     /// Render application metrics from snapshot
     fn render_app_metrics(
         &self,
@@ -1683,7 +1641,8 @@ impl PrometheusExporter {
             )?;
             writeln!(output, "# TYPE obzenflow_edge_liveness_state gauge")?;
 
-            for ((upstream, downstream), value) in &snapshot.edge_liveness_state {
+            for ((upstream, downstream), state) in &snapshot.edge_liveness_state {
+                let value = edge_liveness_state_gauge_value(state);
                 let upstream_id = upstream.to_string();
                 let downstream_id = downstream.to_string();
 
@@ -2536,13 +2495,14 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
-        if !snapshot.liveness_metrics.stage_activity_state.is_empty() {
+        if !snapshot.liveness_metrics.stage_activity.is_empty() {
             writeln!(
                 output,
                 "# HELP obzenflow_stage_activity_state Stage activity state code (0=polling,1=processing,2=draining,3=completed)"
             )?;
             writeln!(output, "# TYPE obzenflow_stage_activity_state gauge")?;
-            for (stage_id, state) in &snapshot.liveness_metrics.stage_activity_state {
+            for (stage_id, activity) in &snapshot.liveness_metrics.stage_activity {
+                let state = stage_activity_gauge_value(activity);
                 writeln!(
                     output,
                     "obzenflow_stage_activity_state{{stage=\"{}\"}} {}",
@@ -2817,7 +2777,7 @@ mod tests {
 
     #[test]
     fn test_prometheus_format() {
-        let exporter = PrometheusExporter::new();
+        let exporter = PrometheusProjection::new();
 
         // Create a test app snapshot
         let mut event_counts = HashMap::new();
@@ -2843,8 +2803,11 @@ mod tests {
         snapshot.pipeline_state = "Created".to_string();
 
         // Update and render
-        exporter.update_app_metrics(snapshot).unwrap();
-        let output = exporter.render_metrics().unwrap();
+        let view = MetricsReadView {
+            app: Some(std::sync::Arc::new(snapshot)),
+            ..Default::default()
+        };
+        let output = exporter.render(&view).unwrap();
 
         // Check output
         assert!(output.contains("# TYPE obzenflow_events_total counter"));
@@ -2857,7 +2820,7 @@ mod tests {
 
     #[test]
     fn sink_operation_failures_use_only_bounded_phase_and_kind_labels() {
-        let exporter = PrometheusExporter::new();
+        let exporter = PrometheusProjection::new();
         let stage_id = StageId::new();
         let mut snapshot = AppMetricsSnapshot::default();
         snapshot.stage_metadata.insert(
@@ -2888,9 +2851,12 @@ mod tests {
                     count,
                 });
         }
-        exporter.update_app_metrics(snapshot).unwrap();
+        let view = MetricsReadView {
+            app: Some(std::sync::Arc::new(snapshot)),
+            ..Default::default()
+        };
 
-        let output = exporter.render_metrics().unwrap();
+        let output = exporter.render(&view).unwrap();
         for phase in [
             "open", "encode", "acquire", "execute", "commit", "flush", "drain",
         ] {
@@ -2912,7 +2878,7 @@ mod tests {
 
     #[test]
     fn test_http_ingestion_refusal_metrics_rendered() {
-        let exporter = PrometheusExporter::new();
+        let exporter = PrometheusProjection::new();
 
         // Refusal totals are projected from `IngressRefusal` facts on the app
         // snapshot, keyed by (ingress_key, reason).
@@ -2921,9 +2887,12 @@ mod tests {
             .insert(("orders".into(), "rate_limited".to_string()), 3);
         app.ingestion_refusal_totals
             .insert(("orders".into(), "validation".to_string()), 5);
-        exporter.update_app_metrics(app).unwrap();
+        let view = MetricsReadView {
+            app: Some(std::sync::Arc::new(app)),
+            ..Default::default()
+        };
 
-        let output = exporter.render_metrics().unwrap();
+        let output = exporter.render(&view).unwrap();
         let ingress = escape_label("orders");
 
         // Refusals render by reason from the projected facts.
@@ -2944,8 +2913,74 @@ mod tests {
     }
 
     #[test]
+    fn semantic_liveness_states_preserve_prometheus_wire_values() {
+        use obzenflow_core::event::system_event::{EdgeLivenessState, StageActivity};
+        use obzenflow_core::event::types::{DurationMs, EventId};
+
+        let upstream = StageId::new();
+        let downstream = StageId::new();
+        for (state, expected) in [
+            (EdgeLivenessState::Healthy, "1"),
+            (EdgeLivenessState::Idle, "0.5"),
+            (EdgeLivenessState::Suspect, "0.25"),
+            (EdgeLivenessState::Stalled, "0"),
+            (EdgeLivenessState::Recovered, "1"),
+        ] {
+            let mut snapshot = AppMetricsSnapshot::default();
+            snapshot
+                .edge_liveness_state
+                .insert((upstream, downstream), state);
+            let view = MetricsReadView {
+                app: Some(std::sync::Arc::new(snapshot)),
+                ..Default::default()
+            };
+            let output = PrometheusProjection::new().render(&view).unwrap();
+            assert!(output.lines().any(|line| line == format!(
+                "obzenflow_edge_liveness_state{{flow=\"unknown\",upstream_stage_id=\"{upstream}\",downstream_stage_id=\"{downstream}\",upstream=\"unknown\",downstream=\"unknown\"}} {expected}"
+            )), "{state:?}: {output}");
+        }
+
+        for (activity, expected) in [
+            (StageActivity::Polling, "0"),
+            (
+                StageActivity::Processing {
+                    event_id: EventId::new(),
+                    elapsed_ms: DurationMs(7),
+                },
+                "1",
+            ),
+            (StageActivity::Draining, "2"),
+            (StageActivity::Completed, "3"),
+            (
+                StageActivity::WaitingOnQuietInput {
+                    upstream: Some(upstream),
+                },
+                "4",
+            ),
+        ] {
+            let mut snapshot = InfraMetricsSnapshot::default();
+            snapshot
+                .liveness_metrics
+                .stage_activity
+                .insert(downstream, activity);
+            let view = MetricsReadView {
+                infra: Some(std::sync::Arc::new(snapshot)),
+                ..Default::default()
+            };
+            let output = PrometheusProjection::new().render(&view).unwrap();
+            assert!(
+                output.lines().any(|line| line
+                    == format!(
+                        "obzenflow_stage_activity_state{{stage=\"{downstream}\"}} {expected}"
+                    )),
+                "{activity:?}: {output}"
+            );
+        }
+    }
+
+    #[test]
     fn test_liveness_metrics_rendered() {
-        let exporter = PrometheusExporter::new();
+        let exporter = PrometheusProjection::new();
 
         let upstream = StageId::new();
         let downstream = StageId::new();
@@ -2955,17 +2990,23 @@ mod tests {
             .liveness_metrics
             .stage_handler_blocked_seconds
             .insert(downstream, 12.5);
-        snapshot
-            .liveness_metrics
-            .stage_activity_state
-            .insert(downstream, 1.0);
+        snapshot.liveness_metrics.stage_activity.insert(
+            downstream,
+            obzenflow_core::event::system_event::StageActivity::Processing {
+                event_id: obzenflow_core::event::types::EventId::new(),
+                elapsed_ms: obzenflow_core::event::types::DurationMs(0),
+            },
+        );
         snapshot
             .liveness_metrics
             .edge_idle_seconds
             .insert((upstream, downstream), 3.25);
 
-        exporter.update_infra_metrics(snapshot).unwrap();
-        let output = exporter.render_metrics().unwrap();
+        let view = MetricsReadView {
+            infra: Some(std::sync::Arc::new(snapshot)),
+            ..Default::default()
+        };
+        let output = exporter.render(&view).unwrap();
 
         assert!(output.contains("# TYPE obzenflow_stage_handler_blocked_seconds gauge"));
         assert!(output.contains(&format!(
@@ -2989,7 +3030,7 @@ mod tests {
 
     #[test]
     fn test_http_surface_metrics_rendered() {
-        let exporter = PrometheusExporter::new();
+        let exporter = PrometheusProjection::new();
 
         let mut snapshot = AppMetricsSnapshot::default();
         snapshot
@@ -3005,8 +3046,11 @@ mod tests {
                 response_bytes_total: 512,
             });
 
-        exporter.update_app_metrics(snapshot).unwrap();
-        let output = exporter.render_metrics().unwrap();
+        let view = MetricsReadView {
+            app: Some(std::sync::Arc::new(snapshot)),
+            ..Default::default()
+        };
+        let output = exporter.render(&view).unwrap();
 
         let surface_name = escape_label("ingestion:/api/ingest");
         let path = escape_label("/api/ingest");
@@ -3027,7 +3071,7 @@ mod tests {
 
     #[test]
     fn test_http_pull_metrics_rendered() {
-        let exporter = PrometheusExporter::new();
+        let exporter = PrometheusProjection::new();
 
         let stage_id = StageId::new();
         let mut stage_metadata = HashMap::new();
@@ -3062,8 +3106,11 @@ mod tests {
         snapshot.stage_metadata = stage_metadata;
         snapshot.http_pull_metrics = http_pull_metrics;
 
-        exporter.update_app_metrics(snapshot).unwrap();
-        let output = exporter.render_metrics().unwrap();
+        let view = MetricsReadView {
+            app: Some(std::sync::Arc::new(snapshot)),
+            ..Default::default()
+        };
+        let output = exporter.render(&view).unwrap();
 
         let stage_id = escape_label(&stage_id.to_string());
         assert!(output.contains("# TYPE http_pull_waiting gauge"));
@@ -3089,7 +3136,7 @@ mod tests {
 
     #[test]
     fn test_ai_chunking_metrics_rendered() {
-        let exporter = PrometheusExporter::new();
+        let exporter = PrometheusProjection::new();
 
         let stage_id = StageId::new();
         let mut stage_metadata = HashMap::new();
@@ -3123,8 +3170,11 @@ mod tests {
         snapshot.stage_metadata = stage_metadata;
         snapshot.ai_chunking_metrics = ai_chunking_metrics;
 
-        exporter.update_app_metrics(snapshot).unwrap();
-        let output = exporter.render_metrics().unwrap();
+        let view = MetricsReadView {
+            app: Some(std::sync::Arc::new(snapshot)),
+            ..Default::default()
+        };
+        let output = exporter.render(&view).unwrap();
 
         let stage_id = escape_label(&stage_id.to_string());
         assert!(output.contains("# TYPE obzenflow_ai_chunking_jobs_total counter"));
@@ -3143,7 +3193,7 @@ mod tests {
 
     #[test]
     fn exact_composite_boundary_families_render_without_legacy_aliases() {
-        let exporter = PrometheusExporter::new();
+        let exporter = PrometheusProjection::new();
         let composite = obzenflow_core::id::CompositeId::new("saga:checkout");
         let peer = StageId::new();
         let mut snapshot = AppMetricsSnapshot::default();
@@ -3230,8 +3280,11 @@ mod tests {
         dimensionless_contract.reader_seq = Some(0);
         snapshot.composite_contracts = vec![contract, dimensionless_contract];
 
-        exporter.update_app_metrics(snapshot).unwrap();
-        let output = exporter.render_metrics().unwrap();
+        let view = MetricsReadView {
+            app: Some(std::sync::Arc::new(snapshot)),
+            ..Default::default()
+        };
+        let output = exporter.render(&view).unwrap();
         assert!(output.contains(
             "obzenflow_composite_port_events_total{composite=\"saga:checkout\",port=\"completed\",direction=\"outbound\"} 7"
         ));

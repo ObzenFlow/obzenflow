@@ -1,5 +1,5 @@
 [alias]
-console-run = "run --package obzenflow --features console"
+tokio-console-run = "run --package obzenflow --features tokio-console"
 xtask = "run --package xtask --"
 
 [build]

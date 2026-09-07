@@ -10,7 +10,7 @@ Defines the handler traits that users implement to build the stages of a durable
 - **Pipeline orchestration** that wires topology, journals, and stages into a supervised pipeline, returning a handle for lifecycle control.
 - **Stage supervision** where each stage runs as an independent task with automatic lifecycle management and drain semantics.
 - **Journal and replay interfaces** that let outer layers inject persistence backends and replay previous runs from archived journals.
-- **Metrics collection** via wide-event aggregation, piped to whatever exporter the adapters layer provides.
+- **Execution measurements** through instrumentation, journal-derived aggregation, and terminal lifecycle totals. Optional reporting receives snapshots through Core’s publication contract.
 - **Backpressure and contracts** for per-edge flow control and verification between stages.
 
 ## Test support

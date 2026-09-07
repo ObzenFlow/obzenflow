@@ -1742,7 +1742,16 @@ async fn handle_request_with_body(
 fn sse_body_reply(body: SseBody) -> impl Reply {
     use tokio_stream::StreamExt;
 
-    let stream = body.map(|frame: SseFrame| Ok::<SseEvent, Infallible>(sse_frame_to_warp(frame)));
+    // Warp requires Sync, while Core permits Send-only producers. Polling still
+    // needs exclusive access: get_mut satisfies that without acquiring a lock.
+    let mut body = std::sync::Mutex::new(body);
+    let stream = futures::stream::poll_fn(move |cx| {
+        futures::Stream::poll_next(
+            std::pin::Pin::new(body.get_mut().expect("exclusive SSE body access")),
+            cx,
+        )
+    });
+    let stream = stream.map(|frame: SseFrame| Ok::<SseEvent, Infallible>(sse_frame_to_warp(frame)));
     warp::sse::reply(warp::sse::keep_alive().stream(stream))
 }
 
@@ -1770,6 +1779,8 @@ impl WarpServer {
         self,
         config: ServerConfig,
     ) -> Result<impl std::future::Future<Output = Result<(), WebError>> + Send, WebError> {
+        use futures::FutureExt;
+
         let addr: SocketAddr = config.address().parse().map_err(|e| WebError::BindFailed {
             address: config.address(),
             source: Some(Box::new(e)),
@@ -1822,21 +1833,28 @@ impl WarpServer {
             // closes gracefully after it fires (FLOWIP-114d gap 8); SSE producers
             // self-close separately, since transport-level graceful shutdown
             // never ends an infinite stream.
+            // Box Warp's bind/run futures at this boundary so their borrowed
+            // Tokio I/O and shutdown futures have an explicit Send type.
             match self.shutdown.clone() {
                 Some(mut shutdown) => {
-                    let (_bound, server) = warp::serve(routes_with_cors)
-                        .bind_with_graceful_shutdown(addr, async move {
+                    warp::serve(routes_with_cors)
+                        .bind(addr)
+                        .boxed()
+                        .await
+                        .graceful(async move {
                             // A dropped sender also means: close now.
                             while !*shutdown.borrow() {
                                 if shutdown.changed().await.is_err() {
                                     break;
                                 }
                             }
-                        });
-                    server.await;
+                        })
+                        .run()
+                        .boxed()
+                        .await;
                 }
                 None => {
-                    warp::serve(routes_with_cors).run(addr).await;
+                    warp::serve(routes_with_cors).run(addr).boxed().await;
                 }
             }
 
@@ -1857,8 +1875,8 @@ impl WebServer for WarpServer {
     }
 
     fn shutdown_handle(&self) -> Option<Box<dyn ServerShutdownHandle>> {
-        // Warp doesn't provide easy shutdown handles in this simple implementation
-        // For production, we'd need to use warp::Server::bind_with_graceful_shutdown
+        // The managed application supplies its shutdown receiver before startup;
+        // Warp's graceful serving future consumes it directly.
         None
     }
 }
@@ -1882,6 +1900,175 @@ mod tests {
             max_body_size_bytes: 10,
             request_timeout: None,
             control_plane_auth: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_flow_totals_reach_sse_independently_of_metrics_reporting() {
+        use obzenflow_adapters::monitoring::MetricsReadModel;
+        use obzenflow_core::event::{PipelineLifecycleEvent, SystemEventType};
+        use obzenflow_dsl::{flow, sink, source, FlowDefinition};
+        use obzenflow_runtime::run_context::FlowBuildContext;
+        use obzenflow_runtime::stages::sink::SinkTyped;
+
+        #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+        struct Item(u64);
+        impl obzenflow_core::TypedPayload for Item {
+            const EVENT_TYPE: &'static str = "metrics_reporting.terminal_proof";
+        }
+
+        let enabled_modes = if cfg!(feature = "prometheus") {
+            vec![false, true]
+        } else {
+            vec![false]
+        };
+        for enabled in enabled_modes {
+            let model = enabled.then(|| Arc::new(MetricsReadModel::default()));
+            let definition = FlowDefinition::materialize(move |_| {
+                let input = obzenflow_adapters::sources::finite(vec![Item(1), Item(2), Item(3)]);
+                let output = SinkTyped::new(|_: Item| async {}).idempotent();
+                Ok(flow! {
+                    name: "terminal_reporting_proof",
+                    journals: crate::journal::memory_journals(),
+                    stages: {
+                        input = source!(Item => input);
+                        output = sink!(Item => output);
+                    },
+                    topology: { input |> output; }
+                })
+            });
+            let mut context = FlowBuildContext::for_tests();
+            if let Some(model) = model {
+                context = context.with_metrics_exporter(model);
+            }
+            let handle = definition.build(context).await.unwrap();
+            let journal = handle.system_journal().unwrap();
+            handle.run().await.unwrap();
+
+            let mut reader = journal.reader_from(0).await.unwrap();
+            let cursor = reader.next().await.unwrap().unwrap().event.id;
+            let mut duration = None;
+            while let Some(envelope) = reader.next().await.unwrap() {
+                if let SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Completed {
+                    duration_ms,
+                    metrics,
+                }) = &envelope.event.event
+                {
+                    assert_eq!(metrics.events_in_total, 3);
+                    assert_eq!(metrics.events_out_total, 3);
+                    assert_eq!(metrics.errors_total, 0);
+                    duration = Some(serde_json::to_value(duration_ms).unwrap());
+                }
+            }
+            let duration = duration.expect("terminal lifecycle fact must exist without a reporter");
+
+            // Resume an attached session's cursor after the entire finite run has
+            // completed. No periodic metrics scrape is needed for these totals.
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let mut server = WarpServer::new();
+            server.with_system_journal(journal);
+            server.with_shutdown(shutdown_rx);
+            let filter = server.build_filter(test_host_policy()).unwrap();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let _ = shutdown_tx.send(true);
+            });
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                warp::test::request()
+                    .method("GET")
+                    .path("/api/flow/events")
+                    .header("Last-Event-ID", cursor.to_string())
+                    .reply(&filter),
+            )
+            .await
+            .expect("terminal SSE stream must close");
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.headers()["content-type"], "text/event-stream");
+            let body = std::str::from_utf8(response.body()).unwrap();
+            let terminal = body
+                .split("\n\n")
+                .find(|frame| frame.contains("\"event_type\":\"flow_completed\""))
+                .expect("SSE must carry the journaled terminal event");
+            assert!(terminal.contains("event:flow_lifecycle\n"));
+            let payload: serde_json::Value = serde_json::from_str(
+                terminal
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data:"))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(payload["duration_ms"], duration);
+            assert_eq!(
+                payload["metrics"],
+                serde_json::json!({
+                    "events_in_total": 3,
+                    "events_out_total": 3,
+                    "errors_total": 0,
+                })
+            );
+        }
+    }
+
+    #[cfg(feature = "prometheus")]
+    #[tokio::test]
+    async fn reporting_enablement_preserves_the_metrics_wire_contract() {
+        use obzenflow_adapters::monitoring::MetricsReadModel;
+        use obzenflow_core::event::context::StageType;
+        use obzenflow_core::metrics::MetricsSnapshotExporter;
+        use obzenflow_core::metrics::{AppMetricsSnapshot, StageMetadata};
+
+        // The host's method-first filters return 405 for an unregistered path.
+        // Preserve that existing behavior when metrics reporting is disabled.
+        for (enabled, expected_status) in [(true, 200), (false, 405)] {
+            let model = enabled.then(|| Arc::new(MetricsReadModel::default()));
+            let stage = obzenflow_core::StageId::new();
+            if let Some(exporter) = &model {
+                let mut app = AppMetricsSnapshot::default();
+                app.pipeline_state = "Running".into();
+                app.stage_metadata.insert(
+                    stage,
+                    StageMetadata {
+                        name: "quoted\"stage\\name\nline".into(),
+                        flow_name: "wire".into(),
+                        stage_type: StageType::Transform,
+                        reference_mode: None,
+                        flow_id: None,
+                    },
+                );
+                app.event_counts.insert(stage, 17);
+                exporter.publish_app_snapshot(app);
+            }
+            let mut server = WarpServer::new();
+            if let Some(model) = model {
+                let endpoint = crate::web::endpoints::PrometheusMetricsEndpoint::new(model);
+                server.register_endpoint(Box::new(endpoint)).unwrap();
+            }
+            let filter = server.build_filter(test_host_policy()).unwrap();
+            let response = warp::test::request()
+                .method("GET")
+                .path("/metrics")
+                .reply(&filter)
+                .await;
+            assert_eq!(response.status(), expected_status);
+            if expected_status == 200 {
+                assert_eq!(
+                    response.headers()["content-type"],
+                    "text/plain; version=0.0.4; charset=utf-8"
+                );
+                let text = std::str::from_utf8(response.body()).unwrap();
+                assert!(text.contains("# TYPE obzenflow_events_total counter\n"));
+                assert!(text.contains(&format!("obzenflow_events_total{{flow=\"wire\",stage=\"quoted\\\"stage\\\\name\\nline\",stage_id=\"{stage}\"}} 17\n")));
+                assert!(text.contains("obzenflow_pipeline_state{state=\"Running\"} 1\n"));
+                assert_eq!(text.matches("# TYPE obzenflow_build_info gauge").count(), 1);
+                let post = warp::test::request()
+                    .method("POST")
+                    .path("/metrics")
+                    .body("")
+                    .reply(&filter)
+                    .await;
+                assert_eq!(post.status(), 405);
+            }
         }
     }
 

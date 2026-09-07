@@ -80,7 +80,7 @@ The full catalog with grouped commands and code pointers is in the
 cargo run -p obzenflow --example product_catalog_enrichment
 
 # End-to-end HTTP service: ingress, joins, projections, /metrics
-cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server
+cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host
 
 # Live AI inference
 cargo run -p obzenflow --example one_shot_inference_demo --features ai -- \
@@ -91,7 +91,7 @@ cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai post
   --config examples/hn_ai_digest_demo/obzenflow.toml
 ```
 
-No features are enabled by default. `--features obzenflow_infra/warp-server` enables the HTTP server and web endpoints, `--features http-pull` enables HTTP pull sources, and `--features postgres` enables the PostgreSQL sink. PostgreSQL applications accept an externally supplied `OBZENFLOW_POSTGRES_URL`; they do not depend on repository tooling to launch the backing service.
+No features are enabled by default. Ordinary launches start neither an HTTP host nor metrics reporting. `--features web-host` compiles the Warp host; configuration must explicitly enable it. Hosted Prometheus reporting additionally needs `--features prometheus`, `[server] enabled = true`, and `[metrics] enabled = true`. The `studio` capability includes both, and `studio.enabled = true` supplies omitted host and metrics defaults while rejecting explicit conflicts. Compiling capabilities alone activates nothing. Prometheus is the supported reporting format; use `metrics.enabled` without an `exporter` selector. Additional providers require a community request and a separate design. `--features http-pull` enables HTTP pull sources, and `--features postgres` enables the PostgreSQL sink. PostgreSQL applications accept an externally supplied `OBZENFLOW_POSTGRES_URL`; they do not depend on repository tooling to launch the backing service.
 
 ## Project organization
 

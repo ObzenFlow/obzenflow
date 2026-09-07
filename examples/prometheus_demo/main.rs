@@ -15,12 +15,12 @@
 //! **FLOWIP-080j Update**: Replaced 59-line EventCounter StatefulHandler with ReduceTyped
 //! **FLOWIP-082a Update**: Added TypedPayload with EVENT_TYPE and SCHEMA_VERSION constants
 //!
-//! Run with: cargo run -p obzenflow --example prometheus_demo --features obzenflow_infra/warp-server
+//! Run with: cargo run -p obzenflow --example prometheus_demo --features prometheus,web-host
 //!
 //! Event volume is operator-tunable via `PROMETHEUS_EVENT_COUNT` (default
 //! 100000), so varying the load needs no code change.
 //!
-//! The default startup config starts the web server with:
+//! This example explicitly opts into hosting and monitoring through its config:
 //! - /metrics endpoint for Prometheus metrics (framework-level metrics)
 //! - /api/topology endpoint for flow structure
 //! - /health and /ready endpoints for monitoring
@@ -178,7 +178,7 @@ fn main() -> Result<()> {
             )
             .section(
                 "Usage",
-                "Default:     cargo run --package obzenflow --example prometheus_demo --features obzenflow_infra/warp-server\nVolume:      PROMETHEUS_EVENT_COUNT=1000 cargo run --package obzenflow --example prometheus_demo --features obzenflow_infra/warp-server\nCustom port: cargo run --package obzenflow --example prometheus_demo --features obzenflow_infra/warp-server -- --server-port 8080",
+                "Default:     cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host\nVolume:      PROMETHEUS_EVENT_COUNT=1000 cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host\nCustom port: cargo run --package obzenflow --example prometheus_demo --features prometheus,web-host -- --server-port 8080",
             ),
     )
     .with_footer(|outcome| {
@@ -240,10 +240,6 @@ fn main() -> Result<()> {
                     println!("   59-line EventCounter StatefulHandler → ReduceTyped helper");
                     println!("   Type-safe accumulation with zero ChainEvent manipulation!");
                     println!();
-                    println!("📈 To view framework-level Prometheus metrics:");
-                    println!("   1. Run the example with the default config");
-                    println!("   2. Visit http://localhost:9090/metrics");
-                    println!("   3. See detailed per-stage metrics, errors, latencies, etc.");
                     println!("=====================================");
                 })
                 .idempotent();

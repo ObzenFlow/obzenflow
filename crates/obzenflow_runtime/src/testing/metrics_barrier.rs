@@ -151,7 +151,7 @@ impl MetricsBarrier {
     /// Wait until the metrics aggregator has published its drain-complete
     /// signal. Resolves on either `MetricsCoordination::Drained` or
     /// `MetricsCoordination::Shutdown` to match the existing
-    /// `FlowHandle::run_with_metrics` polling contract.
+    /// historical drain polling contract.
     pub async fn wait_for_drained(&self) -> Result<(), MetricsBarrierError> {
         let mut scan_from = self.baseline_offset;
         loop {
@@ -385,7 +385,7 @@ mod tests {
             flow_effective_config: None,
         };
 
-        let handle = FlowHandle::new(standard_handle, None, extras);
+        let handle = FlowHandle::new(standard_handle, extras);
         FlowTestHarness::from_parts(handle, Vec::new()).expect("empty stage journals")
     }
 
@@ -416,7 +416,7 @@ mod tests {
             flow_effective_config: None,
         };
 
-        let handle = FlowHandle::new(standard_handle, None, extras);
+        let handle = FlowHandle::new(standard_handle, extras);
         FlowTestHarness::from_parts(handle, Vec::new()).expect("empty stage journals")
     }
 

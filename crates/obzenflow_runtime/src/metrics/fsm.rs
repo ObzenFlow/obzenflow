@@ -163,7 +163,7 @@ pub struct MetricsAggregatorContext {
     /// Whether to include error journals in metrics collection
     pub include_error_journals: bool,
 
-    pub exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
+    pub metrics_exporter: Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>,
     pub metrics_store: MetricsStore,
     pub export_interval_secs: u64,
     pub system_id: SystemId,
@@ -245,7 +245,7 @@ pub struct MetricsStore {
     // Edge liveness state (FLOWIP-063e).
     //
     // Gauge semantics: 1=Healthy, 0.5=Idle, 0.25=Suspect, 0=Stalled.
-    pub edge_liveness_state: HashMap<(StageId, StageId), f64>,
+    pub edge_liveness_state: HashMap<(StageId, StageId), obzenflow_core::event::EdgeLivenessState>,
 
     // Hosted web surface metrics (FLOWIP-093a)
     pub http_surface_metrics:
@@ -421,7 +421,7 @@ impl MetricsAggregatorContext {
     pub(crate) async fn new(
         inputs: crate::metrics::inputs::MetricsInputs,
         system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
-        exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
+        metrics_exporter: Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>,
         export_interval_secs: u64,
         system_id: SystemId,
         stage_metadata: HashMap<StageId, StageMetadata>,
@@ -720,7 +720,7 @@ impl MetricsAggregatorContext {
             stage_error_journals,
             backpressure_registry: inputs.backpressure_registry.clone(),
             include_error_journals: true, // Default to true per FLOWIP-082g
-            exporter,
+            metrics_exporter,
             metrics_store,
             export_interval_secs,
             system_id,
@@ -1084,7 +1084,7 @@ impl MetricsAggregatorContext {
 
         // FLOWIP-128a B5: re-key the boundary members' contract facts to the
         // composite boundary. Pure relabel of the contract_metrics set just
-        // built; the exporter renders these as composite contract families.
+        // built; reporting projections render these as composite contract families.
         use obzenflow_core::metrics::CompositeContract;
         snapshot.composite_contracts = self
             .composite_boundaries
@@ -1368,16 +1368,6 @@ fn normalize_circuit_breaker_state_label(state: &str) -> Option<&'static str> {
     }
 }
 
-fn edge_liveness_state_gauge_value(state: &obzenflow_core::event::EdgeLivenessState) -> f64 {
-    match state {
-        obzenflow_core::event::EdgeLivenessState::Healthy => 1.0,
-        obzenflow_core::event::EdgeLivenessState::Idle => 0.5,
-        obzenflow_core::event::EdgeLivenessState::Suspect => 0.25,
-        obzenflow_core::event::EdgeLivenessState::Stalled => 0.0,
-        obzenflow_core::event::EdgeLivenessState::Recovered => 1.0,
-    }
-}
-
 #[async_trait::async_trait]
 impl FsmAction for MetricsAggregatorAction {
     type Context = MetricsAggregatorContext;
@@ -1578,7 +1568,7 @@ impl FsmAction for MetricsAggregatorAction {
                     } => {
                         store
                             .edge_liveness_state
-                            .insert((*upstream, *reader), edge_liveness_state_gauge_value(state));
+                            .insert((*upstream, *reader), *state);
                     }
                     obzenflow_core::event::SystemEventType::HttpSurfaceSnapshot { snapshot } => {
                         for route in &snapshot.routes {
@@ -1667,7 +1657,7 @@ impl FsmAction for MetricsAggregatorAction {
                     }
 
                     // Best-effort: infer join reference mode from the observed FSM state.
-                    // This enables exporters to attach a `reference_mode` label for joins
+                    // This enables reporting projections to attach a `reference_mode` label for joins
                     // without requiring the pipeline to plumb join config into metrics metadata.
                     if meta.reference_mode.is_none() && meta.stage_type == StageType::Join {
                         if let Some(runtime_ctx) = &event.runtime_context {
@@ -2008,16 +1998,8 @@ impl FsmAction for MetricsAggregatorAction {
                     }
                 }
 
-                if let Some(exporter) = &ctx.exporter {
-                    let snapshot = ctx.build_app_metrics_snapshot();
-                    tracing::debug!("Pushing metrics snapshot to exporter");
-
-                    if let Err(e) = exporter.update_app_metrics(snapshot) {
-                        tracing::warn!("Failed to export metrics: {}", e);
-                    } else {
-                        tracing::debug!("Successfully exported metrics");
-                    }
-                }
+                ctx.metrics_exporter
+                    .publish_app_snapshot(ctx.build_app_metrics_snapshot());
 
                 // FLOWIP-059c: Emit a metrics watermark event so SSE clients can "pull-on-push"
                 // for `/metrics` refresh and deterministic freshness gating.
@@ -2884,7 +2866,7 @@ mod tests {
             stage_error_journals: HashMap::new(),
             backpressure_registry: None,
             include_error_journals: true,
-            exporter: None,
+            metrics_exporter: Arc::new(crate::metrics::RecordingSnapshots::default()),
             metrics_store: store,
             export_interval_secs: 10,
             system_id: obzenflow_core::SystemId::new(),

@@ -43,14 +43,6 @@ impl StartupMode {
     }
 }
 
-/// The configured metrics exporter backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetricsExporterKind {
-    Prometheus,
-    Console,
-    Noop,
-}
-
 /// The operator's archive verb (FLOWIP-120n): bounded reconstruction that
 /// drains, or catch-up that continues live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,24 +67,6 @@ pub struct ReplayBootstrap {
     pub verb: ReplayVerb,
 }
 
-/// Host-level metrics settings used during flow build and execution.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetricsBootstrap {
-    /// When false, metrics are disabled and no exporter is started.
-    pub enabled: bool,
-    /// Which exporter implementation to use when `enabled` is true.
-    pub exporter: MetricsExporterKind,
-}
-
-impl Default for MetricsBootstrap {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            exporter: MetricsExporterKind::Prometheus,
-        }
-    }
-}
-
 /// A resolved bootstrap snapshot shared across infra, DSL, adapters, and runtime.
 ///
 /// These settings are resolved by the hosting shell (typically `FlowApplication`)
@@ -110,8 +84,6 @@ pub struct BootstrapConfig {
     /// The host opens it at config resolution (the concrete opener lives in
     /// infra, below the DSL in the dependency graph) and the build consumes it.
     pub replay_archive: Option<Arc<dyn ReplayArchive>>,
-    /// Metrics bootstrap configuration.
-    pub metrics: MetricsBootstrap,
 }
 
 impl Default for BootstrapConfig {
@@ -121,7 +93,6 @@ impl Default for BootstrapConfig {
             startup_mode: StartupMode::Auto,
             replay: None,
             replay_archive: None,
-            metrics: MetricsBootstrap::default(),
         }
     }
 }
@@ -133,7 +104,6 @@ impl PartialEq for BootstrapConfig {
         self.shutdown_timeout == other.shutdown_timeout
             && self.startup_mode == other.startup_mode
             && self.replay == other.replay
-            && self.metrics == other.metrics
     }
 }
 
@@ -149,7 +119,6 @@ impl fmt::Debug for BootstrapConfig {
                 "replay_archive",
                 &self.replay_archive.as_ref().map(|_| "<present>"),
             )
-            .field("metrics", &self.metrics)
             .finish()
     }
 }
@@ -254,11 +223,6 @@ pub fn replay_archive() -> Option<Arc<dyn ReplayArchive>> {
     bootstrap_config().replay_archive
 }
 
-/// Metrics bootstrap settings.
-pub fn metrics_bootstrap() -> MetricsBootstrap {
-    bootstrap_config().metrics
-}
-
 fn active_install_owner() -> &'static AtomicUsize {
     static ACTIVE_INSTALL: OnceLock<AtomicUsize> = OnceLock::new();
     ACTIVE_INSTALL.get_or_init(|| AtomicUsize::new(0))
@@ -344,7 +308,6 @@ mod tests {
         assert_eq!(bootstrap.shutdown_timeout, Duration::from_secs(30));
         assert_eq!(bootstrap.startup_mode, StartupMode::Auto);
         assert_eq!(bootstrap.replay, None);
-        assert_eq!(bootstrap.metrics, MetricsBootstrap::default());
     }
 
     #[test]
@@ -355,10 +318,6 @@ mod tests {
             startup_mode: StartupMode::Auto,
             replay: None,
             replay_archive: None,
-            metrics: MetricsBootstrap {
-                enabled: true,
-                exporter: MetricsExporterKind::Console,
-            },
         };
         set_bootstrap_config(baseline.clone());
 
@@ -373,15 +332,10 @@ mod tests {
                     verb: ReplayVerb::Replay,
                 }),
                 replay_archive: None,
-                metrics: MetricsBootstrap {
-                    enabled: false,
-                    exporter: MetricsExporterKind::Noop,
-                },
             });
 
             assert_eq!(shutdown_timeout(), Duration::from_secs(5));
             assert!(startup_mode_manual());
-            assert!(!metrics_bootstrap().enabled);
         }
 
         assert_eq!(bootstrap_config(), baseline);

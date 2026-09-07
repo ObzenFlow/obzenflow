@@ -49,7 +49,7 @@ anyhow = { workspace = true }
 matchit = { workspace = true }
 
 # Web frameworks (optional)
-warp = { workspace = true, optional = true }
+warp = { workspace = true, features = ["server"], optional = true }
 bytes = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }
 
@@ -68,15 +68,16 @@ tiktoken-rs = { version = "0.9", optional = true }
 default = []
 prometheus = []
 warp-server = ["dep:warp", "dep:bytes", "dep:tokio-stream"]
-console = ["dep:console-subscriber"]
+tokio-console = ["dep:console-subscriber"]
 reqwest-client = ["dep:reqwest", "dep:rustls-native-certs"]
 # FLOWIP-114d: Studio phonebook registration (heartbeat client + [studio] config).
-studio-registration = ["warp-server", "reqwest-client"]
+studio-registration = ["prometheus", "warp-server", "reqwest-client"]
 ai-rig = ["reqwest-client", "dep:rig_rs"]
 ai-tiktoken = ["dep:tiktoken-rs"]
 test-support = ["obzenflow_runtime/test-support"]
 
 [dev-dependencies]
+warp = { workspace = true, features = ["test"] }
 # FLOWIP-114o: `test-util` enables `#[tokio::test(start_paused = true)]` for the
 # deterministic emit-interval clock test.
 tokio = { workspace = true, features = ["test-util"] }

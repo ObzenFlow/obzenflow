@@ -150,6 +150,10 @@ impl InlineSink for CompletionSink {
 
 #[tokio::test]
 async fn prometheus_100k_typed_try_map_errors_are_unknown_only() -> Result<()> {
+    let metrics_model =
+        std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+    let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
+        .with_metrics_exporter(metrics_model.clone());
     // Use a dedicated journal directory for this test run.
     let journal_root = std::path::PathBuf::from("target/prometheus_100k_error_kinds_test_journal");
 
@@ -176,19 +180,19 @@ async fn prometheus_100k_typed_try_map_errors_are_unknown_only() -> Result<()> {
             }
         })
     })
-    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .build(metrics_context)
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 
     // Run the flow and obtain the metrics exporter.
-    let metrics_exporter = flow_handle
-        .run_with_metrics()
+    flow_handle
+        .run()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
-        .expect("Metrics exporter should be configured");
+        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?;
+    let metrics_exporter = metrics_model.clone();
 
-    let metrics_text = metrics_exporter
-        .render_metrics()
+    let metrics_text = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
+        .render(&metrics_exporter.snapshot())
         .map_err(|e| anyhow::anyhow!("Failed to render metrics: {e}"))?;
 
     // Extract obzenflow_errors_total for stage="error_processor" by error_kind.
