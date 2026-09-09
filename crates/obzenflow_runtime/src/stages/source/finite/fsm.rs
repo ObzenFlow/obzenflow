@@ -1057,7 +1057,10 @@ pub(crate) mod tests {
                         *ctx.instrumentation.state_entered_at.write().unwrap() = old_entry;
                         let repeated = matches!(initial, $state::Failed(_));
                         let mut fsm = build_fsm(initial);
-                        let _actions = fsm.handle($event::Error("failure".into()), &mut ctx).await.unwrap();
+                        let actions = fsm.handle($event::Error("failure".into()), &mut ctx).await.unwrap();
+                        let expected_reason = if repeated { "first" } else { "failure" };
+                        assert_eq!(fsm.state(), &$state::Failed(expected_reason.into()));
+                        assert_eq!(actions.is_empty(), repeated);
                         assert_eq!(ctx.instrumentation.snapshot().fsm_state, "Failed");
                         assert_eq!(*ctx.instrumentation.state_entered_at.read().unwrap() == old_entry, repeated);
                     }

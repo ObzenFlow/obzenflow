@@ -643,7 +643,7 @@ impl StageInstrumentation {
         )
     }
 
-    /// Mirror an accepted FSM state before its transition actions execute.
+    /// Update the state label used in runtime snapshots, without driving the FSM.
     /// Re-observing the same state preserves its original entry time.
     pub fn transition_to_state(&self, new_state: &str) {
         let mut state = self.current_state.write().unwrap();

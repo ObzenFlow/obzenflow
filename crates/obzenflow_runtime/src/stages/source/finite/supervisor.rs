@@ -94,6 +94,8 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         &self,
         initial_state: Self::State,
     ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+        // Construction starts in Created. Entry hooks mirror the engine-assigned
+        // state before the supervisor executes any transition actions.
         fsm! {
             state:   FiniteSourceState<H>;
             event:   FiniteSourceEvent<H>;
@@ -102,9 +104,8 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             initial: initial_state;
 
             state FiniteSourceState::Created {
-                on FiniteSourceEvent::Initialize => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, ctx: &mut FiniteSourceContext<H>| {
+                on FiniteSourceEvent::Initialize => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     Box::pin(async move {
-                        ctx.instrumentation.transition_to_state("Initialized");
                         Ok(Transition {
                             next_state: FiniteSourceState::Initialized,
                             actions: vec![FiniteSourceAction::AllocateResources],
@@ -112,7 +113,7 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     })
                 };
 
-                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, ctx: &mut FiniteSourceContext<H>| {
+                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         let error_msg = if let FiniteSourceEvent::Error(msg) = event {
@@ -121,7 +122,6 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                             "Unknown error".to_string()
                         };
 
-                        ctx.instrumentation.transition_to_state("Failed");
                         Ok(Transition {
                             next_state: FiniteSourceState::Failed(error_msg.clone()),
                             actions: vec![
@@ -134,9 +134,15 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             }
 
             state FiniteSourceState::Initialized {
-                on FiniteSourceEvent::Ready => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, ctx: &mut FiniteSourceContext<H>| {
+                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
                     Box::pin(async move {
-                        ctx.instrumentation.transition_to_state("WaitingForGun");
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
+                on FiniteSourceEvent::Ready => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move {
                         Ok(Transition {
                             next_state: FiniteSourceState::WaitingForGun,
                             actions: vec![],
@@ -144,7 +150,7 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     })
                 };
 
-                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, ctx: &mut FiniteSourceContext<H>| {
+                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         let error_msg = if let FiniteSourceEvent::Error(msg) = event {
@@ -153,7 +159,6 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                             "Unknown error".to_string()
                         };
 
-                        ctx.instrumentation.transition_to_state("Failed");
                         Ok(Transition {
                             next_state: FiniteSourceState::Failed(error_msg.clone()),
                             actions: vec![
@@ -166,9 +171,15 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             }
 
             state FiniteSourceState::WaitingForGun {
-                on FiniteSourceEvent::Start => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, ctx: &mut FiniteSourceContext<H>| {
+                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
                     Box::pin(async move {
-                        ctx.instrumentation.transition_to_state("Running");
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
+                on FiniteSourceEvent::Start => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move {
                         Ok(Transition {
                             next_state: FiniteSourceState::Running,
                             actions: vec![FiniteSourceAction::PublishRunning],
@@ -176,7 +187,7 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     })
                 };
 
-                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, ctx: &mut FiniteSourceContext<H>| {
+                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         let error_msg = if let FiniteSourceEvent::Error(msg) = event {
@@ -185,7 +196,6 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                             "Unknown error".to_string()
                         };
 
-                        ctx.instrumentation.transition_to_state("Failed");
                         Ok(Transition {
                             next_state: FiniteSourceState::Failed(error_msg.clone()),
                             actions: vec![
@@ -198,9 +208,15 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             }
 
             state FiniteSourceState::Running {
-                on FiniteSourceEvent::Completed => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, ctx: &mut FiniteSourceContext<H>| {
+                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
                     Box::pin(async move {
-                        ctx.instrumentation.transition_to_state("Draining");
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
+                on FiniteSourceEvent::Completed => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move {
                         Ok(Transition {
                             next_state: FiniteSourceState::Draining,
                             actions: vec![],
@@ -208,9 +224,8 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     })
                 };
 
-                on FiniteSourceEvent::BeginDrain => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, ctx: &mut FiniteSourceContext<H>| {
+                on FiniteSourceEvent::BeginDrain => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     Box::pin(async move {
-                        ctx.instrumentation.transition_to_state("Draining");
                         Ok(Transition {
                             next_state: FiniteSourceState::Draining,
                             actions: vec![],
@@ -218,11 +233,10 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     })
                 };
 
-                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, ctx: &mut FiniteSourceContext<H>| {
+                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         if let FiniteSourceEvent::Error(msg) = event {
-                            ctx.instrumentation.transition_to_state("Failed");
                             Ok(Transition {
                                 next_state: FiniteSourceState::Failed(msg.clone()),
                                 actions: vec![
@@ -240,9 +254,15 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             }
 
             state FiniteSourceState::Draining {
-                on FiniteSourceEvent::Completed => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, ctx: &mut FiniteSourceContext<H>| {
+                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
                     Box::pin(async move {
-                        ctx.instrumentation.transition_to_state("Drained");
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
+                on FiniteSourceEvent::Completed => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move {
                         Ok(Transition {
                             next_state: FiniteSourceState::Drained,
                             actions: vec![
@@ -254,7 +274,7 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     })
                 };
 
-                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, ctx: &mut FiniteSourceContext<H>| {
+                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         let error_msg = if let FiniteSourceEvent::Error(msg) = event {
@@ -263,7 +283,6 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                             "Unknown error".to_string()
                         };
 
-                        ctx.instrumentation.transition_to_state("Failed");
                         Ok(Transition {
                             next_state: FiniteSourceState::Failed(error_msg.clone()),
                             actions: vec![
@@ -276,7 +295,14 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             }
 
             state FiniteSourceState::Drained {
-                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, ctx: &mut FiniteSourceContext<H>| {
+                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
+                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         let error_msg = if let FiniteSourceEvent::Error(msg) = event {
@@ -285,7 +311,6 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                             "Unknown error".to_string()
                         };
 
-                        ctx.instrumentation.transition_to_state("Failed");
                         Ok(Transition {
                             next_state: FiniteSourceState::Failed(error_msg.clone()),
                             actions: vec![
@@ -298,12 +323,18 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             }
 
             state FiniteSourceState::Failed {
-                on FiniteSourceEvent::Error => |state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, ctx: &mut FiniteSourceContext<H>| {
+                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
+                on FiniteSourceEvent::Error => |state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     let state = state.clone();
                     let event = event.clone();
                     Box::pin(async move {
                         if let FiniteSourceEvent::Error(_msg) = event {
-                            ctx.instrumentation.transition_to_state(state.variant_name());
                             Ok(Transition {
                                 next_state: state,
                                 actions: vec![],
