@@ -641,20 +641,21 @@ where
             .stalled_since
             .map(|s| DurationMs(now.duration_since(s).as_millis() as u64));
 
-        let progress_event = ChainEventFactory::consumption_progress_event(
-            tracker.writer_id,
-            ConsumptionProgressEventParams {
-                reader_seq: progress_seq,
-                last_event_id: progress_last_event_id,
-                vector_clock: progress_vector_clock.clone(),
-                eof_seen: self.state.is_reader_eof(index),
-                reader_path: JournalPath(progress.stage_id.to_string()),
-                reader_index: JournalIndex(index as u64),
-                advertised_writer_seq: progress.advertised_writer_seq,
-                advertised_vector_clock: progress_vector_clock,
-                stalled_since: stalled_duration,
-            },
-        );
+        let progress_event =
+            tracker.with_owner_context(ChainEventFactory::consumption_progress_event(
+                tracker.writer_id,
+                ConsumptionProgressEventParams {
+                    reader_seq: progress_seq,
+                    last_event_id: progress_last_event_id,
+                    vector_clock: progress_vector_clock.clone(),
+                    eof_seen: self.state.is_reader_eof(index),
+                    reader_path: JournalPath(progress.stage_id.to_string()),
+                    reader_index: JournalIndex(index as u64),
+                    advertised_writer_seq: progress.advertised_writer_seq,
+                    advertised_vector_clock: progress_vector_clock,
+                    stalled_since: stalled_duration,
+                },
+            ));
 
         match tracker.journal.append(progress_event, None).await {
             Ok(_) => {
@@ -792,11 +793,13 @@ where
                         } = cause
                         {
                             if advertised.0 > reader.0 {
-                                let gap_event = ChainEventFactory::consumption_gap_event(
-                                    tracker.writer_id,
-                                    SeqNo(reader.0 + 1),
-                                    advertised,
-                                    progress.stage_id,
+                                let gap_event = tracker.with_owner_context(
+                                    ChainEventFactory::consumption_gap_event(
+                                        tracker.writer_id,
+                                        SeqNo(reader.0 + 1),
+                                        advertised,
+                                        progress.stage_id,
+                                    ),
                                 );
                                 if let Err(e) = tracker.journal.append(gap_event, None).await {
                                     tracing::error!(
@@ -827,12 +830,13 @@ where
 
                 if advertised.0 > progress.reader_seq.0 {
                     // Missing events
-                    let gap_event = ChainEventFactory::consumption_gap_event(
-                        tracker.writer_id,
-                        SeqNo(progress.reader_seq.0 + 1),
-                        advertised,
-                        progress.stage_id,
-                    );
+                    let gap_event =
+                        tracker.with_owner_context(ChainEventFactory::consumption_gap_event(
+                            tracker.writer_id,
+                            SeqNo(progress.reader_seq.0 + 1),
+                            advertised,
+                            progress.stage_id,
+                        ));
                     if let Err(e) = tracker.journal.append(gap_event, None).await {
                         tracing::error!(
                             target: "flowip-105",
@@ -883,13 +887,14 @@ where
             if let Some(EventViolationCause::SeqDivergence { advertised, reader }) =
                 aggregate_failure_reason.clone()
             {
-                let violation_event = ChainEventFactory::at_least_once_violation_event(
-                    tracker.writer_id,
-                    progress.stage_id,
-                    EventViolationCause::SeqDivergence { advertised, reader },
-                    progress.reader_seq,
-                    progress.advertised_writer_seq,
-                );
+                let violation_event =
+                    tracker.with_owner_context(ChainEventFactory::at_least_once_violation_event(
+                        tracker.writer_id,
+                        progress.stage_id,
+                        EventViolationCause::SeqDivergence { advertised, reader },
+                        progress.reader_seq,
+                        progress.advertised_writer_seq,
+                    ));
 
                 if let Err(e) = tracker.journal.append(violation_event, None).await {
                     tracing::error!(
@@ -905,7 +910,7 @@ where
         }
 
         // Emit final event
-        let final_event = ChainEventFactory::consumption_final_event(
+        let final_event = tracker.with_owner_context(ChainEventFactory::consumption_final_event(
             tracker.writer_id,
             ConsumptionFinalEventParams {
                 pass,
@@ -918,7 +923,7 @@ where
                 advertised_vector_clock: progress_vector_clock,
                 failure_reason,
             },
-        );
+        ));
 
         let final_append_ok = match tracker.journal.append(final_event, None).await {
             Ok(_) => true,
@@ -1023,11 +1028,12 @@ where
                 let stall_since_candidate = Some(last);
                 let stalled_duration = DurationMs(elapsed);
 
-                let stalled_event = ChainEventFactory::reader_stalled_event(
-                    tracker.writer_id,
-                    progress.stage_id,
-                    stalled_duration,
-                );
+                let stalled_event =
+                    tracker.with_owner_context(ChainEventFactory::reader_stalled_event(
+                        tracker.writer_id,
+                        progress.stage_id,
+                        stalled_duration,
+                    ));
 
                 let stalled_append_ok = match tracker.journal.append(stalled_event, None).await {
                     Ok(_) => true,

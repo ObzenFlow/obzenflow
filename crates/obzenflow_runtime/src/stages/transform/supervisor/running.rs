@@ -378,7 +378,8 @@ async fn dispatch_running_inner<
                                 }
                             }
 
-                            sup.forward_control_event_guarded(&envelope).await?;
+                            sup.forward_control_event_guarded(&envelope, &ctx.stage_name)
+                                .await?;
                             EventLoopDirective::Continue
                         }
                         ControlAction::ForwardAndDrain => {
@@ -402,7 +403,8 @@ async fn dispatch_running_inner<
                                 event_type = envelope.event.event_type(),
                                 "Transform stage transitioning to draining"
                             );
-                            sup.forward_control_event_guarded(&envelope).await?;
+                            sup.forward_control_event_guarded(&envelope, &ctx.stage_name)
+                                .await?;
                             EventLoopDirective::Transition(TransformEvent::ReceivedEOF)
                         }
                         ControlAction::BufferAtEntryPoint { is_drain } => {
@@ -760,7 +762,8 @@ async fn dispatch_running_inner<
                 }
                 _ => {
                     // Other content types: forward them.
-                    sup.forward_control_event(&envelope).await?;
+                    sup.forward_control_event(&envelope, &ctx.stage_name)
+                        .await?;
                     EventLoopDirective::Continue
                 }
             };

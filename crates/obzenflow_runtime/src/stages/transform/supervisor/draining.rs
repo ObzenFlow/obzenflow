@@ -177,7 +177,8 @@ async fn dispatch_draining_inner<
 
                 // Do not forward EOF again during draining; it is forwarded after drain completes.
                 if !envelope.event.is_eof() {
-                    sup.forward_control_event_guarded(&envelope).await?;
+                    sup.forward_control_event_guarded(&envelope, &ctx.stage_name)
+                        .await?;
                 }
 
                 return Ok(EventLoopDirective::Continue);

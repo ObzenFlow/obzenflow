@@ -11,3 +11,7 @@ test_harness|crates/obzenflow_dsl/src/dsl/stage_descriptor.rs|AsyncFiniteSourceH
 test_harness|crates/obzenflow_dsl/src/dsl/stage_descriptor.rs|AsyncFiniteSourceHandler|DummyAsyncFiniteSourceDisabled
 test_harness|crates/obzenflow_dsl/src/dsl/stage_descriptor.rs|AsyncInfiniteSourceHandler|DummyAsyncInfiniteSourceDefault
 test_harness|crates/obzenflow_dsl/src/dsl/stage_descriptor.rs|AsyncInfiniteSourceHandler|DummyAsyncInfiniteSourceConfigured
+# FSM-only unit fixture shared by the four source instrumentation transition proofs.
+test_harness|crates/obzenflow_runtime/src/stages/source/finite/fsm.rs|AsyncFiniteSourceHandler|DummySource
+test_harness|crates/obzenflow_runtime/src/stages/source/finite/fsm.rs|InfiniteSourceHandler|DummySource
+test_harness|crates/obzenflow_runtime/src/stages/source/finite/fsm.rs|AsyncInfiniteSourceHandler|DummySource

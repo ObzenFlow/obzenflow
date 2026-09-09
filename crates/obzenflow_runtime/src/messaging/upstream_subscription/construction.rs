@@ -14,6 +14,7 @@ use crate::contracts::ContractChain;
 use crate::control_plane::NoControlPlane;
 use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
 use async_trait::async_trait;
+use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::journal::journal_error::JournalError;
@@ -406,6 +407,16 @@ where
         Self::new_with_names("unknown_owner", &with_names).await
     }
 
+    /// Attach the consuming stage's context before a framework subscription is polled.
+    /// Contracts must already be enabled; public construction keeps its existing default.
+    pub(crate) fn with_contract_flow_context(mut self, owner: FlowContext) -> Self {
+        self.contract_tracker
+            .as_mut()
+            .expect("contract flow context requires contract wiring")
+            .flow_context = Some(owner);
+        self
+    }
+
     /// Enable contract emission for at-least-once delivery guarantees
     pub fn with_contracts(mut self, wiring: ContractsWiring) -> Self {
         let ContractsWiring {
@@ -428,6 +439,7 @@ where
             system_journal,
             reader_stage,
             receipt_aware_progress: include_delivery_contract,
+            flow_context: None,
             output_events_written: SeqNo(0),
         });
 

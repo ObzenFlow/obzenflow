@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use crate::control_plane::ControlPlaneProvider;
+use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::system_event::{SystemEvent, SystemFeedRole};
 use obzenflow_core::event::types::{
@@ -675,8 +676,21 @@ pub struct ContractTracker {
     pub(super) reader_stage: Option<StageId>,
     pub(super) receipt_aware_progress: bool,
 
+    /// Immutable context of the consuming stage for newly authored contract facts.
+    /// Public subscriptions without framework attachment retain their legacy context.
+    pub(super) flow_context: Option<FlowContext>,
+
     /// Tracks output events written by this stage
     pub(super) output_events_written: SeqNo,
+}
+
+impl ContractTracker {
+    pub(super) fn with_owner_context(&self, event: ChainEvent) -> ChainEvent {
+        match &self.flow_context {
+            Some(owner) => event.with_flow_context(owner.clone()),
+            None => event,
+        }
+    }
 }
 
 /// Wiring configuration for enabling contracts on an upstream subscription.

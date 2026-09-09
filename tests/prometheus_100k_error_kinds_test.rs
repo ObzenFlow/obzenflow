@@ -254,6 +254,8 @@ async fn prometheus_100k_typed_try_map_errors_are_unknown_only() -> Result<()> {
 #[test]
 fn prometheus_demo_host_preserves_data_errors_and_delivery_receipts() {
     use obzenflow_core::event::chain_event::ChainEventContent;
+    use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+    use obzenflow_core::WriterId;
     use obzenflow_infra::application::{FlowApplication, LogLevel};
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
@@ -309,11 +311,57 @@ enabled = false
             .collect();
         assert_eq!(terminal, ["completed"]);
 
+        let manifest: Value = serde_json::from_str(
+            &std::fs::read_to_string(archives[0].join("run_manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let mut final_contracts = BTreeMap::<String, usize>::new();
+
         let mut projection: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut data_types = BTreeMap::<String, usize>::new();
         let mut deliveries = 0;
         let mut errors = 0;
         for event in exported_jsonl::chain_events(&jsonl) {
+            if matches!(event.content, ChainEventContent::FlowControl(_)) {
+                let context = &event.flow_context;
+                let stage = &manifest["stages"][&context.stage_name];
+                assert!(
+                    stage.is_object(),
+                    "unknown local stage context: {context:?}"
+                );
+                assert_eq!(context.flow_name, manifest["flow_name"].as_str().unwrap());
+                assert_eq!(context.flow_id, manifest["flow_id"].as_str().unwrap());
+                assert_eq!(
+                    context.stage_id.to_string(),
+                    stage["stage_id"].as_str().unwrap()
+                );
+                assert_eq!(
+                    format!("{:?}", context.stage_type),
+                    stage["stage_type"].as_str().unwrap()
+                );
+                if matches!(
+                    event.content,
+                    ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
+                ) && event.writer_id == WriterId::from(context.stage_id)
+                {
+                    *final_contracts
+                        .entry(context.stage_name.clone())
+                        .or_default() += 1;
+                }
+            }
+            if let Some(runtime) = &event.runtime_context {
+                assert_ne!(
+                    runtime.fsm_state, "Created",
+                    "emitted snapshot from {}",
+                    event.flow_context.stage_name
+                );
+                if event.is_eof()
+                    && event.writer_id == WriterId::from(event.flow_context.stage_id)
+                    && event.flow_context.stage_name == "high_volume_source"
+                {
+                    assert_eq!(runtime.fsm_state, "Drained");
+                }
+            }
             let mut content = serde_json::to_value(&event.content).unwrap();
             match &event.content {
                 ChainEventContent::Data { event_type, .. } => {
@@ -340,6 +388,18 @@ enabled = false
         }
         for rows in projection.values_mut() {
             rows.sort();
+        }
+        for name in [
+            "high_volume_source",
+            "error_processor",
+            "event_counter",
+            "completion_sink",
+            "summary_sink",
+        ] {
+            assert!(
+                final_contracts.get(name).copied().unwrap_or_default() > 0,
+                "{name} must author a final contract with its own context"
+            );
         }
         assert_eq!(
             deliveries, 991,

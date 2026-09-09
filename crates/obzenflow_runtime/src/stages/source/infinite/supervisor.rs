@@ -98,8 +98,9 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             initial: initial_state;
 
             state InfiniteSourceState::Created {
-                on InfiniteSourceEvent::Initialize => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                on InfiniteSourceEvent::Initialize => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Initialized");
                         Ok(Transition {
                             next_state: InfiniteSourceState::Initialized,
                             actions: vec![InfiniteSourceAction::AllocateResources],
@@ -107,7 +108,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                     })
                 };
 
-                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, ctx: &mut InfiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         let error_msg = if let InfiniteSourceEvent::Error(msg) = event {
@@ -116,6 +117,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                             "Unknown error".to_string()
                         };
 
+                        ctx.instrumentation.transition_to_state("Failed");
                         Ok(Transition {
                             next_state: InfiniteSourceState::Failed(error_msg.clone()),
                             actions: vec![
@@ -128,8 +130,9 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             }
 
             state InfiniteSourceState::Initialized {
-                on InfiniteSourceEvent::Ready => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                on InfiniteSourceEvent::Ready => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("WaitingForGun");
                         Ok(Transition {
                             next_state: InfiniteSourceState::WaitingForGun,
                             actions: vec![],
@@ -137,7 +140,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                     })
                 };
 
-                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, ctx: &mut InfiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         let error_msg = if let InfiniteSourceEvent::Error(msg) = event {
@@ -146,6 +149,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                             "Unknown error".to_string()
                         };
 
+                        ctx.instrumentation.transition_to_state("Failed");
                         Ok(Transition {
                             next_state: InfiniteSourceState::Failed(error_msg.clone()),
                             actions: vec![
@@ -158,8 +162,9 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             }
 
             state InfiniteSourceState::WaitingForGun {
-                on InfiniteSourceEvent::Start => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                on InfiniteSourceEvent::Start => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Running");
                         Ok(Transition {
                             next_state: InfiniteSourceState::Running,
                             actions: vec![InfiniteSourceAction::PublishRunning],
@@ -167,7 +172,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                     })
                 };
 
-                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, ctx: &mut InfiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         let error_msg = if let InfiniteSourceEvent::Error(msg) = event {
@@ -176,6 +181,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                             "Unknown error".to_string()
                         };
 
+                        ctx.instrumentation.transition_to_state("Failed");
                         Ok(Transition {
                             next_state: InfiniteSourceState::Failed(error_msg.clone()),
                             actions: vec![
@@ -188,8 +194,9 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             }
 
             state InfiniteSourceState::Running {
-                on InfiniteSourceEvent::BeginDrain => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                on InfiniteSourceEvent::BeginDrain => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Draining");
                         Ok(Transition {
                             next_state: InfiniteSourceState::Draining,
                             actions: vec![],
@@ -197,10 +204,11 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                     })
                 };
 
-                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, ctx: &mut InfiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         if let InfiniteSourceEvent::Error(msg) = event {
+                            ctx.instrumentation.transition_to_state("Failed");
                             Ok(Transition {
                                 next_state: InfiniteSourceState::Failed(msg.clone()),
                                 actions: vec![
@@ -218,8 +226,9 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             }
 
             state InfiniteSourceState::Draining {
-                on InfiniteSourceEvent::Completed => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                on InfiniteSourceEvent::Completed => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Drained");
                         Ok(Transition {
                             next_state: InfiniteSourceState::Drained,
                             actions: vec![
@@ -231,7 +240,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                     })
                 };
 
-                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, ctx: &mut InfiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         let error_msg = if let InfiniteSourceEvent::Error(msg) = event {
@@ -240,6 +249,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                             "Unknown error".to_string()
                         };
 
+                        ctx.instrumentation.transition_to_state("Failed");
                         Ok(Transition {
                             next_state: InfiniteSourceState::Failed(error_msg.clone()),
                             actions: vec![
@@ -252,7 +262,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             }
 
             state InfiniteSourceState::Drained {
-                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, ctx: &mut InfiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         let error_msg = if let InfiniteSourceEvent::Error(msg) = event {
@@ -261,6 +271,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                             "Unknown error".to_string()
                         };
 
+                        ctx.instrumentation.transition_to_state("Failed");
                         Ok(Transition {
                             next_state: InfiniteSourceState::Failed(error_msg.clone()),
                             actions: vec![
@@ -273,11 +284,12 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             }
 
             state InfiniteSourceState::Failed {
-                on InfiniteSourceEvent::Error => |state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                on InfiniteSourceEvent::Error => |state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, ctx: &mut InfiniteSourceContext<H>| {
                     let state = state.clone();
                     let event = event.clone();
                     Box::pin(async move {
                         if let InfiniteSourceEvent::Error(_msg) = event {
+                            ctx.instrumentation.transition_to_state(state.variant_name());
                             Ok(Transition {
                                 next_state: state,
                                 actions: vec![],

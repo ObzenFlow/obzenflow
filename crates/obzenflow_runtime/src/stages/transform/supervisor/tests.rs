@@ -543,6 +543,102 @@ async fn build_transform_harness<
     )
 }
 
+fn assert_forwarded_control(
+    event: &ChainEvent,
+    original: &ChainEvent,
+    stage_id: StageId,
+    name: &str,
+) {
+    assert_eq!(event.id, original.id);
+    assert_eq!(event.writer_id, original.writer_id);
+    assert_eq!(event.flow_context.flow_id, original.flow_context.flow_id);
+    assert_eq!(
+        event.flow_context.flow_name,
+        original.flow_context.flow_name
+    );
+    assert_eq!(event.flow_context.stage_id, stage_id);
+    assert_eq!(event.flow_context.stage_name, name);
+    assert_eq!(
+        event.flow_context.stage_type,
+        obzenflow_core::event::context::StageType::Transform
+    );
+    assert!(event.runtime_context.is_none());
+}
+
+#[tokio::test]
+async fn forwarding_uses_stage_name_in_running_and_draining_without_reauthoring() {
+    use crate::stages::common::supervision::flow_context_factory::make_flow_context;
+    use obzenflow_core::event::context::StageType;
+
+    for state in [TransformState::Running, TransformState::Draining] {
+        let (mut supervisor, mut ctx, _, s, t, _, upstream, data) =
+            build_transform_harness(|_| FilterHandler, 1, 1).await;
+        // The authored stage name deliberately differs from the supervisor's log name.
+        ctx.stage_name = "actual_transform".into();
+        // Draining deliberately defers EOF; a watermark exercises immediate
+        // forwarding in both states without changing that terminal contract.
+        let original = ChainEventFactory::watermark_event(WriterId::from(s), 42, None)
+            .with_flow_context(make_flow_context(
+                "original_flow",
+                "original_run",
+                "source",
+                s,
+                StageType::FiniteSource,
+            ))
+            .with_runtime_context(
+                crate::metrics::instrumentation::StageInstrumentation::new().snapshot(),
+            );
+        upstream.append(original.clone(), None).await.unwrap();
+        supervisor.dispatch_state(&state, &mut ctx).await.unwrap();
+        let rows = data.read_causally_ordered().await.unwrap();
+        let forwarded = rows
+            .iter()
+            .find(|env| env.event.id == original.id)
+            .expect("forwarded watermark");
+        assert_forwarded_control(&forwarded.event, &original, t, &ctx.stage_name);
+        let source_rows = upstream.read_causally_ordered().await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&source_rows[0].event).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn forwarding_fan_out_keeps_independent_local_contexts() {
+    let (left, left_ctx, _, s, t, _, upstream, left_data) =
+        build_transform_harness(|_| FilterHandler, 1, 1).await;
+    let (right, right_ctx, _, _, right_id, _, _, right_data) =
+        build_transform_harness(|_| FilterHandler, 1, 1).await;
+    let original = ChainEventFactory::eof_event(WriterId::from(s), true);
+    let envelope = upstream.append(original.clone(), None).await.unwrap();
+    left.forward_control_event(&envelope, &left_ctx.stage_name)
+        .await
+        .unwrap();
+    right
+        .forward_control_event(&envelope, &right_ctx.stage_name)
+        .await
+        .unwrap();
+    let left_rows = left_data.read_causally_ordered().await.unwrap();
+    let right_rows = right_data.read_causally_ordered().await.unwrap();
+    assert_forwarded_control(
+        &left_rows.last().unwrap().event,
+        &original,
+        t,
+        &left_ctx.stage_name,
+    );
+    assert_forwarded_control(
+        &right_rows.last().unwrap().event,
+        &original,
+        right_id,
+        &right_ctx.stage_name,
+    );
+    assert_eq!(
+        serde_json::to_value(&envelope.event).unwrap(),
+        serde_json::to_value(&original).unwrap()
+    );
+}
+
 #[tokio::test]
 async fn expand_transform_defers_upstream_ack_until_all_outputs_written() {
     let (mut supervisor, mut ctx, registry, s, t, k, upstream_journal, data_journal) =
@@ -664,7 +760,7 @@ async fn typed_try_map_failure_has_identical_running_and_draining_credit_contrac
 
         let upstream_writer = registry.writer(s);
         upstream_writer.reserve(1).expect("seed reserve").commit(1);
-        upstream_journal
+        let original = upstream_journal
             .append(
                 ChainEventFactory::data_event(
                     WriterId::from(s),
@@ -701,6 +797,12 @@ async fn typed_try_map_failure_has_identical_running_and_draining_credit_contrac
             .filter(|envelope| envelope.event.is_data())
             .collect::<Vec<_>>();
         assert_eq!(errors.len(), 1, "one terminal error parent is journalled");
+        assert_eq!(errors[0].event.id, original.event.id);
+        assert_eq!(errors[0].event.writer_id, original.event.writer_id);
+        assert_eq!(
+            serde_json::to_value(&errors[0].event.flow_context).unwrap(),
+            serde_json::to_value(&original.event.flow_context).unwrap()
+        );
         assert!(matches!(
             &errors[0].event.processing_info.status,
             obzenflow_core::event::status::processing_status::ProcessingStatus::Error {
@@ -1205,6 +1307,12 @@ async fn entry_point_buffers_external_eof_until_scc_quiescent() {
         "expected entry point to buffer EOF and continue"
     );
     assert!(ctx.buffered_terminal_envelope.is_some());
+    let original = ctx
+        .buffered_terminal_envelope
+        .as_ref()
+        .unwrap()
+        .event
+        .clone();
     assert!(ctx.external_eofs_received.contains(&s));
 
     let forwarded = ctx
@@ -1238,6 +1346,12 @@ async fn entry_point_buffers_external_eof_until_scc_quiescent() {
         .into_iter()
         .any(|env| env.event.is_eof());
     assert!(forwarded, "expected EOF to be forwarded after quiescence");
+    let rows = ctx.data_journal.read_causally_ordered().await.unwrap();
+    let forwarded = rows
+        .iter()
+        .find(|env| env.event.id == original.id)
+        .expect("released terminal");
+    assert_forwarded_control(&forwarded.event, &original, t, &ctx.stage_name);
 }
 
 #[tokio::test]
@@ -1264,6 +1378,12 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
         "expected entry point to buffer drain and continue"
     );
     assert!(ctx.buffered_terminal_envelope.is_some());
+    let original = ctx
+        .buffered_terminal_envelope
+        .as_ref()
+        .unwrap()
+        .event
+        .clone();
     assert!(ctx.drain_received);
 
     let forwarded = ctx
@@ -1311,6 +1431,12 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
             )
         });
     assert!(forwarded, "expected drain to be forwarded after quiescence");
+    let rows = ctx.data_journal.read_causally_ordered().await.unwrap();
+    let forwarded = rows
+        .iter()
+        .find(|env| env.event.id == original.id)
+        .expect("released terminal");
+    assert_forwarded_control(&forwarded.event, &original, t, &ctx.stage_name);
 }
 
 #[tokio::test]

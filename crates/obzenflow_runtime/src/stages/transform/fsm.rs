@@ -7,6 +7,7 @@
 //! Transforms process events from upstream stages and emit transformed events.
 //! They start processing immediately without waiting for a start signal.
 
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
@@ -768,7 +769,14 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                         obzenflow_fsm::FsmError::HandlerError(format!(
                             "Failed to create subscription: {e}"
                         ))
-                    })?;
+                    })?
+                    .with_contract_flow_context(make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        StageType::Transform,
+                    ));
 
                 ctx.subscription = Some(subscription);
 
