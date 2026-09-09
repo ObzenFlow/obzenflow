@@ -29,10 +29,13 @@ pub mod metrics;
 pub mod pipeline;
 pub mod stages;
 
-/// Cross-crate runtime erasure used by the DSL and low-level supervisor tests.
+/// Internal cross-crate integration for the framework, DSL and supervisor tests.
+/// This namespace is not a supported application API.
 /// Authored joins use [`stages::TypedJoinHandler`] instead.
 #[doc(hidden)]
 pub mod __private {
+    pub mod lifecycle;
+
     // Public macros resolve through this narrow hygiene surface without
     // re-exporting Core itself as an alternate authoring gateway.
     pub use crate::stages::common::handlers::join::{

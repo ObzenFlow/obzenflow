@@ -31,6 +31,7 @@ use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
+use obzenflow_runtime::__private::lifecycle;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
 use obzenflow_runtime::journal::CurrentRunLocator;
 use obzenflow_runtime::prelude::FlowHandle;
@@ -2058,7 +2059,7 @@ impl FlowApplication {
             if flow.is_running() && !flow.current_state().is_terminal() {
                 flow.stop_cancel().await?;
             }
-            flow.wait_for_termination().await
+            lifecycle::wait(flow).await
         };
         match tokio::time::timeout(grace + grace, cleanup).await {
             Ok(Ok(())) => {}

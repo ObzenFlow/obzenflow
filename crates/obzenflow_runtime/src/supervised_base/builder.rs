@@ -175,7 +175,10 @@ pub trait SupervisorHandle: Send + Sync {
 
     /// Wait for the supervisor to complete
     ///
-    /// This consumes the handle and waits for the supervisor task to finish
+    /// This consumes the handle and waits for the supervisor task to finish.
+    /// Standard handles report task completion. `FlowHandle` also interprets
+    /// the acknowledged execution outcome, so a successfully published flow
+    /// failure returns an error even when the supervisor task returned normally.
     async fn wait_for_completion(self) -> Result<(), Self::Error>;
 
     /// Abort the supervisor task and join it before returning.

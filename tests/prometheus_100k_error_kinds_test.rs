@@ -427,6 +427,7 @@ enabled = false
 mod managed_lifecycle_regressions {
     use futures::FutureExt;
     use obzenflow_infra::application::{ApplicationError, FlowApplication, LogLevel};
+    use obzenflow_runtime::__private::lifecycle;
     use obzenflow_runtime::pipeline::FlowHandle;
     use std::sync::{Arc, Mutex};
 
@@ -493,7 +494,7 @@ enabled = false
                 // Preserve cleanup if this regression reintroduces an admission panic.
                 if let Some(flow) = flow.as_ref().filter(|_| still_running) {
                     flow.stop_cancel().await.unwrap();
-                    let _ = flow.wait_for_termination().await;
+                    let _ = lifecycle::wait(flow).await;
                 }
                 assert!(outcome.is_ok(), "CORS admission panicked; materialised supervisor still running: {still_running}");
                 assert!(
@@ -520,7 +521,7 @@ enabled = false
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn public_terminal_wait_in_a_hook_does_not_fail_a_successful_application() {
+    async fn framework_terminal_wait_in_a_hook_does_not_fail_a_successful_application() {
         let dir = tempfile::tempdir_in("target").unwrap();
         let config = dir.path().join("terminal-wait.toml");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -553,8 +554,8 @@ enabled = false
                 let flow = flow.clone();
                 let tx = handle_tx.lock().unwrap().take().unwrap();
                 tokio::spawn(async move {
-                    let mut wait = Box::pin(flow.wait_for_termination());
-                    // Poll the public wait before releasing the handle to this test.
+                    let mut wait = Box::pin(lifecycle::wait(&flow));
+                    // Poll the framework wait before releasing the handle to this test.
                     tokio::select! {
                         biased;
                         result = &mut wait => panic!("flow ended before manual Run: {result:?}"),
@@ -588,7 +589,7 @@ enabled = false
             result.is_ok(),
             "successful flow became an application error: {result:?}"
         );
-        flow.wait_for_termination().await.unwrap();
-        flow.wait_for_termination().await.unwrap();
+        lifecycle::wait(&flow).await.unwrap();
+        lifecycle::wait(&flow).await.unwrap();
     }
 }

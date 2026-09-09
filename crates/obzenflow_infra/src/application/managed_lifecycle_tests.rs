@@ -24,7 +24,7 @@ async fn host_completion_and_panic_remain_primary_across_application_phases() {
     use crate::web::host_error::ManagedWebHostError;
     use futures::FutureExt;
     use obzenflow_core::event::{PipelineLifecycleEvent, SystemEventType};
-    use obzenflow_runtime::pipeline::FlowStopStatus;
+    use obzenflow_runtime::__private::lifecycle::{self, FlowStopStatus};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone, Debug)]
@@ -107,14 +107,14 @@ enabled = false
                     }
                 }
                 if matches!(phase, FaultPhase::Draining | FaultPhase::Cancelling) {
-                    let mut status = flow.stop_status_receiver();
+                    let mut status = lifecycle::observe_stop(&flow);
                     if matches!(phase, FaultPhase::Draining) {
                         flow.stop_graceful(Duration::from_secs(60)).await.unwrap();
                     } else {
                         flow.stop_cancel().await.unwrap();
                     }
                     loop {
-                        let admitted = status.borrow_and_update().clone();
+                        let admitted = status.snapshot();
                         if let FlowStopStatus::Graceful { deadline } = admitted {
                             *task_deadline.lock().unwrap() = Some(deadline);
                             break;
@@ -207,7 +207,7 @@ enabled = false
             }
             if let Some(deadline) = *admitted_deadline.lock().unwrap() {
                 assert!(
-                    matches!(*flow.stop_status_receiver().borrow(), FlowStopStatus::Graceful { deadline: final_deadline } if deadline == final_deadline)
+                    matches!(lifecycle::observe_stop(&flow).snapshot(), FlowStopStatus::Graceful { deadline: final_deadline } if deadline == final_deadline)
                 );
             }
             let events = flow
@@ -425,7 +425,8 @@ enabled = false
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn signals_preserve_published_failures_and_repeatable_observation() {
     use obzenflow_core::event::JournalEvent;
-    use obzenflow_runtime::pipeline::{FlowStopStatus, PipelineEvent};
+    use obzenflow_runtime::__private::lifecycle::{self, FlowStopStatus};
+    use obzenflow_runtime::pipeline::PipelineEvent;
     use obzenflow_runtime::supervised_base::SupervisorHandle;
     for started in [false, true] {
         for on_terminal in ["park", "exit"] {
@@ -495,7 +496,7 @@ enabled = false
                                 .unwrap();
                                 // In park mode, the signal is strictly later than publication
                                 // and this observer cannot consume the application's join.
-                                assert!(flow.wait_for_termination().await.is_err());
+                                assert!(lifecycle::wait(&flow).await.is_err());
                                 let _ = signal_tx.send(signal);
                             }))
                         })],
@@ -521,10 +522,10 @@ enabled = false
                 );
                 assert!(!flow.is_running());
                 assert!(matches!(
-                    *flow.stop_status_receiver().borrow(),
+                    lifecycle::observe_stop(&flow).snapshot(),
                     FlowStopStatus::NotRequested
                 ));
-                assert!(flow.wait_for_termination().await.is_err());
+                assert!(lifecycle::wait(&flow).await.is_err());
                 let events = flow
                     .system_journal()
                     .unwrap()
@@ -627,7 +628,7 @@ enabled = false
                         } else {
                             flow.stop_graceful(Duration::from_secs(2)).await.unwrap();
                         }
-                        flow.wait_for_termination().await.unwrap();
+                        lifecycle::wait(&flow).await.unwrap();
                     })
                 })
                 .run_async(definition);
@@ -645,7 +646,7 @@ enabled = false
                 "finite={finite} cancel={cancel}: {result:?}"
             );
             let flow = observed.lock().unwrap().take().unwrap();
-            flow.wait_for_termination().await.unwrap();
+            lifecycle::wait(&flow).await.unwrap();
             let facts = flow
                 .system_journal()
                 .unwrap()

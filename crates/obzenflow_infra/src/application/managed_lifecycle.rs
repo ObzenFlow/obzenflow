@@ -4,7 +4,8 @@
 
 //! Application coordination over Runtime-owned stop admission and publication.
 
-use obzenflow_runtime::pipeline::{FlowCancelCause, FlowHandle, FlowStopStatus, PipelineState};
+use obzenflow_runtime::__private::lifecycle::{self, FlowCancelCause, FlowStopStatus};
+use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use std::time::{Duration, Instant};
 
@@ -83,7 +84,7 @@ impl StopCommand {
         let result = match self {
             Self::Graceful => flow.stop_graceful(grace).await,
             Self::Cancel => flow.stop_cancel().await,
-            Self::Timeout => flow.stop_cancel_timeout().await,
+            Self::Timeout => lifecycle::cancel_after_timeout(flow).await,
         };
         result.map_err(|error| ApplicationError::FlowExecutionFailed(error.to_string()))
     }
@@ -186,7 +187,7 @@ async fn settle(
     signals: &mut Option<Signals>,
 ) -> Result<(), ApplicationError> {
     // Subscribe before sending. A successful send only means it entered the queue.
-    let mut stop = flow.stop_status_receiver();
+    let mut stop = lifecycle::observe_stop(flow);
     let (mut host_error, mut other_error, command) = match trigger {
         Trigger::Host(error) => (Some(error), None, StopCommand::Graceful),
         Trigger::Startup(error) => (None, Some(error), StopCommand::Graceful),
@@ -196,13 +197,14 @@ async fn settle(
         }
     };
     let current = flow.current_state();
+    let admitted = stop.snapshot();
     let mut pending = if !flow.is_running() || current.is_terminal() {
         None
-    } else if matches!(*stop.borrow(), FlowStopStatus::Graceful { .. })
+    } else if matches!(admitted, FlowStopStatus::Graceful { .. })
         && matches!(command, StopCommand::Cancel)
     {
         Some(StopCommand::Cancel)
-    } else if !matches!(*stop.borrow(), FlowStopStatus::NotRequested) {
+    } else if !matches!(admitted, FlowStopStatus::NotRequested) {
         None
     } else if matches!(
         current,
@@ -218,9 +220,9 @@ async fn settle(
     let not_admitted = Instant::now() + grace;
     let mut timeout_requested = false;
     let mut observation_open = true;
-    let mut publication = Box::pin(flow.wait_for_termination());
+    let mut publication = Box::pin(lifecycle::wait(flow));
     loop {
-        let status = stop.borrow_and_update().clone();
+        let status = stop.snapshot();
         let deadline = completion_deadline(&status, not_admitted, grace);
         let graceful_deadline = match status {
             FlowStopStatus::Graceful { deadline } => deadline,

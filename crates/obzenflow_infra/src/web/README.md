@@ -90,8 +90,10 @@ if the flow finishes successfully or a shutdown signal arrives concurrently. A l
 bounded graceful stop; an existing stop keeps its admitted deadline. Runtime owns stop admission,
 cancellation and terminal journal publication. Repeating a graceful stop changes neither its deadline
 nor its actions. Cancellation is absorbing; timeout cancellation requires an expired graceful stop.
-`FlowHandle::stop_status_receiver()` observes admission, while a successful stop call only queues a
-request.
+The internal `obzenflow_runtime::__private::lifecycle::observe_stop(&flow)` observes admission,
+while a successful stop call only queues a request. Its `StopObserver` supplies owned snapshots
+and cancellation-safe change notification, including explicit observation closure. Tokio watch
+receivers and guards stay inside Runtime; snapshots retain the original admission timestamps.
 
 Runtime retains the first accepted execution failure independently of stop admission. A later
 SIGINT or SIGTERM cannot turn that failure into successful application exit or a cancelled journal
@@ -105,18 +107,23 @@ Finite and infinite sources, both synchronous and asynchronous, publish already-
 before their graceful EOF. Waiting for output credit still uses the existing cancellation bounds.
 Graceful stop with an infinite source, explicit cancellation and timeout escalation publish
 `pipeline_cancelled`. Accepted execution failure publishes `pipeline_failed` in every case.
-Intentional cancellation is a successful application teardown. Once execution is admitted,
-`FlowHandle::run()` uses the same Runtime outcome, so acknowledged cancellation returns `Ok(())`
+Intentional cancellation is a successful application teardown. `FlowHandle::run()` uses the
+same Runtime outcome, so acknowledged cancellation returns `Ok(())`
 instead of being mistaken for failure because cancellation shares the historical `Failed` FSM
 cleanup state.
 
-The cross-crate `FlowHandle::wait_for_termination()` seam is now `#[doc(hidden)] pub` and is not a
-supported public completion-observer API. Internally, all completion paths share one physical join
-and retain its result. Concurrent, dropped and repeated waits cannot consume another caller's
-completion capability. `SupervisorHandle::wait_for_completion()` remains a physical task join;
-it does not interpret the pipeline's execution outcome. `HandleError` adds `SupervisorAborted`,
-so exhaustive downstream matches need that case. Emergency `abort_and_wait()` accepts confirmed
-abortion as successful teardown, while ordinary completion observation still reports it as an error.
+The hidden `obzenflow_runtime::__private::lifecycle` module is a cross-crate framework integration
+contract, not a supported application API. Infra uses `wait(&flow)` and
+`cancel_after_timeout(&flow)` there. All completion paths share one physical join and retain its
+result. Concurrent, dropped and repeated waits cannot consume another caller's completion.
+`FlowHandle::run()`, its `SupervisorHandle::wait_for_completion()` implementation and the internal
+wait use one Runtime helper to report the acknowledged execution result after joining. A failed
+execution remains an error even when the supervisor returned normally. This also applies when
+`run()` observes a flow that already finished or failed before readiness. Explicit pre-execution
+teardown succeeds without requiring an execution's terminal fact; unexplained missing publication
+fails. Generic `StandardHandle` completion remains task-oriented. `HandleError::SupervisorAborted`
+distinguishes abortion from panic. Emergency `abort_and_wait()` accepts confirmed abortion as
+successful teardown, while ordinary completion observation still reports it as an error.
 
 The listener remains available through normal drain and terminal publication. Closing then stops
 new requests, allows five seconds for existing responses, and aborts and joins remaining connection,
@@ -124,6 +131,14 @@ HTTP/2 and framework SSE tasks. The same ownership applies when using `run_async
 that continues after the application exits. Restart requires another `FlowApplication` invocation.
 
 ## Endpoint errors and API migration
+
+Pre-release completion correction: `FlowHandle::wait_for_completion()` now returns execution
+failures previously hidden by successful task cleanup. Applications should handle its
+`Result<(), FlowError>` as the flow result, just as for `run()`. The former `FlowHandle`
+`stop_status_receiver`, `wait_for_termination` and `stop_cancel_timeout` methods and public pipeline
+`FlowStopStatus`/`FlowCancelCause` exports are removed without deprecated aliases. Normal
+applications use `FlowApplication`, `run()`, `stop_graceful()` and `stop_cancel()`; framework
+integration belongs in the hidden lifecycle namespace.
 
 Implement `HttpEndpoint` or attach a `WebSurface` through `FlowApplication`; listener construction is
 private to Infra. The former Core server SPI, server configuration and TLS placeholder types, Infra
