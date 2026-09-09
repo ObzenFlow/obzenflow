@@ -10,7 +10,6 @@
 pub(crate) mod config;
 mod error;
 mod flow_application;
-#[cfg(feature = "warp-server")]
 mod managed_lifecycle;
 mod presentation;
 mod run_mode;

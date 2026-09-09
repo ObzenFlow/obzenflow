@@ -433,6 +433,165 @@ mod managed_lifecycle_regressions {
 
     use super::prometheus_demo;
 
+    /// FLOWIP-142a: the shipped example, real Play route, supported export and
+    /// certified current-build replay all traverse the application lifecycle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manual_prometheus_example_exports_100_inputs_and_replays_without_a_host() {
+        use obzenflow_core::event::{chain_event::ChainEventContent, JournalEvent, SystemEvent};
+        use obzenflow_infra::journal::disk::log_record::LogRecord;
+        use std::collections::BTreeSet;
+        use std::ffi::OsString;
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir_in("target").unwrap();
+        let config = dir.path().join("hosted.toml");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        std::fs::write(
+            &config,
+            format!(
+                r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = {}
+startup_mode = "manual"
+on_terminal = "exit"
+[metrics]
+enabled = true
+"#,
+                address.port()
+            ),
+        )
+        .unwrap();
+        let (flow_tx, flow_rx) = tokio::sync::oneshot::channel();
+        let flow_tx = Mutex::new(Some(flow_tx));
+        let app = FlowApplication::builder()
+            .with_config_file(config)
+            .with_cli_args(["prometheus-lifecycle-proof"])
+            .with_log_level(LogLevel::Error)
+            .with_flow_handle_hook(move |flow| {
+                assert!(flow_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(flow.clone())
+                    .is_ok());
+                tokio::spawn(async {})
+            });
+        let application = tokio::spawn(app.run_async(prometheus_demo::flow_definition(
+            100,
+            dir.path().join("live"),
+        )));
+        let flow = flow_rx.await.unwrap();
+        flow.wait_for_ready().await.unwrap();
+        let mut socket = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(socket) = tokio::net::TcpStream::connect(address).await {
+                    break socket;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        socket.write_all(b"POST /api/flow/control HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{\"action\":\"play\"}").await.unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        tokio::time::timeout(Duration::from_secs(10), application)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let _rebound = std::net::TcpListener::bind(address).unwrap();
+        let archive = flow.run_substrate().locator().unwrap().path().to_path_buf();
+        let export = dir.path().join("hosted.jsonl");
+        obzenflow_infra::journal::disk::inspect::export_jsonl(&archive, Some(&export)).unwrap();
+        let jsonl = std::fs::read_to_string(export).unwrap();
+        let mut inputs = BTreeSet::new();
+        let mut successes = BTreeSet::new();
+        let mut errors = BTreeSet::new();
+        let mut summaries = Vec::new();
+        for event in super::exported_jsonl::chain_events(&jsonl) {
+            if let ChainEventContent::Data { payload, .. } = &event.content {
+                // Error routing retains the failed parent's source context.
+                // Count its payload identity independently of the producing stage.
+                if !event.processing_info.status.is_success() {
+                    errors.insert(payload["id"].as_u64().unwrap());
+                    continue;
+                }
+                match event.flow_context.stage_name.as_str() {
+                    "high_volume_source" => {
+                        inputs.insert(payload["id"].as_u64().unwrap());
+                    }
+                    "error_processor" => {
+                        successes.insert(payload["id"].as_u64().unwrap());
+                    }
+                    "event_counter" => summaries.push(payload["event_count"].as_u64().unwrap()),
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(inputs, (0..100).collect());
+        assert_eq!(successes, (1..100).collect());
+        assert_eq!(errors, BTreeSet::from([0]));
+        assert_eq!(summaries, [99]);
+        let systems: Vec<_> = jsonl
+            .lines()
+            .filter_map(|line| serde_json::from_str::<LogRecord<SystemEvent>>(line).ok())
+            .collect();
+        let terminals: Vec<_> = systems
+            .iter()
+            .map(|row| row.event.event_type_name())
+            .filter(|kind| {
+                matches!(
+                    *kind,
+                    "system.pipeline.completed"
+                        | "system.pipeline.cancelled"
+                        | "system.pipeline.failed"
+                )
+            })
+            .collect();
+        assert_eq!(terminals, ["system.pipeline.completed"]);
+        assert!(systems
+            .iter()
+            .any(|row| row.event.event_type_name() == "system.contract.pass"));
+        assert!(!systems.iter().any(|row| matches!(
+            row.event.event_type_name(),
+            "system.contract.fail" | "system.contract.result.failed"
+        )));
+        drop(flow);
+
+        let replay_config = dir.path().join("replay.toml");
+        std::fs::write(
+            &replay_config,
+            "[server]\nenabled = false\n[metrics]\nenabled = false\n",
+        )
+        .unwrap();
+        // Keeping the old port bound also proves replay needs no listener.
+        // This example performs no live external I/O; zero configured source
+        // inputs force the proof to reconstruct the recorded 100-input archive.
+        FlowApplication::builder()
+            .with_config_file(replay_config)
+            .with_cli_args(vec![
+                OsString::from("prometheus-replay-proof"),
+                OsString::from("--replay-from"),
+                archive.into_os_string(),
+                OsString::from("--verify"),
+            ])
+            .with_log_level(LogLevel::Error)
+            .run_async(prometheus_demo::flow_definition(
+                0,
+                dir.path().join("replay"),
+            ))
+            .await
+            .expect("certified replay must report zero differences (verification exit code 0)");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn invalid_cors_returns_startup_error_and_stops_the_materialised_flow() {
         use obzenflow_core::event::JournalEvent;

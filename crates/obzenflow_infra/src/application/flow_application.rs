@@ -11,6 +11,7 @@
 //! - HTTP server management
 //! - Graceful shutdown handling
 
+use super::managed_lifecycle::{ApplicationLifecycle, ApplicationTask};
 use super::web_surface::label_endpoint;
 use super::{
     ApplicationError, FlowConfig, Presentation, RunPresentationOutcome, WebSurfaceAttachment,
@@ -31,7 +32,6 @@ use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
-use obzenflow_runtime::__private::lifecycle;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
 use obzenflow_runtime::journal::CurrentRunLocator;
 use obzenflow_runtime::prelude::FlowHandle;
@@ -44,66 +44,6 @@ use tokio::task::JoinHandle;
 
 type FlowHandleHook =
     Box<dyn Fn(&Arc<FlowHandle>) -> Result<JoinHandle<()>, ApplicationError> + Send + Sync>;
-
-/// Cancels an application-owned task even if launch or shutdown is dropped.
-/// This guard has no reporting or provider responsibilities.
-struct ApplicationTask(JoinHandle<()>);
-
-impl ApplicationTask {
-    async fn stop(mut self) {
-        self.0.abort();
-        let _ = (&mut self.0).await;
-    }
-}
-
-impl Drop for ApplicationTask {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-#[cfg(test)]
-mod application_task_tests {
-    use super::ApplicationTask;
-    use tokio::sync::oneshot;
-
-    struct Cancelled(Option<oneshot::Sender<()>>);
-
-    impl Drop for Cancelled {
-        fn drop(&mut self) {
-            let _ = self.0.take().unwrap().send(());
-        }
-    }
-
-    async fn pending_task() -> (ApplicationTask, oneshot::Receiver<()>) {
-        let (started_tx, started_rx) = oneshot::channel();
-        let (cancelled_tx, cancelled_rx) = oneshot::channel();
-        let task = ApplicationTask(tokio::spawn(async move {
-            let _cancelled = Cancelled(Some(cancelled_tx));
-            started_tx.send(()).unwrap();
-            std::future::pending::<()>().await;
-        }));
-        started_rx.await.unwrap();
-        (task, cancelled_rx)
-    }
-
-    #[tokio::test]
-    async fn stopping_application_task_joins_its_cleanup() {
-        let (task, mut cancelled) = pending_task().await;
-        task.stop().await;
-        assert_eq!(cancelled.try_recv(), Ok(()));
-    }
-
-    #[tokio::test]
-    async fn dropping_application_task_cancels_pending_work() {
-        let (task, cancelled) = pending_task().await;
-        drop(task);
-        tokio::time::timeout(std::time::Duration::from_secs(1), cancelled)
-            .await
-            .expect("application drop must not leave a detached task")
-            .unwrap();
-    }
-}
 
 #[derive(Default)]
 struct LaunchParams {
@@ -151,6 +91,7 @@ mod tests {
     use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 
     use obzenflow_dsl::{flow, infinite_source, sink, source};
+    use obzenflow_runtime::__private::lifecycle;
     use obzenflow_runtime::pipeline::PipelineState;
     use obzenflow_runtime::stages::common::handlers::{
         InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
@@ -1388,22 +1329,13 @@ impl FlowApplication {
         #[cfg(feature = "warp-server")]
         let surface_metrics_interval = config.runtime.surface_metrics_interval;
 
-        // Background tasks spawned by FlowHandle hooks and/or web surface wiring closures.
-        // These must not be allowed to outlive FlowApplication, even on early-return paths.
-        let mut managed_tasks: Vec<ApplicationTask> = Vec::new();
+        // One private owner retains every resource from preparation through joined cleanup.
+        let mut application = ApplicationLifecycle::new(grace_timeout, config.server.on_terminal);
         let metrics_model = (cfg!(feature = "prometheus") && config.metrics.enabled)
             .then(|| Arc::new(MetricsReadModel::default()));
         let metrics_exporter = metrics_model
             .as_ref()
             .map(|model| model.clone() as Arc<dyn MetricsSnapshotExporter>);
-        let mut metrics_collector: Option<ApplicationTask> = None;
-        // FLOWIP-114d gap 24: the Studio heartbeat is tracked here rather than in
-        // `managed_tasks` so the shutdown sequence can join its fenced deregistration
-        // before the generic managed-task abort would cancel the in-flight DELETE.
-        #[cfg(feature = "studio-registration")]
-        let mut heartbeat_task: Option<ApplicationTask> = None;
-        #[cfg(feature = "warp-server")]
-        let mut surface_metrics_emitter: Option<HttpSurfaceMetricsEmitter> = None;
 
         if let Some(presentation) = &presentation {
             let rendered = presentation.render_banner(&run_mode);
@@ -1523,10 +1455,10 @@ impl FlowApplication {
 
             for hook in &flow_handle_hooks {
                 match hook(&flow_handle) {
-                    Ok(task) => managed_tasks.push(ApplicationTask(task)),
+                    Ok(task) => application.tasks.push(ApplicationTask(task)),
                     Err(err) => {
-                        Self::stop_before_run(&flow_handle, grace_timeout).await;
-                        break 'run (Err(err), Some(flow_name.clone()), run_state, false);
+                        let result = application.fail_before_run(flow_handle.clone(), err).await;
+                        break 'run (result, Some(flow_name.clone()), run_state, false);
                     }
                 }
             }
@@ -1539,7 +1471,7 @@ impl FlowApplication {
                     liveness,
                     config.runtime.surface_metrics_interval,
                 );
-                metrics_collector = Some(ApplicationTask(collector));
+                application.metrics_collector = Some(ApplicationTask(collector));
             }
 
             #[cfg(feature = "warp-server")]
@@ -1558,10 +1490,10 @@ impl FlowApplication {
                     (surface_metrics_collector.clone(), system_journal)
                 {
                     let emitter = HttpSurfaceMetricsEmitter::new(collector, system_journal);
-                    managed_tasks.push(ApplicationTask(
+                    application.tasks.push(ApplicationTask(
                         emitter.spawn_periodic(surface_metrics_interval),
                     ));
-                    surface_metrics_emitter = Some(emitter);
+                    application.metrics_emitter = Some(emitter);
                 }
 
                 surface_metrics_collector
@@ -1576,18 +1508,16 @@ impl FlowApplication {
                 // silently running without its configured ingress identity.
                 if let Some(slot) = ingress_slot {
                     if !slot.is_filled() {
-                        Self::stop_before_run(&flow_handle, grace_timeout).await;
-                        break 'run (
-                            Err(ApplicationError::FlowBuildFailed(format!(
-                                "hosted ingress surface '{surface_name}' (ingress key '{}') was \
+                        let error = ApplicationError::FlowBuildFailed(format!(
+                            "hosted ingress surface '{surface_name}' (ingress key '{}') was \
                                  registered but its source half was not placed in the flow \
                                  topology; place the http_ingress source in flow!",
-                                slot.ingress_key()
-                            ))),
-                            Some(flow_name.clone()),
-                            run_state,
-                            false,
-                        );
+                            slot.ingress_key()
+                        ));
+                        let result = application
+                            .fail_before_run(flow_handle.clone(), error)
+                            .await;
+                        break 'run (result, Some(flow_name.clone()), run_state, false);
                     }
                 }
                 for endpoint in endpoints {
@@ -1601,12 +1531,13 @@ impl FlowApplication {
                         // refusal recording enabled fails startup here if it is None.
                         system_journal: flow_handle.system_journal(),
                     }) {
-                        Ok(wired) => {
-                            managed_tasks.extend(wired.tasks.into_iter().map(ApplicationTask))
-                        }
+                        Ok(wired) => application
+                            .tasks
+                            .extend(wired.tasks.into_iter().map(ApplicationTask)),
                         Err(err) => {
-                            Self::stop_before_run(&flow_handle, grace_timeout).await;
-                            break 'run (Err(err), Some(flow_name.clone()), run_state, false);
+                            let result =
+                                application.fail_before_run(flow_handle.clone(), err).await;
+                            break 'run (result, Some(flow_name.clone()), run_state, false);
                         }
                     }
                 }
@@ -1630,7 +1561,7 @@ impl FlowApplication {
                 server_config.max_body_size = Some(config.server.max_body_size_bytes);
                 server_config.request_timeout_secs = Some(config.server.request_timeout_secs);
                 server_config.control_plane_auth = config.server.control_plane_auth.clone();
-                let mut host = match Self::start_server(
+                let host = match Self::start_server(
                     &flow_handle,
                     server_config,
                     all_extra_endpoints,
@@ -1649,11 +1580,15 @@ impl FlowApplication {
                 {
                     Ok(host) => host,
                     Err(error) => {
-                        Self::stop_before_run(&flow_handle, grace_timeout).await;
-                        break 'run (Err(error), Some(flow_name), run_state, false);
+                        let result = application
+                            .fail_before_run(flow_handle.clone(), error)
+                            .await;
+                        break 'run (result, Some(flow_name), run_state, false);
                     }
                 };
 
+                #[cfg(any(test, feature = "studio-registration"))]
+                let mut host = host;
                 #[cfg(test)]
                 if let Some((future, complete_before_run)) = test_host_task {
                     host.replace_serving_for_test(future, complete_before_run)
@@ -1677,7 +1612,7 @@ impl FlowApplication {
                             ) => Some(presence),
                         };
                         if let Some(presence) = presence {
-                            heartbeat_task = Some(ApplicationTask(
+                            application.heartbeat = Some(ApplicationTask(
                                 crate::web::studio_registration::spawn_heartbeat(
                                     crate::web::studio_registration::HeartbeatContext {
                                         studio,
@@ -1694,44 +1629,16 @@ impl FlowApplication {
                     }
                 }
 
-                let mut result = super::managed_lifecycle::supervise(
-                    &mut host,
-                    &flow_handle,
-                    config.server.startup_mode,
-                    config.server.on_terminal,
-                    grace_timeout,
-                    initial_failure,
-                    #[cfg(test)]
-                    test_shutdown_signal,
-                )
-                .await;
-                if let Some(task) = metrics_collector.take() {
-                    task.stop().await;
-                }
-                if let Err(error) = host.close().await {
-                    let has_host_failure = matches!(&result, Err(ApplicationError::Other(primary))
-                        if primary.is::<crate::web::host_error::ManagedWebHostError>());
-                    if has_host_failure {
-                        tracing::warn!(%error, "Managed host close also failed");
-                    } else {
-                        if let Err(secondary) = result {
-                            tracing::warn!(%secondary, "Flow cleanup also failed before managed host close");
-                        }
-                        result = Err(ApplicationError::Other(Box::new(error)));
-                    }
-                }
-                #[cfg(feature = "studio-registration")]
-                if let Some(mut heartbeat) = heartbeat_task.take() {
-                    const DEREGISTER_GRACE: Duration = Duration::from_secs(5);
-                    if tokio::time::timeout(DEREGISTER_GRACE, &mut heartbeat.0)
-                        .await
-                        .is_err()
-                    {
-                        tracing::warn!("Studio deregistration deadline expired; lease expiry will remove the registration");
-                        heartbeat.0.abort();
-                        let _ = (&mut heartbeat.0).await;
-                    }
-                }
+                let result = application
+                    .run_hosted(
+                        host,
+                        flow_handle,
+                        config.server.startup_mode,
+                        initial_failure,
+                        #[cfg(test)]
+                        test_shutdown_signal,
+                    )
+                    .await;
                 break 'run (result, Some(flow_name), run_state, true);
             }
 
@@ -1739,24 +1646,19 @@ impl FlowApplication {
             tracing::info!("▶️  Starting flow execution (no server)");
             let handle = match Arc::try_unwrap(flow_handle) {
                 Ok(handle) => handle,
-                Err(_) => {
-                    break 'run (
-                        Err(ApplicationError::FlowExecutionFailed(
-                            "Failed to unwrap FlowHandle for non-server execution".to_string(),
-                        )),
-                        Some(flow_name),
-                        run_state,
-                        false,
-                    );
+                Err(flow) => {
+                    let result = application
+                        .fail_before_run(
+                            flow,
+                            ApplicationError::FlowExecutionFailed(
+                                "Failed to unwrap FlowHandle for non-server execution".to_string(),
+                            ),
+                        )
+                        .await;
+                    break 'run (result, Some(flow_name), run_state, false);
                 }
             };
-            let result = handle
-                .run()
-                .await
-                .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
-            if let Some(task) = metrics_collector.take() {
-                task.stop().await;
-            }
+            let result = application.run_standalone(handle).await;
             if result.is_ok() && !presentation_enabled {
                 if let Some(locator) = run_state.as_ref().and_then(|s| s.locator()) {
                     print_replay_hint(locator);
@@ -1765,27 +1667,7 @@ impl FlowApplication {
             break 'run (result, Some(flow_name), run_state, false);
         };
 
-        if let Some(task) = metrics_collector.take() {
-            task.stop().await;
-        }
-
-        #[cfg(feature = "warp-server")]
-        if let Some(emitter) = &surface_metrics_emitter {
-            let _ = tokio::time::timeout(grace_timeout, emitter.flush()).await;
-        }
-
-        // FLOWIP-114d gap 24: a non-graceful exit (an early break during server
-        // setup) can leave the heartbeat unjoined; the shared close path above
-        // already took it on every normal exit. Abort any leftover so it cannot
-        // outlive FlowApplication; lease expiry covers deregistration here.
-        #[cfg(feature = "studio-registration")]
-        if let Some(heartbeat) = heartbeat_task.take() {
-            let _ = tokio::time::timeout(grace_timeout, heartbeat.stop()).await;
-        }
-
-        // Best-effort: ensure any hook/surface background tasks cannot escape `FlowApplication`
-        // lifetime, even if we exited early due to a startup failure or "no server" fallback.
-        Self::cancel_and_join_tasks(managed_tasks, grace_timeout).await;
+        let result = application.finish(result).await;
 
         match (result, flow_name, run_state, stopped) {
             (Ok(()), flow_name, run_state, stopped) => {
@@ -1917,23 +1799,6 @@ impl FlowApplication {
         }
     }
 
-    async fn cancel_and_join_tasks(tasks: Vec<ApplicationTask>, timeout: Duration) {
-        if tasks.is_empty() {
-            return;
-        }
-
-        for task in &tasks {
-            task.0.abort();
-        }
-
-        let _ = tokio::time::timeout(timeout, async move {
-            for task in tasks {
-                task.stop().await;
-            }
-        })
-        .await;
-    }
-
     fn build_infra_snapshot(
         liveness_snapshots: Option<&LivenessSnapshots>,
     ) -> InfraMetricsSnapshot {
@@ -2050,26 +1915,5 @@ impl FlowApplication {
         tracing::info!("   /ready         - Readiness status");
 
         Ok(handle)
-    }
-
-    /// Stop a materialised pipeline before the bootstrap guard can restore auto-run.
-    async fn stop_before_run(flow: &FlowHandle, grace: Duration) {
-        use obzenflow_runtime::supervised_base::SupervisorHandle;
-        let cleanup = async {
-            if flow.is_running() && !flow.current_state().is_terminal() {
-                flow.stop_cancel().await?;
-            }
-            lifecycle::wait(flow).await
-        };
-        match tokio::time::timeout(grace + grace, cleanup).await {
-            Ok(Ok(())) => {}
-            result => {
-                tracing::warn!(
-                    ?result,
-                    "Pre-run pipeline cleanup did not complete normally"
-                );
-                let _ = flow.abort_and_wait().await;
-            }
-        }
     }
 }
